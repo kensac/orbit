@@ -146,16 +146,8 @@ func (s *Scheduler) catchUp(ctx context.Context, cfg *spec.Config) error {
 func (s *Scheduler) upcoming(cfg *spec.Config, now time.Time) []fire {
 	var out []fire
 	for _, a := range sortedAgents(cfg) {
-		if !a.IsEnabled() {
-			continue
-		}
-		loc, _ := time.LoadLocation(a.Timezone)
-		for i, t := range a.Triggers {
-			sched, err := spec.ParseSchedule(t.Schedule)
-			if err != nil {
-				continue
-			}
-			out = append(out, fire{agent: a, index: i, at: sched.Next(now.In(loc)), trigger: t})
+		for _, n := range NextFires(a, now) {
+			out = append(out, fire{agent: a, index: n.TriggerIndex, at: n.At, trigger: a.Triggers[n.TriggerIndex]})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].at.Before(out[j].at) })
