@@ -476,7 +476,7 @@ never run anywhere. Before committing, code checks:
 - no credential value or secret pattern appears in the diff;
 - the diff is within the size the plan implies (a configured line limit).
 
-The commit is authored by the App's bot user, with a message from the PR
+The commit is authored by the App's bot user (`orbit-kensac[bot]`), with a message from the PR
 title. orbit pushes exactly one refspec, built from the ticket id:
 `<sha>:refs/heads/orbit/<ticket-short-id>`. The code that builds refspecs
 cannot produce anything but `refs/heads/orbit/`; a retry force-pushes that
@@ -582,7 +582,7 @@ confirmed them.
 
 ```yaml
 github:
-  app_id: 123456
+  app_id: 5571920
   # The App's private key: PEM, or base64 of the PEM so it fits one line of
   # an env file. Read by orbit only; never passed to a model.
   private_key_env: ORBIT_GITHUB_APP_PRIVATE_KEY
@@ -595,29 +595,50 @@ agent's spec will add a `build:` block (per repository: the command list,
 protected paths, registry hosts, diff limit) and sandboxd its own section
 (the build image digest, limits, the egress allowlist).
 
-## Deploying it (owner steps)
+## Deploying it
 
-1. **Create the GitHub App** under the personal account (Settings, Developer
-   settings, GitHub Apps, New). Name: `orbit` (App names are global; if it
-   is taken, `orbit-kensac`). Homepage: the repository URL. Webhook:
-   inactive for now (orbit polls). Repository permissions: Contents read
-   and write; Pull requests read and write; Checks read-only; Commit
-   statuses read-only; Actions read-only (job logs of failing checks);
-   Metadata read-only (mandatory). No organization or
-   account permissions, and not Workflows. Where can it be installed: only
-   this account. Events: none until event triggers exist; then Check run,
-   Check suite, Pull request and Status.
-2. **Install it** on all repositories of the account. Every token orbit
-   mints is still limited to one repository and one permission set.
-3. **Generate a private key**, and store `base64 -w0 <key>.pem` in Infisical
-   as `HETZNER_ORBIT_GITHUB_APP_PRIVATE_KEY` (one line, so it renders into
-   `/root/.env` safely), then delete the downloaded file. Add
-   `ORBIT_GITHUB_APP_PRIVATE_KEY=${ORBIT_GITHUB_APP_PRIVATE_KEY}` to the
-   `orbit` service and the `github:` block, with the App ID from the App's
-   page, to `orbit/orbit.yaml` in hetzner-vps-config.
-4. **Protect `main`** on repositories orbit may merge: require a pull
-   request and the CI check (`check` for orbit), and leave the App off the
-   bypass list.
-5. When the build runner lands: run sandboxd (on oci), with
-   `ORBIT_SANDBOX_TOKEN` (Infisical, under both hosts' prefixes, rotated
-   together).
+**The App** is `orbit-kensac` (App ID `5571920`; `orbit` was taken), owned
+by `kensac` and installed on all of its repositories. Webhook inactive
+(orbit polls). Repository permissions, exactly: Contents read and write,
+Pull requests read and write, Checks read, Commit statuses read, Actions
+read (job logs of failing checks), Metadata read. No Workflows, no
+organization or account permissions. Events: none until event triggers
+exist; then Check run, Check suite, Pull request and Status. Every token
+orbit mints is still limited to one repository and one permission set.
+Commits orbit makes are authored by `orbit-kensac[bot]`.
+
+**The key** is in Infisical as `HETZNER_ORBIT_GITHUB_APP_PRIVATE_KEY`:
+base64 of the PEM GitHub issued, on one line, so it renders into
+`/root/.env` safely as `ORBIT_GITHUB_APP_PRIVATE_KEY`. orbit's loader
+(`github.ParsePrivateKey`) takes the value as a PEM or as base64 of one,
+decodes it, and parses PKCS#1 (`RSA PRIVATE KEY`, what GitHub issues) or
+PKCS#8; `TestParsePrivateKeyAcceptsGitHubsFormats` holds all three forms.
+
+**Wiring it** (hetzner-vps-config): in `compose.orbit.yml`, the `orbit`
+service's `environment` gains
+
+```yaml
+      # The GitHub App's key (orbit-kensac). Read by orbit only; never given
+      # to a model.
+      - ORBIT_GITHUB_APP_PRIVATE_KEY=${ORBIT_GITHUB_APP_PRIVATE_KEY}
+```
+
+and `orbit/orbit.yaml` gains
+
+```yaml
+github:
+  app_id: 5571920
+  private_key_env: ORBIT_GITHUB_APP_PRIVATE_KEY
+  repositories: [kensac/orbit]
+```
+
+An agent may merge only once its spec names the rule:
+`actions: {github:merge: approve}`.
+
+**Protect `main`** on repositories orbit may merge: require a pull
+request and the CI check (`check` for orbit), and leave the App off the
+bypass list.
+
+When the build runner lands: run sandboxd (on oci), with
+`ORBIT_SANDBOX_TOKEN` (Infisical, under both hosts' prefixes, rotated
+together).
