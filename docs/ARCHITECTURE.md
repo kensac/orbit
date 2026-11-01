@@ -122,4 +122,13 @@ The direction, so changes now do not close it off:
   merging is an action (`github:merge`) whose executor refuses unless every
   required check is green, because in the fleet a merge is a deploy.
 - **Event triggers** from webhooks (a ticket assigned, a comment).
+- **A worker fleet.** Executors on several hosts, as jobtracker's are; the
+  queue already allows it (SKIP LOCKED claims, `runs_one_running`,
+  heartbeats, one scheduler by advisory lock). What changes: agents declare
+  capabilities and workers advertise theirs, so a run is claimed only where
+  its sources are reachable (finance needs hetzner's docker network); source
+  credentials live only on hosts with the capability; delivery and actions
+  stay on one control host; workers read agent specs from the database, not
+  files; sessions are stored centrally so a conversation can continue on any
+  host. One subscription is shared, so the fleet adds reach, not capacity.
 - **A UI** over `/api/v1` (the thread and the stream are its read side).
