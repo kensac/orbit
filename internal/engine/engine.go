@@ -24,6 +24,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/kensac/orbit/internal/actions"
+	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/notify"
 	"github.com/kensac/orbit/internal/runner"
@@ -47,6 +48,9 @@ type Engine struct {
 	// Live holds the live Claude Code processes of agents with
 	// session.live. Nil runs every turn in a process of its own.
 	Live *runner.Live
+	// Harness is the orbit binary a claude-code run starts for orbit's
+	// tools and hooks (os.Executable in serve). Empty runs without them.
+	Harness string
 
 	mu  sync.RWMutex
 	cfg *Snapshot
@@ -164,6 +168,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			return nil, nil, err
 		}
 		defer os.RemoveAll(filepath.Join(workdir, "inputs"))
+		// The tool ledger and the hook's counters are per run.
+		if err := os.RemoveAll(harness.StateDir(home)); err != nil {
+			return nil, nil, err
+		}
 	} else {
 		defer os.RemoveAll(workdir)
 	}
@@ -189,10 +197,15 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 
 	seq := 0
+	figures := a.Verifies("figures")
+	var transcript [][]byte // the backend's message lines, for the figure check
 	emit := func(kind string, payload any) {
 		b, ok := payload.([]byte)
 		if !ok {
 			b, _ = json.Marshal(payload)
+		}
+		if figures && (kind == "assistant" || kind == "user") {
+			transcript = append(transcript, b)
 		}
 		seq++
 		if err := e.Store.AppendEvent(context.WithoutCancel(ctx), c.ID, c.Attempt, seq, kind, b); err != nil {
@@ -255,7 +268,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	types := actions.Catalog(a, snap.Config.Deployment)
 	schema := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, true)
 	envelope := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, false)
-	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic")
+	var hr *runner.Harness
+	if e.Harness != "" && r.Kind() == "claude-code" {
+		hr = &runner.Harness{Bin: e.Harness, Figures: figures}
+	}
+	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr != nil)
 	trigger := c.Trigger
 	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing},
 		rc, convo, inputs)
@@ -273,7 +290,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	defer cancel()
 	res, err := r.Run(runCtx, runner.Request{
 		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
-		Tools: a.Tools, OutputSchema: schema, Session: sess,
+		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr,
 	}, func(ev runner.Event) { emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
@@ -287,6 +304,24 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	out, err := validate(envelope, res.Output)
 	if err != nil {
 		return nil, res, fmt.Errorf("output does not match the contract: %w", err)
+	}
+	if figures {
+		// The hook already sent the output back for these, up to
+		// MaxFigureDenials times (claude-code); this is the same check on
+		// what was finally submitted, for every backend. A figure no code
+		// produced is reported, not hidden.
+		backed := harness.NewBacked()
+		for _, in := range inputs {
+			backed.AddJSON(in.Content)
+		}
+		for _, t := range harness.OrbitToolResults(transcript) {
+			backed.AddText(t)
+		}
+		if missing := backed.Unbacked(harness.ReportText(res.Output)); len(missing) > 0 {
+			emit("orbit.figures_unverified", map[string]any{"amounts": missing})
+			out.Report = strings.TrimRight(out.Report, "\n") + "\n\n_orbit could not trace these amounts to the inputs or a computed result: " +
+				strings.Join(missing, ", ") + "._"
+		}
 	}
 	return out, res, nil
 }

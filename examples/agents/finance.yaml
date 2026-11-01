@@ -35,6 +35,9 @@ actions:
   webhook:home-assistant: approve
   # Wake again later to finish a long task; each wake waits for approval.
   continue: approve
+# Every dollar amount in a report must come from the inputs or orbit's
+# query and calc tools.
+verify: [figures]
 notify:
   channels: [phone, email]
   when: always

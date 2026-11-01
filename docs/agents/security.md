@@ -40,6 +40,14 @@ more than its agent's rules allow.
   an error, recorded in the run's events. The tool grant is the spec's
   `tools`, decided before the process starts.
 
+- **orbit's tools and hooks** run inside the CLI's process tree with its
+  environment (no orbit secret) and are given `--root <workdir>` and
+  `--state <dir>` as flags, never from the environment. The tools read
+  only under the root and return values computed from it; a compromised model
+  gains no reach it lacked (it could already Read those files). The hook fails
+  closed: an event it cannot parse is denied. Hooks come only from orbit's
+  `--settings`; a workdir's `.claude/settings.json` is never read.
+
 ## What the model can cause
 
 Only actions its spec enables, through executors here, to destinations in

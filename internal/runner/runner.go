@@ -45,6 +45,18 @@ type Request struct {
 	// Session, when set, keeps the backend's conversation between runs
 	// (claude-code only). Nil means a session that is never persisted.
 	Session *Session
+	// Harness, when set, gives a claude-code run orbit's tools (`orbit
+	// mcp`) and hooks (`orbit hook`). Other backends ignore it.
+	Harness *Harness
+}
+
+// Harness is orbit's own code inside the CLI's process tree.
+type Harness struct {
+	// Bin is the orbit binary the CLI starts for tools and hooks.
+	Bin string
+	// Figures sends an output back when its money amounts cannot be traced
+	// to the inputs or orbit's tool results (spec verify: [figures]).
+	Figures bool
 }
 
 // Session is how one run uses a persistent Claude Code session. The engine
