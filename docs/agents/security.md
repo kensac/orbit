@@ -86,7 +86,8 @@ types are not even offered.
 
 ## GitHub
 
-The App's private key is in orbit's environment only. Every token minted
+The App (`orbit-kensac`, docs/tickets.md) has its private key in orbit's
+environment only. Every token minted
 from it names one repository from `github.repositories` and one permission
 set from `internal/github` (never an empty set, which would mean all of the
 installation's), is revoked after its operation, and is refused if GitHub
