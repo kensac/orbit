@@ -52,6 +52,28 @@ type Deployment struct {
 	Channels  map[string]Channel    `yaml:"channels" json:"channels"`
 	Endpoints map[string]Endpoint   `yaml:"endpoints" json:"endpoints"`
 	Runners   map[string]RunnerSpec `yaml:"runners" json:"runners"`
+	// GitHub is the App orbit reaches GitHub as. Without it, no ticket may
+	// name a repository and github:* actions are refused at load.
+	GitHub *GitHub `yaml:"github,omitempty" json:"github,omitempty"`
+}
+
+// GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
+// private key is read by the harness from PrivateKeyEnv and never reaches a
+// model; every token minted from it is limited to one of Repositories.
+type GitHub struct {
+	AppID int64 `yaml:"app_id" json:"app_id"`
+	// PrivateKeyEnv names the variable holding the App's PEM private key,
+	// or base64 of it, so it fits one line of an env file.
+	PrivateKeyEnv string `yaml:"private_key_env" json:"private_key_env"`
+	// APIURL overrides https://api.github.com (tests, GitHub Enterprise).
+	APIURL string `yaml:"api_url,omitempty" json:"api_url,omitempty"`
+	// Repositories ("owner/name") tickets and github:merge may target.
+	Repositories []string `yaml:"repositories" json:"repositories"`
+}
+
+// AllowsRepo reports whether repo is one orbit may act on.
+func (d Deployment) AllowsRepo(repo string) bool {
+	return d.GitHub != nil && slices.Contains(d.GitHub.Repositories, repo)
 }
 
 // Defaults apply to every agent that does not override them.
@@ -225,8 +247,10 @@ func (a *Agent) RuleFor(actionType string) Rule {
 }
 
 var (
-	nameRE    = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
-	envRefRE  = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
+	nameRE   = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	envRefRE = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
+	// RepoRE is GitHub's owner/name shape.
+	RepoRE    = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
 	cronParse = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 
 	// Kinds every adapter registry must cover. Kept here so validation does
@@ -388,6 +412,22 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("runner %q: anthropic needs api_key_env", name))
 		}
 	}
+	if g := d.GitHub; g != nil {
+		if g.AppID <= 0 {
+			errs = append(errs, fmt.Errorf("github: app_id is required"))
+		}
+		if g.PrivateKeyEnv == "" {
+			errs = append(errs, fmt.Errorf("github: private_key_env is required"))
+		}
+		if len(g.Repositories) == 0 {
+			errs = append(errs, fmt.Errorf("github: repositories must list at least one owner/name"))
+		}
+		for _, r := range g.Repositories {
+			if !RepoRE.MatchString(r) {
+				errs = append(errs, fmt.Errorf("github: repository %q is not owner/name", r))
+			}
+		}
+	}
 	for _, ch := range d.Defaults.Channels {
 		if _, ok := d.Channels[ch]; !ok {
 			errs = append(errs, fmt.Errorf("defaults.channels: unknown channel %q", ch))
@@ -470,8 +510,12 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if _, ok := c.Deployment.Endpoints[strings.TrimPrefix(typ, "webhook:")]; !ok {
 				at("action %q: unknown endpoint", typ)
 			}
+		case typ == "github:merge":
+			if c.Deployment.GitHub == nil {
+				at("action %q: needs a github block in orbit.yaml", typ)
+			}
 		default:
-			at("action %q: unknown action type (want notify or webhook:<endpoint>)", typ)
+			at("action %q: unknown action type (want notify, webhook:<endpoint> or github:merge)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {

@@ -34,6 +34,7 @@ public_url: http://orbit.test
 defaults: {runner: r, channels: [c]}
 runners: {r: {kind: claude-code}}
 channels: {c: {kind: log}}
+github: {app_id: 1, private_key_env: GH_KEY, repositories: [kensac/orbit]}
 `), 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "agents", "a.yaml"), []byte("name: a\ncharter: x\nwake_on_message: true\nactions: {notify: approve}\n"), 0o644)
 	cfg, err := spec.Load(dir)

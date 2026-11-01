@@ -182,6 +182,8 @@ type NewRun struct {
 	TriggerIndex *int
 	ScheduledFor *time.Time
 	Prompt       string
+	// TicketID scopes the run to one ticket's thread (docs/tickets.md).
+	TicketID *string
 }
 
 // EnqueueRun inserts a queued run. For a schedule fire already recorded it
@@ -189,11 +191,11 @@ type NewRun struct {
 func (s *Store) EnqueueRun(ctx context.Context, r NewRun) (string, error) {
 	var id string
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO runs (agent, spec_sha, trigger, trigger_index, scheduled_for, prompt)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO runs (agent, spec_sha, trigger, trigger_index, scheduled_for, prompt, ticket_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (agent, trigger_index, scheduled_for) WHERE trigger = 'schedule' DO NOTHING
 		RETURNING id::text`,
-		r.Agent, r.SpecSHA, r.Trigger, r.TriggerIndex, r.ScheduledFor, r.Prompt).Scan(&id)
+		r.Agent, r.SpecSHA, r.Trigger, r.TriggerIndex, r.ScheduledFor, r.Prompt, r.TicketID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
@@ -640,12 +642,14 @@ func (s *Store) ListMessages(ctx context.Context, agent string, limit int) ([]Me
 }
 
 // openQuestion is true of a question (alias m) nobody has answered: no reply
-// names it and no message reached the agent after it. Any later message
-// closes it, because the run that reads that message sees the person's
-// words and asks again if it still needs to.
+// names it and no message reached the agent in the same thread (the agent's
+// general inbox, or one ticket) after it. Any later message closes it,
+// because the run that reads that message sees the person's words and asks
+// again if it still needs to.
 const openQuestion = `m.direction = 'from_agent'
 	AND NOT EXISTS (SELECT 1 FROM messages r
 	                WHERE r.agent = m.agent AND r.direction = 'to_agent'
+	                  AND r.ticket_id IS NOT DISTINCT FROM m.ticket_id
 	                  AND (r.reply_to = m.id OR r.created_at > m.created_at))`
 
 // ---------------------------------------------------------------- run context
@@ -661,7 +665,9 @@ type RunContext struct {
 	Questions []Message
 }
 
-// StartRunContext reads and consumes the run's context.
+// StartRunContext reads and consumes the run's context. A run reads one
+// thread: its ticket's, when the run row names a ticket, otherwise the
+// agent's general inbox, so two tickets never read each other's messages.
 func (s *Store) StartRunContext(ctx context.Context, runID, agent string) (*RunContext, error) {
 	rc := &RunContext{}
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -669,10 +675,15 @@ func (s *Store) StartRunContext(ctx context.Context, runID, agent string) (*RunC
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
+		var ticket *string
+		if err := tx.QueryRow(ctx, `SELECT ticket_id::text FROM runs WHERE id = $1`, runID).Scan(&ticket); err != nil {
+			return err
+		}
 		rows, err := tx.Query(ctx, `
 			UPDATE messages SET run_id = $2
 			WHERE agent = $1 AND direction = 'to_agent' AND run_id IS NULL
-			RETURNING id::text, agent, direction, body, reply_to::text, run_id::text, author, created_at`, agent, runID)
+			  AND ticket_id IS NOT DISTINCT FROM $3::uuid
+			RETURNING id::text, agent, direction, body, reply_to::text, run_id::text, author, created_at`, agent, runID, ticket)
 		if err != nil {
 			return err
 		}
@@ -682,8 +693,8 @@ func (s *Store) StartRunContext(ctx context.Context, runID, agent string) (*RunC
 		rows, err = tx.Query(ctx, `
 			SELECT id::text, agent, direction, body, reply_to::text, run_id::text, author, created_at
 			FROM messages m
-			WHERE agent = $1 AND `+openQuestion+`
-			ORDER BY created_at`, agent)
+			WHERE agent = $1 AND m.ticket_id IS NOT DISTINCT FROM $2::uuid AND `+openQuestion+`
+			ORDER BY created_at`, agent, ticket)
 		if err != nil {
 			return err
 		}
@@ -730,7 +741,9 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 			}
 		}
 		for _, q := range o.Questions {
-			if _, err := tx.Exec(ctx, `INSERT INTO messages (agent, direction, body, run_id) VALUES ($1, 'from_agent', $2, $3)`,
+			// A question belongs to the thread of the run that asked it.
+			if _, err := tx.Exec(ctx, `INSERT INTO messages (agent, direction, body, run_id, ticket_id)
+				SELECT $1, 'from_agent', $2, $3, ticket_id FROM runs WHERE id = $3`,
 				agent, q, runID); err != nil {
 				return err
 			}

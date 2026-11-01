@@ -95,3 +95,29 @@ func TestExpandEnv(t *testing.T) {
 		t.Fatalf("an unset variable must be an error, got %v", err)
 	}
 }
+
+func TestGitHubBlock(t *testing.T) {
+	agent := "name: m\ncharter: x\nactions: {github:merge: approve}\n"
+	if _, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/m.yaml": agent})); err == nil ||
+		!strings.Contains(err.Error(), "needs a github block") {
+		t.Fatalf("merge without github = %v", err)
+	}
+	bad := base + "github: {app_id: 0, repositories: [nope]}\n"
+	_, err := Load(write(t, map[string]string{"orbit.yaml": bad}))
+	for _, want := range []string{"app_id is required", "private_key_env is required", `"nope" is not owner/name`} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %v, want %q", err, want)
+		}
+	}
+	good := base + "github: {app_id: 7, private_key_env: K, repositories: [kensac/orbit]}\n"
+	cfg, err := Load(write(t, map[string]string{"orbit.yaml": good, "agents/m.yaml": agent}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Deployment.AllowsRepo("kensac/orbit") || cfg.Deployment.AllowsRepo("kensac/other") {
+		t.Fatal("AllowsRepo: only listed repositories")
+	}
+	if cfg.Agents["m"].RuleFor("github:merge") != RuleApprove {
+		t.Fatal("rule")
+	}
+}

@@ -71,9 +71,11 @@ to Codex or to a plain API call is one line in its spec.
 An action type is code (`internal/actions`): a name, a parameter schema shown
 to the agent, a validator, and an executor. An agent's spec maps types to
 `auto`, `approve` or `deny`; unnamed types are denied and not offered.
-Today: `notify` (an extra message to one of the agent's channels) and
+Today: `notify` (an extra message to one of the agent's channels),
 `webhook:<endpoint>` (a JSON body to an endpoint whose URL and credentials
-are configuration, never chosen by the model).
+are configuration, never chosen by the model), and `github:merge` (squash
+one of orbit's own `orbit/*` PRs, only if its head is still the approved
+commit and every required check passed; [tickets.md](tickets.md)).
 
 Approval happens from a signed link (`/ui/actions/{id}?sig=`), the API, or
 `orbit approve`. An action is executed at most once: one interrupted during

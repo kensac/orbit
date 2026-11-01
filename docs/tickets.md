@@ -7,8 +7,19 @@ orbit opens, and a merge orbit performs once every required check is green.
 In the fleet a merge is a deploy, so the merge is gated by code, not by the
 model.
 
-This document is the design. None of it is built yet; as pieces land, they
-are marked **Built** here.
+This document is the design. What exists today:
+
+| piece | state | where |
+|---|---|---|
+| `tickets`, `ticket_events`, `ticket_plans`, `ticket_id` on messages and runs; guarded transitions; thread scoping | **Built**, unit-tested | `internal/store/tickets.go`, `migrations/00002_tickets.sql` |
+| the ticket API below (except `/thread`) | **Built**, unit-tested | `internal/api/tickets.go` |
+| App JWT, per-repository down-scoped tokens, revocation, git auth by environment | **Built**, tested against a fake GitHub | `internal/github/app.go` |
+| `github:merge`: the checks gate, the scrub, the pinned squash merge | **Built**, tested against a fake GitHub | `internal/github/merge.go`, `internal/actions` |
+| the `github:` block in `orbit.yaml` | **Built** | `internal/spec` |
+| the `plan` output field, the ticket loop (build enqueue, PR polling, proposing the merge, reconciliation), the build runner and sandboxd, review comments, the failure report, the self-hosting rules | not built | specified below |
+
+Nothing has run against the real GitHub API yet; the fake
+(`internal/github/githubtest`) follows GitHub's documented shapes.
 
 ## Principles applied here
 
@@ -46,7 +57,7 @@ What tickets add is a scope and a lifecycle, so three tables and two columns:
 | `messages.ticket_id` | the ticket a message belongs to, or null for the agent's general inbox | a ticket's messages are its thread |
 | `runs.ticket_id` | the ticket a run works on, or null | a run on a ticket reads that ticket's thread only |
 
-**Scoping.** A run with a `ticket_id` consumes only that ticket's
+**Scoping (Built).** A run with a `ticket_id` consumes only that ticket's
 unread messages; a run without one consumes only messages without one. Two
 tickets with the same agent never read each other's thread, and the agent's
 general inbox is not swallowed by ticket work. The scope is taken from the
@@ -465,7 +476,7 @@ same branch. The default branch should also be protected on GitHub
 (require a pull request), with the App not on any bypass list, so even a
 bug in orbit cannot push to it.
 
-## Merge: the `github:merge` action
+## Merge: the `github:merge` action (Built)
 
 Params, shown to an agent like any action type:
 
@@ -484,7 +495,7 @@ action's error, unless all of these hold at execution time:
    something else.
 2. GitHub reports it `mergeable: true` (orbit re-reads while GitHub is still
    computing it, a few times, then refuses), and `mergeable_state` is not
-   `dirty`, `blocked`, `behind` or `draft`.
+   `dirty`, `blocked`, `behind`, `draft` or `unknown`.
 3. **The checks gate.** The required checks are the union of the default
    branch's protection (`GET /repos/{o}/{r}/branches/{branch}`,
    `protection.required_status_checks`) and its rulesets (`GET
@@ -541,7 +552,7 @@ changes:
 
 ## Configuration
 
-`orbit.yaml` gains:
+`orbit.yaml` gains (Built):
 
 ```yaml
 github:

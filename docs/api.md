@@ -115,6 +115,15 @@ what the agent narrated while working.
 - `POST /actions/{id}/approve`, `POST /actions/{id}/reject` `{"by": "kanishk"}`:
   409 when it was already decided.
 
+## Tickets
+
+A ticket is a request or question with its own thread
+([tickets.md](tickets.md)). `POST /tickets`, `GET /tickets`,
+`GET /tickets/{id}` (the ticket, its plans, transitions, messages and runs),
+`POST /tickets/{id}/messages`, `POST /tickets/{id}/plans/{version}/approve`,
+and `POST /tickets/{id}/{abandon,retry,reopen}`. Bodies and shapes are in
+tickets.md; a transition the ticket's state does not allow is 409.
+
 ## Memory
 
 `GET /agents/{name}/memory?limit=`: every version, newest first.

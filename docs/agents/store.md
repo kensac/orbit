@@ -23,5 +23,10 @@ an agent's beliefs changed.
 - action: `pending -> approved | rejected`, `approved -> executing ->
   executed | failed`; `denied` and rule-approved are set at creation.
 
+- ticket: `ticketEdges` in `tickets.go` is the table (diagram in
+  docs/tickets.md); into `planned` and `approved` only through
+  `ProposePlan`/`ApprovePlan`, which carry the plan version. Each transition
+  writes its `ticket_events` row in the same transaction.
+
 Every transition is a guarded UPDATE (`WHERE status = ...`); zero rows
 affected is `ErrConflict`, not success.

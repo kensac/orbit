@@ -41,3 +41,10 @@ endpoints:
   home-assistant:
     url: http://homeassistant.example.ts.net:8123/api/webhook/orbit
     method: POST
+
+# The GitHub App orbit acts as (docs/tickets.md). Tickets may target only
+# these repositories; the key is read by orbit and never given to a model.
+github:
+  app_id: 123456
+  private_key_env: ORBIT_GITHUB_APP_PRIVATE_KEY
+  repositories: [kensac/orbit]
