@@ -58,12 +58,15 @@ type Conversation struct {
 	// NeedsInput is true while one of its questions is open or one of its
 	// runs' actions awaits approval.
 	NeedsInput bool `json:"needs_input"`
+	// TicketID is set when the conversation is a ticket's.
+	TicketID *string `json:"ticket_id"`
 }
 
 const conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived, c.created_at, c.last_activity_at,
 	EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND ` + openQuestion + `)
 	OR EXISTS (SELECT 1 FROM actions x JOIN runs xr ON xr.id = x.run_id
-	           WHERE xr.conversation_id = c.id AND x.status = 'pending')`
+	           WHERE xr.conversation_id = c.id AND x.status = 'pending'),
+	(SELECT t.id::text FROM tickets t WHERE t.conversation_id = c.id)`
 
 // GetConversation returns one conversation.
 func (s *Store) GetConversation(ctx context.Context, id string) (*Conversation, error) {

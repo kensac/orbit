@@ -11,6 +11,13 @@ Never in YAML. Channels name variables with `*_env`; source headers, query
 values and endpoint headers use `${VAR}`. An unset variable is an error, never
 an empty string.
 
+## GitHub
+
+`github:` in `orbit.yaml` names the App (`app_id`), the variable holding its
+private key (`private_key_env`: PEM, or base64 of the PEM for a one-line env
+file), and the `repositories` tickets and `github:merge` may target. Without
+it, a request ticket or a `github:merge` rule fails validation.
+
 ## Templates in sources
 
 URLs and query values may use `{{today}}`, `{{now}}`, `{{month_start}}`,
