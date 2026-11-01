@@ -35,6 +35,10 @@ more than its agent's rules allow.
   Claude Code's own auto memory, a second model-written store under HOME, is
   off (`autoMemoryEnabled: false`), so memory_versions stays the only
   memory. Everything in a transcript is also in run_events and artifacts.
+  Every other Claude Code run also keeps its transcript while it runs, in
+  the run's own HOME (denied like any `~`), so an interrupted attempt can be
+  continued; it is removed with the run's workdir, and only that run's next
+  attempt reads it.
 - **Control requests:** a live process may ask orbit for a permission or a
   hook decision; orbit configures none of their sources and answers any with
   an error, recorded in the run's events. The tool grant is the spec's
@@ -70,6 +74,9 @@ types are not even offered.
   request arrived on is a property of the socket; a header saying a request
   is internal could be sent by anyone, so none is trusted. Never give the
   internal port a traefik router or a public port mapping.
+- `POST /api/v1/drain` takes an instance out of service; it exists only on
+  the internal listener, so nobody on the public one can, whatever their
+  token.
 - Only asymmetric signatures are accepted. An `HS*` token would be verified
   with the client secret, which every client holds, so any client could mint
   any person.

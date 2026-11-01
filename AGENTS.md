@@ -43,7 +43,7 @@ is the design; the topic documents below are the rules for changing it.
 
 ## Repository map
 
-- `cmd/orbit/`: the binary: `serve` (scheduler, executors, action loop,
+- `cmd/orbit/`: the binary: `serve` (scheduler, executors, action loop, drain,
   reaper, config reload, HTTP), and operator commands.
 - `internal/spec/`: configuration loading and validation (`orbit.yaml`,
   `agents/*.yaml`).
@@ -55,7 +55,7 @@ is the design; the topic documents below are the rules for changing it.
 - `internal/notify/`: channels (`ntfy`, `smtp`, `webhook`, `log`).
 - `internal/scheduler/`: schedule triggers to queued runs, one leader.
 - `internal/store/`: every database read and write; `migrations/` is the schema.
-- `internal/api/`: JSON API, the run and approval pages, `/healthz`, `/metrics`.
+- `internal/api/`: JSON API, the run and approval pages, `/healthz`, `/readyz`, `/metrics`.
 - `examples/`: a complete configuration, loaded by tests and `make validate`.
 - `internal/sandboxd/`, `internal/egress/`, `internal/sandbox/`: the build
   sandbox service (the only holder of a docker socket), its egress proxy,

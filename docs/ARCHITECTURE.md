@@ -66,8 +66,9 @@ session between runs. Claude Code stores a session's transcript at
 (`runner.SessionFile`); orbit pins `CLAUDE_CONFIG_DIR` to
 `<data>/agents/<name>/home/.claude` and the cwd to `<data>/agents/<name>/work`,
 so `ORBIT_DATA_DIR` must be a persistent volume for resume to survive a restart. The
-transcript is on the host that ran the session; a run claimed where it is
-missing starts fresh rather than failing. For the worker fleet (below), the
+transcript is on the volume that ran the session, which every instance of
+one deployment shares (Upgrades); a run claimed where it is missing starts
+fresh rather than failing. For the worker fleet (below), the
 central store would save it after a run and write it back before a resume,
 as the Agent SDK's SessionStore does (it materializes
 `<dir>/projects/<key>/<id>.jsonl` and points `CLAUDE_CONFIG_DIR` there).
@@ -204,11 +205,70 @@ cost sums, the queue, running runs and next fires. Contract: docs/api.md.
 - **Scheduling:** one leader by advisory lock. A fire is enqueued at most once
   (`runs_one_per_fire`). After downtime, each trigger runs once for its newest
   missed fire; a trigger that has never fired is not backfilled.
-- **Shutdown:** a run in progress gets the drain window (`ORBIT_DRAIN`), then
-  goes back to the queue. Nothing a run does outside its own rows happens
-  before it finishes, so another attempt is safe.
+- **Shutdown** is a drain (Upgrades, below): runs in progress finish under
+  their own timeouts, and only past the drain's cap are they handed back.
+  Nothing a run does outside its own rows happens before it finishes, so
+  another attempt is safe.
 - **Lost workers:** a run without a heartbeat for `engine.StaleAfter` is
   requeued, and failed after `store.MaxAttempts` claims.
+- **One claim, one writer.** A claim is an attempt (`run_attempts`), and
+  every write a running attempt makes (heartbeat, runner, session, outcome,
+  hand-back) is guarded by `status = 'running' AND attempt = <its own>`. An
+  attempt that was reaped and reclaimed elsewhere is refused everything
+  (`ErrConflict`); its heartbeat sees that, or sees no beat land for
+  `StaleAfter` less one beat, and cancels it before another attempt can
+  start. So two instances never both work on one run.
+
+## Upgrades
+
+orbit is replaced by starting a new instance beside the old one and
+draining the old one, so nobody sees the switch and no model work is paid
+for twice. The rollout contract is in docs/agents/deployment.md.
+
+- **Two instances at once** share the database and the `/data` volume, and
+  nothing else. Claims are split by `FOR UPDATE SKIP LOCKED` and
+  `runs_one_running`; one scheduler leads by advisory lock and the other
+  takes over within its 30 s retry when the leader exits; each polls its own
+  config mount and reloads; actions are claimed one at a time, and an
+  action is failed as orphaned only after `engine.OrphanAfter` executing, so
+  neither instance fails the other's. Metrics are per instance except
+  `orbit_queued` and `orbit_pending`, read from the shared database.
+- **Readiness.** `/readyz` is 200 while the instance takes new work, 503
+  while it drains or cannot reach the database; `/healthz` stays liveness
+  (the image's HEALTHCHECK). traefik routes by `/readyz`.
+- **Drain** (SIGTERM, `orbit drain`, or `POST /api/v1/drain` on the
+  internal listener): stop claiming runs and approved actions, report not
+  ready, keep serving the API and open streams, let every run held here
+  finish under its own timeout, then close live processes (between turns,
+  since none is running) and exit. The cap, `ORBIT_DRAIN_MAX`, defaults to
+  `engine.DrainMax`: the longest agent timeout plus `engine.DrainMargin`
+  (5 minutes, for source fetches before the backend call and deliveries
+  after it), so a run that can finish within its timeout does. The
+  scheduler keeps leading through a drain (it only enqueues, and the ready
+  instance claims). A second signal hands back at once.
+- **Hand-back without paying twice.** A run stopped mid-flight (the cap, a
+  second signal, a lost claim, a crash the reaper finds) is continued, not
+  restarted: the next attempt resumes the interrupted attempt's Claude Code
+  session with `--resume <id> --fork-session` (never writing into it), on
+  the inputs that attempt read (restored from its artifacts, not refetched),
+  with a prompt that says it was interrupted and to continue
+  (`engine/recover.go`). The session id is recorded per attempt as soon as
+  the stream names it (`Session.Attached`), so a killed attempt still says
+  where its work is. Every Claude Code run keeps its session for this,
+  agents without `session` in a per-run HOME under `runs/<run>` (one
+  workdir per run, not per attempt: the CLI files a session under its cwd),
+  removed when the run ends. It starts over, with the reason in
+  `recover_skipped`, when the interrupted attempt ran on another backend or
+  spec, named no session, or its transcript is not on the volume.
+- **What an interruption cost.** On SIGTERM Claude Code saves its running
+  session total in the transcript (a `cost-state` line) and restores it on
+  resume; on SIGKILL it saves nothing, and that spend is unknown
+  (`runner.TranscriptCost`, verified on 2.1.316). Each attempt records its
+  share (`run_attempts.cost_usd`) and the session's total; a run's
+  `cost_usd` is every attempt's.
+- **The stream follows it.** An attempt that resumed the previous one's
+  session continues its narration (`status.continues`); a client keeps what
+  it showed (docs/api.md).
 - **Configuration** reloads when the directory's content changes. An invalid
   change is refused and the previous configuration kept
   (`orbit_config_valid` = 0).

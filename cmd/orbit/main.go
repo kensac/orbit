@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"log/slog"
 	"net/http"
 	"os"
@@ -386,9 +387,16 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			ConfigState: configState, Drain: drain}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
+		// Bind before any executor starts: an instance that cannot serve
+		// (its port taken) must not claim runs, or a rollout's readiness
+		// wait would be answered by whatever holds the port.
 		for _, hs := range []*http.Server{srv, internal} {
+			ln, err := net.Listen("tcp", hs.Addr)
+			if err != nil {
+				return fmt.Errorf("listen: %w", err)
+			}
 			go func() {
-				if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				if err := hs.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 					log.Error("http", "addr", hs.Addr, "err", err)
 				}
 			}()
