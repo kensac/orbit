@@ -1,18 +1,31 @@
 # HTTP API
 
-Base path `/api/v1`. Every request needs `Authorization: Bearer <token>`.
-JSON in and out; errors are `{"error": "..."}` with a 4xx/5xx status. Times
-are RFC 3339.
+Base path `/api/v1`. JSON in and out; errors are `{"error": "..."}` with a
+4xx/5xx status. Times are RFC 3339.
+
+## Authentication: authentik
+
+Every request carries `Authorization: Bearer <token>`, where the token is one
+of:
+
+- **An authentik access token (JWT) for a signed-in person.** orbit verifies
+  it against authentik's JWKS: signature, `iss`
+  (`https://auth.kanishksachdev.com/application/o/<slug>/`), `exp`, `aud`
+  in `ORBIT_OIDC_CLIENT_IDS`, and membership of `ORBIT_OIDC_GROUP` in the
+  `groups` claim (today `infra-admins`). The person is the token's
+  `preferred_username`; it is recorded as the author of their messages and
+  decisions. A client forwards the token of the person it is acting for and
+  refreshes it before it expires; orbit never sees a password or a session.
+- **The operator token** (`ORBIT_API_TOKEN`), accepted on the tailnet
+  listener only, for scripts and the CLI.
 
 orbit is reached two ways:
 
-- **Tailnet:** `http://100.79.4.41:8095`, with `ORBIT_API_TOKEN`. Everything
-  below, plus the approval and run pages under `/ui`.
+- **Tailnet:** `http://100.79.4.41:8095`. Both token kinds, plus the approval
+  and run pages under `/ui`.
 - **Public:** `https://orbit-api.kanishksachdev.com`, for server-side callers
-  that cannot join the tailnet (the portfolio on Vercel). Only `/api/v1`, and
-  only with a client token (`ORBIT_CLIENT_TOKENS`). The caller authenticates
-  its own user; orbit trusts the client. Never call it from a browser: the
-  token would ship to every visitor.
+  off the tailnet (the portfolio on Vercel). Only `/api/v1`, and only
+  authentik tokens. A 401 says which check failed.
 
 ## Agents
 
