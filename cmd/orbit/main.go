@@ -174,6 +174,9 @@ func validate(args []string) error {
 			refs[r.APIKeyEnv] = true
 		}
 	}
+	if g := cfg.Deployment.GitHub; g != nil {
+		refs[g.PrivateKeyEnv] = true
+	}
 	names := make([]string, 0, len(cfg.Agents))
 	for n := range cfg.Agents {
 		names = append(names, n)

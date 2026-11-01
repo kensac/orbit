@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/notify"
 	"github.com/kensac/orbit/internal/spec"
 )
@@ -47,7 +48,61 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 			out = append(out, webhookType(name))
 		}
 	}
+	if d.GitHub != nil && a.RuleFor(MergeType) != spec.RuleDeny {
+		out = append(out, mergeType(d))
+	}
 	return out
+}
+
+// MergeType squash-merges one of orbit's own PRs once its checks are green.
+// In the fleet a merge is a deploy, so the executor re-checks every gate
+// itself at execution time; the agent supplies only which PR and which
+// commit it means.
+const MergeType = "github:merge"
+
+type mergeParams struct {
+	Repo       string `json:"repo"`
+	PullNumber int    `json:"pull_number"`
+	HeadSHA    string `json:"head_sha"`
+}
+
+func mergeType(d spec.Deployment) Type {
+	return Type{
+		Name: MergeType,
+		Description: "Squash-merge one of orbit's own pull requests (an orbit/* branch). " +
+			"It merges only if the PR's head is still head_sha and every required check passed.",
+		ParamsSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"repo":        map[string]any{"type": "string", "enum": d.GitHub.Repositories},
+				"pull_number": map[string]any{"type": "integer", "minimum": 1},
+				"head_sha":    map[string]any{"type": "string", "pattern": "^[0-9a-f]{40}$"},
+			},
+			"required":             []string{"repo", "pull_number", "head_sha"},
+			"additionalProperties": false,
+		},
+		Validate: func(p json.RawMessage) error {
+			_, err := decodeMerge(d, p)
+			return err
+		},
+	}
+}
+
+func decodeMerge(d spec.Deployment, p json.RawMessage) (mergeParams, error) {
+	var v mergeParams
+	if err := strictDecode(p, &v); err != nil {
+		return v, err
+	}
+	if !d.AllowsRepo(v.Repo) {
+		return v, fmt.Errorf("github:merge: repository %q is not in github.repositories", v.Repo)
+	}
+	if v.PullNumber < 1 {
+		return v, fmt.Errorf("github:merge: pull_number must be positive")
+	}
+	if len(v.HeadSHA) != 40 || strings.Trim(v.HeadSHA, "0123456789abcdef") != "" {
+		return v, fmt.Errorf("github:merge: head_sha must be a full commit sha")
+	}
+	return v, nil
 }
 
 func notifyType(a *spec.Agent) Type {
@@ -184,6 +239,8 @@ type Executor struct {
 	Channels   map[string]notify.Channel
 	Client     *http.Client
 	Env        func(string) (string, bool)
+	// MergeOptions tunes github:merge's wait for mergeability (tests).
+	MergeOptions github.MergeOptions
 	// Continue enqueues a continuation for agent, asked for by run fromRun.
 	// It returns the queued run's id, and queued false when one was
 	// already waiting (whose id it returns instead).
@@ -275,8 +332,33 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 			return result, fmt.Errorf("%s %s: %s", method, name, resp.Status)
 		}
 		return result, nil
+	case typ == MergeType:
+		return e.merge(ctx, params)
 	}
 	return nil, fmt.Errorf("unknown action type %q", typ)
+}
+
+// merge mints a merge token for the one repository, runs the gated merge,
+// and revokes the token whatever happened.
+func (e *Executor) merge(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
+	p, err := decodeMerge(e.Deployment, params)
+	if err != nil {
+		return nil, err
+	}
+	app, err := github.NewApp(e.Deployment.GitHub, e.Env, e.Client)
+	if err != nil {
+		return nil, err
+	}
+	tok, err := app.Token(ctx, p.Repo, github.MergePermissions)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tok.Revoke(context.WithoutCancel(ctx)) }()
+	sha, err := github.Merge(ctx, tok.Client(), github.MergeRequest{Repo: p.Repo, Number: p.PullNumber, HeadSHA: p.HeadSHA}, e.MergeOptions)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{"merged": true, "repo": p.Repo, "pull_number": p.PullNumber, "merge_sha": sha})
 }
 
 func strictDecode(p json.RawMessage, into any) error {
