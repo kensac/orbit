@@ -30,12 +30,12 @@ func finish(t *testing.T, s *store.Store, status, session string, mode string, p
 func TestLatestSessionReportsTheLatestFinishedRun(t *testing.T) {
 	s := testdb.New(t)
 	seed(t, s, "a")
-	if p, err := s.LatestSession(ctx, "a"); err != nil || p != nil {
+	if p, err := s.LatestSession(ctx, "a", nil); err != nil || p != nil {
 		t.Fatalf("no runs: %+v %v", p, err)
 	}
 	manual(t, s, "a")
 	first := finish(t, s, "succeeded", "s1", "fresh", "", 0.5)
-	p, err := s.LatestSession(ctx, "a")
+	p, err := s.LatestSession(ctx, "a", nil)
 	if err != nil || p.RunID != first || p.SessionID != "s1" || p.Status != "succeeded" || *p.CostUSD != 0.5 || p.Tainted {
 		t.Fatalf("latest = %+v %v", p, err)
 	}
@@ -43,12 +43,12 @@ func TestLatestSessionReportsTheLatestFinishedRun(t *testing.T) {
 	// failed turn into s1's transcript.
 	manual(t, s, "a")
 	finish(t, s, "failed", "", "live", "s1", 0)
-	if p, _ = s.LatestSession(ctx, "a"); p.Status != "failed" || p.SessionID != "" {
+	if p, _ = s.LatestSession(ctx, "a", nil); p.Status != "failed" || p.SessionID != "" {
 		t.Fatalf("after a failure = %+v", p)
 	}
 	manual(t, s, "a")
 	finish(t, s, "succeeded", "s2", "fresh", "", 0.1)
-	if p, _ = s.LatestSession(ctx, "a"); p.SessionID != "s2" || p.Tainted {
+	if p, _ = s.LatestSession(ctx, "a", nil); p.SessionID != "s2" || p.Tainted {
 		t.Fatalf("a fresh session after the failure = %+v", p)
 	}
 	// A live turn requeued mid-turn (shutdown) leaves the run queued with
@@ -61,7 +61,7 @@ func TestLatestSessionReportsTheLatestFinishedRun(t *testing.T) {
 	if err := s.RequeueRun(ctx, c.ID); err != nil {
 		t.Fatal(err)
 	}
-	if p, _ = s.LatestSession(ctx, "a"); p.SessionID != "s2" || !p.Tainted {
+	if p, _ = s.LatestSession(ctx, "a", nil); p.SessionID != "s2" || !p.Tainted {
 		t.Fatalf("an interrupted live turn must taint its session: %+v", p)
 	}
 }

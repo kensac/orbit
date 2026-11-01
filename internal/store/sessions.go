@@ -44,10 +44,12 @@ type PriorSession struct {
 	Tainted bool
 }
 
-// LatestSession returns the agent's latest finished (succeeded or failed)
-// run and its session, or nil if it has none. Whether to continue it is the
-// engine's policy; this only reports.
-func (s *Store) LatestSession(ctx context.Context, agent string) (*PriorSession, error) {
+// LatestSession returns the latest finished (succeeded or failed) run of
+// one thread of the agent (ticketID's, or the general thread when nil) and
+// its session, or nil if it has none. A ticket never continues another
+// thread's session. Whether to continue it is the engine's policy; this
+// only reports.
+func (s *Store) LatestSession(ctx context.Context, agent string, ticketID *string) (*PriorSession, error) {
 	var p PriorSession
 	var kind, sid *string
 	var depth *int
@@ -60,7 +62,8 @@ func (s *Store) LatestSession(ctx context.Context, agent string) (*PriorSession,
 		             AND t.session_parent = r.session_id AND t.status <> 'succeeded')
 		FROM runs r
 		WHERE r.agent = $1 AND r.status IN ('succeeded', 'failed')
-		ORDER BY r.finished_at DESC LIMIT 1`, agent).
+		  AND r.ticket_id IS NOT DISTINCT FROM $2::uuid
+		ORDER BY r.finished_at DESC LIMIT 1`, agent, ticketID).
 		Scan(&p.RunID, &p.Status, &p.SpecSHA, &kind, &sid, &p.FinishedAt, &depth, &p.CostUSD, &p.Tainted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -99,7 +102,8 @@ type Continuation struct {
 // EnqueueContinuation queues a continue run due After from now. The chain
 // is one longer than FromRun's when FromRun was itself a continuation, else
 // 1. runs_one_continuation keeps one waiting per agent: when one already
-// waits, its id is returned with queued false and nothing is written.
+// waits, its id is returned with queued false and nothing is written. The
+// continuation stays in FromRun's thread (its ticket_id).
 func (s *Store) EnqueueContinuation(ctx context.Context, c Continuation) (id string, queued bool, err error) {
 	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var trigger string
@@ -119,8 +123,9 @@ func (s *Store) EnqueueContinuation(ctx context.Context, c Continuation) (id str
 			return fmt.Errorf("%w: this would be continuation %d of at most %d", ErrChainLimit, next, c.MaxChain)
 		}
 		err := tx.QueryRow(ctx, `
-			INSERT INTO runs (agent, spec_sha, trigger, prompt, run_after, continues, chain)
-			SELECT name, spec_sha, 'continue', $2, now() + $3::interval, $4, $5 FROM agents WHERE name = $1
+			INSERT INTO runs (agent, spec_sha, trigger, prompt, run_after, continues, chain, ticket_id)
+			SELECT a.name, a.spec_sha, 'continue', $2, now() + $3::interval, $4, $5, f.ticket_id
+			FROM agents a, runs f WHERE a.name = $1 AND f.id = $4
 			ON CONFLICT (agent) WHERE trigger = 'continue' AND status = 'queued' DO NOTHING
 			RETURNING id::text`, c.Agent, c.Note, c.After.String(), c.FromRun, next).Scan(&id)
 		if err == nil {

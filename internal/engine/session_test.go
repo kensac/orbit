@@ -216,3 +216,39 @@ func TestUntracedFiguresAreNotedInTheReport(t *testing.T) {
 		t.Fatalf("report = %s", *run.Report)
 	}
 }
+
+func TestATicketRunKeepsToItsOwnSessionAndConversation(t *testing.T) {
+	fr := &fakeRunner{output: goodOutput}
+	e, s, _ := harnessWith(t, fr, sessionSpec)
+	general := claim(t, e, s)
+	if err := e.Execute(ctx, general); err != nil {
+		t.Fatal(err)
+	}
+	a := e.Current().Config.Agents["finance"]
+	tk, _, err := s.CreateTicket(ctx, store.NewTicket{Kind: "question", Title: "q", Body: "Why was rent late?", Agent: "finance",
+		SpecSHA: a.SHA, Wake: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.ClaimRun(ctx, "test")
+	if err != nil || c == nil || c.ID != tk.RunID || c.TicketID == nil || *c.TicketID != tk.TicketID {
+		t.Fatalf("claimed %+v %v", c, err)
+	}
+	if err := e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if fr.got.Session == nil || fr.got.Session.Resume != "" || fr.got.Session.Key != "finance/ticket/"+tk.TicketID {
+		t.Fatalf("ticket session = %+v, want a fresh one under the ticket's key", fr.got.Session)
+	}
+	if strings.Contains(fr.got.Prompt, "October spend") || !strings.Contains(fr.got.Prompt, "Why was rent late?") {
+		t.Fatalf("a ticket run must see only its thread:\n%s", fr.got.Prompt)
+	}
+	// The general thread still resumes its own session afterwards.
+	next := claim(t, e, s)
+	if err := e.Execute(ctx, next); err != nil {
+		t.Fatal(err)
+	}
+	if fr.got.Session.Resume != "session-1" || fr.got.Session.Key != "finance" {
+		t.Fatalf("general session = %+v", fr.got.Session)
+	}
+}

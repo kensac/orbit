@@ -208,10 +208,29 @@ type ThreadPage struct {
 	NextBefore string
 }
 
-// Thread returns an agent's messages (both directions) and runs (every
-// trigger): the newest limit items before the cursor (nil: the newest),
-// oldest first.
+// Thread returns an agent's general thread: its messages (both directions)
+// and runs (every trigger) that belong to no ticket, the newest limit items
+// before the cursor (nil: the newest), oldest first.
 func (s *Store) Thread(ctx context.Context, agent string, before *ThreadCursor, limit int) (*ThreadPage, error) {
+	return s.thread(ctx, agent, nil, before, limit)
+}
+
+// TicketThread is one ticket's thread, paged exactly as Thread.
+func (s *Store) TicketThread(ctx context.Context, ticketID string, before *ThreadCursor, limit int) (*ThreadPage, error) {
+	var agent string
+	err := s.Pool.QueryRow(ctx, `SELECT agent FROM tickets WHERE id = $1`, ticketID).Scan(&agent)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.thread(ctx, agent, &ticketID, before, limit)
+}
+
+// thread pages one thread: the agent's general one (ticketID nil) or a
+// ticket's.
+func (s *Store) thread(ctx context.Context, agent string, ticketID *string, before *ThreadCursor, limit int) (*ThreadPage, error) {
 	if limit <= 0 {
 		limit = DefaultThreadLimit
 	}
@@ -231,18 +250,28 @@ func (s *Store) Thread(ctx context.Context, agent string, before *ThreadCursor, 
 		}
 		// The page's keys, one more than limit to learn whether older items
 		// exist. Each branch is a range scan on (agent, created_at)
-		// (messages_agent_recent, runs_agent_recent) bounded by the limit.
+		// (messages_agent_recent, runs_agent_recent), or on (ticket_id,
+		// created_at) for a ticket (messages_ticket, runs_ticket), bounded
+		// by the limit.
+		// IS NOT DISTINCT FROM is not an index operator, so the scope is
+		// spelled as one of two indexable predicates.
+		scope, args := "ticket_id IS NULL", []any{agent, at, rank, id, limit + 1}
+		if ticketID != nil {
+			scope, args = "ticket_id = $6::uuid", append(args, *ticketID)
+		}
 		rows, err := tx.Query(ctx, `
 			(SELECT created_at, 1, id FROM messages
-			 WHERE agent = $1 AND created_at <= COALESCE($2::timestamptz, 'infinity')
+			 WHERE agent = $1 AND `+scope+`
+			   AND created_at <= COALESCE($2::timestamptz, 'infinity')
 			   AND (created_at, 1, id) < (COALESCE($2::timestamptz, 'infinity'), $3::int, $4::uuid)
 			 ORDER BY created_at DESC, id DESC LIMIT $5)
 			UNION ALL
 			(SELECT created_at, 0, id FROM runs
-			 WHERE agent = $1 AND created_at <= COALESCE($2::timestamptz, 'infinity')
+			 WHERE agent = $1 AND `+scope+`
+			   AND created_at <= COALESCE($2::timestamptz, 'infinity')
 			   AND (created_at, 0, id) < (COALESCE($2::timestamptz, 'infinity'), $3::int, $4::uuid)
 			 ORDER BY created_at DESC, id DESC LIMIT $5)
-			ORDER BY 1 DESC, 2 DESC, 3 DESC LIMIT $5`, agent, at, rank, id, limit+1)
+			ORDER BY 1 DESC, 2 DESC, 3 DESC LIMIT $5`, args...)
 		if err != nil {
 			return err
 		}

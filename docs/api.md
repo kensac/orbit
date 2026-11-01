@@ -222,6 +222,24 @@ the concatenated `text`: `text` is what the agent narrated while working.
   decider is the token's person. Only with the operator token, `{"by":
   "name"}` names it (default `operator`).
 
+## Tickets
+
+A ticket is a request or question with its own thread
+([tickets.md](tickets.md)): `POST /tickets`, `GET /tickets`,
+`GET /tickets/{id}` (the ticket, its plans and transitions),
+`GET /tickets/{id}/thread` (paged exactly as an agent's thread, same items
+and cursor), `POST /tickets/{id}/messages`,
+`POST /tickets/{id}/plans/{version}/approve`, and
+`POST /tickets/{id}/{abandon,retry,reopen}`. Bodies and shapes are in
+tickets.md. As for messages and decisions, the author and approver are the
+token's person (body `author` and `by` count only with the operator token),
+and filing takes `client_request_id`, posting `client_message_id` and
+approving `client_request_id` with the same retry rules. A transition the
+ticket's state does not allow is 409.
+
+An agent's thread (`GET /agents/{name}/thread`) is its general thread: it
+leaves out ticket messages and runs, which are in their ticket's thread.
+
 ## Memory
 
 `GET /agents/{name}/memory?limit=`: every version, newest first.

@@ -77,6 +77,15 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/actions/{id}", s.getAction)
 	api("POST /api/v1/actions/{id}/approve", s.decide(true))
 	api("POST /api/v1/actions/{id}/reject", s.decide(false))
+	api("POST /api/v1/tickets", s.createTicket)
+	api("GET /api/v1/tickets", s.listTickets)
+	api("GET /api/v1/tickets/{id}", s.getTicket)
+	api("GET /api/v1/tickets/{id}/thread", s.ticketThread)
+	api("POST /api/v1/tickets/{id}/messages", s.ticketMessage)
+	api("POST /api/v1/tickets/{id}/plans/{version}/approve", s.approvePlan)
+	api("POST /api/v1/tickets/{id}/abandon", s.ticketMove(store.TicketAbandoned))
+	api("POST /api/v1/tickets/{id}/retry", s.ticketMove(store.TicketApproved))
+	api("POST /api/v1/tickets/{id}/reopen", s.ticketMove(store.TicketOpen))
 
 	if !internal {
 		mux.HandleFunc("GET /ui/actions/{id}", s.approvalPage)
@@ -143,8 +152,16 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 	respond(w, nil, store.ErrNotFound)
 }
 
-// thread serves an agent's conversation, a page at a time (store.Thread).
+// thread serves an agent's general thread, a page at a time (store.Thread).
 func (s *Server) thread(w http.ResponseWriter, r *http.Request) {
+	servePage(w, r, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
+		return s.Store.Thread(r.Context(), r.PathValue("name"), before, limit)
+	})
+}
+
+// servePage is the one way a thread is served, an agent's or a ticket's:
+// the before cursor and limit in, items, has_more and next_before out.
+func servePage(w http.ResponseWriter, r *http.Request, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) {
 	var before *store.ThreadCursor
 	if b := r.URL.Query().Get("before"); b != "" {
 		c, err := store.ParseThreadCursor(b)
@@ -154,7 +171,7 @@ func (s *Server) thread(w http.ResponseWriter, r *http.Request) {
 		}
 		before = c
 	}
-	page, err := s.Store.Thread(r.Context(), r.PathValue("name"), before, intParam(r, "limit"))
+	page, err := fetch(before, intParam(r, "limit"))
 	if err != nil {
 		respond(w, nil, err)
 		return

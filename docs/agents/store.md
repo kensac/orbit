@@ -22,9 +22,13 @@ an agent's beliefs changed.
   `running -> queued` (shutdown, lost worker under `MaxAttempts`).
 - action: `pending -> approved | rejected`, `approved -> executing ->
   executed | failed`; `denied` and rule-approved are set at creation.
+- ticket: `ticketEdges` in `tickets.go` is the table (diagram in
+  docs/tickets.md); into `planned` and `approved` only through
+  `ProposePlan`/`ApprovePlan`, which carry the plan version. Each transition
+  writes its `ticket_events` row in the same transaction.
 
 A client request id (`receipts`) is written in the same transaction as the
-message or decision it records, so a retry returns the first result and a
+message, decision, ticket or plan approval it records, so a retry returns the first result and a
 failure leaves no receipt.
 
 Every transition is a guarded UPDATE (`WHERE status = ...`); zero rows

@@ -27,7 +27,7 @@ const maxSessionDepth = 20
 // decision and its reason are an event of the run.
 func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, workdir, home string, emit func(string, any)) (*runner.Session, bool, error) {
 	idle := time.Duration(a.Session.Idle)
-	prior, err := e.Store.LatestSession(ctx, a.Name)
+	prior, err := e.Store.LatestSession(ctx, a.Name, c.TicketID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -60,7 +60,7 @@ func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.Claime
 	sess := &runner.Session{
 		Home:     home,
 		KeepDays: int(math.Ceil(idle.Hours()/24)) + 1,
-		Key:      a.Name,
+		Key:      sessionKey(a.Name, c.TicketID),
 	}
 	depth := 1
 	if reason == "" {
@@ -80,4 +80,14 @@ func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.Claime
 		return e.Store.SetSession(ctx, c.ID, mode, parent, depth)
 	}
 	return sess, reason == "", nil
+}
+
+// sessionKey names one thread's live process: the agent's general thread, or
+// one of its tickets, so a ticket's turn never lands in another thread's
+// process.
+func sessionKey(agent string, ticketID *string) string {
+	if ticketID == nil {
+		return agent
+	}
+	return agent + "/ticket/" + *ticketID
 }
