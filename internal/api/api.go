@@ -24,6 +24,7 @@ import (
 	"github.com/kensac/orbit/internal/auth"
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/scheduler"
+	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -64,6 +65,12 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/agents", s.listAgents)
 	api("GET /api/v1/agents/{name}", s.getAgent)
 	api("GET /api/v1/agents/{name}/thread", s.thread)
+	api("GET /api/v1/agents/{name}/conversations", s.listConversations)
+	api("POST /api/v1/agents/{name}/conversations", s.createConversation)
+	api("GET /api/v1/conversations/{id}", s.getConversation)
+	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
+	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
+	api("POST /api/v1/conversations/{id}/messages", s.conversationMessage)
 	api("GET /api/v1/agents/{name}/memory", s.memoryHistory)
 	api("POST /api/v1/agents/{name}/runs", s.startRun)
 	api("GET /api/v1/agents/{name}/messages", s.listMessages)
@@ -149,8 +156,17 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 	respond(w, nil, store.ErrNotFound)
 }
 
-// thread serves an agent's conversation, a page at a time (store.Thread).
+// thread serves an agent's default conversation, a page at a time
+// (store.Thread).
 func (s *Server) thread(w http.ResponseWriter, r *http.Request) {
+	servePage(w, r, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
+		return s.Store.Thread(r.Context(), r.PathValue("name"), before, limit)
+	})
+}
+
+// servePage is the one way a thread page is served, whichever conversation:
+// the before cursor and limit in, items, has_more and next_before out.
+func servePage(w http.ResponseWriter, r *http.Request, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) {
 	var before *store.ThreadCursor
 	if b := r.URL.Query().Get("before"); b != "" {
 		c, err := store.ParseThreadCursor(b)
@@ -160,7 +176,7 @@ func (s *Server) thread(w http.ResponseWriter, r *http.Request) {
 		}
 		before = c
 	}
-	page, err := s.Store.Thread(r.Context(), r.PathValue("name"), before, intParam(r, "limit"))
+	page, err := fetch(before, intParam(r, "limit"))
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -204,7 +220,19 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"messages": orEmpty(m)}, err)
 }
 
+// sendMessage posts to an agent's default conversation.
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.Engine.Current().Config.Agents[r.PathValue("name")]
+	if !ok {
+		respond(w, nil, store.ErrNotFound)
+		return
+	}
+	s.postTo(w, r, a, "")
+}
+
+// postTo posts a person's message into one of agent a's conversations
+// ("" is the default) and wakes a run there when wake says so.
+func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, conversationID string) {
 	var body struct {
 		Body    string  `json:"body"`
 		ReplyTo *string `json:"reply_to"`
@@ -224,22 +252,13 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "body is required")
 		return
 	}
-	a, ok := s.Engine.Current().Config.Agents[r.PathValue("name")]
-	if !ok {
-		respond(w, nil, store.ErrNotFound)
-		return
-	}
-	author := body.Author
-	if p := principalOf(r); p.Person != "" {
-		author = p.Person
-	}
 	wake := a.MessagesTrigger
 	if body.Wake != nil {
 		wake = *body.Wake
 	}
 	res, replayed, err := s.Store.PostMessageOnce(r.Context(), store.PostMessage{
-		Agent: a.Name, SpecSHA: a.SHA, Body: body.Body, Author: author, ReplyTo: body.ReplyTo,
-		Wake: wake, ClientID: body.ClientMessageID,
+		Agent: a.Name, SpecSHA: a.SHA, Body: body.Body, Author: actor(r, body.Author), ReplyTo: body.ReplyTo,
+		Wake: wake, ClientID: body.ClientMessageID, ConversationID: conversationID,
 	})
 	if err != nil {
 		respond(w, nil, err)
@@ -253,6 +272,15 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		resp["run_id"] = res.RunID
 	}
 	respondStatus(w, http.StatusCreated, resp, nil)
+}
+
+// actor is who a write is for: the token's person; with the operator token,
+// whoever the body names (possibly no one).
+func actor(r *http.Request, named string) string {
+	if p := principalOf(r); p.Person != "" {
+		return p.Person
+	}
+	return named
 }
 
 // ---------------------------------------------------------------- runs
@@ -351,6 +379,8 @@ func respondStatus(w http.ResponseWriter, status int, v any, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "not found")
+	case errors.Is(err, store.ErrReplyElsewhere), errors.Is(err, store.ErrInvalid):
+		writeErr(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, store.ErrReceiptMismatch):
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, store.ErrConflict):

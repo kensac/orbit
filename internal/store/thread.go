@@ -208,10 +208,23 @@ type ThreadPage struct {
 	NextBefore string
 }
 
-// Thread returns an agent's messages (both directions) and runs (every
-// trigger): the newest limit items before the cursor (nil: the newest),
-// oldest first.
+// Thread returns an agent's default conversation (see ConversationThread).
 func (s *Store) Thread(ctx context.Context, agent string, before *ThreadCursor, limit int) (*ThreadPage, error) {
+	var id string
+	err := s.Pool.QueryRow(ctx, `SELECT id::text FROM conversations WHERE agent = $1 AND is_default`, agent).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.ConversationThread(ctx, id, before, limit)
+}
+
+// ConversationThread returns one conversation's messages (both directions)
+// and runs (every trigger): the newest limit items before the cursor (nil:
+// the newest), oldest first.
+func (s *Store) ConversationThread(ctx context.Context, conversationID string, before *ThreadCursor, limit int) (*ThreadPage, error) {
 	if limit <= 0 {
 		limit = DefaultThreadLimit
 	}
@@ -223,26 +236,27 @@ func (s *Store) Thread(ctx context.Context, agent string, before *ThreadCursor, 
 	page := &ThreadPage{}
 	err := pgx.BeginTxFunc(ctx, s.Pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
 		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM agents WHERE name = $1)`, agent).Scan(&exists); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM conversations WHERE id = $1)`, conversationID).Scan(&exists); err != nil {
 			return err
 		}
 		if !exists {
 			return ErrNotFound
 		}
 		// The page's keys, one more than limit to learn whether older items
-		// exist. Each branch is a range scan on (agent, created_at)
-		// (messages_agent_recent, runs_agent_recent) bounded by the limit.
+		// exist. Each branch is a range scan on (conversation_id, created_at)
+		// (messages_conversation_recent, runs_conversation_recent) bounded
+		// by the limit.
 		rows, err := tx.Query(ctx, `
 			(SELECT created_at, 1, id FROM messages
-			 WHERE agent = $1 AND created_at <= COALESCE($2::timestamptz, 'infinity')
+			 WHERE conversation_id = $1 AND created_at <= COALESCE($2::timestamptz, 'infinity')
 			   AND (created_at, 1, id) < (COALESCE($2::timestamptz, 'infinity'), $3::int, $4::uuid)
 			 ORDER BY created_at DESC, id DESC LIMIT $5)
 			UNION ALL
 			(SELECT created_at, 0, id FROM runs
-			 WHERE agent = $1 AND created_at <= COALESCE($2::timestamptz, 'infinity')
+			 WHERE conversation_id = $1 AND created_at <= COALESCE($2::timestamptz, 'infinity')
 			   AND (created_at, 0, id) < (COALESCE($2::timestamptz, 'infinity'), $3::int, $4::uuid)
 			 ORDER BY created_at DESC, id DESC LIMIT $5)
-			ORDER BY 1 DESC, 2 DESC, 3 DESC LIMIT $5`, agent, at, rank, id, limit+1)
+			ORDER BY 1 DESC, 2 DESC, 3 DESC LIMIT $5`, conversationID, at, rank, id, limit+1)
 		if err != nil {
 			return err
 		}

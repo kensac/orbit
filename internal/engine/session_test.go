@@ -216,3 +216,39 @@ func TestUntracedFiguresAreNotedInTheReport(t *testing.T) {
 		t.Fatalf("report = %s", *run.Report)
 	}
 }
+
+func TestEachConversationKeepsItsOwnSessionAndThread(t *testing.T) {
+	fr := &fakeRunner{output: goodOutput}
+	e, s, _ := harnessWith(t, fr, sessionSpec)
+	general := claim(t, e, s)
+	if err := e.Execute(ctx, general); err != nil {
+		t.Fatal(err)
+	}
+	a := e.Current().Config.Agents["finance"]
+	conv, _, err := s.CreateConversation(ctx, store.NewConversation{Agent: "finance", SpecSHA: a.SHA,
+		Body: "Why was rent late?", Wake: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.ClaimRun(ctx, "test")
+	if err != nil || c == nil || c.ID != conv.RunID || c.ConversationID != conv.ConversationID {
+		t.Fatalf("claimed %+v %v", c, err)
+	}
+	if err := e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if fr.got.Session == nil || fr.got.Session.Resume != "" || fr.got.Session.Key != conv.ConversationID {
+		t.Fatalf("new conversation's session = %+v, want a fresh one under its own key", fr.got.Session)
+	}
+	if strings.Contains(fr.got.Prompt, "October spend") || !strings.Contains(fr.got.Prompt, "Why was rent late?") {
+		t.Fatalf("a run must see only its conversation:\n%s", fr.got.Prompt)
+	}
+	// The default conversation still resumes its own session afterwards.
+	next := claim(t, e, s)
+	if err := e.Execute(ctx, next); err != nil {
+		t.Fatal(err)
+	}
+	if fr.got.Session.Resume != "session-1" || fr.got.Session.Key != general.ConversationID {
+		t.Fatalf("default session = %+v", fr.got.Session)
+	}
+}
