@@ -430,7 +430,15 @@ deterministic:
 | anything else | never |
 
 A denial's message tells the model what is allowed, so it adapts instead of
-retrying. This list keeps the run on task and makes its intent auditable; it
+retrying.
+
+orbit already runs a `PreToolUse` hook inside Claude Code (`orbit hook`,
+`internal/harness/hook.go`: a path guard on the file tools). In a build run
+that hook would run inside the sandbox, in the CLI's process tree, beside
+code the model wrote and can run; it is a useful second layer there (it
+sees each call before the permission prompt) but not the authority. The
+decision that counts is the stdio permission prompt, answered by orbit's
+process outside the container, which nothing inside can reach or alter. This list keeps the run on task and makes its intent auditable; it
 is **not** the security boundary. `go test` and `make check` run code the
 model wrote, which can do anything the container allows. The boundary is
 the container, its network, and the absence of secrets in it.
