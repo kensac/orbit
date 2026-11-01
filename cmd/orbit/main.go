@@ -283,6 +283,8 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			return err
 		}
 		metrics.ConfigValid.Set(1)
+		configState := &engine.ConfigState{}
+		configState.Loaded(time.Now())
 		if err := seedMetrics(ctx, s); err != nil {
 			return err
 		}
@@ -314,7 +316,8 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		defer cancelRuns()
 
 		stopStreams := make(chan struct{})
-		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams}
+		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
+			ConfigState: configState}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		for _, hs := range []*http.Server{srv, internal} {
@@ -394,10 +397,12 @@ func serve(ctx context.Context, log *slog.Logger) error {
 				if h := configHash(dir); h != last {
 					if err := reloadConfig(ctx, s, eng, dir); err != nil {
 						metrics.ConfigValid.Set(0)
+						configState.Failed(err, time.Now())
 						log.Error("config reload failed; keeping the previous configuration", "err", err)
 					} else {
 						last = h
 						metrics.ConfigValid.Set(1)
+						configState.Loaded(time.Now())
 						log.Info("config reloaded")
 						select {
 						case reload <- struct{}{}:

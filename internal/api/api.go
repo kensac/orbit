@@ -23,6 +23,7 @@ import (
 
 	"github.com/kensac/orbit/internal/auth"
 	"github.com/kensac/orbit/internal/engine"
+	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -42,6 +43,8 @@ type Server struct {
 	// StreamPoll and StreamPing override the stream's poll and heartbeat
 	// intervals (streamPoll, streamPing) when set; tests shorten them.
 	StreamPoll, StreamPing time.Duration
+	// ConfigState is the configuration's load status, for GET /health.
+	ConfigState *engine.ConfigState
 }
 
 // Handler returns the public listener's routes, the ones traefik serves.
@@ -73,6 +76,8 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/runs/{id}/artifacts", s.listArtifacts)
 	api("GET /api/v1/runs/{id}/deliveries", s.listDeliveries)
 	api("GET /api/v1/artifacts/{id}", s.getArtifact)
+	api("GET /api/v1/usage", s.usage)
+	api("GET /api/v1/health", s.health)
 	api("GET /api/v1/actions", s.listActions)
 	api("GET /api/v1/actions/{id}", s.getAction)
 	api("POST /api/v1/actions/{id}/approve", s.decide(true))
@@ -136,7 +141,8 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 	for _, a := range agents {
 		if a.Name == name {
 			mem, err := s.Store.Memory(r.Context(), name)
-			respond(w, map[string]any{"agent": a, "memory": mem}, err)
+			next := scheduler.NextFires(s.Engine.Current().Config.Agents[name], time.Now())
+			respond(w, map[string]any{"agent": a, "memory": mem, "next_fires": next}, err)
 			return
 		}
 	}

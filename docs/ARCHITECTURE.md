@@ -175,7 +175,11 @@ interleaved, `Store.Thread`), and a run is watched as Server-Sent Events
 (`/runs/{id}/stream`), which poll the stored transcript and turn it into
 prose and tool calls in code (`runner.Narrate`). The stream reads only rows,
 so it follows a run across a requeue, a deploy or another replica with no
-signalling between writers and readers. Contract: docs/api.md.
+signalling between writers and readers. `GET /usage` and `GET /health` are
+the admin read side, computed from stored rows and the configuration in
+force: subscription windows from the newest `rate_limit_event` Claude Code
+wrote into a run's stream (what it last reported, not a live query), exact
+cost sums, the queue, running runs and next fires. Contract: docs/api.md.
 
 ## Reliability
 
