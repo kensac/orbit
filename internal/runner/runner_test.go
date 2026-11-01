@@ -492,3 +492,76 @@ func TestSessionFile(t *testing.T) {
 		t.Fatal("a name past 200 characters is hashed by the CLI; orbit must not guess it")
 	}
 }
+
+func TestClaudeCodeHarnessToolsAndHooks(t *testing.T) {
+	bin, dir := fakeCLI(t, `echo '{"type":"result","subtype":"success","is_error":false,"structured_output":{}}'`)
+	r, _ := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
+	work := t.TempDir()
+	if _, err := r.Run(context.Background(), Request{Workdir: work, OutputSchema: json.RawMessage(`{}`),
+		Harness: &Harness{Bin: "/opt/orbit", Figures: true}}, func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	argv := strings.Split(read(t, filepath.Join(dir, "argv")), "\n")
+	flag := func(name string) string {
+		for i, a := range argv {
+			if a == name && i+1 < len(argv) {
+				return argv[i+1]
+			}
+		}
+		t.Fatalf("argv lacks %s", name)
+		return ""
+	}
+	state := filepath.Join(work, ".home", ".orbit-harness")
+	var mcp struct {
+		MCPServers map[string]struct {
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(flag("--mcp-config")), &mcp); err != nil {
+		t.Fatal(err)
+	}
+	if s := mcp.MCPServers["orbit"]; s.Command != "/opt/orbit" || strings.Join(s.Args, " ") != "mcp --root "+work+" --state "+state {
+		t.Fatalf("mcp server = %+v", s)
+	}
+	if got := flag("--allowedTools"); got != "mcp__orbit__query,mcp__orbit__calc" {
+		t.Fatalf("allowedTools = %q", got)
+	}
+	var settings struct {
+		DisableAllHooks bool `json:"disableAllHooks"`
+		Hooks           map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal([]byte(flag("--settings")), &settings); err != nil {
+		t.Fatal(err)
+	}
+	pre := settings.Hooks["PreToolUse"]
+	if settings.DisableAllHooks || len(pre) != 2 || pre[0].Matcher != "Read|Glob|Grep" || pre[1].Matcher != "StructuredOutput" {
+		t.Fatalf("settings = %+v", settings)
+	}
+	if want := "'/opt/orbit' hook --root '" + work + "' --state '" + state + "' --figures"; pre[1].Hooks[0].Command != want {
+		t.Fatalf("hook command = %q, want %q", pre[1].Hooks[0].Command, want)
+	}
+}
+
+func TestClaudeCodeWithoutHarnessDisablesHooks(t *testing.T) {
+	bin, dir := fakeCLI(t, `echo '{"type":"result","subtype":"success","is_error":false,"structured_output":{}}'`)
+	r, _ := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
+	if _, err := r.Run(context.Background(), Request{Workdir: t.TempDir(), OutputSchema: json.RawMessage(`{}`)}, func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	argv := read(t, filepath.Join(dir, "argv"))
+	if !strings.Contains(argv, `"disableAllHooks":true`) || strings.Contains(argv, "--mcp-config") {
+		t.Fatalf("argv:\n%s", argv)
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	if got := shellQuote("/a b/it's"); got != `'/a b/it'\''s'` {
+		t.Fatalf("got %s", got)
+	}
+}

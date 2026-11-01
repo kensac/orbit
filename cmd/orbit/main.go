@@ -7,6 +7,8 @@
 //	orbit run <agent> [prompt]   queue a manual run (a running serve picks it up)
 //	orbit approve <action-id> / orbit reject <action-id>
 //	orbit healthcheck        exit 0 if the local server answers /healthz
+//	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
+//	orbit hook --root <dir> --state <dir> [--figures]   orbit's hook, run by Claude Code
 package main
 
 import (
@@ -14,6 +16,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -30,6 +33,7 @@ import (
 
 	"github.com/kensac/orbit/internal/api"
 	"github.com/kensac/orbit/internal/engine"
+	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/scheduler"
@@ -62,6 +66,8 @@ func main() {
 		err = decide(ctx, os.Args[1] == "approve", os.Args[2:])
 	case "healthcheck":
 		err = healthcheck()
+	case "mcp", "hook":
+		err = harnessCmd(os.Args[1], os.Args[2:])
 	case "version":
 		fmt.Println(revision)
 	default:
@@ -73,8 +79,28 @@ func main() {
 	}
 }
 
+// harnessCmd is the code Claude Code runs on orbit's behalf, inside the
+// model's process tree: it reads only under --root and needs nothing from
+// orbit's environment, which it does not have.
+func harnessCmd(name string, args []string) error {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	root := fs.String("root", "", "the run's working directory")
+	figures := fs.Bool("figures", false, "check the output's money amounts")
+	state := fs.String("state", "", "the directory the tool server and the hook share")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *root == "" {
+		return errors.New(name + ": --root is required")
+	}
+	if name == "mcp" {
+		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, revision)
+	}
+	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state})
+}
+
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck | version")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck | version | mcp | hook")
 	os.Exit(2)
 }
 
@@ -239,6 +265,11 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			Store: s, DataDir: env("ORBIT_DATA_DIR", "/data"), Env: os.LookupEnv,
 			Client: &http.Client{Timeout: 2 * time.Minute}, Secret: []byte(token),
 			NewRunner: runner.New, Log: log, Live: runner.NewLive(runner.MaxLive),
+		}
+		if bin, err := os.Executable(); err == nil {
+			eng.Harness = bin
+		} else {
+			log.Warn("orbit's tools and hooks are off: cannot find this binary", "err", err)
 		}
 		if err := eng.SetConfig(cfg); err != nil {
 			return err

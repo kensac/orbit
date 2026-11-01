@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/actions"
+	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -123,7 +124,7 @@ func OutputSchema(types []actions.Type, memoryMax int, strictActions bool) json.
 
 // systemPrompt is the contract every backend receives, separate from the
 // agent's own charter.
-func systemPrompt(a *spec.Agent, types []actions.Type, inputs []runner.Input, cliFiles bool) string {
+func systemPrompt(a *spec.Agent, types []actions.Type, inputs []runner.Input, cliFiles, orbitTools bool) string {
 	var b strings.Builder
 	b.WriteString(`You are an orbit agent: a standing assistant that wakes on a schedule or when its person writes to it, does one piece of work, and returns a structured result. You do not talk to the person directly during a run. Everything you want them to see goes in your result.
 
@@ -161,6 +162,13 @@ Rules:
 			b.WriteString("- Your inputs are files in the working directory, listed in the prompt. Read them with your file tools; they can be large, so search before reading whole files where that helps. You cannot read anything outside the working directory.\n")
 		} else {
 			b.WriteString("- Your inputs are included at the end of the prompt.\n")
+		}
+	}
+	if orbitTools {
+		fmt.Fprintf(&b, "- Never add, count or compute figures yourself. Use orbit's tools: %s filters, groups and sums the records of a JSON input exactly; %s does exact arithmetic. Every number you report should come from your inputs or from one of their results.\n",
+			harness.ToolQuery, harness.ToolCalc)
+		if a.Verifies("figures") {
+			b.WriteString("- Every $ amount in your summary and report is checked against your inputs and those tools' results; one that cannot be traced is sent back to you.\n")
 		}
 	}
 	return b.String()

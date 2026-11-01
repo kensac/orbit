@@ -38,6 +38,14 @@ one every run after a restart starts fresh (it does not fail).
 are constants in `internal/actions` (`ContinueMinDelay`, `ContinueMaxDelay`,
 `MaxContinueChain`).
 
+## Checks
+
+`verify: [figures]` makes every money amount (`$` followed by a number) in an
+agent's summary, notification title and report traceable to its inputs or to
+a result of orbit's query or calc tool (docs/ARCHITECTURE.md). Use it for
+agents whose reports are numbers; prose with incidental amounts from the
+charter or memory gets those amounts sent back and then noted.
+
 ## Changing a running deployment
 
 orbit polls its config directory and reloads on any content change. A change
