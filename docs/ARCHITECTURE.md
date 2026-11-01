@@ -100,7 +100,8 @@ The direction, so changes now do not close it off:
 - **Transforms and gates** (above). A transform is a named, tested Go
   function from a source's bytes to smaller bytes, stored as its own
   artifact; a gate is a predicate over inputs and memory that ends the run
-  as `succeeded` without a backend call.
+  without a backend call, recorded as its own status (`skipped`, naming the
+  gate) so a run that judged nothing is distinguishable from one that did.
 
 - **Tickets and a build agent**: [tickets.md](tickets.md). A request or
   question thread a person files and discusses with an agent; an approved

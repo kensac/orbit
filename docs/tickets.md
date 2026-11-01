@@ -24,6 +24,11 @@ are marked **Built** here.
   unless an agent's spec names it.
 - **Never delete stored data.** A ticket's transitions, plans, runs and
   actions are kept. A rebuilt PR is a new build run and new rows.
+- **Ticket text is data, not instructions.** Only an approved plan turns a
+  ticket into work (below).
+- **No agent writes to GitHub or dispatches work itself.** There is no CLI
+  or tool in any run that files tickets, comments, pushes or starts another
+  agent; each of those is an orbit action with a rule, or the harness.
 
 ## Data model
 
@@ -37,6 +42,7 @@ What tickets add is a scope and a lifecycle, so three tables and two columns:
 | `tickets` | one row per ticket: kind, title, the agent discussing it, the target repository, status, the approved plan, the branch, PR and merge commit | the lifecycle has states no run or message has |
 | `ticket_events` | every transition: from, to, who, when, detail | the history of a ticket is a record, never overwritten (a `tickets.status` alone would lose it) |
 | `ticket_plans` | every plan version an agent proposed, and which one was approved | a plan is approved by version; a later plan must never inherit an earlier approval |
+| `ticket_review_comments` | line comments on a PR's diff and the message that delivered them | a comment is anchored to a file and lines, and delivered exactly once (Lifecycle) |
 | `messages.ticket_id` | the ticket a message belongs to, or null for the agent's general inbox | a ticket's messages are its thread |
 | `runs.ticket_id` | the ticket a run works on, or null | a run on a ticket reads that ticket's thread only |
 
@@ -49,6 +55,28 @@ run row inside `StartRunContext`, so the engine needs no change for it.
 When conversation context and session resume land (one live backend session
 per thread), a ticket is one more kind of thread: the session is keyed by
 the ticket, exactly as an agent's general thread is keyed by the agent.
+
+### Ticket text is untrusted
+
+A ticket's title, body and messages are written by a person, but may quote
+anything (a pasted log, an issue from elsewhere, a web page), and once
+tickets come from webhooks they may be written by someone other than the
+owner. orbit therefore treats ticket text as source data, the same as a
+fetched source:
+
+- it reaches the model as an input artifact (`ticket.json`: title, body,
+  the thread's messages with their authors), never spliced into the system
+  contract; the prompt names it as data the agent must not take
+  instructions from, wrapped in a delimiter whose occurrences inside the
+  text are escaped, with control characters escaped and the length capped;
+- the author of every message is recorded, and only messages from the
+  owner (the authenticated person, `infra-admins`) can approve a plan; a
+  ticket or message from anyone else can be discussed but never approved
+  by its own text;
+- the build run's instructions are the **approved plan**, which a person
+  read and approved by version, plus the ticket text as data. Nothing a
+  ticket says can widen the build's tools, repository, commands or paths:
+  those are configuration.
 
 ### Ticket kinds and states
 
@@ -106,7 +134,9 @@ did not read.
    like action approvals). Replying instead reopens the ticket.
 4. **Build.** The harness enqueues a build run (below). Its result is a diff
    orbit computes, never one the model reports.
-5. **PR.** orbit commits the diff to `orbit/<ticket-short-id>` from the base
+5. **PR.** orbit commits the diff to `orbit/<ticket-short-id>` (the first
+   eight hex characters of the ticket's id: deterministic, never chosen by a
+   model, so retries and reconciliation find the same branch) from the base
    commit the build started at, pushes that one ref, and opens the PR with a
    title and body built from the run's output and the approved plan, scrubbed
    of attribution.
@@ -129,6 +159,30 @@ fails the ticket with the check's name and URL. A person can retry
 reopen to discuss (`failed -> open`), or abandon from any state before
 `merged`. Abandoning a ticket with an open PR closes the PR (orbit, with the
 build token) and keeps the branch.
+
+**Fixing failed checks.** When a ticket fails on its checks, code collects
+what failed: each failing check's name, conclusion and URL, and the last
+lines of its log (GitHub Actions job logs, read with a token that adds
+`actions: read`), bounded in size. A retry's build run gets exactly that as
+an input artifact, with the approved plan and the current branch, never a
+model's summary of it, and its prompt says only "make these checks pass
+without changing the plan".
+
+**Review comments.** A person can review the PR's diff in orbit: line
+comments `{path, start_line, end_line, body}` are stored as
+`ticket_review_comments` rows, and submitting the review sends them to the
+ticket's thread as one structured message (each comment with its file and
+line range), which wakes the next run. A comment records the message that
+carried it; it counts as delivered once the run that consumed that message
+succeeded, and a failed run hands the message back like any other, so a
+comment is never lost and never sent twice. An edited comment is a new row.
+
+**Prechecks are gates.** Before any build or retry run calls the backend,
+tested Go predicates decide whether there is work: the PR already merged,
+the branch already at the approved plan's result, the checks already green.
+A run a gate ends is recorded with its own status, `skipped`, naming the
+gate, not as `succeeded`: a run that judged nothing must be distinguishable
+from one that did.
 
 **Reconciliation.** A crash can separate a side effect from its row: the
 merge succeeded on GitHub but `FinishAction` never ran, so the action is
@@ -199,6 +253,7 @@ The permission sets are named in code, one per use:
 | reading run (clone a repository for an agent to read) | `contents: read` |
 | build delivery (push `orbit/*`, open the PR, close it on abandon) | `contents: write`, `pull_requests: write` |
 | merge (read the PR and its checks, update the body, merge) | `contents: write`, `pull_requests: write`, `checks: read`, `statuses: read` |
+| failure report (read failing checks and their job logs) | `checks: read`, `actions: read` |
 
 `metadata: read` is implicit in every token. No set includes `workflows`, so
 a pushed change to `.github/workflows/` is refused by GitHub itself: a build
@@ -510,7 +565,8 @@ protected paths, registry hosts, diff limit) and sandboxd its own section
    is taken, `orbit-kensac`). Homepage: the repository URL. Webhook:
    inactive for now (orbit polls). Repository permissions: Contents read
    and write; Pull requests read and write; Checks read-only; Commit
-   statuses read-only; Metadata read-only (mandatory). No organization or
+   statuses read-only; Actions read-only (job logs of failing checks);
+   Metadata read-only (mandatory). No organization or
    account permissions, and not Workflows. Where can it be installed: only
    this account. Events: none until event triggers exist; then Check run,
    Check suite, Pull request and Status.
