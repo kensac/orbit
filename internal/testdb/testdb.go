@@ -18,8 +18,19 @@ import (
 	"github.com/kensac/orbit/internal/store"
 )
 
-// New returns a store on a new database, dropped when the test ends.
+// New returns a store on a new, fully migrated database, dropped when the
+// test ends.
 func New(t *testing.T) *store.Store {
+	t.Helper()
+	s := Empty(t)
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// Empty is New without migrations, for tests of an upgrade.
+func Empty(t *testing.T) *store.Store {
 	t.Helper()
 	base := os.Getenv("ORBIT_TEST_DATABASE_URL")
 	if base == "" {
@@ -58,8 +69,5 @@ func New(t *testing.T) *store.Store {
 		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)")
 		_ = admin.Close(context.Background())
 	})
-	if err := s.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
 	return s
 }

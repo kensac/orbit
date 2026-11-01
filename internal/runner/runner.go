@@ -78,7 +78,7 @@ type Session struct {
 	KeepDays int
 	// Live, when set, may take the turn in a live process.
 	Live *Live
-	// Key names the live process (the agent): one per key.
+	// Key names the live process (the conversation): one per key.
 	Key string
 	// Open starts a live process when none can take the turn, and keeps
 	// it for LiveIdle after the turn.

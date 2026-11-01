@@ -60,6 +60,19 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return migrate(ctx, db)
 }
 
+// MigrateTo applies the embedded migrations up to version, for tests of an
+// upgrade over existing rows.
+func (s *Store) MigrateTo(ctx context.Context, version int64) error {
+	db := stdlib.OpenDBFromPool(s.Pool)
+	defer db.Close()
+	p, err := goose.NewProvider(goose.DialectPostgres, db, mustSub(migrations, "migrations"))
+	if err != nil {
+		return err
+	}
+	_, err = p.UpTo(ctx, version)
+	return err
+}
+
 func migrate(ctx context.Context, db *sql.DB) error {
 	p, err := goose.NewProvider(goose.DialectPostgres, db, mustSub(migrations, "migrations"))
 	if err != nil {
@@ -93,6 +106,10 @@ func (s *Store) SyncAgents(ctx context.Context, specs map[string]AgentSpec) erro
 				                        OR NOT agents.present
 				                      THEN now() ELSE agents.updated_at END`,
 				name, a.SHA, a.Enabled); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO conversations (agent, title, is_default) VALUES ($1, 'General', true)
+				ON CONFLICT (agent) WHERE is_default DO NOTHING`, name); err != nil {
 				return err
 			}
 		}
@@ -186,6 +203,9 @@ type NewRun struct {
 	TriggerIndex *int
 	ScheduledFor *time.Time
 	Prompt       string
+	// ConversationID is the conversation the run answers in; empty is the
+	// agent's default conversation (schedules, manual runs).
+	ConversationID string
 }
 
 // EnqueueRun inserts a queued run. For a schedule fire already recorded it
@@ -193,11 +213,14 @@ type NewRun struct {
 func (s *Store) EnqueueRun(ctx context.Context, r NewRun) (string, error) {
 	var id string
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO runs (agent, spec_sha, trigger, trigger_index, scheduled_for, prompt)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO runs (agent, spec_sha, trigger, trigger_index, scheduled_for, prompt, conversation_id)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, '')::uuid)
 		ON CONFLICT (agent, trigger_index, scheduled_for) WHERE trigger = 'schedule' DO NOTHING
 		RETURNING id::text`,
-		r.Agent, r.SpecSHA, r.Trigger, r.TriggerIndex, r.ScheduledFor, r.Prompt).Scan(&id)
+		r.Agent, r.SpecSHA, r.Trigger, r.TriggerIndex, r.ScheduledFor, r.Prompt, r.ConversationID).Scan(&id)
+	if isForeignKeyViolation(err) {
+		return "", ErrNotFound
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
@@ -225,6 +248,10 @@ type ClaimedRun struct {
 	// Chain is how many continuations in a row this run is (0 unless its
 	// trigger is continue).
 	Chain int
+	// ConversationID is the conversation the run belongs to: its inbox,
+	// its open questions, the thread it is shown and the session it
+	// continues are that conversation's.
+	ConversationID string
 }
 
 // MaxAttempts bounds how often an interrupted run is claimed again. A run
@@ -250,8 +277,8 @@ func (s *Store) ClaimRun(ctx context.Context, worker string) (*ClaimedRun, error
 			    LIMIT 1
 			    FOR UPDATE SKIP LOCKED
 			)
-			RETURNING id::text, attempt, agent, spec_sha, trigger, prompt, chain`, worker).
-			Scan(&c.ID, &c.Attempt, &c.Agent, &c.SpecSHA, &c.Trigger, &c.Prompt, &c.Chain)
+			RETURNING id::text, attempt, agent, spec_sha, trigger, prompt, chain, conversation_id::text`, worker).
+			Scan(&c.ID, &c.Attempt, &c.Agent, &c.SpecSHA, &c.Trigger, &c.Prompt, &c.Chain, &c.ConversationID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -644,7 +671,9 @@ func (s *Store) ListMessages(ctx context.Context, agent string, limit int) ([]Me
 		limit = 100
 	}
 	rows, err := s.Pool.Query(ctx, `SELECT id::text, agent, direction, body, reply_to::text, run_id::text, author, created_at
-		FROM (SELECT * FROM messages WHERE agent = $1 ORDER BY created_at DESC LIMIT $2) m
+		FROM (SELECT * FROM messages
+		      WHERE conversation_id = (SELECT id FROM conversations WHERE agent = $1 AND is_default)
+		      ORDER BY created_at DESC LIMIT $2) m
 		ORDER BY created_at`, agent, limit)
 	if err != nil {
 		return nil, err
@@ -653,12 +682,12 @@ func (s *Store) ListMessages(ctx context.Context, agent string, limit int) ([]Me
 }
 
 // openQuestion is true of a question (alias m) nobody has answered: no reply
-// names it and no message reached the agent after it. Any later message
-// closes it, because the run that reads that message sees the person's
-// words and asks again if it still needs to.
+// names it and no message reached its conversation after it. Any later
+// message there closes it, because the run that reads that message sees the
+// person's words and asks again if it still needs to.
 const openQuestion = `m.direction = 'from_agent'
 	AND NOT EXISTS (SELECT 1 FROM messages r
-	                WHERE r.agent = m.agent AND r.direction = 'to_agent'
+	                WHERE r.conversation_id = m.conversation_id AND r.direction = 'to_agent'
 	                  AND (r.reply_to = m.id OR r.created_at > m.created_at))`
 
 // ---------------------------------------------------------------- run context
@@ -674,7 +703,9 @@ type RunContext struct {
 	Questions []Message
 }
 
-// StartRunContext reads and consumes the run's context.
+// StartRunContext reads and consumes the run's context: the agent's memory,
+// and the unread messages and open questions of the run's conversation
+// only, so a run never reads another conversation's words.
 func (s *Store) StartRunContext(ctx context.Context, runID, agent string) (*RunContext, error) {
 	rc := &RunContext{}
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -685,6 +716,7 @@ func (s *Store) StartRunContext(ctx context.Context, runID, agent string) (*RunC
 		rows, err := tx.Query(ctx, `
 			UPDATE messages SET run_id = $2
 			WHERE agent = $1 AND direction = 'to_agent' AND run_id IS NULL
+			  AND conversation_id = (SELECT conversation_id FROM runs WHERE id = $2)
 			RETURNING id::text, agent, direction, body, reply_to::text, run_id::text, author, created_at`, agent, runID)
 		if err != nil {
 			return err
@@ -695,8 +727,8 @@ func (s *Store) StartRunContext(ctx context.Context, runID, agent string) (*RunC
 		rows, err = tx.Query(ctx, `
 			SELECT id::text, agent, direction, body, reply_to::text, run_id::text, author, created_at
 			FROM messages m
-			WHERE agent = $1 AND `+openQuestion+`
-			ORDER BY created_at`, agent)
+			WHERE agent = $1 AND conversation_id = (SELECT conversation_id FROM runs WHERE id = $2) AND `+openQuestion+`
+			ORDER BY created_at`, agent, runID)
 		if err != nil {
 			return err
 		}
@@ -746,8 +778,9 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 		// transaction's now(), so each has its own time and the thread
 		// orders them as the run listed them.
 		for _, q := range o.Questions {
-			if _, err := tx.Exec(ctx, `INSERT INTO messages (agent, direction, body, run_id, created_at)
-				VALUES ($1, 'from_agent', $2, $3, clock_timestamp())`,
+			// A question is asked in the asking run's conversation.
+			if _, err := tx.Exec(ctx, `INSERT INTO messages (agent, direction, body, run_id, conversation_id, created_at)
+				SELECT $1, 'from_agent', $2, $3, conversation_id, clock_timestamp() FROM runs WHERE id = $3`,
 				agent, q, runID); err != nil {
 				return err
 			}

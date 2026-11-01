@@ -71,6 +71,9 @@ type PostMessage struct {
 	Wake    bool
 	// ClientID makes the post idempotent (receipts).
 	ClientID string
+	// ConversationID is where the message goes; empty is the agent's
+	// default conversation.
+	ConversationID string
 }
 
 // PostResult is what PostMessage did.
@@ -83,24 +86,12 @@ type PostResult struct {
 // transaction, so a retry with the same ClientID neither duplicates the
 // message nor wakes a second run. replayed reports a retry.
 func (s *Store) PostMessageOnce(ctx context.Context, p PostMessage) (res PostResult, replayed bool, err error) {
-	req := map[string]any{"op": "message", "body": p.Body, "reply_to": p.ReplyTo, "author": p.Author, "wake": p.Wake}
+	req := map[string]any{"op": "message", "conversation": p.ConversationID, "body": p.Body, "reply_to": p.ReplyTo,
+		"author": p.Author, "wake": p.Wake}
 	raw, replayed, err := s.withReceipt(ctx, p.Agent, p.ClientID, req, func(tx pgx.Tx) (json.RawMessage, error) {
-		var r PostResult
-		err := tx.QueryRow(ctx, `
-			INSERT INTO messages (agent, direction, body, author, reply_to)
-			VALUES ($1, 'to_agent', $2, NULLIF($3, ''), $4) RETURNING id::text`,
-			p.Agent, p.Body, p.Author, p.ReplyTo).Scan(&r.MessageID)
-		if isForeignKeyViolation(err) {
-			return nil, ErrNotFound
-		}
+		r, err := postMessage(ctx, tx, p)
 		if err != nil {
 			return nil, err
-		}
-		if p.Wake {
-			if err := tx.QueryRow(ctx, `INSERT INTO runs (agent, spec_sha, trigger) VALUES ($1, $2, 'message') RETURNING id::text`,
-				p.Agent, p.SpecSHA).Scan(&r.RunID); err != nil {
-				return nil, err
-			}
 		}
 		return json.Marshal(r)
 	})
@@ -108,6 +99,57 @@ func (s *Store) PostMessageOnce(ctx context.Context, p PostMessage) (res PostRes
 		return res, false, err
 	}
 	return res, replayed, json.Unmarshal(raw, &res)
+}
+
+// ErrReplyElsewhere is a reply_to naming a message of another conversation.
+var ErrReplyElsewhere = errors.New("reply_to names a message in another conversation")
+
+// postMessage writes a person's message into its conversation and the run
+// it wakes. It brings an archived conversation back, and names an untitled
+// one after the message (DefaultTitle).
+func postMessage(ctx context.Context, tx pgx.Tx, p PostMessage) (PostResult, error) {
+	var r PostResult
+	conv := p.ConversationID
+	if conv == "" {
+		err := tx.QueryRow(ctx, `SELECT id::text FROM conversations WHERE agent = $1 AND is_default`, p.Agent).Scan(&conv)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return r, ErrNotFound
+		}
+		if err != nil {
+			return r, err
+		}
+	}
+	if p.ReplyTo != nil {
+		var same bool
+		err := tx.QueryRow(ctx, `SELECT conversation_id = $2::uuid FROM messages WHERE id = $1`, *p.ReplyTo, conv).Scan(&same)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && !same) {
+			return r, ErrReplyElsewhere
+		}
+		if err != nil {
+			return r, err
+		}
+	}
+	err := tx.QueryRow(ctx, `
+		INSERT INTO messages (agent, direction, body, author, reply_to, conversation_id)
+		VALUES ($1, 'to_agent', $2, NULLIF($3, ''), $4, $5) RETURNING id::text`,
+		p.Agent, p.Body, p.Author, p.ReplyTo, conv).Scan(&r.MessageID)
+	if isForeignKeyViolation(err) {
+		return r, ErrNotFound
+	}
+	if err != nil {
+		return r, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE conversations SET archived = false,
+		title = CASE WHEN title = '' THEN $2 ELSE title END WHERE id = $1`, conv, DefaultTitle(p.Body)); err != nil {
+		return r, err
+	}
+	if p.Wake {
+		if err := tx.QueryRow(ctx, `INSERT INTO runs (agent, spec_sha, trigger, conversation_id) VALUES ($1, $2, 'message', $3) RETURNING id::text`,
+			p.Agent, p.SpecSHA, conv).Scan(&r.RunID); err != nil {
+			return r, err
+		}
+	}
+	return r, nil
 }
 
 // DecideActionOnce is DecideAction with an optional client request id: a
