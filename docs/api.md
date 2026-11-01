@@ -93,7 +93,8 @@ conversation is never deleted, only archived.
 {"conversations": [{
   "id": "uuid", "agent": "finance", "title": "How much on Uber Eats in October?",
   "is_default": false, "archived": false,
-  "created_at": "...", "last_activity_at": "...", "needs_input": true}],
+  "created_at": "...", "last_activity_at": "...", "needs_input": true,
+  "ticket_id": null}],
  "has_more": false, "next_before": null}
 ```
 
@@ -102,6 +103,7 @@ Newest activity first (a message or a run in it is activity). `archived`
 thread: `next_before` is an opaque cursor, `null` exactly when `has_more`
 is false; `limit` defaults to 50, at most 200. `needs_input` is true while
 one of its questions is open or one of its runs' actions is pending.
+`ticket_id` is set when the conversation is a ticket's (below).
 
 `POST /agents/{name}/conversations`
 
@@ -284,6 +286,21 @@ the concatenated `text`: `text` is what the agent narrated while working.
   409. The
   decider is the token's person. Only with the operator token, `{"by":
   "name"}` names it (default `operator`).
+
+## Tickets
+
+A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)):
+`POST /tickets` (opens its conversation; returns `ticket_id`,
+`conversation_id`, `message_id`, `run_id`), `GET /tickets`,
+`GET /tickets/{id}` (the ticket, its plans and transitions),
+`POST /tickets/{id}/plans/{version}/approve`, and
+`POST /tickets/{id}/{abandon,retry,reopen}`. Its thread and messages are
+its conversation's (`/conversations/{conversation_id}/thread`,
+`/messages`); a message there reopens a `planned` ticket, and a `merged`,
+`done` or `abandoned` one refuses messages (409). A ticket's conversation
+carries `ticket_id` in the conversation list. Filing and approving take
+`client_request_id`; the author and approver are the token's person. A
+transition the ticket's state does not allow is 409.
 
 ## Memory
 

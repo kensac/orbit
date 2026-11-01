@@ -84,6 +84,18 @@ types are not even offered.
   (file paths, commands, URLs): the same data `/events` already serves to
   the same callers.
 
+## GitHub
+
+The App (`orbit-kensac`, docs/tickets.md) has its private key in orbit's
+environment only. Every token minted
+from it names one repository from `github.repositories` and one permission
+set from `internal/github` (never an empty set, which would mean all of the
+installation's), is revoked after its operation, and is refused if GitHub
+grants more than was asked. `github:merge` lets a compromised model ask to
+merge an orbit PR whose checks are green; the executor re-checks the head
+commit, the branch and every check itself, and the rule decides whether a
+person approves first. In the fleet a merge is a deploy: keep it `approve`.
+
 ## Adding a capability
 
 A new tool grant, action type, channel or source is a security change. Say

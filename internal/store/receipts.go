@@ -129,6 +129,9 @@ func postMessage(ctx context.Context, tx pgx.Tx, p PostMessage) (PostResult, err
 			return r, err
 		}
 	}
+	if err := ticketOnMessage(ctx, tx, conv, p.Author); err != nil {
+		return r, err
+	}
 	err := tx.QueryRow(ctx, `
 		INSERT INTO messages (agent, direction, body, author, reply_to, conversation_id)
 		VALUES ($1, 'to_agent', $2, NULLIF($3, ''), $4, $5) RETURNING id::text`,
