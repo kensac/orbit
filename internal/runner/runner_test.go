@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -274,6 +276,7 @@ func TestClaudeCodeResumesAForkOfTheSession(t *testing.T) {
 func liveCLI(t *testing.T, onTurn string) (bin, dir string) {
 	t.Helper()
 	return fakeCLI(t, `echo start >> "$(dirname "$0")/starts"
+echo $$ >> "$(dirname "$0")/pids"
 trap 'echo exited >> "$(dirname "$0")/exits"' EXIT
 n=0
 while IFS= read -r line; do
@@ -446,7 +449,12 @@ func TestClaudeCodeLiveProcessHangIsKilledAtTheTimeout(t *testing.T) {
 	if time.Since(start) > 5*time.Second {
 		t.Fatalf("the turn outlived its timeout by %s", time.Since(start))
 	}
-	eventually(t, "the hung process to be killed", func() bool { return len(lines(t, filepath.Join(dir, "exits"))) == 1 })
+	// Not the EXIT trap: dash does not run it when a signal kills it.
+	pid, err := strconv.Atoi(lines(t, filepath.Join(dir, "pids"))[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the hung process to be killed", func() bool { return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) })
 }
 
 func TestClaudeCodeLiveProcessRefusesControlRequests(t *testing.T) {
