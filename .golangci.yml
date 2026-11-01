@@ -1,0 +1,27 @@
+version: "2"
+linters:
+  default: standard
+  enable: [bodyclose, errorlint, gosec, misspell, unconvert]
+  settings:
+    errcheck:
+      # A failed Close on a read, or of scratch cleanup, changes nothing the
+      # caller can act on; write paths check their Close explicitly.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*database/sql.DB).Close
+        - (*github.com/jackc/pgx/v5.Conn).Close
+        - (*net/smtp.Client).Close
+        - os.RemoveAll
+    gosec:
+      excludes:
+        # Subprocess arguments come from configuration, by design (runner).
+        - G204
+        # Paths come from configuration and run ids (sources, engine).
+        - G304
+  exclusions:
+    rules:
+      # Tests write fixtures and fake executables with ordinary modes, and
+      # hold obviously fake credentials.
+      - path: _test\.go
+        linters: [gosec, bodyclose, errcheck]

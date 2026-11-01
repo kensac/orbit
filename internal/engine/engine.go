@@ -1,0 +1,489 @@
+// Package engine runs one agent wake end to end: read its context, fetch its
+// inputs, call its backend, validate the result, store everything, and tell
+// the person. It is the only package that knows what a run means; the
+// runner, sources, actions and notify packages each know one piece.
+package engine
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/santhosh-tekuri/jsonschema/v6"
+
+	"github.com/kensac/orbit/internal/actions"
+	"github.com/kensac/orbit/internal/metrics"
+	"github.com/kensac/orbit/internal/notify"
+	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/sources"
+	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/store"
+)
+
+// Engine holds what every run shares. Config is swapped atomically on reload
+// through Current; a run keeps the snapshot it started with.
+type Engine struct {
+	Store   *store.Store
+	DataDir string
+	Env     func(string) (string, bool)
+	Client  *http.Client
+	// Secret signs approval links (see ApprovalSig).
+	Secret []byte
+	// NewRunner is runner.New, replaceable in tests.
+	NewRunner func(name string, rs spec.RunnerSpec, env func(string) (string, bool)) (runner.Runner, error)
+	Log       *slog.Logger
+
+	mu  sync.RWMutex
+	cfg *Snapshot
+}
+
+// Snapshot is one loaded configuration with its built channels.
+type Snapshot struct {
+	Config   *spec.Config
+	Channels map[string]notify.Channel
+}
+
+// heartbeatEvery is well inside the reaper's stale bound (StaleAfter), so a
+// live run is never reaped for one slow heartbeat.
+const heartbeatEvery = 30 * time.Second
+
+// StaleAfter is how long a running run may go without a heartbeat before the
+// reaper fails it: ten missed beats.
+const StaleAfter = 10 * heartbeatEvery
+
+// SetConfig installs a configuration. Channels are built here so a channel
+// with a missing credential fails the reload, not the first notification.
+func (e *Engine) SetConfig(cfg *spec.Config) error {
+	chans := map[string]notify.Channel{}
+	for name, c := range cfg.Deployment.Channels {
+		ch, err := notify.New(name, c, e.Env, e.Client)
+		if err != nil {
+			return err
+		}
+		chans[name] = ch
+	}
+	e.mu.Lock()
+	e.cfg = &Snapshot{Config: cfg, Channels: chans}
+	e.mu.Unlock()
+	return nil
+}
+
+// Current returns the configuration in force.
+func (e *Engine) Current() *Snapshot {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.cfg
+}
+
+// Execute runs one claimed run to a final state. It returns an error only
+// when it could not record that state; a failed run is a recorded outcome.
+func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
+	snap := e.Current()
+	start := time.Now()
+	log := e.Log.With("run", c.ID, "agent", c.Agent)
+	a, ok := snap.Config.Agents[c.Agent]
+	if !ok {
+		return e.fail(ctx, snap, nil, c, start, fmt.Errorf("agent %q is no longer configured", c.Agent), nil)
+	}
+
+	hbCtx, stopHB := context.WithCancel(ctx)
+	defer stopHB()
+	go func() {
+		t := time.NewTicker(heartbeatEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-t.C:
+				if err := e.Store.Heartbeat(context.WithoutCancel(hbCtx), c.ID); err != nil {
+					log.Warn("heartbeat", "err", err)
+				}
+			}
+		}
+	}()
+
+	out, res, err := e.attempt(ctx, snap, a, c, log)
+	if ctx.Err() != nil {
+		// orbit is shutting down, not the run failing: give it back to
+		// the queue for the next process.
+		log.Info("requeued by shutdown")
+		return e.Store.RequeueRun(context.WithoutCancel(ctx), c.ID)
+	}
+	if err != nil {
+		return e.fail(ctx, snap, a, c, start, err, res)
+	}
+	return e.succeed(ctx, snap, a, c, start, out, res)
+}
+
+// attempt does the work; any error fails the run.
+func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, log *slog.Logger) (*Output, *runner.Result, error) {
+	rs := snap.Config.Deployment.Runners[a.Runner]
+	r, err := e.NewRunner(a.Runner, rs, e.Env)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := e.Store.SetRunner(ctx, c.ID, r.Kind(), r.Model(), a.SHA); err != nil {
+		return nil, nil, err
+	}
+
+	workdir := filepath.Join(e.DataDir, "runs", fmt.Sprintf("%s-%d", c.ID, c.Attempt))
+	if err := os.MkdirAll(filepath.Join(workdir, "inputs"), 0o700); err != nil {
+		return nil, nil, err
+	}
+	// Every byte the run read is stored as an artifact, so the workdir is
+	// scratch and goes when the run ends.
+	defer os.RemoveAll(workdir)
+
+	loc, _ := time.LoadLocation(a.Timezone)
+	now := time.Now().In(loc)
+
+	rc, err := e.Store.StartRunContext(ctx, c.ID, a.Name)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "memory.md", "text/markdown", []byte(rc.Memory)); err != nil {
+		return nil, nil, err
+	}
+	if len(rc.Messages) > 0 {
+		b, _ := json.Marshal(rc.Messages)
+		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "messages.json", "application/json", b); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	seq := 0
+	emit := func(kind string, payload any) {
+		b, ok := payload.([]byte)
+		if !ok {
+			b, _ = json.Marshal(payload)
+		}
+		seq++
+		if err := e.Store.AppendEvent(context.WithoutCancel(ctx), c.ID, c.Attempt, seq, kind, b); err != nil {
+			log.Warn("append event", "err", err)
+		}
+	}
+
+	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env}
+	vars := sources.Vars(now)
+	var inputs []runner.Input
+	for _, s := range a.Sources {
+		f, err := fetcher.Fetch(ctx, s, vars)
+		if err != nil {
+			emit("orbit.source_failed", map[string]any{"source": s.Name, "error": err.Error()})
+			return nil, nil, fmt.Errorf("source %s: %w", s.Name, err)
+		}
+		ext := ".txt"
+		switch f.MediaType {
+		case "application/json":
+			ext = ".json"
+		case "text/markdown":
+			ext = ".md"
+		}
+		rel := filepath.Join("inputs", s.Name+ext)
+		if err := os.WriteFile(filepath.Join(workdir, rel), f.Content, 0o600); err != nil {
+			return nil, nil, err
+		}
+		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", rel, f.MediaType, f.Content); err != nil {
+			return nil, nil, err
+		}
+		emit("orbit.source_fetched", map[string]any{"source": s.Name, "bytes": len(f.Content), "meta": f.Meta})
+		inputs = append(inputs, runner.Input{Name: s.Name, Path: rel, MediaType: f.MediaType, Content: f.Content})
+	}
+
+	types := actions.Catalog(a, snap.Config.Deployment)
+	schema := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, true)
+	envelope := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, false)
+	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic")
+	trigger := c.Trigger
+	prompt := userPrompt(a, now, trigger, c.Prompt, rc, inputs)
+	for name, b := range map[string]string{"system.md": system, "prompt.md": prompt, "schema.json": string(schema)} {
+		mt := "text/markdown"
+		if strings.HasSuffix(name, ".json") {
+			mt = "application/json"
+		}
+		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", name, mt, []byte(b)); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
+	defer cancel()
+	res, err := r.Run(runCtx, runner.Request{
+		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
+		Tools: a.Tools, OutputSchema: schema,
+	}, func(ev runner.Event) { emit(ev.Kind, ev.Payload) })
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
+	}
+	if err != nil {
+		return nil, res, err
+	}
+	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "out", "output.json", "application/json", res.Output); err != nil {
+		return nil, res, err
+	}
+	out, err := validate(envelope, res.Output)
+	if err != nil {
+		return nil, res, fmt.Errorf("output does not match the contract: %w", err)
+	}
+	return out, res, nil
+}
+
+// validate checks output against the schema the backend was given. Backends
+// enforce it too, but not all of them, and not identically.
+func validate(schema, output json.RawMessage) (*Output, error) {
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schema))
+	if err != nil {
+		return nil, err
+	}
+	c := jsonschema.NewCompiler()
+	if err := c.AddResource("contract.json", doc); err != nil {
+		return nil, err
+	}
+	sch, err := c.Compile("contract.json")
+	if err != nil {
+		return nil, err
+	}
+	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(output))
+	if err != nil {
+		return nil, err
+	}
+	if err := sch.Validate(inst); err != nil {
+		var ve *jsonschema.ValidationError
+		if errors.As(err, &ve) {
+			return nil, errors.New(leafErrors(ve.BasicOutput()))
+		}
+		return nil, err
+	}
+	var out Output
+	if err := json.Unmarshal(output, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// leafErrors lists where and why the output failed, one cause per location.
+func leafErrors(o *jsonschema.OutputUnit) string {
+	var parts []string
+	var walk func(u *jsonschema.OutputUnit)
+	walk = func(u *jsonschema.OutputUnit) {
+		if u.Error != nil && len(u.Errors) == 0 {
+			loc := u.InstanceLocation
+			if loc == "" {
+				loc = "/"
+			}
+			parts = append(parts, loc+": "+u.Error.String())
+		}
+		for i := range u.Errors {
+			walk(&u.Errors[i])
+		}
+	}
+	walk(o)
+	if len(parts) == 0 {
+		return "does not match the schema"
+	}
+	if len(parts) > 10 {
+		parts = append(parts[:10], fmt.Sprintf("and %d more", len(parts)-10))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, start time.Time, out *Output, res *runner.Result) error {
+	types := map[string]actions.Type{}
+	for _, t := range actions.Catalog(a, snap.Config.Deployment) {
+		types[t.Name] = t
+	}
+	o := store.Outcome{Questions: out.Questions}
+	if out.Memory.Update {
+		m := out.Memory.Content
+		o.Memory = &m
+	}
+	for _, act := range out.Actions {
+		pa := store.ProposedAction{Type: act.Type, Params: act.Params, Reason: act.Reason, Rule: string(a.RuleFor(act.Type))}
+		if t, ok := types[act.Type]; !ok {
+			pa.Rule, pa.Error = string(spec.RuleDeny), "action type not enabled for this agent"
+		} else if err := t.Validate(act.Params); err != nil {
+			pa.Rule, pa.Error = string(spec.RuleDeny), "invalid params: "+err.Error()
+		}
+		if len(pa.Params) == 0 {
+			pa.Params = json.RawMessage(`{}`)
+		}
+		o.Actions = append(o.Actions, pa)
+	}
+	rr := store.RunResult{Status: "succeeded", Summary: out.Summary, Report: out.Report}
+	fillResult(&rr, res)
+	ids, err := e.Store.RecordOutcome(ctx, c.ID, a.Name, rr, o)
+	if err != nil {
+		return err
+	}
+	metrics.RunFinished(a.Name, "succeeded", runnerKind(snap, a), time.Since(start), rr.CostUSD)
+
+	// Delivery: the report, then each pending approval.
+	link := e.runLink(snap, c.ID)
+	pr := notify.Priority(out.Notify.Priority)
+	if pr == "" {
+		pr = notify.Default
+	}
+	send := a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send)
+	if send || len(out.Questions) > 0 {
+		title := out.Notify.Title
+		if title == "" {
+			title = out.Summary
+		}
+		body := out.Report
+		if !send {
+			// Only the questions warrant a ping.
+			title, body = a.Name+" has a question", ""
+		}
+		if len(out.Questions) > 0 {
+			body += "\n\n**Questions**\n"
+			for _, q := range out.Questions {
+				body += "\n- " + q
+			}
+		}
+		e.deliver(ctx, snap, a, &c.ID, nil, "report", notify.Message{
+			Title: a.Name + ": " + title, Body: strings.TrimSpace(body), Priority: pr,
+			Tags: []string{"orbit", a.Name}, Link: link,
+		})
+	}
+	for i, pa := range o.Actions {
+		if pa.Rule != string(spec.RuleApprove) {
+			continue
+		}
+		id := ids[i]
+		e.deliver(ctx, snap, a, &c.ID, &id, "approval", notify.Message{
+			Title:    fmt.Sprintf("%s wants to %s", a.Name, pa.Type),
+			Body:     pa.Reason + "\n\n```json\n" + string(pa.Params) + "\n```",
+			Priority: notify.High,
+			Tags:     []string{"orbit", "approval"},
+			Link:     e.ApprovalLink(snap, id),
+			Buttons:  []notify.Button{{Label: "Review", URL: e.ApprovalLink(snap, id)}},
+		})
+	}
+	return nil
+}
+
+func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, start time.Time, runErr error, r *runner.Result) error {
+	e.Log.Warn("run failed", "run", c.ID, "agent", c.Agent, "err", runErr)
+	rr := store.RunResult{Status: "failed", Error: runErr.Error()}
+	fillResult(&rr, r)
+	if err := e.Store.FinishRun(context.WithoutCancel(ctx), c.ID, rr); err != nil {
+		return err
+	}
+	metrics.RunFinished(c.Agent, "failed", runnerKind(snap, a), time.Since(start), rr.CostUSD)
+	if a != nil {
+		e.deliver(ctx, snap, a, &c.ID, nil, "failure", notify.Message{
+			Title: a.Name + " run failed", Body: runErr.Error(), Priority: notify.High,
+			Tags: []string{"orbit", "warning"}, Link: e.runLink(snap, c.ID),
+		})
+	}
+	return nil
+}
+
+func runnerKind(snap *Snapshot, a *spec.Agent) string {
+	if a == nil {
+		return ""
+	}
+	return snap.Config.Deployment.Runners[a.Runner].Kind
+}
+
+func fillResult(rr *store.RunResult, r *runner.Result) {
+	if r == nil {
+		return
+	}
+	rr.Output, rr.Usage, rr.CostUSD, rr.SessionID = r.Output, r.Usage, r.CostUSD, r.SessionID
+}
+
+// deliver sends to every channel of the agent and records each attempt. A
+// failed channel does not stop the others.
+func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, runID, actionID *string, purpose string, m notify.Message) {
+	if purpose == "report" && a.Notify.When == "never" {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	for _, name := range a.Notify.Channels {
+		ch := snap.Channels[name]
+		sendCtx, cancel := context.WithTimeout(ctx, time.Minute)
+		err := ch.Send(sendCtx, m)
+		cancel()
+		metrics.Delivery(name, err)
+		if err != nil {
+			e.Log.Warn("delivery failed", "channel", name, "purpose", purpose, "err", err)
+		}
+		if rerr := e.Store.RecordDelivery(ctx, runID, actionID, name, purpose, err); rerr != nil {
+			e.Log.Error("record delivery", "err", rerr)
+		}
+	}
+}
+
+func (e *Engine) runLink(snap *Snapshot, runID string) string {
+	if snap.Config.Deployment.PublicURL == "" {
+		return ""
+	}
+	return strings.TrimRight(snap.Config.Deployment.PublicURL, "/") + "/ui/runs/" + runID
+}
+
+// ApprovalLink is the page where a person approves or rejects an action. The
+// signature lets the link work from a phone without a login while naming
+// exactly one action.
+func (e *Engine) ApprovalLink(snap *Snapshot, actionID string) string {
+	if snap.Config.Deployment.PublicURL == "" {
+		return ""
+	}
+	return strings.TrimRight(snap.Config.Deployment.PublicURL, "/") + "/ui/actions/" + actionID + "?sig=" + e.ApprovalSig(actionID)
+}
+
+// ApprovalSig is an HMAC of the action id under the deployment secret.
+func (e *Engine) ApprovalSig(actionID string) string {
+	m := hmac.New(sha256.New, e.Secret)
+	m.Write([]byte("action:" + actionID))
+	return hex.EncodeToString(m.Sum(nil))
+}
+
+// CheckApprovalSig reports whether sig is ApprovalSig(actionID).
+func (e *Engine) CheckApprovalSig(actionID, sig string) bool {
+	want := e.ApprovalSig(actionID)
+	return hmac.Equal([]byte(want), []byte(sig))
+}
+
+// ExecuteActions runs every approved action, one at a time, until none is
+// left. Auto actions arrive here approved by rule, through the same path as
+// a person's approval.
+func (e *Engine) ExecuteActions(ctx context.Context) error {
+	snap := e.Current()
+	ex := &actions.Executor{Deployment: snap.Config.Deployment, Channels: snap.Channels, Client: e.Client, Env: e.Env}
+	for {
+		act, err := e.Store.ClaimApprovedAction(ctx)
+		if err != nil || act == nil {
+			return err
+		}
+		actx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		result, xerr := ex.Execute(actx, act.Type, act.Params)
+		cancel()
+		if err := e.Store.FinishAction(context.WithoutCancel(ctx), act.ID, result, xerr); err != nil {
+			return err
+		}
+		metrics.ActionExecuted(act.Agent, act.Type, xerr)
+		if xerr != nil {
+			e.Log.Warn("action failed", "action", act.ID, "type", act.Type, "err", xerr)
+			if a, ok := snap.Config.Agents[act.Agent]; ok {
+				e.deliver(ctx, snap, a, &act.RunID, &act.ID, "action", notify.Message{
+					Title: fmt.Sprintf("%s: %s failed", act.Agent, act.Type), Body: xerr.Error(),
+					Priority: notify.High, Tags: []string{"orbit", "warning"}, Link: e.runLink(snap, act.RunID),
+				})
+			}
+		}
+	}
+}

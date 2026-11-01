@@ -1,0 +1,28 @@
+# Secret scanning, as in homelab-config and job-scripts. The workflow is the
+# enforcing half (a local pre-commit hook can be bypassed with --no-verify);
+# gitleaks auto-discovers a .gitleaks.toml allowlist at the repo root.
+name: gitleaks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Required on pull_request events: the action lists the PR's commits via
+  # GET /pulls/{n}/commits to work out the scan range.
+  pull-requests: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Full history: a force-push or a rebase can introduce a secret in a
+          # commit that a shallow fetch would never look at.
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

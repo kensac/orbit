@@ -1,0 +1,5 @@
+/bin/
+/deploy/cli/node_modules/
+*.test
+*.out
+.env

@@ -1,0 +1,43 @@
+# The deployment file: where notifications go, which backends exist, and the
+# endpoints an action may reach. Secrets are named by environment variable.
+timezone: America/New_York
+public_url: http://orbit.example.ts.net:8080
+
+defaults:
+  runner: claude
+  timeout: 15m
+  channels: [phone]
+
+runners:
+  claude:
+    kind: claude-code
+    model: claude-opus-5-5
+    max_turns: 30
+  codex:
+    kind: codex
+    model: gpt-6
+  api:
+    kind: anthropic
+    model: claude-sonnet-5-5
+    api_key_env: ANTHROPIC_API_KEY
+
+channels:
+  phone:
+    kind: ntfy
+    url: https://ntfy.example.com
+    topic_env: ORBIT_NTFY_TOPIC
+  email:
+    kind: smtp
+    host: mail.example.com
+    port: 587
+    username_env: ORBIT_SMTP_USER
+    password_env: ORBIT_SMTP_PASS
+    from: orbit <orbit@example.com>
+    to: [me@example.com]
+  log:
+    kind: log
+
+endpoints:
+  home-assistant:
+    url: http://homeassistant.example.ts.net:8123/api/webhook/orbit
+    method: POST

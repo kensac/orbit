@@ -1,0 +1,32 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "dependencyDashboard": true,
+  "branchPrefix": "renovate/",
+  "labels": ["dependencies", "renovate"],
+  "timezone": "America/New_York",
+  "pinDigests": true,
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 5,
+  "minimumReleaseAge": "3 days",
+  "platformAutomerge": true,
+  "postUpdateOptions": ["gomodTidy"],
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin"],
+      "groupName": "non-major dependencies",
+      "automerge": true,
+      "automergeStrategy": "squash"
+    },
+    {
+      "description": "The agent CLIs change the backend's behavior and flags orbit parses; a release is reviewed, not automerged.",
+      "matchFileNames": ["deploy/cli/**"],
+      "groupName": "agent CLIs",
+      "automerge": false
+    },
+    {
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    }
+  ]
+}

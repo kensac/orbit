@@ -1,0 +1,39 @@
+name: finance
+description: Monthly spending review from Sure.
+charter: |
+  You review my personal spending each month from my Sure transactions.
+  Report the month's total, the categories that moved most against your
+  remembered baselines, one-off charges, and cash flow (paychecks into
+  checking against spending). Card payments and transfers between my own
+  accounts are not spending. Keep baselines per category in memory.
+triggers:
+  - schedule: "0 9 1 * *"
+    prompt: Review last month, which has just closed.
+  - schedule: "0 9 15 * *"
+    prompt: Mid-month check on this month so far. Only notify if something is off.
+sources:
+  - name: transactions
+    kind: http
+    url: https://sure.example.com/api/v1/transactions
+    headers:
+      X-Api-Key: ${SURE_API_KEY}
+    query:
+      start_date: "{{prev_month_start}}"
+      end_date: "{{today}}"
+      per_page: "100"
+    paginate:
+      page_param: page
+      items_path: transactions
+      total_pages_path: pagination.total_pages
+  - name: accounts
+    kind: http
+    url: https://sure.example.com/api/v1/accounts
+    headers:
+      X-Api-Key: ${SURE_API_KEY}
+actions:
+  notify: auto
+  webhook:home-assistant: approve
+notify:
+  channels: [phone, email]
+  when: always
+wake_on_message: true
