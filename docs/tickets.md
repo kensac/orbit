@@ -46,15 +46,25 @@ What tickets add is a scope and a lifecycle, so three tables and two columns:
 | `messages.ticket_id` | the ticket a message belongs to, or null for the agent's general inbox | a ticket's messages are its thread |
 | `runs.ticket_id` | the ticket a run works on, or null | a run on a ticket reads that ticket's thread only |
 
-**Scoping.** A run with a `ticket_id` consumes only that ticket's
-unread messages; a run without one consumes only messages without one. Two
-tickets with the same agent never read each other's thread, and the agent's
-general inbox is not swallowed by ticket work. The scope is taken from the
-run row inside `StartRunContext`, so the engine needs no change for it.
+**Scoping.** A thread is either an agent's general thread (`ticket_id`
+null) or one ticket's. Everything that reads or continues a thread is
+scoped by it, taken from the run row, so two tickets with the same agent
+never see each other's words and ticket work never swallows the general
+inbox:
 
-When conversation context and session resume land (one live backend session
-per thread), a ticket is one more kind of thread: the session is keyed by
-the ticket, exactly as an agent's general thread is keyed by the agent.
+| what | scoped how |
+|---|---|
+| unread messages a run consumes (`StartRunContext`) | the run's `ticket_id` |
+| open questions, and what closes one (`openQuestion`) | a reply or later message in the same thread |
+| a question a run asks (`RecordOutcome`) | lands in the asking run's thread |
+| the conversation a fresh run is shown (`Conversation`) | the run's thread |
+| the session a run resumes (`LatestSession`) and the live process it feeds (`runner.Session.Key`) | the latest finished run of the same thread; the live key is the agent, or `<agent>/ticket/<id>` |
+| a `continue` the run asks for (`EnqueueContinuation`) | inherits the run's `ticket_id` |
+| the thread API (`Store.Thread`, its cursor paging) | one implementation, filtered by thread: `GET /agents/{name}/thread` is the general thread, `GET /tickets/{id}/thread` a ticket's |
+
+`runs_one_running` (one running run per agent) and `runs_one_continuation`
+stay per agent: an agent's tickets queue behind each other, which keeps its
+memory free of races.
 
 ### Ticket text is untrusted
 
@@ -194,20 +204,26 @@ existing one by head branch).
 
 ## API
 
-Under `/api/v1`, same conventions as [api.md](api.md). Authentication is the
-API's; `by` and `author` fields stand in for the person until the token
-supplies it.
+Under `/api/v1`, with the conventions of [api.md](api.md). The person is
+the verified authentik token's: a ticket's `author`, a message's author and
+a plan's approver are the token's `preferred_username`. Body `author` and
+`by` are read only with the operator token on the internal listener, as for
+messages and decisions. Creating a ticket, posting to it and approving a
+plan take an optional `client_request_id`: a retry with the same id returns
+the first result (the `receipts` table, keyed by the ticket's agent); the
+same id for a different request is a 409.
 
 | method | path | body | result |
 |---|---|---|---|
-| `POST` | `/tickets` | `{"kind": "request", "title": "...", "body": "...", "agent": "orbit", "repo": "kensac/orbit", "author": "kanishk", "wake": true}` | `201 {"ticket_id", "message_id", "run_id"}` |
+| `POST` | `/tickets` | `{"kind": "request", "title": "...", "body": "...", "agent": "orbit", "repo": "kensac/orbit", "wake": true, "client_request_id": "..."}` | `201 {"ticket_id", "message_id", "run_id"}` |
 | `GET` | `/tickets?status=&agent=&before=&limit=` | | `{"tickets": [...]}`, newest first |
-| `GET` | `/tickets/{id}` | | `{"ticket", "plans", "events", "messages", "runs"}` |
-| `POST` | `/tickets/{id}/messages` | `{"body", "author", "wake"}` | `201 {"message_id", "run_id"}`; a `planned` ticket reopens |
-| `POST` | `/tickets/{id}/plans/{version}/approve` | `{"by"}` | `{"ok": true}`; 409 unless it is the newest plan of a `planned` ticket |
-| `POST` | `/tickets/{id}/abandon` | `{"by", "reason"}` | `{"ok": true}`; 409 once merged or terminal |
-| `POST` | `/tickets/{id}/retry` | `{"by"}` | `{"ok": true}`; `failed -> approved` |
-| `POST` | `/tickets/{id}/reopen` | `{"by"}` | `{"ok": true}`; `failed -> open` |
+| `GET` | `/tickets/{id}` | | `{"ticket", "plans", "events"}` |
+| `GET` | `/tickets/{id}/thread?before=&limit=` | | the ticket's thread, as `GET /agents/{name}/thread`: `{"items", "has_more", "next_before"}` |
+| `POST` | `/tickets/{id}/messages` | `{"body", "reply_to", "wake", "client_message_id"}` | `201 {"message_id", "run_id"}`; a `planned` ticket reopens |
+| `POST` | `/tickets/{id}/plans/{version}/approve` | `{"client_request_id"}` | `{"ok": true}`; 409 unless it is the newest plan of a `planned` ticket |
+| `POST` | `/tickets/{id}/abandon` | `{"reason"}` | `{"ok": true}`; 409 once merged or terminal |
+| `POST` | `/tickets/{id}/retry` | | `{"ok": true}`; `failed -> approved` |
+| `POST` | `/tickets/{id}/reopen` | | `{"ok": true}`; `failed -> open` |
 
 `repo` is required for a request and must be one of `github.repositories`
 in `orbit.yaml`. A ticket in the API:
@@ -219,9 +235,6 @@ in `orbit.yaml`. A ticket in the API:
  "head_sha": "...", "merge_sha": null, "error": null,
  "created_at": "...", "updated_at": "..."}
 ```
-
-The thread of a ticket, once the thread API exists, is
-`GET /tickets/{id}/thread` with the same item shapes as an agent's thread.
 
 ## GitHub access: one App, per-run tokens
 
@@ -328,7 +341,7 @@ does not allow `github.com`: the checkout is already inside, and a sandbox
 that cannot reach GitHub cannot push even with a token it found.
 
 **Where it runs.** sandboxd can run on any docker host orbit reaches over
-the tailnet. oci (the ARM CI host, already running CI runners and nothing
+the tailnet; the default is oci (Open decisions). oci (the ARM CI host, already running CI runners and nothing
 public) is the better home than hetzner, which holds every other secret in
 the fleet: a container escape there reaches far less.
 
@@ -492,9 +505,11 @@ action's error, unless all of these hold at execution time:
    `required_status_checks`). Each must be present on the head commit, as a
    check run (latest by name, and from the named app when the rule names
    one) or a commit status (by context), and must have concluded
-   `success`. With no required checks, every check run and every commit
-   status on the head must have concluded `success`, and there must be at
-   least one: a merge with no check at all is a deploy with no gate.
+   `success`; `skipped` or `neutral` does not satisfy a required check.
+   With no required checks, every check run on the head must have
+   concluded `success`, `skipped` or `neutral` and every commit status must
+   be `success`, and there must be at least one that succeeded: a merge
+   with no check at all is a deploy with no gate (see Open decisions).
 4. The PR body, scrubbed of attribution (lines naming an AI tool as an
    author, such as `Co-Authored-By:` trailers for one or "generated with"
    footers), is written back to the PR first, and the squash merge is
@@ -538,6 +553,22 @@ changes:
   no orbit run can revert it; recovery is the person rolling hetzner's pin
   back. The build run's `make check` and the image build in CI are the only
   gates before that, which is why the merge stays `approve`.
+
+## Open decisions
+
+Recommended defaults, implemented as the defaults; the owner has not
+confirmed them.
+
+- **Which check conclusions pass.** Default: a required check passes only
+  on `success`; with no required checks, `success`, `skipped` and
+  `neutral` pass and anything else blocks. Owner to confirm.
+- **Where sandboxd runs.** Default: oci (above). Owner to confirm.
+- **Which PRs orbit merges.** Default: only its own `orbit/*` branches in
+  the same repository, not Renovate's or anyone else's. Owner to confirm.
+- **Keeping the backend credential out of the build container** (the
+  credential proxy above). Open. **Precondition:** until it is verified
+  against the real CLI, build runs target only `kensac/orbit`, whose
+  diff is reviewed before every merge, and no other repository.
 
 ## Configuration
 
