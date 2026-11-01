@@ -115,3 +115,38 @@ func (s *Store) AttemptArtifacts(ctx context.Context, runID string, attempt int,
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[StoredInput])
 }
+
+// AttemptChain is the narration an attempt continues: the earlier attempts
+// whose sessions it resumed, transitively, oldest first, ending with
+// attempt itself. settled is false while a just-claimed attempt has not yet
+// decided whether it continues the one before (planRecovery records that
+// before its first event); an attempt 1, one with events, one without a row (claimed by a
+// version that recorded none), or one whose run is final is settled.
+func (s *Store) AttemptChain(ctx context.Context, runID string, attempt int) (chain []int, settled bool, err error) {
+	if attempt < 1 {
+		return nil, true, nil
+	}
+	rows, err := s.Pool.Query(ctx, `
+		WITH RECURSIVE c(attempt, recovered_from) AS (
+		    SELECT attempt, recovered_from FROM run_attempts WHERE run_id = $1 AND attempt = $2
+		    UNION ALL
+		    SELECT a.attempt, a.recovered_from FROM run_attempts a JOIN c ON a.run_id = $1 AND a.attempt = c.recovered_from
+		)
+		SELECT attempt FROM c ORDER BY attempt`, runID, attempt)
+	if err != nil {
+		return nil, false, err
+	}
+	if chain, err = pgx.CollectRows(rows, pgx.RowTo[int]); err != nil {
+		return nil, false, err
+	}
+	if len(chain) == 0 {
+		return []int{attempt}, true, nil
+	}
+	err = s.Pool.QueryRow(ctx, `
+		SELECT $2 = 1 OR a.recovered_from IS NOT NULL OR a.recover_skipped IS NOT NULL
+		       OR r.status IN ('succeeded', 'failed', 'cancelled')
+		       OR EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = $1 AND e.attempt = $2)
+		FROM run_attempts a JOIN runs r ON r.id = a.run_id
+		WHERE a.run_id = $1 AND a.attempt = $2`, runID, attempt).Scan(&settled)
+	return chain, settled, err
+}

@@ -70,8 +70,14 @@ type recovery struct {
 // the run starts over and skipped says why. Both are recorded on the
 // attempt.
 func (e *Engine) planRecovery(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, kind, workdir, home string) (rec *recovery, skipped string, err error) {
-	if c.Attempt < 2 || kind != "claude-code" {
+	if c.Attempt < 2 {
 		return nil, "", nil
+	}
+	if kind != "claude-code" {
+		// Recorded all the same: a stream waits for this decision to know
+		// whether the new attempt continues the last one's narration.
+		skipped = "only a Claude Code session can be continued"
+		return nil, skipped, e.Store.SetRecovery(ctx, c.ID, c.Attempt, 0, skipped)
 	}
 	prev, err := e.Store.PriorAttempt(ctx, c.ID, c.Attempt)
 	if err != nil {

@@ -51,6 +51,8 @@ type Engine struct {
 	// Harness is the orbit binary a claude-code run starts for orbit's
 	// tools and hooks (os.Executable in serve). Empty runs without them.
 	Harness string
+	// HeartbeatEvery overrides heartbeatEvery when set; tests shorten it.
+	HeartbeatEvery time.Duration
 
 	mu  sync.RWMutex
 	cfg *Snapshot
@@ -138,7 +140,11 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 // enough that the reaper (on any instance) may have requeued it: one beat
 // short of StaleAfter, so this attempt stops before another can start.
 func (e *Engine) heartbeat(ctx context.Context, c *store.ClaimedRun, lose context.CancelCauseFunc, log *slog.Logger) {
-	t := time.NewTicker(heartbeatEvery)
+	every := heartbeatEvery
+	if e.HeartbeatEvery > 0 {
+		every = e.HeartbeatEvery
+	}
+	t := time.NewTicker(every)
 	defer t.Stop()
 	last := time.Now()
 	for {
@@ -208,7 +214,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 		defer func() {
 			if !keepScratch() {
-				os.RemoveAll(filepath.Join(workdir, "inputs"))
+				_ = os.RemoveAll(filepath.Join(workdir, "inputs"))
 			}
 		}()
 		// The tool ledger and the hook's counters are per run.
@@ -218,7 +224,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	} else {
 		defer func() {
 			if !keepScratch() {
-				os.RemoveAll(workdir)
+				_ = os.RemoveAll(workdir)
 			}
 		}()
 	}

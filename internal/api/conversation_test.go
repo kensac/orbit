@@ -426,6 +426,10 @@ func TestStreamFollowsARunThroughARequeue(t *testing.T) {
 	}
 	expect(t, ch, "status", `{"attempt":1,"status":"queued"}`)
 	_, a2 := claim(t, v, "claude-code")
+	// As the engine does before an attempt's first event: it starts over.
+	if err := v.s.SetRecovery(ctx, run, a2, 0, "the interrupted attempt's transcript is gone"); err != nil {
+		t.Fatal(err)
+	}
 	expect(t, ch, "status", `{"attempt":2,"status":"running"}`)
 	appendEvents(t, v, run, a2,
 		`{"type":"system","subtype":"init"}`,

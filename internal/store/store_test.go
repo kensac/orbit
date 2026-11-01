@@ -238,6 +238,11 @@ func TestActionDecisionsAndSingleExecution(t *testing.T) {
 	if again, _ := s.ClaimApprovedAction(ctx); again != nil {
 		t.Fatal("an executing action was claimed twice")
 	}
+	// Another live instance may be executing it right now: within the
+	// bound it is left alone.
+	if n, err := s.FailOrphanedActions(ctx, time.Hour); err != nil || n != 0 {
+		t.Fatalf("an action executing now was failed: %d %v", n, err)
+	}
 	// A crash mid-execution fails it rather than running it again.
 	n, err := s.FailOrphanedActions(ctx, 0)
 	if err != nil || n != 1 {
