@@ -84,6 +84,68 @@ types are not even offered.
   (file paths, commands, URLs): the same data `/events` already serves to
   the same callers.
 
+## The build sandbox
+
+A build run's model can write files and run any command its tool policy
+lets through, and `go test` runs code it wrote, so the tool policy is not
+the boundary: the container is (`internal/sandboxd`, ARCHITECTURE.md).
+
+**Guaranteed by sandboxd's code**, checked from inside a real container by
+`TestIntegrationIsolation` (CI runs it on every change; locally it skips
+without docker):
+
+- Every process runs as uid and gid 10001 with no capabilities (effective,
+  permitted and bounding sets empty), `no_new_privs` set and docker's
+  seccomp filter on; sandboxd refuses a daemon without seccomp.
+- The root filesystem is read-only: writes to `/`, `/etc`, `/usr`, `/var`
+  and `/root` fail. `/work` (the checkout, read back) and `/tmp` (tmpfs,
+  discarded) are the only writable paths. No host path is mounted and the
+  docker socket is not there.
+- No route out except the proxy: a direct TCP connection to a public
+  address fails, an external name does not resolve, and through the proxy
+  GitHub, a host off the allowlist and any port but 443 are refused (403).
+  The proxy never dials a private, loopback, link-local or CGNAT address
+  (every tailnet address), so an allowed name that resolves to one cannot
+  reach the host's networks.
+- The environment is sandboxd's fixed list plus the backend credential
+  (`sandbox.AllowedEnv`); no orbit secret, no GitHub token.
+- Callers cannot pass docker options: the create request is the tar and a
+  run id, the attach request is argv and env (unknown fields refused); the
+  unit tests pin the full create document and reject any container the
+  daemon made differently (`verifyCreated`). The API answers "no such
+  sandbox" for any container without sandboxd's label, including every
+  other container on oci.
+- Lifetime: PID 1 is `sleep 1h`, so the kernel ends every process at
+  expiry; the reaper removes the container 30 minutes later. At most two
+  exist at once, each limited to 6 GiB of memory (tmpfs included), 2 CPUs
+  and 1024 processes.
+- The workdir crosses the boundary only through `tarfilter.go`: no devices
+  or FIFOs, no names outside it, ownership and special mode bits rewritten.
+
+**Not guaranteed:**
+
+- **The backend credential is readable by code the model runs** (same uid;
+  `/proc/<pid>/environ`), and an allowed host can carry it out: the Go
+  module proxy fetches any module path a request names, from a host the
+  path names, so a request for a crafted path is a message to whoever owns
+  that host. Hence tickets.md's precondition (only `kensac/orbit`, whose
+  diff is reviewed, until the credential proxy keeps the token out) and the
+  diff policy's exact-match scan before anything is committed. Treat every
+  allowlisted host as a channel for anything the sandbox holds.
+- **The kernel is shared** with oci. A container escape is root on oci,
+  which runs CI runners and holds less than hetzner; `ORBIT_SANDBOX_RUNTIME=
+  runsc` (gVisor) narrows this where installed.
+- **`/work` has no disk quota**: a sandbox can fill oci's docker volume
+  until its lifetime ends. The readback refuses more than 256 MiB.
+- **sandboxd holds the docker socket**, so a bug in it is root on oci. Its
+  surface is the four handlers and `docker.go`; it listens only on the
+  tailnet address or a unix socket (`validListen` refuses every interface)
+  and requires the token on every request.
+- **A dropped attach does not stop the process**; the lifetime or a destroy
+  does.
+- Tunnelled traffic is opaque: the proxy sees hostnames, not requests, so
+  it cannot tell a download from an upload to an allowed host.
+
 ## Adding a capability
 
 A new tool grant, action type, channel or source is a security change. Say
