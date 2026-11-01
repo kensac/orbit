@@ -1,4 +1,8 @@
-FROM golang:1.26.10-trixie@sha256:a050dcceee6eb9bf110151662dfac7662f3bec40927c7dee48731e3d92083d42 AS build
+# The Go stage runs on the build machine's own architecture and
+# cross-compiles: under QEMU an arm64 compile of this module took over 20
+# minutes. Only the final stage is per-platform.
+FROM --platform=$BUILDPLATFORM golang:1.26.10-trixie@sha256:a050dcceee6eb9bf110151662dfac7662f3bec40927c7dee48731e3d92083d42 AS build
+ARG TARGETOS TARGETARCH
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -7,7 +11,7 @@ COPY . .
 # The commit this image was built from, so every log line names its release.
 # The build workflow passes it; a local build without it says "unknown".
 ARG GIT_SHA=unknown
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.revision=${GIT_SHA}" -o /out/orbit ./cmd/orbit
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags "-s -w -X main.revision=${GIT_SHA}" -o /out/orbit ./cmd/orbit
 
 # Node is the runtime the agent CLIs need (Codex is a Node launcher; Claude
 # Code's npm package installs a native binary through a postinstall script).
