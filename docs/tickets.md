@@ -32,39 +32,32 @@ are marked **Built** here.
 
 ## Data model
 
-A ticket's discussion is orbit's existing thread machinery: the person's
-messages are `messages` rows, the agent's replies are `runs` (their `report`
+A ticket is a **conversation with a lifecycle**. orbit's conversations
+(an agent's many threads, each with its own inbox, open questions, the
+thread a run is shown, and Claude Code session; `docs/api.md`) already give
+a ticket its discussion: the person's messages are `messages` rows in the
+ticket's conversation, the agent's replies are its `runs` (their `report`
 and `questions`), and anything the agent wants done is an `actions` row.
-What tickets add is a scope and a lifecycle, so three tables and two columns:
+Nothing about a thread is built twice. What tickets add is the lifecycle:
 
 | table / column | what it holds | why it is not an existing table |
 |---|---|---|
-| `tickets` | one row per ticket: kind, title, the agent discussing it, the target repository, status, the approved plan, the branch, PR and merge commit | the lifecycle has states no run or message has |
+| `tickets` | one row per ticket: kind, title, the agent discussing it, the target repository, status, the approved plan, the branch, PR and merge commit, and `conversation_id` (unique: one ticket per conversation) | the lifecycle has states no conversation has |
 | `ticket_events` | every transition: from, to, who, when, detail | the history of a ticket is a record, never overwritten (a `tickets.status` alone would lose it) |
 | `ticket_plans` | every plan version an agent proposed, and which one was approved | a plan is approved by version; a later plan must never inherit an earlier approval |
 | `ticket_review_comments` | line comments on a PR's diff and the message that delivered them | a comment is anchored to a file and lines, and delivered exactly once (Lifecycle) |
-| `messages.ticket_id` | the ticket a message belongs to, or null for the agent's general inbox | a ticket's messages are its thread |
-| `runs.ticket_id` | the ticket a run works on, or null | a run on a ticket reads that ticket's thread only |
 
-**Scoping.** A thread is either an agent's general thread (`ticket_id`
-null) or one ticket's. Everything that reads or continues a thread is
-scoped by it, taken from the run row, so two tickets with the same agent
-never see each other's words and ticket work never swallows the general
-inbox:
+**Scoping** is the conversation's: two tickets with the same agent never see
+each other's words, and ticket work never touches the agent's other
+conversations. Memory, schedules, rules and `runs_one_running` stay per
+agent, so an agent's tickets queue behind each other rather than race on
+its memory.
 
-| what | scoped how |
-|---|---|
-| unread messages a run consumes (`StartRunContext`) | the run's `ticket_id` |
-| open questions, and what closes one (`openQuestion`) | a reply or later message in the same thread |
-| a question a run asks (`RecordOutcome`) | lands in the asking run's thread |
-| the conversation a fresh run is shown (`Conversation`) | the run's thread |
-| the session a run resumes (`LatestSession`) and the live process it feeds (`runner.Session.Key`) | the latest finished run of the same thread; the live key is the agent, or `<agent>/ticket/<id>` |
-| a `continue` the run asks for (`EnqueueContinuation`) | inherits the run's `ticket_id` |
-| the thread API (`Store.Thread`, its cursor paging) | one implementation, filtered by thread: `GET /agents/{name}/thread` is the general thread, `GET /tickets/{id}/thread` a ticket's |
-
-`runs_one_running` (one running run per agent) and `runs_one_continuation`
-stay per agent: an agent's tickets queue behind each other, which keeps its
-memory free of races.
+**Messages to a ticket** go through the one conversation message path
+(`POST /conversations/{id}/messages`), which knows about tickets: a message
+to a `planned` ticket reopens it (the person is discussing the plan, not
+approving it), and a ticket that is `merged`, `done` or `abandoned` takes no
+more messages (409). There is no second message route that could disagree.
 
 ### Ticket text is untrusted
 
@@ -131,9 +124,9 @@ did not read.
 
 ## Lifecycle
 
-1. **File.** `POST /tickets` stores the ticket (`open`) and its body as the
-   first message of its thread, and wakes the discussing agent's run with
-   `ticket_id` set.
+1. **File.** `POST /tickets` opens the ticket's conversation (titled as the
+   ticket), stores the ticket (`open`) and its body as the conversation's
+   first message, and wakes a run there, in one transaction.
 2. **Discuss.** Each person message on the ticket wakes a run scoped to it.
    The agent replies in its report, asks questions, and when it has enough,
    proposes a plan. The output contract gains an optional `plan` field
@@ -208,28 +201,33 @@ Under `/api/v1`, with the conventions of [api.md](api.md). The person is
 the verified authentik token's: a ticket's `author`, a message's author and
 a plan's approver are the token's `preferred_username`. Body `author` and
 `by` are read only with the operator token on the internal listener, as for
-messages and decisions. Creating a ticket, posting to it and approving a
-plan take an optional `client_request_id`: a retry with the same id returns
+messages and decisions. Creating a ticket and approving a plan take an
+optional `client_request_id` (posting takes `client_message_id`, as any
+conversation message): a retry with the same id returns
 the first result (the `receipts` table, keyed by the ticket's agent); the
 same id for a different request is a 409.
 
 | method | path | body | result |
 |---|---|---|---|
-| `POST` | `/tickets` | `{"kind": "request", "title": "...", "body": "...", "agent": "orbit", "repo": "kensac/orbit", "wake": true, "client_request_id": "..."}` | `201 {"ticket_id", "message_id", "run_id"}` |
+| `POST` | `/tickets` | `{"kind": "request", "title": "...", "body": "...", "agent": "orbit", "repo": "kensac/orbit", "wake": true, "client_request_id": "..."}` | `201 {"ticket_id", "conversation_id", "message_id", "run_id"}` |
 | `GET` | `/tickets?status=&agent=&before=&limit=` | | `{"tickets": [...]}`, newest first |
 | `GET` | `/tickets/{id}` | | `{"ticket", "plans", "events"}` |
-| `GET` | `/tickets/{id}/thread?before=&limit=` | | the ticket's thread, as `GET /agents/{name}/thread`: `{"items", "has_more", "next_before"}` |
-| `POST` | `/tickets/{id}/messages` | `{"body", "reply_to", "wake", "client_message_id"}` | `201 {"message_id", "run_id"}`; a `planned` ticket reopens |
 | `POST` | `/tickets/{id}/plans/{version}/approve` | `{"client_request_id"}` | `{"ok": true}`; 409 unless it is the newest plan of a `planned` ticket |
 | `POST` | `/tickets/{id}/abandon` | `{"reason"}` | `{"ok": true}`; 409 once merged or terminal |
 | `POST` | `/tickets/{id}/retry` | | `{"ok": true}`; `failed -> approved` |
 | `POST` | `/tickets/{id}/reopen` | | `{"ok": true}`; `failed -> open` |
+
+A ticket's thread and its messages are its conversation's:
+`GET /conversations/{conversation_id}/thread` and
+`POST /conversations/{conversation_id}/messages`. In the agent's
+conversation list a ticket's conversation carries its `ticket_id`.
 
 `repo` is required for a request and must be one of `github.repositories`
 in `orbit.yaml`. A ticket in the API:
 
 ```json
 {"id": "uuid", "kind": "request", "title": "...", "agent": "orbit",
+ "conversation_id": "uuid",
  "repo": "kensac/orbit", "status": "review", "author": "kanishk",
  "approved_plan": 2, "branch": "orbit/3f2a9c1e", "pr_number": 41,
  "head_sha": "...", "merge_sha": null, "error": null,
@@ -287,7 +285,7 @@ disposable.
 
 ```
 ticket approved
-  -> runs row (ticket_id, trigger 'ticket')
+  -> runs row in the ticket's conversation (trigger 'ticket')
   -> orbit: mint contents:read token, clone the repo at the default branch's
      head (base_sha), revoke the token
   -> orbit: tar the checkout (without credentials), ask the sandbox launcher
