@@ -1,12 +1,16 @@
 // Package api is orbit's HTTP surface: a JSON API under /api/v1 that a UI
 // can be built on, the two pages notifications link to (a run, an
-// approval), /healthz and /metrics. It listens on the tailnet only; the API
-// also requires a bearer token, and the approval page accepts a per-action
-// signature instead, so a link opened from a phone works without a login.
+// approval), /healthz and /metrics.
+//
+// It serves two listeners. The public one (Handler) is what traefik routes
+// to: /api/v1 there accepts only verified authentik tokens, and /ui relies
+// on authentik forward-auth in front of it. The internal one
+// (InternalHandler) is never routed by traefik: /api/v1 there also accepts
+// the operator token, for scripts on the host. The approval page accepts a
+// per-action signature, so a link opened from a phone works without a login.
 package api
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -17,6 +21,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/kensac/orbit/internal/auth"
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/store"
 )
@@ -25,21 +30,37 @@ import (
 type Server struct {
 	Store  *store.Store
 	Engine *engine.Engine
-	Token  string
-	Log    *slog.Logger
+	// Token is the operator token, accepted on the internal listener only.
+	Token string
+	// Verifier checks authentik tokens; nil refuses them all.
+	Verifier *auth.Verifier
+	Log      *slog.Logger
 	// Wake nudges the executor after a manual run or message is enqueued.
 	Wake func()
+	// Stop is closed when the server shuts down, ending open streams.
+	Stop <-chan struct{}
+	// StreamPoll and StreamPing override the stream's poll and heartbeat
+	// intervals (streamPoll, streamPing) when set; tests shorten them.
+	StreamPoll, StreamPing time.Duration
 }
 
-// Handler returns the routes.
-func (s *Server) Handler() http.Handler {
+// Handler returns the public listener's routes, the ones traefik serves.
+func (s *Server) Handler() http.Handler { return s.routes(false) }
+
+// InternalHandler returns the internal listener's routes: the API, which
+// there also accepts the operator token, /healthz and /metrics. It has no
+// /ui pages, which rely on forward-auth.
+func (s *Server) InternalHandler() http.Handler { return s.routes(true) }
+
+func (s *Server) routes(internal bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
-	api := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.auth(h)) }
+	api := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.authenticate(internal, h)) }
 	api("GET /api/v1/agents", s.listAgents)
 	api("GET /api/v1/agents/{name}", s.getAgent)
+	api("GET /api/v1/agents/{name}/thread", s.thread)
 	api("GET /api/v1/agents/{name}/memory", s.memoryHistory)
 	api("POST /api/v1/agents/{name}/runs", s.startRun)
 	api("GET /api/v1/agents/{name}/messages", s.listMessages)
@@ -48,6 +69,7 @@ func (s *Server) Handler() http.Handler {
 	api("GET /api/v1/runs/{id}", s.getRun)
 	api("POST /api/v1/runs/{id}/cancel", s.cancelRun)
 	api("GET /api/v1/runs/{id}/events", s.listEvents)
+	api("GET /api/v1/runs/{id}/stream", s.streamRun)
 	api("GET /api/v1/runs/{id}/artifacts", s.listArtifacts)
 	api("GET /api/v1/runs/{id}/deliveries", s.listDeliveries)
 	api("GET /api/v1/artifacts/{id}", s.getArtifact)
@@ -56,9 +78,11 @@ func (s *Server) Handler() http.Handler {
 	api("POST /api/v1/actions/{id}/approve", s.decide(true))
 	api("POST /api/v1/actions/{id}/reject", s.decide(false))
 
-	mux.HandleFunc("GET /ui/actions/{id}", s.approvalPage)
-	mux.HandleFunc("POST /ui/actions/{id}", s.approvalSubmit)
-	mux.HandleFunc("GET /ui/runs/{id}", s.runPage)
+	if !internal {
+		mux.HandleFunc("GET /ui/actions/{id}", s.approvalPage)
+		mux.HandleFunc("POST /ui/actions/{id}", s.approvalSubmit)
+		mux.HandleFunc("GET /ui/runs/{id}", s.runPage)
+	}
 	return s.logRequests(mux)
 }
 
@@ -68,17 +92,6 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write([]byte("ok\n"))
-}
-
-func (s *Server) auth(next http.HandlerFunc) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if s.Token == "" || subtle.ConstantTimeCompare([]byte(got), []byte(s.Token)) != 1 {
-			writeErr(w, http.StatusUnauthorized, "missing or wrong bearer token")
-			return
-		}
-		next(w, r)
-	})
 }
 
 func (s *Server) logRequests(next http.Handler) http.Handler {
@@ -102,6 +115,10 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap lets http.ResponseController reach the connection (a stream
+// flushes and clears its write deadline through it).
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // ---------------------------------------------------------------- agents
 
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +141,29 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	respond(w, nil, store.ErrNotFound)
+}
+
+// thread serves an agent's conversation, a page at a time (store.Thread).
+func (s *Server) thread(w http.ResponseWriter, r *http.Request) {
+	var before *store.ThreadCursor
+	if b := r.URL.Query().Get("before"); b != "" {
+		c, err := store.ParseThreadCursor(b)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "before: "+err.Error())
+			return
+		}
+		before = c
+	}
+	page, err := s.Store.Thread(r.Context(), r.PathValue("name"), before, intParam(r, "limit"))
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	resp := map[string]any{"items": orEmpty(page.Items), "has_more": page.HasMore, "next_before": nil}
+	if page.HasMore {
+		resp["next_before"] = page.NextBefore
+	}
+	respond(w, resp, nil)
 }
 
 func (s *Server) memoryHistory(w http.ResponseWriter, r *http.Request) {
@@ -162,9 +202,13 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Body    string  `json:"body"`
 		ReplyTo *string `json:"reply_to"`
-		Author  string  `json:"author"`
+		// Author is used with the operator token only; a person's message
+		// is always authored by the token's person.
+		Author string `json:"author"`
 		// Wake overrides the agent's wake_on_message for this message.
 		Wake *bool `json:"wake"`
+		// ClientMessageID makes a retry return the first result.
+		ClientMessageID string `json:"client_message_id"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -179,24 +223,28 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, store.ErrNotFound)
 		return
 	}
-	id, err := s.Store.SendToAgent(r.Context(), a.Name, body.Body, body.Author, body.ReplyTo)
-	if err != nil {
-		respond(w, nil, err)
-		return
+	author := body.Author
+	if p := principalOf(r); p.Person != "" {
+		author = p.Person
 	}
-	resp := map[string]any{"message_id": id}
 	wake := a.MessagesTrigger
 	if body.Wake != nil {
 		wake = *body.Wake
 	}
-	if wake {
-		runID, err := s.Store.EnqueueRun(r.Context(), store.NewRun{Agent: a.Name, SpecSHA: a.SHA, Trigger: "message"})
-		if err != nil {
-			respond(w, nil, err)
-			return
-		}
-		resp["run_id"] = runID
+	res, replayed, err := s.Store.PostMessageOnce(r.Context(), store.PostMessage{
+		Agent: a.Name, SpecSHA: a.SHA, Body: body.Body, Author: author, ReplyTo: body.ReplyTo,
+		Wake: wake, ClientID: body.ClientMessageID,
+	})
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	if res.RunID != "" && !replayed {
 		s.Wake()
+	}
+	resp := map[string]any{"message_id": res.MessageID}
+	if res.RunID != "" {
+		resp["run_id"] = res.RunID
 	}
 	respondStatus(w, http.StatusCreated, resp, nil)
 }
@@ -269,16 +317,20 @@ func (s *Server) getAction(w http.ResponseWriter, r *http.Request) {
 func (s *Server) decide(approve bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			By string `json:"by"`
+			By              string `json:"by"`
+			ClientRequestID string `json:"client_request_id"`
 		}
 		if r.ContentLength != 0 {
 			_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body)
 		}
-		if body.By == "" {
-			body.By = "api"
+		// A person decides as themselves; by is for the operator token.
+		if p := principalOf(r); p.Person != "" {
+			body.By = p.Person
+		} else if body.By == "" {
+			body.By = "operator"
 		}
-		err := s.Store.DecideAction(r.Context(), r.PathValue("id"), approve, body.By)
-		if err == nil {
+		replayed, err := s.Store.DecideActionOnce(r.Context(), r.PathValue("id"), approve, body.By, body.ClientRequestID)
+		if err == nil && !replayed {
 			s.Wake()
 		}
 		respond(w, map[string]any{"ok": err == nil}, err)
@@ -293,6 +345,8 @@ func respondStatus(w http.ResponseWriter, status int, v any, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "not found")
+	case errors.Is(err, store.ErrReceiptMismatch):
+		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, store.ErrConflict):
 		writeErr(w, http.StatusConflict, "no longer in a state that allows this")
 	case err != nil:
