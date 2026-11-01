@@ -18,6 +18,13 @@ Check the running container's revision, not the pin:
 answer. A config change is in force when the log says `config reloaded` and
 `orbit_config_valid` is 1.
 
+## Data volume
+
+`ORBIT_DATA_DIR` (`/data`) holds run scratch and, for agents with `session`,
+their Claude Code sessions. It must be a named volume, owned by uid 10001, for
+sessions to survive a container restart; on the container's own layer every
+restart starts those agents fresh.
+
 ## Credentials
 
 Rendered from Infisical (`HETZNER_ORBIT_*`). The Claude Code subscription

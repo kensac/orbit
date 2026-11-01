@@ -41,7 +41,7 @@ var (
 		Name: "orbit_actions_pending", Help: "Actions waiting for a person's decision.",
 	})
 	Queued = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "orbit_runs_queued", Help: "Runs waiting for an executor.",
+		Name: "orbit_runs_queued", Help: "Runs due and waiting for an executor (a continuation counts once it is due).",
 	})
 )
 

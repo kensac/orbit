@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExampleConfigLoads(t *testing.T) {
@@ -93,5 +94,34 @@ func TestExpandEnv(t *testing.T) {
 	}
 	if _, err := ExpandEnv("${UNSET}", env); err == nil || !strings.Contains(err.Error(), "UNSET") {
 		t.Fatalf("an unset variable must be an error, got %v", err)
+	}
+}
+
+func TestSessionSpec(t *testing.T) {
+	load := func(orbit, agent string) (*Config, error) {
+		return Load(write(t, map[string]string{"orbit.yaml": orbit, "agents/a.yaml": "name: a\ncharter: x\n" + agent}))
+	}
+	cfg, err := load(base, "session: {resume: true}\nactions: {continue: approve}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := cfg.Agents["a"].Session; time.Duration(s.Idle) != DefaultSessionIdle || s.Live != 0 {
+		t.Fatalf("session = %+v, want the default idle and no live process", s)
+	}
+	if cfg.Agents["a"].RuleFor("continue") != RuleApprove {
+		t.Fatal("continue is an action type with a rule")
+	}
+	for _, c := range []struct{ orbit, agent, want string }{
+		{base, "session: {resume: true, idle: 48h}\n", "session.idle"},
+		{base, "session: {resume: true, idle: 1h, live: 2h}\n", "session.live must be between"},
+		{base, "session: {resume: true, idle: 10m, live: 20m}\n", "must not exceed session.idle"},
+		{base, "session: {live: 5m}\n", "need resume: true"},
+		{"defaults: {runner: r, channels: [c]}\nrunners: {r: {kind: codex}}\nchannels: {c: {kind: log}}\n", "session: {resume: true}\n", "needs a claude-code runner"},
+		{"defaults: {runner: r, channels: [c]}\nrunners: {r: {kind: claude-code, max_budget_usd: 1}}\nchannels: {c: {kind: log}}\n",
+			"session: {resume: true, live: 5m}\n", "max_budget_usd"},
+	} {
+		if _, err := load(c.orbit, c.agent); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%q: err = %v, want %q", c.agent, err, c.want)
+		}
 	}
 }

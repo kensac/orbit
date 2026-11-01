@@ -26,7 +26,7 @@ type claudeCode struct {
 // rest, so the model cannot read orbit's own files or /proc.
 var readTools = []string{"Read", "Glob", "Grep"}
 
-// claudeAuthEnv are the only orbit environment variables the CLI sees.
+// claudeAuthEnv are the credentials the CLI accepts; env hands it one.
 var claudeAuthEnv = []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}
 
 func newClaudeCode(rs spec.RunnerSpec, getenv func(string) (string, bool)) (Runner, error) {
@@ -49,9 +49,10 @@ func newClaudeCode(rs spec.RunnerSpec, getenv func(string) (string, bool)) (Runn
 func (c *claudeCode) Kind() string  { return "claude-code" }
 func (c *claudeCode) Model() string { return c.rs.Model }
 
-// settings is passed with --settings. Deny rules win over everything, so
-// these hold even for a tool an agent's spec allows.
-func claudeSettings() string {
+// claudeSettings is passed with --settings. Deny rules win over everything,
+// so these hold even for a tool an agent's spec allows. keepDays is the
+// transcript retention: 1 for runs whose session is never persisted.
+func claudeSettings(keepDays int) string {
 	s := map[string]any{
 		"permissions": map[string]any{
 			"deny": []string{
@@ -62,17 +63,20 @@ func claudeSettings() string {
 		},
 		"disableAllHooks":     true,
 		"includeCoAuthoredBy": false,
-		"cleanupPeriodDays":   1,
+		"cleanupPeriodDays":   keepDays,
+		// Auto memory is a model-written store under HOME that the CLI
+		// loads into later sessions. An agent's memory is orbit's
+		// memory_versions, kept and shown; a second, invisible one under a
+		// persistent HOME would let one run steer the next unrecorded.
+		"autoMemoryEnabled": false,
 	}
 	b, _ := json.Marshal(s)
 	return string(b)
 }
 
-func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*Result, error) {
-	home := filepath.Join(req.Workdir, ".home")
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return nil, err
-	}
+// baseArgs is the invocation every run shares, without the prompt's
+// transport or the session flags.
+func (c *claudeCode) baseArgs(req Request, keepDays int) []string {
 	tools := append(append([]string{}, readTools...), req.Tools...)
 	args := []string{
 		"-p",
@@ -82,8 +86,7 @@ func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*R
 		"--tools", strings.Join(tools, ","),
 		"--strict-mcp-config",
 		"--setting-sources", "",
-		"--settings", claudeSettings(),
-		"--no-session-persistence",
+		"--settings", claudeSettings(keepDays),
 	}
 	if len(req.Tools) > 0 {
 		args = append(args, "--allowedTools", strings.Join(req.Tools, ","))
@@ -92,23 +95,126 @@ func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*R
 		args = append(args, "--model", c.rs.Model)
 	}
 	if c.rs.MaxTurns > 0 {
+		// Per user message, also in a live process: each turn of one
+		// reported its own num_turns against the same limit.
 		args = append(args, "--max-turns", strconv.Itoa(c.rs.MaxTurns))
 	}
 	if c.rs.MaxBudgetUSD > 0 {
 		args = append(args, "--max-budget-usd", strconv.FormatFloat(c.rs.MaxBudgetUSD, 'f', -1, 64))
 	}
-	env := childEnv(home, c.getenv, claudeAuthEnv...)
-	env = append(env,
+	return args
+}
+
+// resumeArgs continue a session. Every resume forks (a new session id, the
+// parent's transcript copied), so an attempt that is interrupted or fails
+// leaves the session it continued exactly as the last good run left it.
+func resumeArgs(id string) []string {
+	if id == "" {
+		return nil
+	}
+	return []string{"--resume", id, "--fork-session"}
+}
+
+// env gives the CLI one credential. With a subscription token present the
+// API key is withheld: an API key the CLI is handed takes precedence over
+// the subscription and is billed per token, so a stray key in orbit's
+// environment must never turn subscription runs into API spend.
+// CLAUDE_CONFIG_DIR is pinned to HOME's .claude, where SessionFile looks,
+// whatever the CLI's default becomes.
+func (c *claudeCode) env(home string) []string {
+	oauth, apiKey := claudeAuthEnv[0], claudeAuthEnv[1]
+	cred := apiKey
+	if v, ok := c.getenv(oauth); ok && v != "" {
+		cred = oauth
+	}
+	env := childEnv(home, c.getenv, cred)
+	return append(env,
+		"CLAUDE_CONFIG_DIR="+filepath.Join(home, ".claude"),
 		"DISABLE_AUTOUPDATER=1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
 		"DISABLE_TELEMETRY=1",
 	)
+}
 
+func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*Result, error) {
+	sess := req.Session
+	home := filepath.Join(req.Workdir, ".home")
+	keepDays := 1
+	if sess != nil {
+		home = sess.Home
+		keepDays = max(sess.KeepDays, 1)
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return nil, err
+	}
+	args := c.baseArgs(req, keepDays)
+	env := c.env(home)
+	if sess == nil {
+		args = append(args, "--no-session-persistence")
+		final, err := c.oneShot(ctx, args, env, req, emit)
+		if final == nil {
+			return nil, err
+		}
+		return parseClaudeResult(final)
+	}
+
+	var final []byte
+	var err error
+	if sess.Live != nil {
+		var used bool
+		final, used, err = c.runLive(ctx, sess, args, env, req, emit)
+		if !used {
+			final, err = c.resumed(ctx, sess, args, env, req, emit)
+		}
+	} else {
+		final, err = c.resumed(ctx, sess, args, env, req, emit)
+	}
+	if final == nil {
+		return nil, err
+	}
+	res, perr := parseClaudeResult(final)
+	if res != nil {
+		sessionCost(res, sess.BaseCostUSD)
+	}
+	return res, perr
+}
+
+// sessionCost turns the CLI's cumulative session total into this run's
+// share. The total is a running figure across turns and across resumes and
+// forks of one session (sdk.d.ts, SDKResultMessage.total_cost_usd); a total
+// below the base means the CLI started counting again, so it is all ours.
+func sessionCost(res *Result, base float64) {
+	if res.CostUSD == nil {
+		return
+	}
+	total := *res.CostUSD
+	res.SessionCostUSD = &total
+	if total >= base {
+		d := total - base
+		res.CostUSD = &d
+	}
+}
+
+// resumed runs one process for this run, continuing sess.Resume if set.
+func (c *claudeCode) resumed(ctx context.Context, sess *Session, args, env []string, req Request, emit func(Event)) ([]byte, error) {
+	mode := "fresh"
+	if sess.Resume != "" {
+		mode = "resumed"
+	}
+	if err := sess.Started(mode, sess.Resume); err != nil {
+		return nil, err
+	}
+	return c.oneShot(ctx, append(args, resumeArgs(sess.Resume)...), env, req, emit)
+}
+
+// oneShot runs the CLI with the prompt on stdin and returns its result line,
+// or nil and why there was none.
+func (c *claudeCode) oneShot(ctx context.Context, args, env []string, req Request, emit func(Event)) ([]byte, error) {
 	var final []byte
 	stderr, err := runCLI(ctx, c.bin, args, env, req.Workdir, req.Prompt, func(line []byte) {
 		kind := eventKind(line)
 		emit(Event{Kind: kind, Payload: line})
-		if kind == "result" || strings.HasPrefix(kind, "result.") {
+		if isResult(kind) {
 			final = line
 		}
 	})
@@ -118,8 +224,10 @@ func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*R
 		}
 		return nil, exitDetail(err, stderr)
 	}
-	return parseClaudeResult(final)
+	return final, nil
 }
+
+func isResult(kind string) bool { return kind == "result" || strings.HasPrefix(kind, "result.") }
 
 // parseClaudeResult reads the stream's final `result` line. is_error is the
 // field to trust: a failed login reports subtype "success" with is_error.

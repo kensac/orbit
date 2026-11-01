@@ -33,7 +33,15 @@ sources:
 actions:
   notify: auto
   webhook:home-assistant: approve
+  # Wake again later to finish a long task; each wake waits for approval.
+  continue: approve
 notify:
   channels: [phone, email]
   when: always
 wake_on_message: true
+# Continue the Claude Code session across runs for six hours, and keep the
+# process open ten minutes after a message for the next one.
+session:
+  resume: true
+  idle: 6h
+  live: 10m

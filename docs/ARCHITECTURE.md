@@ -18,10 +18,13 @@ numbers should come from code, with the model explaining them.
 ## One run
 
 ```
-trigger (schedule | manual | message)
+trigger (schedule | manual | message | continue)
   -> runs row, status queued
-  -> executor claims it (FOR UPDATE SKIP LOCKED; at most one running per agent)
+  -> executor claims it (FOR UPDATE SKIP LOCKED; at most one running per agent;
+     a continuation not before its run_after)
   -> StartRunContext: memory + unread messages (marked consumed) + open questions
+  -> session plan: continue the agent's Claude Code session, or start fresh
+  -> a fresh session: the recent thread, packed into a byte budget, as conversation.md
   -> sources fetched by the harness, written to <workdir>/inputs/, stored as artifacts
   -> runner called with: system contract, prompt, workdir, tools, output schema
   -> output validated against the contract
@@ -32,7 +35,58 @@ trigger (schedule | manual | message)
 
 Everything a run read and wrote is in Postgres: the prompt, system contract,
 schema, every input, the raw output, the backend's full event stream, every
-delivery attempt. The workdir is scratch and is removed after the run.
+delivery attempt. The workdir is scratch and is removed after the run, except
+for an agent with a session (below), whose workdir and HOME persist and whose
+inputs go in a per-attempt directory removed after the run.
+
+## Conversations
+
+A run that starts a fresh session is shown its agent's recent thread: the
+person's messages earlier runs read, earlier reports and errors, and the
+questions asked, newest kept, within `conversationBudget` (24 KB, each item
+clipped to a quarter of it; `internal/engine/conversation.go`). It is stored
+as the `conversation.md` artifact. The packing is deterministic.
+
+## Sessions (claude-code, opt-in per agent)
+
+`session: {resume: true, idle: 6h, live: 10m}` keeps an agent's Claude Code
+session between runs. Claude Code stores a session's transcript at
+`$CLAUDE_CONFIG_DIR/projects/<cwd, non-alphanumerics as ->/<id>.jsonl`
+(`runner.SessionFile`); orbit pins `CLAUDE_CONFIG_DIR` to
+`<data>/agents/<name>/home/.claude` and the cwd to `<data>/agents/<name>/work`,
+so `ORBIT_DATA_DIR` must be a persistent volume for resume to survive a restart.
+
+- **Resume.** A run continues the session of the agent's latest finished run
+  when that run succeeded on Claude Code under the same spec within `idle`,
+  no live turn on the session failed, the chain is under `maxSessionDepth`
+  (20) runs, and the transcript is on disk. Otherwise it starts fresh and the
+  `orbit.session` event says why. Every resume is `--resume <id>
+  --fork-session`: a new id each run, so an interrupted attempt never edits
+  the session the next attempt continues. A continued run's prompt keeps the
+  charter and memory (small, and the authority if the CLI compacts) and drops
+  the conversation, which the session holds.
+- **Live process.** A run a person's message starts opens one `claude -p
+  --input-format stream-json` process and leaves it open for `live`; the next
+  run of that agent (any trigger) is written to it as one user message while it
+  holds the session that run would resume. Each message still is a run row
+  with its own events and outcome. A turn ends at its `result` line, which
+  carries that turn's own `structured_output` (verified on 2.1.316). Any
+  failure, a crash, a timeout or a mismatch closes the process; at most
+  `runner.MaxLive` (4) are open, the least recently used idle one closed first.
+- **Recorded per run:** `session_mode` (fresh, resumed, live),
+  `session_parent`, `session_depth`, `session_id`, and `session_cost_usd`. The
+  CLI reports a cumulative cost per session (across turns, resumes and forks),
+  so `cost_usd` is the difference from the parent run's total.
+
+## Continuations
+
+An agent with the `continue` action may ask to be woken again
+(`after_minutes`, 1 to 1440) with a note to itself. When executed, it queues a
+`continue` run with `run_after`; `runs_one_continuation` keeps one waiting
+per agent, and a chain is bounded by `actions.MaxContinueChain` (12): the
+run at the limit has its proposal denied, and `EnqueueContinuation` holds the
+same bound. A long task becomes a chain of short checkpointed runs, each with
+the session continued when the agent has one.
 
 ## The output contract
 
@@ -71,8 +125,8 @@ to Codex or to a plain API call is one line in its spec.
 An action type is code (`internal/actions`): a name, a parameter schema shown
 to the agent, a validator, and an executor. An agent's spec maps types to
 `auto`, `approve` or `deny`; unnamed types are denied and not offered.
-Today: `notify` (an extra message to one of the agent's channels) and
-`webhook:<endpoint>` (a JSON body to an endpoint whose URL and credentials
+Today: `notify` (an extra message to one of the agent's channels),
+`continue` (wake this agent again later, above) and `webhook:<endpoint>` (a JSON body to an endpoint whose URL and credentials
 are configuration, never chosen by the model).
 
 Approval happens from a signed link (`/ui/actions/{id}?sig=`), the API, or

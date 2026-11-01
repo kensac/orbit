@@ -44,6 +44,9 @@ type Engine struct {
 	// NewRunner is runner.New, replaceable in tests.
 	NewRunner func(name string, rs spec.RunnerSpec, env func(string) (string, bool)) (runner.Runner, error)
 	Log       *slog.Logger
+	// Live holds the live Claude Code processes of agents with
+	// session.live. Nil runs every turn in a process of its own.
+	Live *runner.Live
 
 	mu  sync.RWMutex
 	cfg *Snapshot
@@ -139,13 +142,34 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return nil, nil, err
 	}
 
-	workdir := filepath.Join(e.DataDir, "runs", fmt.Sprintf("%s-%d", c.ID, c.Attempt))
-	if err := os.MkdirAll(filepath.Join(workdir, "inputs"), 0o700); err != nil {
+	// Every byte the run read is stored as an artifact, so a workdir is
+	// scratch. A run without a session gets its own, removed when it ends.
+	// An agent with a session keeps one workdir and HOME (its sessions
+	// live under HOME, keyed by the workdir's path, and a live process
+	// has one cwd for its life); its inputs go in a directory named for
+	// the attempt, so a continued session never mistakes this run's
+	// files for the ones it read before, and are removed when it ends.
+	attemptName := fmt.Sprintf("%s-%d", c.ID, c.Attempt)
+	workdir := filepath.Join(e.DataDir, "runs", attemptName)
+	inputsDir := "inputs"
+	var home string
+	withSession := a.Session != nil && a.Session.Resume && r.Kind() == "claude-code"
+	if withSession {
+		base := filepath.Join(e.DataDir, "agents", a.Name)
+		workdir, home = filepath.Join(base, "work"), filepath.Join(base, "home")
+		inputsDir = filepath.Join("inputs", attemptName)
+		// Earlier runs' inputs are in their artifacts; a crashed run's may
+		// still be here.
+		if err := os.RemoveAll(filepath.Join(workdir, "inputs")); err != nil {
+			return nil, nil, err
+		}
+		defer os.RemoveAll(filepath.Join(workdir, "inputs"))
+	} else {
+		defer os.RemoveAll(workdir)
+	}
+	if err := os.MkdirAll(filepath.Join(workdir, inputsDir), 0o700); err != nil {
 		return nil, nil, err
 	}
-	// Every byte the run read is stored as an artifact, so the workdir is
-	// scratch and goes when the run ends.
-	defer os.RemoveAll(workdir)
 
 	loc, _ := time.LoadLocation(a.Timezone)
 	now := time.Now().In(loc)
@@ -192,7 +216,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		case "text/markdown":
 			ext = ".md"
 		}
-		rel := filepath.Join("inputs", s.Name+ext)
+		rel := filepath.Join(inputsDir, s.Name+ext)
 		if err := os.WriteFile(filepath.Join(workdir, rel), f.Content, 0o600); err != nil {
 			return nil, nil, err
 		}
@@ -203,12 +227,38 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		inputs = append(inputs, runner.Input{Name: s.Name, Path: rel, MediaType: f.MediaType, Content: f.Content})
 	}
 
+	var sess *runner.Session
+	continuing := false
+	if withSession {
+		sess, continuing, err = e.planSession(ctx, a, c, workdir, home, emit)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	var convo []store.ConversationItem
+	if !continuing {
+		// A continued session holds the thread already; a fresh one is
+		// told it as text.
+		items, err := e.Store.Conversation(ctx, a.Name, c.ID, conversationRows)
+		if err != nil {
+			return nil, nil, err
+		}
+		var text string
+		text, convo = conversationText(items, now.Location())
+		if text != "" {
+			if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "conversation.md", "text/markdown", []byte(text)); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+
 	types := actions.Catalog(a, snap.Config.Deployment)
 	schema := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, true)
 	envelope := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, false)
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic")
 	trigger := c.Trigger
-	prompt := userPrompt(a, now, trigger, c.Prompt, rc, inputs)
+	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing},
+		rc, convo, inputs)
 	for name, b := range map[string]string{"system.md": system, "prompt.md": prompt, "schema.json": string(schema)} {
 		mt := "text/markdown"
 		if strings.HasSuffix(name, ".json") {
@@ -223,7 +273,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	defer cancel()
 	res, err := r.Run(runCtx, runner.Request{
 		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
-		Tools: a.Tools, OutputSchema: schema,
+		Tools: a.Tools, OutputSchema: schema, Session: sess,
 	}, func(ev runner.Event) { emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
@@ -317,6 +367,11 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		} else if err := t.Validate(act.Params); err != nil {
 			pa.Rule, pa.Error = string(spec.RuleDeny), "invalid params: "+err.Error()
 		}
+		if act.Type == "continue" && pa.Error == "" && c.Chain >= actions.MaxContinueChain {
+			// Refused here so the run says why; EnqueueContinuation holds the
+			// same bound for an action that reaches it anyway.
+			pa.Rule, pa.Error = string(spec.RuleDeny), fmt.Sprintf("continuation limit reached: this run is continuation %d of at most %d", c.Chain, actions.MaxContinueChain)
+		}
 		if len(pa.Params) == 0 {
 			pa.Params = json.RawMessage(`{}`)
 		}
@@ -404,6 +459,7 @@ func fillResult(rr *store.RunResult, r *runner.Result) {
 		return
 	}
 	rr.Output, rr.Usage, rr.CostUSD, rr.SessionID = r.Output, r.Usage, r.CostUSD, r.SessionID
+	rr.SessionCostUSD = r.SessionCostUSD
 }
 
 // deliver sends to every channel of the agent and records each attempt. A
@@ -463,14 +519,18 @@ func (e *Engine) CheckApprovalSig(actionID, sig string) bool {
 // a person's approval.
 func (e *Engine) ExecuteActions(ctx context.Context) error {
 	snap := e.Current()
-	ex := &actions.Executor{Deployment: snap.Config.Deployment, Channels: snap.Channels, Client: e.Client, Env: e.Env}
+	ex := &actions.Executor{Deployment: snap.Config.Deployment, Channels: snap.Channels, Client: e.Client, Env: e.Env,
+		Continue: func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (string, bool, error) {
+			return e.Store.EnqueueContinuation(ctx, store.Continuation{
+				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
+		}}
 	for {
 		act, err := e.Store.ClaimApprovedAction(ctx)
 		if err != nil || act == nil {
 			return err
 		}
 		actx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		result, xerr := ex.Execute(actx, act.Type, act.Params)
+		result, xerr := ex.Execute(actx, actions.Call{Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params})
 		cancel()
 		if err := e.Store.FinishAction(context.WithoutCancel(ctx), act.ID, result, xerr); err != nil {
 			return err

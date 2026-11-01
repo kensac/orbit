@@ -28,9 +28,10 @@ RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 COPY --from=build /out/orbit /usr/local/bin/orbit
 
-# uid 10001 owns nothing else in the image. /data holds only scratch run
-# directories (every byte a run reads is stored in Postgres), so it can be a
-# volume or a tmpfs.
+# uid 10001 owns nothing else in the image. /data holds scratch run
+# directories (every byte a run reads is stored in Postgres) and the Claude
+# Code sessions of agents with `session`, so it is a volume: on a tmpfs or the
+# container layer those agents start fresh after a restart.
 RUN useradd --uid 10001 --create-home --home-dir /home/orbit --shell /usr/sbin/nologin orbit \
     && mkdir -p /data && chown orbit:orbit /data
 USER orbit

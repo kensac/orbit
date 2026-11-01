@@ -65,7 +65,11 @@ backwards with `before` = the first item's `at`)
 ```
 
 `from` is `person` or `agent`. A run's `status` is `queued`, `running`,
-`succeeded`, `failed` or `cancelled`.
+`succeeded`, `failed` or `cancelled`; its `trigger` is `schedule`, `manual`,
+`message` or `continue` (the agent asked to be woken; `run_after`, `chain` and
+`continues` on the run say when, how many in a row, and which run asked). A
+run of an agent with a session also has `session_mode` (`fresh`, `resumed`,
+`live`), `session_parent` and `session_depth`.
 
 `POST /agents/{name}/messages`
 

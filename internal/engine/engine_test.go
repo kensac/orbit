@@ -32,12 +32,30 @@ type fakeRunner struct {
 	block  chan struct{}
 	// started is closed once Run begins, when block is set.
 	started chan struct{}
+	calls   int
 }
 
 func (f *fakeRunner) Kind() string  { return "claude-code" }
 func (f *fakeRunner) Model() string { return "fake" }
 func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runner.Event)) (*runner.Result, error) {
 	f.got = req
+	f.calls++
+	sid := "s1"
+	if req.Session != nil {
+		// As the CLI does: continue req.Session.Resume in a new (forked)
+		// session whose transcript lands under HOME.
+		mode := "fresh"
+		if req.Session.Resume != "" {
+			mode = "resumed"
+		}
+		if err := req.Session.Started(mode, req.Session.Resume); err != nil {
+			return nil, err
+		}
+		sid = fmt.Sprintf("session-%d", f.calls)
+		path, _ := runner.SessionFile(req.Session.Home, req.Workdir, sid)
+		_ = os.MkdirAll(filepath.Dir(path), 0o700)
+		_ = os.WriteFile(path, []byte("{}\n"), 0o600)
+	}
 	emit(runner.Event{Kind: "assistant", Payload: []byte(`{"type":"assistant"}`)})
 	if f.block != nil {
 		close(f.started)
@@ -45,7 +63,7 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 		return nil, ctx.Err()
 	}
 	cost := 0.25
-	return &runner.Result{Output: json.RawMessage(f.output), CostUSD: &cost, SessionID: "s1"}, f.err
+	return &runner.Result{Output: json.RawMessage(f.output), CostUSD: &cost, SessionID: sid}, f.err
 }
 
 // hooks collects what the webhook channel and endpoint receive.
@@ -56,6 +74,12 @@ type hooks struct {
 }
 
 func harness(t *testing.T, fr *fakeRunner) (*engine.Engine, *store.Store, *hooks) {
+	t.Helper()
+	return harnessWith(t, fr, "")
+}
+
+// harnessWith appends extra to the agent's YAML.
+func harnessWith(t *testing.T, fr *fakeRunner, extra string) (*engine.Engine, *store.Store, *hooks) {
 	t.Helper()
 	s := testdb.New(t)
 	h := &hooks{}
@@ -116,7 +140,7 @@ sources:
 actions:
   notify: auto
   webhook:ep: approve
-`, srv.URL))
+%s`, srv.URL, extra))
 	cfg, err := spec.Load(dir)
 	if err != nil {
 		t.Fatal(err)

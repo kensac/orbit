@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -75,10 +76,16 @@ func runCLI(ctx context.Context, bin string, args, env []string, dir, prompt str
 	return stderr.String(), waitErr
 }
 
-// tailBuffer keeps the last 8 KB written to it.
-type tailBuffer struct{ b []byte }
+// tailBuffer keeps the last 8 KB written to it. A live process's stderr is
+// written while a turn may read it, hence the lock.
+type tailBuffer struct {
+	mu sync.Mutex
+	b  []byte
+}
 
 func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.b = append(t.b, p...)
 	if len(t.b) > 8<<10 {
 		t.b = t.b[len(t.b)-8<<10:]
@@ -86,7 +93,11 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (t *tailBuffer) String() string { return string(t.b) }
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.b)
+}
 
 // writeTemp writes content to a file in dir and returns its path.
 func writeTemp(dir, name string, content []byte) (string, error) {

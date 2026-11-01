@@ -238,7 +238,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		eng := &engine.Engine{
 			Store: s, DataDir: env("ORBIT_DATA_DIR", "/data"), Env: os.LookupEnv,
 			Client: &http.Client{Timeout: 2 * time.Minute}, Secret: []byte(token),
-			NewRunner: runner.New, Log: log,
+			NewRunner: runner.New, Log: log, Live: runner.NewLive(runner.MaxLive),
 		}
 		if err := eng.SetConfig(cfg); err != nil {
 			return err
@@ -385,6 +385,9 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			cancelRuns()
 			<-drained
 		}
+		// No run is in progress now; an idle live process holds nothing a
+		// later run needs beyond its session, which resume picks up.
+		eng.Live.Close()
 		return nil
 	})
 }
@@ -440,7 +443,7 @@ func refreshGauges(ctx context.Context, s *store.Store, log *slog.Logger) {
 	var pending, queued int
 	err := s.Pool.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM actions WHERE status = 'pending'),
-		(SELECT count(*) FROM runs WHERE status = 'queued')`).Scan(&pending, &queued)
+		(SELECT count(*) FROM runs WHERE status = 'queued' AND (run_after IS NULL OR run_after <= now()))`).Scan(&pending, &queued)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Warn("gauges", "err", err)
