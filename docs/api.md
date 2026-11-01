@@ -16,16 +16,13 @@ of:
   `preferred_username`; it is recorded as the author of their messages and
   decisions. A client forwards the token of the person it is acting for and
   refreshes it before it expires; orbit never sees a password or a session.
-- **The operator token** (`ORBIT_API_TOKEN`), accepted on the tailnet
-  listener only, for scripts and the CLI.
+- **The operator token** (`ORBIT_API_TOKEN`), for scripts on the host,
+  accepted only on requests that did not come through traefik.
 
-orbit is reached two ways:
-
-- **Tailnet:** `http://100.79.4.41:8095`. Both token kinds, plus the approval
-  and run pages under `/ui`.
-- **Public:** `https://orbit-api.kanishksachdev.com`, for server-side callers
-  off the tailnet (the portfolio on Vercel). Only `/api/v1`, and only
-  authentik tokens. A 401 says which check failed.
+orbit is at `https://orbit.kanishksachdev.com`. The pages under `/ui` are
+behind authentik forward-auth. `/api/v1` accepts authentik tokens from any
+caller (the portfolio on Vercel calls it server-side); the operator token is
+accepted only from inside the docker network. A 401 says which check failed.
 
 ## Agents
 

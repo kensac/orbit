@@ -30,14 +30,17 @@ types are not even offered.
 
 ## The API
 
-- Bound to the tailnet address in deployment. `/api/v1` requires
-  `ORBIT_API_TOKEN` (at least 32 characters, constant-time compared).
+- Deployed behind traefik at a public hostname with authentik forward-auth
+  in front of every path, and `/api/v1` also requires `ORBIT_API_TOKEN`
+  (at least 32 characters, constant-time compared). When orbit verifies
+  authentik tokens itself (docs/api.md), `/api/` gets a forward-auth bypass
+  and the JWT check is the gate.
 - `/ui/actions/{id}` accepts `sig`, an HMAC of the action id under the same
   token, so a phone can approve from a notification without a login. The GET
   only shows; deciding is a POST from the page, so a link preview cannot
   approve anything. Rotating the token invalidates every outstanding link.
-- `/ui/runs/{id}` is read-only and relies on the tailnet bind. Reports can
-  hold personal data; do not publish the port.
+- `/ui/runs/{id}` is read-only and relies on forward-auth. Reports can hold
+  personal data; never route `/ui/` around authentik.
 
 ## Adding a capability
 
