@@ -26,6 +26,12 @@ wrapper that links `$HOME/.claude/projects` (orbit's HOME) to the real
 `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN`, and execs `claude`; give
 orbit any placeholder token so the runner builds.
 
+After changing `internal/harness` or its wiring, run an agent with
+`verify: [figures]` and a JSON `file` source: the init event lists
+`mcp__orbit__query` and `mcp__orbit__calc`, the totals come from query calls,
+a Read of `../x` is denied with orbit's message, and a figure asked for "in
+your head" is sent back and recomputed with a tool.
+
 After changing sessions or the live process, also run an agent with
 `session: {resume: true, live: 10m}` and `continue: approve`: a message (run
 fresh), a second message (`session_mode` live, one `claude` process), a

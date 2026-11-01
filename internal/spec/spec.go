@@ -128,6 +128,10 @@ type Agent struct {
 	// only). Without it every run starts a fresh session and sees the
 	// recent thread as text in its prompt.
 	Session *SessionSpec `yaml:"session,omitempty" json:"session,omitempty"`
+	// Verify names deterministic checks of a run's output. "figures": every
+	// money amount in the summary and report must be in the inputs or in a
+	// result of orbit's query or calc tool.
+	Verify []string `yaml:"verify,omitempty" json:"verify,omitempty"`
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
@@ -245,6 +249,9 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// Verifies reports whether the agent's spec names a check.
+func (a *Agent) Verifies(check string) bool { return slices.Contains(a.Verify, check) }
+
 // IsEnabled reports whether the agent's triggers fire. Manual runs work
 // either way.
 func (a *Agent) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
@@ -268,6 +275,7 @@ var (
 	sourceKinds  = []string{"http", "prometheus", "file"}
 	runnerKinds  = []string{"claude-code", "codex", "anthropic"}
 	notifyWhen   = []string{"", "always", "agent", "never"}
+	verifyChecks = []string{"figures"}
 )
 
 // ParseSchedule parses a five-field cron expression or a descriptor.
@@ -517,6 +525,11 @@ func (c *Config) validateAgent(a *Agent) []error {
 	}
 	if !slices.Contains(notifyWhen, a.Notify.When) {
 		at("notify.when must be always, agent or never")
+	}
+	for _, v := range a.Verify {
+		if !slices.Contains(verifyChecks, v) {
+			at("verify: unknown check %q (want one of %v)", v, verifyChecks)
+		}
 	}
 	if ss := a.Session; ss != nil {
 		rs := c.Deployment.Runners[a.Runner]

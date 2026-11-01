@@ -83,6 +83,33 @@ as the Agent SDK's SessionStore does (it materializes
   CLI reports a cumulative cost per session (across turns, resumes and forks),
   so `cost_usd` is the difference from the parent run's total.
 
+## orbit inside the CLI: tools and hooks (claude-code)
+
+A Claude Code run starts orbit's own binary twice over, so deterministic work
+happens in tested Go at the moment the model needs it (`internal/harness`):
+
+- **Tools** (`orbit mcp`, an MCP stdio server from `--mcp-config` under
+  `--strict-mcp-config`): `mcp__orbit__query` filters, groups and
+  counts or sums the records of a JSON input, exactly (numbers are read as the
+  decimal literals they are); `mcp__orbit__calc` is exact rational arithmetic.
+  The system prompt tells the model to compute every figure with them. Both
+  read only under the workdir, and append each result to a ledger in the run's
+  state directory.
+- **Hooks** (`orbit hook`, from `--settings`; with `--setting-sources ""` no
+  other hook is loaded, so `disableAllHooks` is on whenever orbit has none):
+  PreToolUse on Read, Glob and Grep denies a path that leaves the workdir after
+  symlinks, a second wall behind the CLI's own; with `verify: [figures]`,
+  PreToolUse on StructuredOutput sends the output back when a `$` amount in its
+  summary, title or report is in neither the inputs (as written, or as cents)
+  nor the ledger, rounding to the figure's precision allowed, at most
+  `harness.MaxFigureDenials` (2) times per prompt. The engine runs the same
+  check on the final output for every backend and notes any amount it cannot
+  trace in the report.
+- Not used: SessionStart (a live process starts one session for many runs, so
+  per-run context belongs in the prompt, where it already is), PostToolUse
+  and Stop (the stream already records every tool result, and the output to
+  verify is the StructuredOutput call, not the stop).
+
 ## Continuations
 
 An agent with the `continue` action may ask to be woken again

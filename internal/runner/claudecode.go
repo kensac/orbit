@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/spec"
 )
 
@@ -52,7 +53,10 @@ func (c *claudeCode) Model() string { return c.rs.Model }
 // claudeSettings is passed with --settings. Deny rules win over everything,
 // so these hold even for a tool an agent's spec allows. keepDays is the
 // transcript retention: 1 for runs whose session is never persisted.
-func claudeSettings(keepDays int) string {
+// hooks are orbit's own; with --setting-sources "" no other settings file
+// is read, so they are the only hooks the CLI runs, and with none
+// disableAllHooks stays on.
+func claudeSettings(keepDays int, hooks map[string]any) string {
 	s := map[string]any{
 		"permissions": map[string]any{
 			"deny": []string{
@@ -61,7 +65,7 @@ func claudeSettings(keepDays int) string {
 			},
 			"defaultMode": "dontAsk",
 		},
-		"disableAllHooks":     true,
+		"disableAllHooks":     len(hooks) == 0,
 		"includeCoAuthoredBy": false,
 		"cleanupPeriodDays":   keepDays,
 		// Auto memory is a model-written store under HOME that the CLI
@@ -70,14 +74,58 @@ func claudeSettings(keepDays int) string {
 		// persistent HOME would let one run steer the next unrecorded.
 		"autoMemoryEnabled": false,
 	}
+	if len(hooks) > 0 {
+		s["hooks"] = hooks
+	}
 	b, _ := json.Marshal(s)
 	return string(b)
 }
 
+// hookTimeout bounds one orbit hook call, in seconds (the CLI's unit). The
+// hook reads at most the run's inputs; a second is ample, ten leaves room
+// for a loaded host.
+const hookTimeout = 10
+
+// harnessHooks are the hooks orbit configures: a path guard on the file
+// tools, and, with Figures, the figure check on the structured output.
+// Matchers are tool names joined by |.
+func harnessHooks(h *Harness, workdir, home string) map[string]any {
+	cmd := func(extra string) []any {
+		return []any{map[string]any{"type": "command", "timeout": hookTimeout,
+			"command": shellQuote(h.Bin) + " hook --root " + shellQuote(workdir) +
+				" --state " + shellQuote(harness.StateDir(home)) + extra}}
+	}
+	pre := []any{map[string]any{"matcher": "Read|Glob|Grep", "hooks": cmd("")}}
+	if h.Figures {
+		pre = append(pre, map[string]any{"matcher": "StructuredOutput", "hooks": cmd(" --figures")})
+	}
+	return map[string]any{"PreToolUse": pre}
+}
+
+// harnessMCP is the --mcp-config that starts `orbit mcp` for the run.
+func harnessMCP(h *Harness, workdir, home string) string {
+	b, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{
+		harness.MCPServer: map[string]any{"type": "stdio", "command": h.Bin,
+			"args": []string{"mcp", "--root", workdir, "--state", harness.StateDir(home)}},
+	}})
+	return string(b)
+}
+
+// shellQuote quotes s for the sh -c the CLI runs a hook command with.
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
 // baseArgs is the invocation every run shares, without the prompt's
 // transport or the session flags.
-func (c *claudeCode) baseArgs(req Request, keepDays int) []string {
+func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 	tools := append(append([]string{}, readTools...), req.Tools...)
+	allowed := append([]string{}, req.Tools...)
+	var hooks map[string]any
+	if req.Harness != nil {
+		// MCP tools are not built-ins, so --tools does not list them; in
+		// dontAsk mode a tool runs only when allowed by name.
+		allowed = append(allowed, harness.ToolQuery, harness.ToolCalc)
+		hooks = harnessHooks(req.Harness, req.Workdir, home)
+	}
 	args := []string{
 		"-p",
 		"--output-format", "stream-json", "--verbose",
@@ -86,10 +134,13 @@ func (c *claudeCode) baseArgs(req Request, keepDays int) []string {
 		"--tools", strings.Join(tools, ","),
 		"--strict-mcp-config",
 		"--setting-sources", "",
-		"--settings", claudeSettings(keepDays),
+		"--settings", claudeSettings(keepDays, hooks),
 	}
-	if len(req.Tools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(req.Tools, ","))
+	if req.Harness != nil {
+		args = append(args, "--mcp-config", harnessMCP(req.Harness, req.Workdir, home))
+	}
+	if len(allowed) > 0 {
+		args = append(args, "--allowedTools", strings.Join(allowed, ","))
 	}
 	if c.rs.Model != "" {
 		args = append(args, "--model", c.rs.Model)
@@ -147,7 +198,7 @@ func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*R
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return nil, err
 	}
-	args := c.baseArgs(req, keepDays)
+	args := c.baseArgs(req, home, keepDays)
 	env := c.env(home)
 	if sess == nil {
 		args = append(args, "--no-session-persistence")

@@ -201,3 +201,18 @@ func TestContinueIsDeniedAtTheChainLimit(t *testing.T) {
 		t.Fatalf("actions = %+v", acts)
 	}
 }
+
+func TestUntracedFiguresAreNotedInTheReport(t *testing.T) {
+	out := strings.Replace(goodOutput, `"Spend was fine."`, `"Spend was $5,914. Page 2 cost $2."`, 1)
+	fr := &fakeRunner{output: out}
+	e, s, _ := harnessWith(t, fr, "verify: [figures]\n")
+	c := claim(t, e, s)
+	if err := e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	run, _ := s.GetRun(ctx, c.ID)
+	// $2 is in the input ({"page":2}); $5,914 is in no input or tool result.
+	if !strings.Contains(*run.Report, "could not trace these amounts to the inputs or a computed result: $5,914.") {
+		t.Fatalf("report = %s", *run.Report)
+	}
+}
