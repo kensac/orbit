@@ -54,7 +54,12 @@ session between runs. Claude Code stores a session's transcript at
 `$CLAUDE_CONFIG_DIR/projects/<cwd, non-alphanumerics as ->/<id>.jsonl`
 (`runner.SessionFile`); orbit pins `CLAUDE_CONFIG_DIR` to
 `<data>/agents/<name>/home/.claude` and the cwd to `<data>/agents/<name>/work`,
-so `ORBIT_DATA_DIR` must be a persistent volume for resume to survive a restart.
+so `ORBIT_DATA_DIR` must be a persistent volume for resume to survive a restart. The
+transcript is on the host that ran the session; a run claimed where it is
+missing starts fresh rather than failing. For the worker fleet (below), the
+central store would save it after a run and write it back before a resume,
+as the Agent SDK's SessionStore does (it materializes
+`<dir>/projects/<key>/<id>.jsonl` and points `CLAUDE_CONFIG_DIR` there).
 
 - **Resume.** A run continues the session of the agent's latest finished run
   when that run succeeded on Claude Code under the same spec within `idle`,
