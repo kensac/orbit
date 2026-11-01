@@ -122,6 +122,9 @@ type AgentRow struct {
 	LastRun   *RunSummary     `json:"last_run,omitempty"`
 	Unread    int             `json:"unread_messages"`
 	Pending   int             `json:"pending_actions"`
+	// NeedsInput is true while the agent waits on its person: an open
+	// question or an action pending approval.
+	NeedsInput bool `json:"needs_input"`
 }
 
 // RunSummary is the short form of a run.
@@ -164,6 +167,7 @@ func (s *Store) ListAgents(ctx context.Context) ([]AgentRow, error) {
 			&id, &status, &trigger, &created, &finished, &summary, &a.Unread, &a.Pending); err != nil {
 			return nil, err
 		}
+		a.NeedsInput = a.Unread > 0 || a.Pending > 0
 		if id != nil {
 			a.LastRun = &RunSummary{ID: *id, Status: *status, Trigger: *trigger, CreatedAt: *created, FinishedAt: finished, Summary: summary}
 		}
@@ -630,15 +634,8 @@ type Message struct {
 
 // SendToAgent stores a person's message for the agent's next run.
 func (s *Store) SendToAgent(ctx context.Context, agent, body, author string, replyTo *string) (string, error) {
-	var id string
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO messages (agent, direction, body, author, reply_to)
-		VALUES ($1, 'to_agent', $2, NULLIF($3, ''), $4) RETURNING id::text`,
-		agent, body, author, replyTo).Scan(&id)
-	if isForeignKeyViolation(err) {
-		return "", ErrNotFound
-	}
-	return id, err
+	r, _, err := s.PostMessageOnce(ctx, PostMessage{Agent: agent, Body: body, Author: author, ReplyTo: replyTo})
+	return r.MessageID, err
 }
 
 // ListMessages returns an agent's inbox, oldest first.
@@ -745,8 +742,12 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 				return err
 			}
 		}
+		// Questions and actions take clock_timestamp(), not the
+		// transaction's now(), so each has its own time and the thread
+		// orders them as the run listed them.
 		for _, q := range o.Questions {
-			if _, err := tx.Exec(ctx, `INSERT INTO messages (agent, direction, body, run_id) VALUES ($1, 'from_agent', $2, $3)`,
+			if _, err := tx.Exec(ctx, `INSERT INTO messages (agent, direction, body, run_id, created_at)
+				VALUES ($1, 'from_agent', $2, $3, clock_timestamp())`,
 				agent, q, runID); err != nil {
 				return err
 			}
@@ -755,11 +756,11 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 			status := map[string]string{"auto": "approved", "approve": "pending", "deny": "denied"}[a.Rule]
 			var id string
 			if err := tx.QueryRow(ctx, `
-				INSERT INTO actions (run_id, agent, type, params, reason, rule, status, decided_by, decided_at, error)
+				INSERT INTO actions (run_id, agent, type, params, reason, rule, status, decided_by, decided_at, error, created_at)
 				VALUES ($1, $2, $3, $4, $5, $6, $7,
 				        CASE WHEN $6 = 'approve' THEN NULL ELSE 'rule' END,
 				        CASE WHEN $6 = 'approve' THEN NULL ELSE now() END,
-				        NULLIF($8, ''))
+				        NULLIF($8, ''), clock_timestamp())
 				RETURNING id::text`,
 				runID, agent, a.Type, []byte(a.Params), a.Reason, a.Rule, status, a.Error).Scan(&id); err != nil {
 				return err
@@ -823,22 +824,8 @@ func (s *Store) ListActions(ctx context.Context, agent, status string, limit int
 
 // DecideAction approves or rejects a pending action.
 func (s *Store) DecideAction(ctx context.Context, id string, approve bool, by string) error {
-	status := "rejected"
-	if approve {
-		status = "approved"
-	}
-	tag, err := s.Pool.Exec(ctx, `UPDATE actions SET status = $2, decided_by = $3, decided_at = now()
-		WHERE id = $1 AND status = 'pending'`, id, status, by)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		if _, err := s.GetAction(ctx, id); err != nil {
-			return err
-		}
-		return ErrConflict
-	}
-	return nil
+	_, err := s.DecideActionOnce(ctx, id, approve, by, "")
+	return err
 }
 
 // ClaimApprovedAction moves the oldest approved action to executing. An

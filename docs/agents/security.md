@@ -50,17 +50,31 @@ types are not even offered.
 
 ## The API
 
-- Deployed behind traefik at a public hostname with authentik forward-auth
-  in front of every path, and `/api/v1` also requires `ORBIT_API_TOKEN`
-  (at least 32 characters, constant-time compared). When orbit verifies
-  authentik tokens itself (docs/api.md), `/api/` gets a forward-auth bypass
-  and the JWT check is the gate.
-- `/ui/actions/{id}` accepts `sig`, an HMAC of the action id under the same
-  token, so a phone can approve from a notification without a login. The GET
-  only shows; deciding is a POST from the page, so a link preview cannot
-  approve anything. Rotating the token invalidates every outstanding link.
+- Deployed behind traefik at a public hostname. `/ui/` is behind authentik
+  forward-auth; `/api/` is routed past it, and orbit verifies the authentik
+  access token itself (`internal/auth`, docs/api.md): signature against the
+  issuer's JWKS, `iss`, `exp`/`nbf`, `aud`, the group. The person in the
+  token is the author and decider of record; a request body cannot name
+  someone else.
+- **The operator token** (`ORBIT_API_TOKEN`, at least 32 characters,
+  constant-time compared) is accepted only on the internal listener
+  (`ORBIT_INTERNAL_LISTEN`), which traefik never routes to. Which listener a
+  request arrived on is a property of the socket; a header saying a request
+  is internal could be sent by anyone, so none is trusted. Never give the
+  internal port a traefik router or a public port mapping.
+- Only asymmetric signatures are accepted. An `HS*` token would be verified
+  with the client secret, which every client holds, so any client could mint
+  any person.
+- `/ui/actions/{id}` accepts `sig`, an HMAC of the action id under the
+  operator token, so a phone can approve from a notification without a
+  login. The GET only shows; deciding is a POST from the page, so a link
+  preview cannot approve anything. Rotating the token invalidates every
+  outstanding link.
 - `/ui/runs/{id}` is read-only and relies on forward-auth. Reports can hold
   personal data; never route `/ui/` around authentik.
+- `GET /runs/{id}/stream` shows the agent's narration and tool summaries
+  (file paths, commands, URLs): the same data `/events` already serves to
+  the same callers.
 
 ## Adding a capability
 

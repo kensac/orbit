@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/api"
+	"github.com/kensac/orbit/internal/auth"
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/runner"
@@ -220,6 +221,13 @@ func serve(ctx context.Context, log *slog.Logger) error {
 	if err != nil || workers < 1 {
 		return fmt.Errorf("ORBIT_WORKERS: want a positive integer")
 	}
+	verifier, err := oidcVerifier()
+	if err != nil {
+		return err
+	}
+	if verifier == nil {
+		log.Warn("ORBIT_OIDC_ISSUER is not set: the public /api/v1 refuses every request")
+	}
 	dir := configDir(nil)
 	cfg, err := spec.Load(dir)
 	if err != nil {
@@ -274,16 +282,17 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		runCtx, cancelRuns := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancelRuns()
 
-		srv := &http.Server{
-			Addr:              env("ORBIT_LISTEN", ":8080"),
-			Handler:           (&api.Server{Store: s, Engine: eng, Token: token, Log: log, Wake: nudge}).Handler(),
-			ReadHeaderTimeout: 10 * time.Second,
+		stopStreams := make(chan struct{})
+		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams}
+		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
+		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
+		for _, hs := range []*http.Server{srv, internal} {
+			go func() {
+				if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					log.Error("http", "addr", hs.Addr, "err", err)
+				}
+			}()
 		}
-		go func() {
-			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Error("http", "err", err)
-			}
-		}()
 
 		sched := &scheduler.Scheduler{
 			Store: s, Log: log.With("component", "scheduler"), Reload: reload, Now: time.Now,
@@ -368,11 +377,16 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			}
 		}()
 
-		log.Info("orbit serving", "addr", srv.Addr, "workers", workers, "agents", len(cfg.Agents))
+		log.Info("orbit serving", "addr", srv.Addr, "internal_addr", internal.Addr, "workers", workers,
+			"agents", len(cfg.Agents), "oidc", verifier != nil)
 		<-ctx.Done()
 		log.Info("shutting down")
+		// Shutdown waits for open requests, and a stream is open until its
+		// run ends: end streams first (clients reconnect and replay).
+		close(stopStreams)
 		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_ = srv.Shutdown(shutCtx)
+		_ = internal.Shutdown(shutCtx)
 		cancel()
 		// Runs in progress get the drain window, then are cancelled and
 		// requeued by the engine.
@@ -390,6 +404,34 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		eng.Live.Close()
 		return nil
 	})
+}
+
+// writeTimeout bounds an ordinary response, so a client that stops reading
+// does not hold a handler forever. Generous, because an artifact can be
+// several MB to a phone; a run stream clears it (api.streamRun).
+const writeTimeout = 5 * time.Minute
+
+func httpServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: writeTimeout}
+}
+
+// oidcVerifier builds the authentik token check from the environment, or
+// returns nil when ORBIT_OIDC_ISSUER is unset. Setting the issuer without
+// the client ids or the group is an error, not a looser check.
+func oidcVerifier() (*auth.Verifier, error) {
+	issuers := auth.SplitList(os.Getenv("ORBIT_OIDC_ISSUER"))
+	clients := auth.SplitList(os.Getenv("ORBIT_OIDC_CLIENT_IDS"))
+	group := strings.TrimSpace(os.Getenv("ORBIT_OIDC_GROUP"))
+	if len(issuers) == 0 {
+		if len(clients) > 0 || group != "" {
+			return nil, errors.New("ORBIT_OIDC_CLIENT_IDS or ORBIT_OIDC_GROUP is set without ORBIT_OIDC_ISSUER")
+		}
+		return nil, nil
+	}
+	if len(clients) == 0 || group == "" {
+		return nil, errors.New("ORBIT_OIDC_ISSUER needs ORBIT_OIDC_CLIENT_IDS and ORBIT_OIDC_GROUP")
+	}
+	return auth.New(auth.Config{Issuers: issuers, ClientIDs: clients, Group: group})
 }
 
 func reloadConfig(ctx context.Context, s *store.Store, eng *engine.Engine, dir string) error {

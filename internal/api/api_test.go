@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/kensac/orbit/internal/api"
+	"github.com/kensac/orbit/internal/auth"
+	"github.com/kensac/orbit/internal/auth/authtest"
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -24,7 +26,30 @@ var token = strings.Repeat("t", 32)
 
 var ctx = context.Background()
 
+// env is a running API: the public listener (srv), the internal one, and
+// the stand-in authentik issuer whose tokens the public one accepts.
+type env struct {
+	srv, internal *httptest.Server
+	s             *store.Store
+	e             *engine.Engine
+	is            *authtest.Issuer
+}
+
+const (
+	clientID = "orbit-ui"
+	group    = "infra-admins"
+)
+
+// person returns a valid authentik token for name.
+func (v *env) person(name string) string { return v.is.Mint(v.is.Valid(clientID, group, name)) }
+
 func server(t *testing.T) (*httptest.Server, *store.Store, *engine.Engine) {
+	t.Helper()
+	v := newEnv(t, nil)
+	return v.internal, v.s, v.e
+}
+
+func newEnv(t *testing.T, tweak func(*api.Server, *http.Server)) *env {
 	t.Helper()
 	s := testdb.New(t)
 	dir := t.TempDir()
@@ -49,10 +74,27 @@ channels: {c: {kind: log}}
 	if err := s.SyncAgents(ctx, map[string]store.AgentSpec{"a": {SHA: cfg.Agents["a"].SHA, JSON: b, Enabled: true}}); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer((&api.Server{Store: s, Engine: e, Token: token, Wake: func() {},
-		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}).Handler())
-	t.Cleanup(srv.Close)
-	return srv, s, e
+	is := authtest.NewIssuer(t)
+	ver, err := auth.New(auth.Config{Issuers: []string{is.URL}, ClientIDs: []string{clientID}, Group: group})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	a := &api.Server{Store: s, Engine: e, Token: token, Verifier: ver, Wake: func() {}, Stop: stop,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	pub := httptest.NewUnstartedServer(nil)
+	if tweak != nil {
+		tweak(a, pub.Config)
+	}
+	pub.Config.Handler = a.Handler()
+	pub.Start()
+	internal := httptest.NewServer(a.InternalHandler())
+	t.Cleanup(func() {
+		close(stop)
+		pub.Close()
+		internal.Close()
+	})
+	return &env{srv: pub, internal: internal, s: s, e: e, is: is}
 }
 
 func call(t *testing.T, method, u, auth, body string) (int, map[string]any) {
@@ -71,7 +113,7 @@ func call(t *testing.T, method, u, auth, body string) (int, map[string]any) {
 	return resp.StatusCode, v
 }
 
-func TestAPIRequiresTheToken(t *testing.T) {
+func TestInternalListenerAcceptsTheOperatorToken(t *testing.T) {
 	srv, _, _ := server(t)
 	if code, _ := call(t, "GET", srv.URL+"/api/v1/agents", "", ""); code != 401 {
 		t.Fatalf("no token = %d", code)
@@ -108,7 +150,8 @@ func TestManualRunAndMessageWake(t *testing.T) {
 }
 
 func TestApprovalPage(t *testing.T) {
-	srv, s, e := server(t)
+	v := newEnv(t, nil)
+	srv, s, e := v.srv, v.s, v.e
 	id, _ := s.EnqueueRun(ctx, store.NewRun{Agent: "a", SpecSHA: e.Current().Config.Agents["a"].SHA, Trigger: "manual"})
 	c, _ := s.ClaimRun(ctx, "w")
 	ids, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Status: "succeeded"}, store.Outcome{
