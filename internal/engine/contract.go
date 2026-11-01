@@ -166,19 +166,42 @@ Rules:
 	return b.String()
 }
 
+// promptRun is what the prompt says about this run itself.
+type promptRun struct {
+	Trigger string
+	// Wake is the trigger's prompt; for a continuation, the agent's note.
+	Wake  string
+	Chain int
+	// Continuing is true when the backend continues the agent's session,
+	// which already holds the charter and the conversation.
+	Continuing bool
+}
+
 // userPrompt is the run's content: charter, why it woke, memory and inbox.
-func userPrompt(a *spec.Agent, now time.Time, trigger, wake string, rc *store.RunContext, inputs []runner.Input) string {
+// The charter and memory are repeated in a continued session too: they are
+// small, and they are the authority if the CLI has compacted the session.
+func userPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContext, convo []store.ConversationItem, inputs []runner.Input) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Charter\n\n%s\n\n", strings.TrimSpace(a.Charter))
-	fmt.Fprintf(&b, "# This run\n\nNow: %s (%s)\nTrigger: %s\n", now.Format("Monday 2006-01-02 15:04 MST"), a.Timezone, trigger)
-	if strings.TrimSpace(wake) != "" {
-		fmt.Fprintf(&b, "\n%s\n", strings.TrimSpace(wake))
+	fmt.Fprintf(&b, "# This run\n\nNow: %s (%s)\nTrigger: %s\n", now.Format("Monday 2006-01-02 15:04 MST"), a.Timezone, run.Trigger)
+	if run.Continuing {
+		b.WriteString("Session: continued. Your earlier runs in this session are above; this message starts a new run. Inputs listed below are this run's, freshly fetched: read them rather than relying on earlier reads.\n")
+	}
+	if run.Trigger == "continue" {
+		fmt.Fprintf(&b, "\nYou asked to be woken again (continuation %d of at most %d). Your note to yourself:\n\n%s\n",
+			run.Chain, actions.MaxContinueChain, strings.TrimSpace(run.Wake))
+	} else if strings.TrimSpace(run.Wake) != "" {
+		fmt.Fprintf(&b, "\n%s\n", strings.TrimSpace(run.Wake))
 	}
 	b.WriteString("\n# Memory\n\n")
 	if strings.TrimSpace(rc.Memory) == "" {
 		b.WriteString("(empty: this is your first run, or nothing has been kept yet)\n")
 	} else {
 		b.WriteString(rc.Memory + "\n")
+	}
+	if len(convo) > 0 {
+		b.WriteString("\n# Conversation so far (oldest first; earlier runs' reports are yours)\n\n")
+		b.WriteString(renderConversation(convo, now.Location()))
 	}
 	if len(rc.Messages) > 0 {
 		b.WriteString("\n# Messages from your person since your last run\n\n")

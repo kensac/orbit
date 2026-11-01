@@ -110,7 +110,8 @@ asked.
   `reply_to`, when set, is the message it answers. `run_id` is the run that
   read a person's message (`null` until one starts) or the run that asked a
   question.
-- **Runs.** `trigger` is `schedule`, `manual` or `message`. `status` is
+- **Runs.** `trigger` is `schedule`, `manual`, `message` or `continue` (the
+  agent asked to be woken again). `status` is
   `queued`, `running`, `succeeded`, `failed` or `cancelled`. `attempt` counts
   claims (0 while never started; a run interrupted by a deploy is claimed
   again). `started_at` is the latest attempt's start, `null` while queued.
@@ -200,7 +201,9 @@ the concatenated `text`: `text` is what the agent narrated while working.
 ## Runs, events, artifacts
 
 - `GET /runs?agent=&status=&before=&limit=`
-- `GET /runs/{id}`
+- `GET /runs/{id}`: also `session_mode` (`fresh`, `resumed`, `live`),
+  `session_parent` and `session_depth` for an agent with a session, and
+  `run_after`, `chain` and `continues` for a `continue` run.
 - `POST /runs/{id}/cancel`: `200 {"cancelled": true}`; queued runs only, 409
   otherwise
 - `GET /runs/{id}/events?attempt=&after=&limit=`: the backend's raw stream

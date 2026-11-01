@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/kensac/orbit/internal/spec"
 )
@@ -41,6 +42,40 @@ type Request struct {
 	// CLI runner always grants inside Workdir.
 	Tools        []string
 	OutputSchema json.RawMessage
+	// Session, when set, keeps the backend's conversation between runs
+	// (claude-code only). Nil means a session that is never persisted.
+	Session *Session
+}
+
+// Session is how one run uses a persistent Claude Code session. The engine
+// decides whether to continue one; the runner decides how (a resumed copy,
+// or a turn in a live process that already holds it).
+type Session struct {
+	// Home is the CLI's HOME, kept between runs: Claude Code stores the
+	// session's transcript under it (see SessionFile).
+	Home string
+	// Resume is the session to continue; empty starts a fresh one.
+	Resume string
+	// BaseCostUSD is the backend's cumulative cost total saved with Resume.
+	// The CLI reports a running total per session, so this run's cost is
+	// the difference.
+	BaseCostUSD float64
+	// KeepDays is Claude Code's transcript retention (cleanupPeriodDays):
+	// at least the resume window, so a session is never swept while it may
+	// still be resumed.
+	KeepDays int
+	// Live, when set, may take the turn in a live process.
+	Live *Live
+	// Key names the live process (the agent): one per key.
+	Key string
+	// Open starts a live process when none can take the turn, and keeps
+	// it for LiveIdle after the turn.
+	Open     bool
+	LiveIdle time.Duration
+	// Started is called once the runner knows how it will use the session
+	// (mode fresh, resumed or live; parent the session continued), before
+	// the prompt is sent. An error aborts the run.
+	Started func(mode, parent string) error
 }
 
 // Event is one line of the backend's stream, kept as the run's transcript.
@@ -58,6 +93,9 @@ type Result struct {
 	CostUSD   *float64
 	SessionID string
 	Model     string
+	// SessionCostUSD is the backend's cumulative cost for the session, when
+	// the run had one; CostUSD is then this run's share of it.
+	SessionCostUSD *float64
 }
 
 // Runner is a model backend.

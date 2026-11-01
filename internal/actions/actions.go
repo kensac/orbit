@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/kensac/orbit/internal/notify"
 	"github.com/kensac/orbit/internal/spec"
@@ -36,6 +37,9 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 	var out []Type
 	if r := a.RuleFor("notify"); r != spec.RuleDeny {
 		out = append(out, notifyType(a))
+	}
+	if r := a.RuleFor("continue"); r != spec.RuleDeny {
+		out = append(out, continueType())
 	}
 	for _, name := range slices.Sorted(maps.Keys(d.Endpoints)) {
 		typ := "webhook:" + name
@@ -113,17 +117,108 @@ func webhookType(endpoint string) Type {
 	}
 }
 
+// ContinueMinDelay is the shortest wait a continuation may ask for. The
+// executors poll every few seconds, so anything shorter is a busy loop
+// rather than a checkpoint.
+const ContinueMinDelay = time.Minute
+
+// ContinueMaxDelay is the longest. A wake further out than a day is a
+// schedule, which belongs in the agent's spec where a person can see it.
+const ContinueMaxDelay = 24 * time.Hour
+
+// MaxContinueChain bounds continuations in a row: each is a full run
+// (up to its timeout), so twelve is a long task's worth of checkpoints, and
+// past that a loop is likelier than progress. Any run that is not a
+// continuation (a message, a schedule) starts the count again.
+const MaxContinueChain = 12
+
+func continueType() Type {
+	return Type{
+		Name: "continue",
+		Description: fmt.Sprintf("Be woken again after_minutes from now (%d to %d) to carry on a longer task. "+
+			"note is what your next run is told: what you were doing and what to do next. "+
+			"At most %d continuations in a row; one waits at a time.",
+			int(ContinueMinDelay/time.Minute), int(ContinueMaxDelay/time.Minute), MaxContinueChain),
+		ParamsSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"after_minutes": map[string]any{"type": "integer",
+					"minimum": int(ContinueMinDelay / time.Minute), "maximum": int(ContinueMaxDelay / time.Minute)},
+				"note": map[string]any{"type": "string", "minLength": 1, "maxLength": 4000},
+			},
+			"required":             []string{"after_minutes", "note"},
+			"additionalProperties": false,
+		},
+		Validate: func(p json.RawMessage) error {
+			v, err := decodeContinue(p)
+			if err != nil {
+				return err
+			}
+			if v.Note == "" {
+				return fmt.Errorf("continue: note is required")
+			}
+			d := time.Duration(v.AfterMinutes) * time.Minute
+			if d < ContinueMinDelay || d > ContinueMaxDelay {
+				return fmt.Errorf("continue: after_minutes must be between %d and %d",
+					int(ContinueMinDelay/time.Minute), int(ContinueMaxDelay/time.Minute))
+			}
+			return nil
+		},
+	}
+}
+
+type continueParams struct {
+	AfterMinutes int    `json:"after_minutes"`
+	Note         string `json:"note"`
+}
+
+func decodeContinue(p json.RawMessage) (continueParams, error) {
+	var v continueParams
+	err := strictDecode(p, &v)
+	return v, err
+}
+
 // Executor runs approved actions.
 type Executor struct {
 	Deployment spec.Deployment
 	Channels   map[string]notify.Channel
 	Client     *http.Client
 	Env        func(string) (string, bool)
+	// Continue enqueues a continuation for agent, asked for by run fromRun.
+	// It returns the queued run's id, and queued false when one was
+	// already waiting (whose id it returns instead).
+	Continue func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (id string, queued bool, err error)
+}
+
+// Call is one action to execute: its type and parameters, and the agent
+// and run that proposed it.
+type Call struct {
+	Agent  string
+	RunID  string
+	Type   string
+	Params json.RawMessage
 }
 
 // Execute performs one action and returns a JSON result to store.
-func (e *Executor) Execute(ctx context.Context, typ string, params json.RawMessage) (json.RawMessage, error) {
+func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error) {
+	typ, params := c.Type, c.Params
 	switch {
+	case typ == "continue":
+		v, err := decodeContinue(params)
+		if err != nil {
+			return nil, err
+		}
+		if e.Continue == nil {
+			return nil, fmt.Errorf("continue: not available in this process")
+		}
+		id, queued, err := e.Continue(ctx, c.Agent, c.RunID, time.Duration(v.AfterMinutes)*time.Minute, v.Note)
+		if err != nil {
+			return nil, err
+		}
+		// A continuation already waiting is the agent's next wake; this one
+		// adds nothing, and its note stays in this action's params.
+		result, _ := json.Marshal(map[string]any{"run_id": id, "queued": queued})
+		return result, nil
 	case typ == "notify":
 		var p notifyParams
 		if err := strictDecode(params, &p); err != nil {

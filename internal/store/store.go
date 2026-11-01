@@ -222,6 +222,9 @@ type ClaimedRun struct {
 	SpecSHA string
 	Trigger string
 	Prompt  string
+	// Chain is how many continuations in a row this run is (0 unless its
+	// trigger is continue).
+	Chain int
 }
 
 // MaxAttempts bounds how often an interrupted run is claimed again. A run
@@ -241,13 +244,14 @@ func (s *Store) ClaimRun(ctx context.Context, worker string) (*ClaimedRun, error
 			WHERE id = (
 			    SELECT q.id FROM runs q
 			    WHERE q.status = 'queued'
+			      AND (q.run_after IS NULL OR q.run_after <= now())
 			      AND NOT EXISTS (SELECT 1 FROM runs b WHERE b.agent = q.agent AND b.status = 'running')
 			    ORDER BY q.created_at
 			    LIMIT 1
 			    FOR UPDATE SKIP LOCKED
 			)
-			RETURNING id::text, attempt, agent, spec_sha, trigger, prompt`, worker).
-			Scan(&c.ID, &c.Attempt, &c.Agent, &c.SpecSHA, &c.Trigger, &c.Prompt)
+			RETURNING id::text, attempt, agent, spec_sha, trigger, prompt, chain`, worker).
+			Scan(&c.ID, &c.Attempt, &c.Agent, &c.SpecSHA, &c.Trigger, &c.Prompt, &c.Chain)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -353,6 +357,8 @@ type RunResult struct {
 	Usage     json.RawMessage
 	CostUSD   *float64
 	SessionID string
+	// SessionCostUSD is the backend's cumulative total for the session.
+	SessionCostUSD *float64
 }
 
 // FinishRun records the outcome of a run that wrote nothing else (a failure,
@@ -379,9 +385,10 @@ func finishRun(ctx context.Context, db execer, runID string, r RunResult) error 
 	tag, err := db.Exec(ctx, `
 		UPDATE runs SET status = $2, finished_at = now(), error = NULLIF($3, ''),
 		       summary = NULLIF($4, ''), report = NULLIF($5, ''), output = $6, usage = $7,
-		       cost_usd = $8, session_id = NULLIF($9, '')
+		       cost_usd = $8, session_id = NULLIF($9, ''), session_cost_usd = $10
 		WHERE id = $1 AND status = 'running'`,
-		runID, r.Status, r.Error, r.Summary, r.Report, nullJSON(r.Output), nullJSON(r.Usage), r.CostUSD, r.SessionID)
+		runID, r.Status, r.Error, r.Summary, r.Report, nullJSON(r.Output), nullJSON(r.Usage), r.CostUSD, r.SessionID,
+		r.SessionCostUSD)
 	if err != nil {
 		return err
 	}
@@ -415,17 +422,26 @@ type Run struct {
 	Usage        json.RawMessage `json:"usage,omitempty"`
 	CostUSD      *float64        `json:"cost_usd,omitempty"`
 	SessionID    *string         `json:"session_id,omitempty"`
+	// SessionMode is fresh, resumed or live for an agent with a session.
+	SessionMode   *string    `json:"session_mode,omitempty"`
+	SessionParent *string    `json:"session_parent,omitempty"`
+	SessionDepth  *int       `json:"session_depth,omitempty"`
+	RunAfter      *time.Time `json:"run_after,omitempty"`
+	Continues     *string    `json:"continues,omitempty"`
+	Chain         int        `json:"chain,omitempty"`
 }
 
 const runCols = `id::text, attempt, agent, spec_sha, trigger, trigger_index, scheduled_for, prompt, status,
 	runner_kind, model, worker, created_at, started_at, finished_at, error, summary, report,
-	output, usage, cost_usd::float8, session_id`
+	output, usage, cost_usd::float8, session_id, session_mode, session_parent, session_depth,
+	run_after, continues::text, chain`
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.Attempt, &r.Agent, &r.SpecSHA, &r.Trigger, &r.TriggerIndex, &r.ScheduledFor, &r.Prompt,
 		&r.Status, &r.RunnerKind, &r.Model, &r.Worker, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.Error,
-		&r.Summary, &r.Report, &r.Output, &r.Usage, &r.CostUSD, &r.SessionID)
+		&r.Summary, &r.Report, &r.Output, &r.Usage, &r.CostUSD, &r.SessionID, &r.SessionMode, &r.SessionParent,
+		&r.SessionDepth, &r.RunAfter, &r.Continues, &r.Chain)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

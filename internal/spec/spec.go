@@ -124,10 +124,43 @@ type Agent struct {
 	Notify   NotifySpec `yaml:"notify,omitempty" json:"notify,omitempty"`
 	// MessagesTrigger starts a run when a person sends the agent a message.
 	MessagesTrigger bool `yaml:"wake_on_message,omitempty" json:"wake_on_message,omitempty"`
+	// Session keeps the backend's conversation between runs (claude-code
+	// only). Without it every run starts a fresh session and sees the
+	// recent thread as text in its prompt.
+	Session *SessionSpec `yaml:"session,omitempty" json:"session,omitempty"`
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
 }
+
+// SessionSpec is an agent's opt-in to continuing its Claude Code session.
+type SessionSpec struct {
+	// Resume continues the previous run's session when that run succeeded
+	// under the same spec within Idle; otherwise the run starts fresh.
+	Resume bool `yaml:"resume" json:"resume"`
+	// Idle is the resume window, measured from the previous run's end.
+	Idle Duration `yaml:"idle,omitempty" json:"idle,omitempty"`
+	// Live keeps one Claude Code process open for this long after a run a
+	// person's message started, and feeds the next runs into it instead of
+	// starting a process per run. Zero means no live process.
+	Live Duration `yaml:"live,omitempty" json:"live,omitempty"`
+}
+
+// DefaultSessionIdle is the resume window when a spec names none: a
+// working day's conversation, short enough that a stale session does not
+// outlive the person's train of thought.
+const DefaultSessionIdle = 6 * time.Hour
+
+// MaxSessionIdle bounds the resume window. A resumed session re-reads its
+// whole transcript, and Claude Code's prompt cache lasts at most an hour,
+// so a resume after a long gap pays for every earlier run again; past a
+// day a fresh session with the thread in its prompt is cheaper and as good.
+const MaxSessionIdle = 24 * time.Hour
+
+// MaxSessionLive bounds how long an idle live process is kept. Each one is
+// a resident CLI process; an hour covers a conversation with pauses, and
+// resume picks up after it closes.
+const MaxSessionLive = time.Hour
 
 // Trigger is one way an agent wakes. Exactly one of Schedule is set today;
 // the struct leaves room for event triggers.
@@ -326,6 +359,9 @@ func (c *Config) applyDefaults() {
 		if a.Notify.When == "" {
 			a.Notify.When = "always"
 		}
+		if a.Session != nil && a.Session.Resume && a.Session.Idle == 0 {
+			a.Session.Idle = Duration(DefaultSessionIdle)
+		}
 		for i := range a.Sources {
 			if a.Sources[i].MaxBytes == 0 {
 				// A month of transactions from Sure is about 300 KB; 8 MB is
@@ -465,13 +501,13 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("action %q: rule must be auto, approve or deny", typ)
 		}
 		switch {
-		case typ == "notify":
+		case typ == "notify", typ == "continue":
 		case strings.HasPrefix(typ, "webhook:"):
 			if _, ok := c.Deployment.Endpoints[strings.TrimPrefix(typ, "webhook:")]; !ok {
 				at("action %q: unknown endpoint", typ)
 			}
 		default:
-			at("action %q: unknown action type (want notify or webhook:<endpoint>)", typ)
+			at("action %q: unknown action type (want notify, continue or webhook:<endpoint>)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
@@ -481,6 +517,30 @@ func (c *Config) validateAgent(a *Agent) []error {
 	}
 	if !slices.Contains(notifyWhen, a.Notify.When) {
 		at("notify.when must be always, agent or never")
+	}
+	if ss := a.Session; ss != nil {
+		rs := c.Deployment.Runners[a.Runner]
+		if rs.Kind != "claude-code" {
+			at("session: needs a claude-code runner (runner %q is %q)", a.Runner, rs.Kind)
+		}
+		if !ss.Resume && (ss.Idle != 0 || ss.Live != 0) {
+			at("session: idle and live need resume: true")
+		}
+		if ss.Idle < 0 || time.Duration(ss.Idle) > MaxSessionIdle {
+			at("session.idle must be between 0 and %s", MaxSessionIdle)
+		}
+		if ss.Live < 0 || time.Duration(ss.Live) > MaxSessionLive {
+			at("session.live must be between 0 and %s", MaxSessionLive)
+		}
+		if ss.Live > ss.Idle {
+			at("session.live must not exceed session.idle: a live process outliving the resume window would continue a session resume would not")
+		}
+		if ss.Live > 0 && rs.MaxBudgetUSD > 0 {
+			// --max-budget-usd counts a process's whole lifetime, every
+			// turn fed into it (sdk.d.ts, Options.maxBudgetUsd and
+			// SDKResultMessage.total_cost_usd), so it is no per-run bound.
+			at("session.live cannot be used with runner %q's max_budget_usd: a live process's budget would cover every run fed into it", a.Runner)
+		}
 	}
 	return errs
 }
