@@ -14,14 +14,14 @@ import (
 // SetSession records how a running attempt uses its backend session. It is
 // written before the backend is called, so an attempt that is interrupted
 // still names the session it touched (see LatestSession's Tainted).
-func (s *Store) SetSession(ctx context.Context, runID, mode, parent string, depth int) error {
-	tag, err := s.Pool.Exec(ctx, `UPDATE runs SET session_mode = $2, session_parent = NULLIF($3, ''), session_depth = $4
-		WHERE id = $1 AND status = 'running'`, runID, mode, parent, depth)
+func (s *Store) SetSession(ctx context.Context, runID string, attempt int, mode, parent string, depth int) error {
+	tag, err := s.Pool.Exec(ctx, `UPDATE runs SET session_mode = $3, session_parent = NULLIF($4, ''), session_depth = $5
+		WHERE id = $1 AND status = 'running' AND attempt = $2`, runID, attempt, mode, parent, depth)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("set session of run %s: %w (not running)", runID, ErrConflict)
+		return fmt.Errorf("set session of run %s attempt %d: %w (not its running claim)", runID, attempt, ErrConflict)
 	}
 	return nil
 }
