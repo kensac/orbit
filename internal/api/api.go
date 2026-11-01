@@ -46,6 +46,10 @@ type Server struct {
 	StreamPoll, StreamPing time.Duration
 	// ConfigState is the configuration's load status, for GET /health.
 	ConfigState *engine.ConfigState
+	// Drain is this instance's drain switch: /readyz reports it, and the
+	// internal listener's POST /api/v1/drain starts it. Nil is never
+	// draining.
+	Drain *engine.Drain
 }
 
 // Handler returns the public listener's routes, the ones traefik serves.
@@ -59,6 +63,7 @@ func (s *Server) InternalHandler() http.Handler { return s.routes(true) }
 func (s *Server) routes(internal bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
+	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
 	api := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.authenticate(internal, h)) }
@@ -90,7 +95,11 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/actions/{id}/approve", s.decide(true))
 	api("POST /api/v1/actions/{id}/reject", s.decide(false))
 
-	if !internal {
+	if internal {
+		// Only the host's rollout reaches this listener; a person cannot
+		// take an instance out of service from the public one.
+		api("POST /api/v1/drain", s.drain)
+	} else {
 		mux.HandleFunc("GET /ui/actions/{id}", s.approvalPage)
 		mux.HandleFunc("POST /ui/actions/{id}", s.approvalSubmit)
 		mux.HandleFunc("GET /ui/runs/{id}", s.runPage)
@@ -106,12 +115,45 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok\n"))
 }
 
+// readyz is readiness, not liveness: 200 only while this instance takes
+// new work, so the proxy routes to it; 503 while it drains (it still serves
+// whoever is connected) or cannot reach the database. traefik health-checks
+// this; the container's own HEALTHCHECK stays on /healthz, because a
+// draining instance is alive and must not be restarted.
+func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	if s.Drain != nil && s.Drain.Draining() {
+		http.Error(w, "draining", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.Store.Pool.Ping(r.Context()); err != nil {
+		http.Error(w, "database: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	_, _ = w.Write([]byte("ready\n"))
+}
+
+// drain serves POST /api/v1/drain (internal listener): start draining, as
+// SIGTERM does. The rollout calls it on the old instance once the new one
+// is ready, then waits for the old one to exit.
+func (s *Server) drain(w http.ResponseWriter, r *http.Request) {
+	if s.Drain == nil {
+		writeErr(w, http.StatusNotImplemented, "this server has no drain")
+		return
+	}
+	started := s.Drain.Start()
+	if started {
+		s.Log.Info("draining: requested over the internal API")
+	}
+	respondStatus(w, http.StatusAccepted, map[string]any{"draining": true, "started": started,
+		"since": s.Drain.Since()}, nil)
+}
+
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(sw, r)
-		if r.URL.Path != "/healthz" && r.URL.Path != "/metrics" {
+		if r.URL.Path != "/healthz" && r.URL.Path != "/readyz" && r.URL.Path != "/metrics" {
 			s.Log.Info("http", "method", r.Method, "path", r.URL.Path, "status", sw.status, "ms", time.Since(start).Milliseconds())
 		}
 	})
@@ -301,7 +343,12 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 	run, err := s.Store.GetRun(r.Context(), r.PathValue("id"))
-	respond(w, map[string]any{"run": run}, err)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	attempts, err := s.Store.ListAttempts(r.Context(), run.ID)
+	respond(w, map[string]any{"run": run, "attempts": orEmpty(attempts)}, err)
 }
 
 func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {

@@ -1,6 +1,8 @@
 package runner
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -209,6 +211,9 @@ func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*R
 		return parseClaudeResult(final)
 	}
 
+	if sess.Attached != nil {
+		emit = attachOnce(emit, sess.Attached)
+	}
 	var final []byte
 	var err error
 	if sess.Live != nil {
@@ -310,4 +315,56 @@ func parseClaudeResult(line []byte) (*Result, error) {
 	}
 	res.Output = r.StructuredOutput
 	return res, nil
+}
+
+// attachOnce passes events through and calls attached with the first
+// session id the stream names. Every line of Claude Code's stream-json
+// carries session_id; the first is the system init line.
+func attachOnce(emit func(Event), attached func(string)) func(Event) {
+	seen := false
+	return func(ev Event) {
+		if !seen {
+			var h struct {
+				SessionID string `json:"session_id"`
+			}
+			if json.Unmarshal(ev.Payload, &h) == nil && h.SessionID != "" {
+				seen = true
+				attached(h.SessionID)
+			}
+		}
+		emit(ev)
+	}
+}
+
+// TranscriptCost is the running cost total Claude Code last saved in a
+// session's transcript: the CLI appends a cost-state line when its process
+// exits, a SIGTERM included, and restores it on --resume, so a resumed
+// session's reported total includes it. A process killed with SIGKILL saves
+// none, and what it spent is unknown (ok false). Verified on 2.1.316.
+func TranscriptCost(home, workdir, id string) (total float64, ok bool) {
+	path, found := SessionFile(home, workdir, id)
+	if !found {
+		return 0, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadBytes('\n')
+		if bytes.Contains(line, []byte(`"cost-state"`)) {
+			var c struct {
+				Type         string   `json:"type"`
+				TotalCostUSD *float64 `json:"totalCostUSD"`
+			}
+			if json.Unmarshal(line, &c) == nil && c.Type == "cost-state" && c.TotalCostUSD != nil {
+				total, ok = *c.TotalCostUSD, true
+			}
+		}
+		if err != nil {
+			return total, ok
+		}
+	}
 }

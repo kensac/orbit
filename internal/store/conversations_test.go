@@ -102,7 +102,7 @@ func TestConversationsAreIndependentThreads(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Status: "succeeded", Report: "r", SessionID: session},
+		if _, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Attempt: 1, Status: "succeeded", Report: "r", SessionID: session},
 			store.Outcome{Questions: []string{"which?"}}); err != nil {
 			t.Fatal(err)
 		}

@@ -17,11 +17,11 @@ func finish(t *testing.T, s *store.Store, status, session string, mode string, p
 		t.Fatalf("claim: %v %v", c, err)
 	}
 	if mode != "" {
-		if err := s.SetSession(ctx, c.ID, mode, parent, 1); err != nil {
+		if err := s.SetSession(ctx, c.ID, c.Attempt, mode, parent, 1); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := s.FinishRun(ctx, c.ID, store.RunResult{Status: status, SessionID: session, SessionCostUSD: &cost}); err != nil {
+	if err := s.FinishRun(ctx, c.ID, store.RunResult{Attempt: 1, Status: status, SessionID: session, SessionCostUSD: &cost}); err != nil {
 		t.Fatal(err)
 	}
 	return c.ID
@@ -55,10 +55,10 @@ func TestLatestSessionReportsTheLatestFinishedRun(t *testing.T) {
 	// its session recorded: that, too, taints the session it continued.
 	manual(t, s, "a")
 	c, _ := s.ClaimRun(ctx, "w")
-	if err := s.SetSession(ctx, c.ID, "live", "s2", 2); err != nil {
+	if err := s.SetSession(ctx, c.ID, c.Attempt, "live", "s2", 2); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RequeueRun(ctx, c.ID); err != nil {
+	if err := s.HandBack(ctx, c.ID, c.Attempt, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if p, _ = s.LatestSession(ctx, defaultConv(t, s, "a")); p.SessionID != "s2" || !p.Tainted {
@@ -70,7 +70,7 @@ func TestSetSessionNeedsARunningRun(t *testing.T) {
 	s := testdb.New(t)
 	seed(t, s, "a")
 	id := manual(t, s, "a")
-	if err := s.SetSession(ctx, id, "fresh", "", 1); !errors.Is(err, store.ErrConflict) {
+	if err := s.SetSession(ctx, id, 1, "fresh", "", 1); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -109,7 +109,7 @@ func TestContinuationsWaitDeduplicateAndChain(t *testing.T) {
 	}
 	// A continuation asked for by a continuation extends the chain, up to
 	// MaxChain.
-	if err := s.FinishRun(ctx, id, store.RunResult{Status: "succeeded"}); err != nil {
+	if err := s.FinishRun(ctx, id, store.RunResult{Attempt: 1, Status: "succeeded"}); err != nil {
 		t.Fatal(err)
 	}
 	second, _, err := s.EnqueueContinuation(ctx, store.Continuation{Agent: "a", FromRun: id, After: time.Minute, Note: "n", MaxChain: 2})
@@ -139,7 +139,7 @@ func TestConversationIsTheThreadBeforeThisRun(t *testing.T) {
 	if _, err := s.StartRunContext(ctx, c.ID, "a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Status: "succeeded", Summary: "$412", Report: "Food was $412."},
+	if _, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Attempt: 1, Status: "succeeded", Summary: "$412", Report: "Food was $412."},
 		store.Outcome{Questions: []string{"Include restaurants?"}}); err != nil {
 		t.Fatal(err)
 	}

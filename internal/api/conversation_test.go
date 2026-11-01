@@ -26,7 +26,7 @@ func claim(t *testing.T, v *env, kind string) (string, int) {
 	if err != nil || c == nil {
 		t.Fatalf("claim: %+v %v", c, err)
 	}
-	if err := v.s.SetRunner(ctx, c.ID, kind, "", specSHA(v)); err != nil {
+	if err := v.s.SetRunner(ctx, c.ID, c.Attempt, kind, "", specSHA(v)); err != nil {
 		t.Fatal(err)
 	}
 	return c.ID, c.Attempt
@@ -120,7 +120,7 @@ func TestThePersonAuthorsAndDecides(t *testing.T) {
 
 	enqueue(t, v)
 	id, _ := claim(t, v, "claude-code")
-	ids, err := v.s.RecordOutcome(ctx, id, "a", store.RunResult{Status: "succeeded"}, store.Outcome{
+	ids, err := v.s.RecordOutcome(ctx, id, "a", store.RunResult{Attempt: 1, Status: "succeeded"}, store.Outcome{
 		Actions: []store.ProposedAction{
 			{Type: "notify", Params: json.RawMessage(`{}`), Rule: "approve"},
 			{Type: "notify", Params: json.RawMessage(`{}`), Rule: "approve"},
@@ -212,7 +212,7 @@ func TestThread(t *testing.T) {
 		assistantTool("Read", `{"file_path":"/data/runs/x-1/inputs/transactions.json"}`),
 		assistantText("Summing."),
 		assistantTool("StructuredOutput", `{}`))
-	if _, err := v.s.RecordOutcome(ctx, run, "a", store.RunResult{Status: "succeeded", Summary: "s", Report: "$84"}, store.Outcome{
+	if _, err := v.s.RecordOutcome(ctx, run, "a", store.RunResult{Attempt: 1, Status: "succeeded", Summary: "s", Report: "$84"}, store.Outcome{
 		Questions: []string{"Was the 12th a refund?", "Count tips?"},
 		Actions:   []store.ProposedAction{{Type: "notify", Params: json.RawMessage(`{"channel":"c"}`), Reason: "r", Rule: "approve"}},
 	}); err != nil {
@@ -421,7 +421,7 @@ func TestStreamFollowsARunThroughARequeue(t *testing.T) {
 
 	// A deploy requeues it; the next claim is a new attempt, streamed from
 	// its own start.
-	if err := v.s.RequeueRun(ctx, run); err != nil {
+	if err := v.s.HandBack(ctx, run, 1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	expect(t, ch, "status", `{"attempt":1,"status":"queued"}`)
@@ -457,7 +457,7 @@ wait:
 		t.Fatalf("pings in 1s = %d", pings)
 	}
 
-	if _, err := v.s.RecordOutcome(ctx, run, "a", store.RunResult{Status: "succeeded", Report: "r"},
+	if _, err := v.s.RecordOutcome(ctx, run, "a", store.RunResult{Attempt: a2, Status: "succeeded", Report: "r"},
 		store.Outcome{Questions: []string{"q?"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +569,7 @@ func TestStepsMatchTheStream(t *testing.T) {
 		run := enqueue(t, v)
 		_, attempt := claim(t, v, kind)
 		appendEvents(t, v, run, attempt, lines...)
-		if err := v.s.FinishRun(ctx, run, store.RunResult{Status: "succeeded"}); err != nil {
+		if err := v.s.FinishRun(ctx, run, store.RunResult{Attempt: 1, Status: "succeeded"}); err != nil {
 			t.Fatal(err)
 		}
 		ch, _ := openStream(t, v, run)
@@ -614,7 +614,7 @@ func TestRetriedSendsActOnce(t *testing.T) {
 	}
 
 	id, _ := claim(t, v, "claude-code")
-	ids, err := v.s.RecordOutcome(ctx, id, "a", store.RunResult{Status: "succeeded"}, store.Outcome{
+	ids, err := v.s.RecordOutcome(ctx, id, "a", store.RunResult{Attempt: 1, Status: "succeeded"}, store.Outcome{
 		Actions: []store.ProposedAction{{Type: "notify", Params: json.RawMessage(`{}`), Rule: "approve"}}})
 	if err != nil {
 		t.Fatal(err)
