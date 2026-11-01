@@ -304,3 +304,13 @@ func TestConcurrentRetriesPostOnce(t *testing.T) {
 		t.Fatalf("messages %d runs %d", msgs, runs)
 	}
 }
+
+// defaultConv is the agent's default conversation.
+func defaultConv(t *testing.T, s *store.Store, agent string) string {
+	t.Helper()
+	var id string
+	if err := s.Pool.QueryRow(ctx, `SELECT id::text FROM conversations WHERE agent = $1 AND is_default`, agent).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}

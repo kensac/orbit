@@ -27,7 +27,7 @@ const maxSessionDepth = 20
 // decision and its reason are an event of the run.
 func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, workdir, home string, emit func(string, any)) (*runner.Session, bool, error) {
 	idle := time.Duration(a.Session.Idle)
-	prior, err := e.Store.LatestSession(ctx, a.Name)
+	prior, err := e.Store.LatestSession(ctx, c.ConversationID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -60,7 +60,9 @@ func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.Claime
 	sess := &runner.Session{
 		Home:     home,
 		KeepDays: int(math.Ceil(idle.Hours()/24)) + 1,
-		Key:      a.Name,
+		// One live process per conversation: a turn never lands in
+		// another conversation's process.
+		Key: c.ConversationID,
 	}
 	depth := 1
 	if reason == "" {

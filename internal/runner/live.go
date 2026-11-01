@@ -49,7 +49,7 @@ const MaxLive = 4
 // closes before its process group is killed, as runCLI does on a timeout.
 const liveCloseGrace = 10 * time.Second
 
-// Live holds the live processes, one per key (agent).
+// Live holds the live processes, one per key (a conversation).
 type Live struct {
 	mu     sync.Mutex
 	procs  map[string]*liveProc

@@ -2,7 +2,7 @@
 
 orbit runs standing agents: each has a charter (what it is responsible for),
 triggers (when it wakes), sources (what it reads), memory (what it keeps
-between runs), an inbox (what its person tells it), and rules (what it may do
+between runs), conversations (what its person tells it), and rules (what it may do
 alone, what waits for approval, what it may not do at all).
 
 ## Code first, model last
@@ -41,7 +41,18 @@ inputs go in a per-attempt directory removed after the run.
 
 ## Conversations
 
-A run that starts a fresh session is shown its agent's recent thread: the
+An agent has many conversations (`conversations`; the person opens them as
+"New chat") and one default conversation, where schedules, manual runs and
+the agent-level API speak. Every message and run is in exactly one
+(`conversation_id`, NOT NULL; a foreign key on `(conversation_id, agent)`
+keeps it the agent's own), and a row written without one (the previous
+release during a deploy) lands in the default by trigger. What a run reads
+of its person is its conversation's only: unread messages, open questions,
+the thread below, and the session it continues. Memory, schedules, rules
+and `runs_one_running` stay per agent, so an agent's conversations queue
+behind each other rather than race on its memory.
+
+A run that starts a fresh session is shown its conversation's recent thread: the
 person's messages earlier runs read, earlier reports and errors, and the
 questions asked, newest kept, within `conversationBudget` (24 KB, each item
 clipped to a quarter of it; `internal/engine/conversation.go`). It is stored
@@ -61,7 +72,7 @@ central store would save it after a run and write it back before a resume,
 as the Agent SDK's SessionStore does (it materializes
 `<dir>/projects/<key>/<id>.jsonl` and points `CLAUDE_CONFIG_DIR` there).
 
-- **Resume.** A run continues the session of the agent's latest finished run
+- **Resume.** A run continues the session of its conversation's latest finished run
   when that run succeeded on Claude Code under the same spec within `idle`,
   no live turn on the session failed, the chain is under `maxSessionDepth`
   (20) runs, and the transcript is on disk. Otherwise it starts fresh and the
@@ -72,8 +83,10 @@ as the Agent SDK's SessionStore does (it materializes
   the conversation, which the session holds.
 - **Live process.** A run a person's message starts opens one `claude -p
   --input-format stream-json` process and leaves it open for `live`; the next
-  run of that agent (any trigger) is written to it as one user message while it
-  holds the session that run would resume. Each message still is a run row
+  run of that conversation (any trigger) is written to it as one user message
+  while it holds the session that run would resume. The process is keyed by
+  the conversation, so a turn never lands in another conversation's process.
+  Each message still is a run row
   with its own events and outcome. A turn ends at its `result` line, which
   carries that turn's own `structured_output` (verified on 2.1.316). Any
   failure, a crash, a timeout or a mismatch closes the process; at most
@@ -114,7 +127,8 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
 
 An agent with the `continue` action may ask to be woken again
 (`after_minutes`, 1 to 1440) with a note to itself. When executed, it queues a
-`continue` run with `run_after`; `runs_one_continuation` keeps one waiting
+`continue` run with `run_after`, in the asking run's conversation;
+`runs_one_continuation` keeps one waiting
 per agent, and a chain is bounded by `actions.MaxContinueChain` (12): the
 run at the limit has its proposal denied, and `EnqueueContinuation` holds the
 same bound. A long task becomes a chain of short checkpointed runs, each with
@@ -146,11 +160,12 @@ to Codex or to a plain API call is one line in its spec.
 - **Memory** is one Markdown document per agent, replaced whole by a run that
   sets `memory.update`. Every version is kept (`memory_versions`).
 - **Questions** a run asks become `from_agent` messages and are delivered with
-  the report. A question stays open until a reply names it or any later
-  message reaches the agent; open questions are shown to the next run so it
-  does not ask again.
-- **Messages** to an agent are consumed by the first run that starts after
-  them. A run that fails or is interrupted hands them back.
+  the report, in the asking run's conversation. A question stays open until
+  a reply names it or any later message reaches that conversation; open
+  questions are shown to the conversation's next run so it does not ask
+  again.
+- **Messages** to an agent are consumed by the first run of their
+  conversation that starts after them. A run that fails or is interrupted hands them back.
 
 ## Actions and rules
 

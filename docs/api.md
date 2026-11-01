@@ -65,18 +65,72 @@ A rejected token is `401` with `{"error": "<check>: <reason>", "check":
 }]}
 ```
 
-`unread_messages` counts the agent's open questions. `GET /agents/{name}`
+`unread_messages` counts the agent's open questions, in all its
+conversations. `GET /agents/{name}`
 adds `"memory": "<markdown>"`. `needs_input` is true while the agent waits
 on its person: an open question or a pending action.
 
-## A conversation
+## Conversations
 
-A conversation with an agent is its thread: the person's messages, the
-agent's questions, and every run (whatever its trigger; scheduled runs also
-speak). An agent's reply is its run's `report`, plus any `questions` it
-asked.
+An agent has as many conversations as its person opens ("New chat"), and
+one **default conversation** (`is_default`, titled `General`) where its
+scheduled and manual runs speak and which the agent-level routes
+(`/agents/{name}/thread`, `/agents/{name}/messages`) read and write. Each
+conversation is its own thread: its inbox, open questions, the conversation
+a run is shown and the backend session a run continues are that
+conversation's only. Memory, schedules and rules stay per agent. A
+conversation is never deleted, only archived.
 
-`GET /agents/{name}/thread?before=<cursor>&limit=<n>`
+`GET /agents/{name}/conversations?archived=<bool>&before=<cursor>&limit=<n>`
+
+```json
+{"conversations": [{
+  "id": "uuid", "agent": "finance", "title": "How much on Uber Eats in October?",
+  "is_default": false, "archived": false,
+  "created_at": "...", "last_activity_at": "...", "needs_input": true}],
+ "has_more": false, "next_before": null}
+```
+
+Newest activity first (a message or a run in it is activity). `archived`
+(default `false`) lists the archived ones instead. Paging is as for a
+thread: `next_before` is an opaque cursor, `null` exactly when `has_more`
+is false; `limit` defaults to 50, at most 200. `needs_input` is true while
+one of its questions is open or one of its runs' actions is pending.
+
+`POST /agents/{name}/conversations`
+
+```json
+{"title": "optional", "body": "optional first message", "wake": true,
+ "client_request_id": "optional, minted by the client"}
+```
+
+returns `201 {"conversation_id": "uuid", "message_id": "uuid", "run_id": "uuid"}`
+(`message_id` with a `body`, `run_id` when it woke a run; `wake` defaults to
+the agent's `wake_on_message`). Without a `title`, the first message names
+it: its first non-empty line, Markdown markers and extra whitespace
+removed, cut at a word to 60 characters (`store.DefaultTitle`, code, never
+a model). `client_request_id` makes a retry return the first result, as for
+messages below.
+
+`GET /conversations/{id}` returns `{"conversation": {...}}`, the same shape.
+
+`PATCH /conversations/{id}` `{"title": "...", "archived": true}` (either
+field) returns the updated `{"conversation": {...}}`. A title is at most 240
+characters (400 otherwise). The default conversation cannot be archived
+(409). A message to an archived conversation brings it back.
+
+`POST /conversations/{id}/messages` takes and returns exactly what
+`POST /agents/{name}/messages` does (below), in that conversation.
+
+## A conversation's thread
+
+A thread is the person's messages, the agent's questions, and every run
+(whatever its trigger) of one conversation. An agent's reply is its run's
+`report`, plus any `questions` it asked.
+
+`GET /conversations/{id}/thread?before=<cursor>&limit=<n>`, and
+`GET /agents/{name}/thread?before=<cursor>&limit=<n>` for the default
+conversation:
 
 ```json
 {"items": [
@@ -121,9 +175,10 @@ asked.
   `actions` are always arrays.
 - **Questions** appear twice by design: in their run's `questions`, and as
   `from: "agent"` message items with the same `id`. A client dedupes by
-  `id`, and replies by sending a message with `reply_to` set to it. `open`
-  is true until a message names the question in `reply_to` or any later
-  message reaches the agent (the next run sees the person's words).
+  `id`, and replies by sending a message with `reply_to` set to it, in the
+  same conversation (a `reply_to` from another one is a 400). `open` is true
+  until a message names the question in `reply_to` or any later message
+  reaches its conversation (the next run there sees the person's words).
 - **Waiting on the person.** `needs_input` on a run is true while one of its
   questions is open or one of its actions is `pending`: the run finished,
   and the agent is waiting for an answer or an approval. It is a state
@@ -141,7 +196,8 @@ asked.
  "client_message_id": "optional, minted by the client"}
 ```
 
-returns `201 {"message_id": "uuid", "run_id": "uuid"}`. `run_id` is present
+posts to the default conversation, and returns
+`201 {"message_id": "uuid", "run_id": "uuid"}`. `run_id` is present
 when the message woke a run (`wake`, default: the agent's `wake_on_message`).
 Stream that run to show the reply as it is written.
 
@@ -157,7 +213,8 @@ token's person. Only with the operator token, an `"author"` field names it
 (otherwise none is recorded).
 
 `POST /agents/{name}/runs` `{"prompt": "optional"}` starts a run without a
-message: `202 {"run_id": "uuid"}`.
+message, in the default conversation: `202 {"run_id": "uuid"}`.
+`GET /agents/{name}/messages` lists the default conversation's messages.
 
 ## Streaming a run
 
