@@ -89,6 +89,13 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/actions/{id}", s.getAction)
 	api("POST /api/v1/actions/{id}/approve", s.decide(true))
 	api("POST /api/v1/actions/{id}/reject", s.decide(false))
+	api("POST /api/v1/tickets", s.createTicket)
+	api("GET /api/v1/tickets", s.listTickets)
+	api("GET /api/v1/tickets/{id}", s.getTicket)
+	api("POST /api/v1/tickets/{id}/plans/{version}/approve", s.approvePlan)
+	api("POST /api/v1/tickets/{id}/abandon", s.ticketMove(store.TicketAbandoned))
+	api("POST /api/v1/tickets/{id}/retry", s.ticketMove(store.TicketApproved))
+	api("POST /api/v1/tickets/{id}/reopen", s.ticketMove(store.TicketOpen))
 
 	if !internal {
 		mux.HandleFunc("GET /ui/actions/{id}", s.approvalPage)

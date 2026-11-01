@@ -7,8 +7,19 @@ orbit opens, and a merge orbit performs once every required check is green.
 In the fleet a merge is a deploy, so the merge is gated by code, not by the
 model.
 
-This document is the design. None of it is built yet; as pieces land, they
-are marked **Built** here.
+This document is the design. What exists today:
+
+| piece | state | where |
+|---|---|---|
+| `tickets` (one per conversation), `ticket_events`, `ticket_plans`; guarded transitions; receipts for filing and approving; a message in a ticket's conversation reopening or refusing per the ticket's state | **Built**, unit-tested | `internal/store/tickets.go`, `migrations/00005_tickets.sql` |
+| the ticket API below; the person from the verified token; `ticket_id` on a conversation | **Built**, unit-tested | `internal/api/tickets.go` |
+| App JWT, per-repository down-scoped tokens, revocation, git auth by environment | **Built**, tested against a fake GitHub | `internal/github/app.go` |
+| `github:merge`: the checks gate (with the Open decisions defaults), the scrub, the pinned squash merge | **Built**, tested against a fake GitHub | `internal/github/merge.go`, `internal/actions` |
+| the `github:` block in `orbit.yaml` | **Built** | `internal/spec` |
+| the `plan` output field, the ticket loop (build enqueue, PR polling, proposing the merge, reconciliation), the build runner and sandboxd, review comments, the failure report, the self-hosting rules | not built | specified below |
+
+Nothing has run against the real GitHub API yet; the fake
+(`internal/github/githubtest`) follows GitHub's documented shapes.
 
 ## Principles applied here
 
