@@ -51,10 +51,17 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
-	send := func(event string, data any) error {
+	// send writes one event. id is set on text and tool events only, so a
+	// client's Last-Event-ID is always the last narration it received.
+	send := func(event, id string, data any) error {
 		b, err := json.Marshal(data)
 		if err != nil {
 			return err
+		}
+		if id != "" {
+			if _, err := fmt.Fprintf(w, "id: %s\n", id); err != nil {
+				return err
+			}
 		}
 		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b); err != nil {
 			return err
@@ -62,8 +69,12 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 		return rc.Flush()
 	}
 	sendStatus := func(p *store.RunProgress) error {
-		return send("status", map[string]any{"status": p.Status, "attempt": p.Attempt})
+		return send("status", "", map[string]any{"status": p.Status, "attempt": p.Attempt})
 	}
+	// A reconnecting client names the last narration it has; within the
+	// same attempt, everything up to it is skipped. Skipped narration is
+	// still read, so chunk separators come out exactly as in a full replay.
+	resume, resuming := parseEventID(r.Header.Get("Last-Event-ID"))
 
 	attempt, seq, status := p.Attempt, 0, p.Status
 	// wrote is whether this attempt has sent text yet: each text event is a
@@ -82,16 +93,22 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, ev := range evs {
 				seq = ev.Seq
-				for _, n := range runner.Narrate(kind, ev.Kind, ev.Payload) {
+				for i, n := range runner.Narrate(kind, ev.Kind, ev.Payload) {
+					at := eventID{attempt, ev.Seq, i}
+					skip := resuming && resume.attempt == attempt && !resume.less(at)
 					if n.Tool != nil {
-						err = send("tool", n.Tool)
+						if !skip {
+							err = send("tool", at.String(), n.Tool)
+						}
 					} else {
 						chunk := n.Text
 						if wrote {
 							chunk = "\n\n" + chunk
 						}
 						wrote = true
-						err = send("text", map[string]string{"text": chunk})
+						if !skip {
+							err = send("text", at.String(), map[string]string{"text": chunk})
+						}
 					}
 					if err != nil {
 						return err
@@ -109,7 +126,7 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 			s.Log.Warn("stream done", "run", id, "err", err)
 			return
 		}
-		_ = send("done", run)
+		_ = send("done", "", run)
 	}
 
 	if sendStatus(p) != nil || drain(p.RunnerKind) != nil {
@@ -178,4 +195,26 @@ func orDefault(d, def time.Duration) time.Duration {
 		return d
 	}
 	return def
+}
+
+// eventID names one narration: the attempt, the transcript event's seq,
+// and its index among that event's narrations. Sent as "attempt.seq.index".
+type eventID struct{ attempt, seq, index int }
+
+func (e eventID) String() string { return fmt.Sprintf("%d.%d.%d", e.attempt, e.seq, e.index) }
+
+func (e eventID) less(o eventID) bool {
+	if e.seq != o.seq {
+		return e.seq < o.seq
+	}
+	return e.index < o.index
+}
+
+// parseEventID reads a Last-Event-ID; anything else means a full replay.
+func parseEventID(s string) (eventID, bool) {
+	var e eventID
+	if _, err := fmt.Sscanf(s, "%d.%d.%d", &e.attempt, &e.seq, &e.index); err != nil || e.attempt < 1 {
+		return eventID{}, false
+	}
+	return e, true
 }

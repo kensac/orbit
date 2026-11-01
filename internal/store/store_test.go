@@ -275,3 +275,32 @@ func TestEventsAndArtifactsAreKeptPerAttempt(t *testing.T) {
 		t.Fatalf("latest attempt has no events yet, got %d", len(latest))
 	}
 }
+
+func TestConcurrentRetriesPostOnce(t *testing.T) {
+	s := testdb.New(t)
+	seed(t, s, "a")
+	var wg sync.WaitGroup
+	results := make([]store.PostResult, 8)
+	for i := range results {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			r, _, err := s.PostMessageOnce(ctx, store.PostMessage{Agent: "a", SpecSHA: "sha-a", Body: "hi", Wake: true, ClientID: "c"})
+			if err != nil {
+				t.Error(err)
+			}
+			results[i] = r
+		}(i)
+	}
+	wg.Wait()
+	for _, r := range results {
+		if r != results[0] || r.RunID == "" {
+			t.Fatalf("results differ: %+v", results)
+		}
+	}
+	var msgs, runs int
+	_ = s.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM messages), (SELECT count(*) FROM runs)`).Scan(&msgs, &runs)
+	if msgs != 1 || runs != 1 {
+		t.Fatalf("messages %d runs %d", msgs, runs)
+	}
+}

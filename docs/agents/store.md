@@ -23,5 +23,9 @@ an agent's beliefs changed.
 - action: `pending -> approved | rejected`, `approved -> executing ->
   executed | failed`; `denied` and rule-approved are set at creation.
 
+A client request id (`receipts`) is written in the same transaction as the
+message or decision it records, so a retry returns the first result and a
+failure leaves no receipt.
+
 Every transition is a guarded UPDATE (`WHERE status = ...`); zero rows
 affected is `ErrConflict`, not success.

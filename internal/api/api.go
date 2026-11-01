@@ -207,6 +207,8 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		Author string `json:"author"`
 		// Wake overrides the agent's wake_on_message for this message.
 		Wake *bool `json:"wake"`
+		// ClientMessageID makes a retry return the first result.
+		ClientMessageID string `json:"client_message_id"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -225,24 +227,24 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	if p := principalOf(r); p.Person != "" {
 		author = p.Person
 	}
-	id, err := s.Store.SendToAgent(r.Context(), a.Name, body.Body, author, body.ReplyTo)
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	resp := map[string]any{"message_id": id}
 	wake := a.MessagesTrigger
 	if body.Wake != nil {
 		wake = *body.Wake
 	}
-	if wake {
-		runID, err := s.Store.EnqueueRun(r.Context(), store.NewRun{Agent: a.Name, SpecSHA: a.SHA, Trigger: "message"})
-		if err != nil {
-			respond(w, nil, err)
-			return
-		}
-		resp["run_id"] = runID
+	res, replayed, err := s.Store.PostMessageOnce(r.Context(), store.PostMessage{
+		Agent: a.Name, SpecSHA: a.SHA, Body: body.Body, Author: author, ReplyTo: body.ReplyTo,
+		Wake: wake, ClientID: body.ClientMessageID,
+	})
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	if res.RunID != "" && !replayed {
 		s.Wake()
+	}
+	resp := map[string]any{"message_id": res.MessageID}
+	if res.RunID != "" {
+		resp["run_id"] = res.RunID
 	}
 	respondStatus(w, http.StatusCreated, resp, nil)
 }
@@ -315,7 +317,8 @@ func (s *Server) getAction(w http.ResponseWriter, r *http.Request) {
 func (s *Server) decide(approve bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			By string `json:"by"`
+			By              string `json:"by"`
+			ClientRequestID string `json:"client_request_id"`
 		}
 		if r.ContentLength != 0 {
 			_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body)
@@ -326,8 +329,8 @@ func (s *Server) decide(approve bool) http.HandlerFunc {
 		} else if body.By == "" {
 			body.By = "operator"
 		}
-		err := s.Store.DecideAction(r.Context(), r.PathValue("id"), approve, body.By)
-		if err == nil {
+		replayed, err := s.Store.DecideActionOnce(r.Context(), r.PathValue("id"), approve, body.By, body.ClientRequestID)
+		if err == nil && !replayed {
 			s.Wake()
 		}
 		respond(w, map[string]any{"ok": err == nil}, err)
@@ -342,6 +345,8 @@ func respondStatus(w http.ResponseWriter, status int, v any, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "not found")
+	case errors.Is(err, store.ErrReceiptMismatch):
+		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, store.ErrConflict):
 		writeErr(w, http.StatusConflict, "no longer in a state that allows this")
 	case err != nil:

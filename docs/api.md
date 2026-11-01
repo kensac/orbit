@@ -60,12 +60,14 @@ A rejected token is `401` with `{"error": "<check>: <reason>", "check":
   "last_run": {"id": "uuid", "status": "succeeded", "trigger": "message",
                "created_at": "...", "finished_at": "...", "summary": "..."},
   "unread_messages": 1,
-  "pending_actions": 0
+  "pending_actions": 0,
+  "needs_input": true
 }]}
 ```
 
 `unread_messages` counts the agent's open questions. `GET /agents/{name}`
-adds `"memory": "<markdown>"`.
+adds `"memory": "<markdown>"`. `needs_input` is true while the agent waits
+on its person: an open question or a pending action.
 
 ## A conversation
 
@@ -85,11 +87,12 @@ asked.
    "status": "succeeded", "attempt": 1,
    "started_at": "...", "finished_at": "...", "steps": 4,
    "summary": "...", "report": "<markdown>",
-   "questions": [{"id": "uuid-of-the-question-message", "body": "..."}],
+   "questions": [{"id": "uuid-of-the-question-message", "body": "...", "open": true}],
    "error": null, "cost_usd": 0.03,
-   "actions": [{"id": "uuid", "type": "notify", "status": "pending", "reason": "...", "params": {}}]},
+   "actions": [{"id": "uuid", "type": "notify", "status": "pending", "reason": "...", "params": {}}],
+   "needs_input": true},
   {"kind": "message", "id": "uuid-of-the-question-message", "at": "...", "from": "agent",
-   "body": "<a question>", "run_id": "uuid"}
+   "body": "<a question>", "run_id": "uuid", "open": true}
  ],
  "has_more": true,
  "next_before": "opaque-cursor"}
@@ -117,7 +120,14 @@ asked.
   `actions` are always arrays.
 - **Questions** appear twice by design: in their run's `questions`, and as
   `from: "agent"` message items with the same `id`. A client dedupes by
-  `id`, and replies by sending a message with `reply_to` set to it.
+  `id`, and replies by sending a message with `reply_to` set to it. `open`
+  is true until a message names the question in `reply_to` or any later
+  message reaches the agent (the next run sees the person's words).
+- **Waiting on the person.** `needs_input` on a run is true while one of its
+  questions is open or one of its actions is `pending`: the run finished,
+  and the agent is waiting for an answer or an approval. It is a state
+  distinct from `status`, which says only whether the run itself is done.
+  The agents list carries the same flag per agent.
 - **Actions.** `status` is `pending` (waiting for a person), `approved`
   (by a person or by an `auto` rule, about to execute), `rejected` (by a
   person), `denied` (by rule or invalid; never executes), `executing`,
@@ -126,12 +136,22 @@ asked.
 `POST /agents/{name}/messages`
 
 ```json
-{"body": "text", "reply_to": "optional message id", "wake": true}
+{"body": "text", "reply_to": "optional message id", "wake": true,
+ "client_message_id": "optional, minted by the client"}
 ```
 
 returns `201 {"message_id": "uuid", "run_id": "uuid"}`. `run_id` is present
 when the message woke a run (`wake`, default: the agent's `wake_on_message`).
-Stream that run to show the reply as it is written. The author is the
+Stream that run to show the reply as it is written.
+
+**Retries.** With `client_message_id` (1 to 200 characters, unique per agent;
+a UUID), a retry returns the first result, the same `message_id` and
+`run_id`, and creates nothing. The message, its run and the receipt are one
+transaction, so a lost response is safe to retry, and concurrent retries act
+once. Reusing an id for a different request is `409`. A request that failed
+leaves no receipt.
+
+The author is the
 token's person. Only with the operator token, an `"author"` field names it
 (otherwise none is recorded).
 
@@ -155,9 +175,14 @@ message: `202 {"run_id": "uuid"}`.
 - **`tool`** is one tool call; `summary` is one line (a file path relative to
   the run's directory, a pattern, a command, a URL), at most 160 characters,
   possibly empty. The call that returns the final answer is not shown.
-- **Replay.** The stream replays from the start of the run's latest attempt,
-  then follows live, so a client that connects late (or reconnects) gets
-  everything; a reconnecting client discards what it showed and starts over.
+- **Replay and resume.** Without `Last-Event-ID`, the stream replays from
+  the start of the run's latest attempt, then follows live, so a client that
+  connects late gets everything. Every `text` and `tool` event has an `id`
+  (`<attempt>.<seq>.<index>`); a client that reconnects with `Last-Event-ID`
+  set to the last one it received gets only what followed it (a browser
+  `EventSource` does this itself). An id from an earlier attempt, or one
+  that does not parse, means a full replay of the latest attempt. `status`
+  and `done` are sent again on every connection and carry no id.
 - **Requeue.** A run requeued by a deploy streams `status: queued`, then
   `status: running` with the next `attempt`. When `attempt` changes, the
   prose and tools shown so far belong to an abandoned attempt: a client
@@ -184,10 +209,13 @@ the concatenated `text`: `text` is what the agent narrated while working.
 
 ## Actions
 
-- `GET /actions?agent=&status=pending`
+- `GET /actions?agent=&status=pending`: `status` as in a thread action
 - `GET /actions/{id}`
 - `POST /actions/{id}/approve`, `POST /actions/{id}/reject`: `200 {"ok":
-  true}`; 404 for an unknown action; 409 when it was already decided. The
+  true}`; 404 for an unknown action; 409 when it was already decided. With
+  `{"client_request_id": "..."}` (same rules as `client_message_id`), a retry
+  of a decision that succeeded returns `200 {"ok": true}` again instead of
+  409. The
   decider is the token's person. Only with the operator token, `{"by":
   "name"}` names it (default `operator`).
 

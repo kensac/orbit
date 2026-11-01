@@ -54,6 +54,8 @@ type ThreadMessage struct {
 	ReplyTo *string   `json:"reply_to,omitempty"`
 	// RunID is the run that read it (person) or asked it (agent).
 	RunID *string `json:"run_id"`
+	// Open is set on a question: true until answered (openQuestion).
+	Open *bool `json:"open,omitempty"`
 }
 
 // ThreadRun is a run with what it said: its report, its questions and the
@@ -74,6 +76,9 @@ type ThreadRun struct {
 	Error      *string          `json:"error"`
 	CostUSD    *float64         `json:"cost_usd"`
 	Actions    []ThreadAction   `json:"actions"`
+	// NeedsInput is true when the run is waiting on its person: one of its
+	// questions is open or one of its actions awaits approval.
+	NeedsInput bool `json:"needs_input"`
 }
 
 // ThreadQuestion is a question a run asked; ID is its from_agent message,
@@ -81,6 +86,7 @@ type ThreadRun struct {
 type ThreadQuestion struct {
 	ID   string `json:"id"`
 	Body string `json:"body"`
+	Open bool   `json:"open"`
 }
 
 // ThreadAction is an action as a thread shows it.
@@ -123,7 +129,7 @@ const stepsCount = `(
 const threadRunSelect = `
 	SELECT r.id::text, r.created_at, r.trigger, r.status, r.attempt, r.started_at, r.finished_at,
 	       ` + stepsCount + `, r.summary, r.report, r.error, r.cost_usd::float8,
-	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body) ORDER BY m.created_at, m.id)
+	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', (` + openQuestion + `)) ORDER BY m.created_at, m.id)
 	                 FROM messages m WHERE m.run_id = r.id AND m.direction = 'from_agent'), '[]'),
 	       COALESCE((SELECT json_agg(json_build_object('id', a.id, 'type', a.type, 'status', a.status,
 	                                                   'reason', a.reason, 'params', a.params)
@@ -146,6 +152,12 @@ func scanThreadRun(row pgx.Row) (*ThreadRun, error) {
 	}
 	if err := json.Unmarshal(actions, &r.Actions); err != nil {
 		return nil, err
+	}
+	for _, q := range r.Questions {
+		r.NeedsInput = r.NeedsInput || q.Open
+	}
+	for _, a := range r.Actions {
+		r.NeedsInput = r.NeedsInput || a.Status == "pending"
 	}
 	return &r, nil
 }
@@ -262,15 +274,16 @@ func (s *Store) Thread(ctx context.Context, agent string, before *ThreadCursor, 
 		}
 		if len(msgIDs) > 0 {
 			rows, err := tx.Query(ctx, `
-				SELECT id::text, created_at, direction, body, author, reply_to::text, run_id::text
-				FROM messages WHERE id = ANY($1::uuid[])`, msgIDs)
+				SELECT id::text, created_at, direction, body, author, reply_to::text, run_id::text,
+				       CASE WHEN direction = 'from_agent' THEN (`+openQuestion+`) END
+				FROM messages m WHERE id = ANY($1::uuid[])`, msgIDs)
 			if err != nil {
 				return err
 			}
 			for rows.Next() {
 				m := ThreadMessage{Kind: "message"}
 				var dir string
-				if err := rows.Scan(&m.ID, &m.At, &dir, &m.Body, &m.Author, &m.ReplyTo, &m.RunID); err != nil {
+				if err := rows.Scan(&m.ID, &m.At, &dir, &m.Body, &m.Author, &m.ReplyTo, &m.RunID, &m.Open); err != nil {
 					rows.Close()
 					return err
 				}

@@ -148,22 +148,25 @@ func TestThePersonAuthorsAndDecides(t *testing.T) {
 
 type threadPage struct {
 	Items []struct {
-		Kind      string     `json:"kind"`
-		ID        string     `json:"id"`
-		At        time.Time  `json:"at"`
-		From      string     `json:"from"`
-		Body      string     `json:"body"`
-		Author    *string    `json:"author"`
-		RunID     *string    `json:"run_id"`
-		Trigger   string     `json:"trigger"`
-		Status    string     `json:"status"`
-		Steps     int        `json:"steps"`
-		StartedAt *time.Time `json:"started_at"`
-		Finished  *time.Time `json:"finished_at"`
-		Report    *string    `json:"report"`
-		Questions []struct {
+		Kind       string     `json:"kind"`
+		ID         string     `json:"id"`
+		At         time.Time  `json:"at"`
+		From       string     `json:"from"`
+		Body       string     `json:"body"`
+		Author     *string    `json:"author"`
+		RunID      *string    `json:"run_id"`
+		Trigger    string     `json:"trigger"`
+		Status     string     `json:"status"`
+		Steps      int        `json:"steps"`
+		StartedAt  *time.Time `json:"started_at"`
+		Finished   *time.Time `json:"finished_at"`
+		Report     *string    `json:"report"`
+		Open       *bool      `json:"open"`
+		NeedsInput bool       `json:"needs_input"`
+		Questions  []struct {
 			ID   string `json:"id"`
 			Body string `json:"body"`
+			Open bool   `json:"open"`
 		} `json:"questions"`
 		Actions []struct {
 			ID     string `json:"id"`
@@ -242,6 +245,21 @@ func TestThread(t *testing.T) {
 		t.Fatalf("queued run = %+v", last)
 	}
 
+	if !r.NeedsInput || !r.Questions[0].Open || p.Items[2].Open == nil || !*p.Items[2].Open || p.Items[4].NeedsInput {
+		t.Fatalf("needs_input = %v, open = %v", r.NeedsInput, r.Questions[0].Open)
+	}
+	if _, body := get(t, v.srv.URL+"/api/v1/agents", v.person("kanishk")); body["agents"].([]any)[0].(map[string]any)["needs_input"] != true {
+		t.Fatalf("agents needs_input = %v", body)
+	}
+	// A reply closes the questions; the pending action still waits.
+	if _, err := v.s.SendToAgent(ctx, "a", "yes, a refund", "kanishk", &r.Questions[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	p = thread(t, v, "")
+	if r := p.Items[1]; r.Questions[0].Open || r.Questions[1].Open || !r.NeedsInput {
+		t.Fatalf("after reply: %+v", r)
+	}
+
 	if code, _ := get(t, v.srv.URL+"/api/v1/agents/nope/thread", v.person("kanishk")); code != 404 {
 		t.Fatalf("unknown agent = %d", code)
 	}
@@ -300,6 +318,7 @@ func TestThreadPagingNeverSkipsOrRepeats(t *testing.T) {
 // ------------------------------------------------------------ stream
 
 type sse struct {
+	ID    string
 	Event string
 	Data  string
 }
@@ -308,8 +327,16 @@ type sse struct {
 // comment. The channel closes when the stream ends.
 func openStream(t *testing.T, v *env, run string) (<-chan sse, context.CancelFunc) {
 	t.Helper()
+	return resumeStream(t, v, run, "")
+}
+
+func resumeStream(t *testing.T, v *env, run, lastID string) (<-chan sse, context.CancelFunc) {
+	t.Helper()
 	c, cancel := context.WithCancel(ctx)
 	req, _ := http.NewRequestWithContext(c, "GET", v.srv.URL+"/api/v1/runs/"+run+"/stream", nil)
+	if lastID != "" {
+		req.Header.Set("Last-Event-ID", lastID)
+	}
 	req.Header.Set("Authorization", "Bearer "+v.person("kanishk"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -329,6 +356,8 @@ func openStream(t *testing.T, v *env, run string) (<-chan sse, context.CancelFun
 			switch {
 			case line == ": ping":
 				ch <- sse{Event: "ping"}
+			case strings.HasPrefix(line, "id: "):
+				cur.ID = strings.TrimPrefix(line, "id: ")
 			case strings.HasPrefix(line, "event: "):
 				cur.Event = strings.TrimPrefix(line, "event: ")
 			case strings.HasPrefix(line, "data: "):
@@ -361,12 +390,13 @@ func next(t *testing.T, ch <-chan sse) sse {
 	}
 }
 
-func expect(t *testing.T, ch <-chan sse, event, data string) {
+func expect(t *testing.T, ch <-chan sse, event, data string) sse {
 	t.Helper()
 	e := next(t, ch)
 	if e.Event != event || (data != "" && e.Data != data) {
 		t.Fatalf("got %s %s, want %s %s", e.Event, e.Data, event, data)
 	}
+	return e
 }
 
 func fastStreams(a *api.Server, hs *http.Server) {
@@ -384,7 +414,10 @@ func TestStreamFollowsARunThroughARequeue(t *testing.T) {
 	_, a1 := claim(t, v, "claude-code")
 	expect(t, ch, "status", `{"attempt":1,"status":"running"}`)
 	appendEvents(t, v, run, a1, assistantText("first try"))
-	expect(t, ch, "text", `{"text":"first try"}`)
+	firstTry := expect(t, ch, "text", `{"text":"first try"}`)
+	if firstTry.ID != "1.1.0" {
+		t.Fatalf("event id = %q", firstTry.ID)
+	}
 
 	// A deploy requeues it; the next claim is a new attempt, streamed from
 	// its own start.
@@ -460,9 +493,21 @@ wait:
 	late, _ := openStream(t, v, run)
 	expect(t, late, "status", `{"attempt":2,"status":"succeeded"}`)
 	expect(t, late, "text", `{"text":"Reading."}`)
-	expect(t, late, "tool", "")
+	tool := expect(t, late, "tool", "")
 	expect(t, late, "text", `{"text":"\n\nDone."}`)
 	expect(t, late, "done", done.Data)
+
+	// Resuming after the tool sends only what followed it, with the same
+	// separator a full replay has.
+	resumed, _ := resumeStream(t, v, run, tool.ID)
+	expect(t, resumed, "status", `{"attempt":2,"status":"succeeded"}`)
+	expect(t, resumed, "text", `{"text":"\n\nDone."}`)
+	expect(t, resumed, "done", done.Data)
+
+	// An id from the abandoned attempt replays the latest one in full.
+	stale, _ := resumeStream(t, v, run, firstTry.ID)
+	expect(t, stale, "status", "")
+	expect(t, stale, "text", `{"text":"Reading."}`)
 }
 
 func mustThreadRun(t *testing.T, v *env, id string) *store.ThreadRun {
@@ -541,5 +586,46 @@ func TestStepsMatchTheStream(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// ------------------------------------------------------------ idempotency
+
+func TestRetriedSendsActOnce(t *testing.T) {
+	v := newEnv(t, nil)
+	kanishk := v.person("kanishk")
+	send := `{"body":"the $500 was a deductible","wake":true,"client_message_id":"c-1"}`
+	code, first := call(t, "POST", v.srv.URL+"/api/v1/agents/a/messages", kanishk, send)
+	if code != 201 || first["run_id"] == nil {
+		t.Fatalf("first = %d %v", code, first)
+	}
+	code, again := call(t, "POST", v.srv.URL+"/api/v1/agents/a/messages", kanishk, send)
+	if code != 201 || again["message_id"] != first["message_id"] || again["run_id"] != first["run_id"] {
+		t.Fatalf("retry = %d %v, want %v", code, again, first)
+	}
+	msgs, _ := v.s.ListMessages(ctx, "a", 0)
+	runs, _ := v.s.ListRuns(ctx, store.RunFilter{Agent: "a"})
+	if len(msgs) != 1 || len(runs) != 1 {
+		t.Fatalf("messages %d runs %d, want one of each", len(msgs), len(runs))
+	}
+	if code, _ := call(t, "POST", v.srv.URL+"/api/v1/agents/a/messages", kanishk,
+		`{"body":"something else","client_message_id":"c-1"}`); code != 409 {
+		t.Fatalf("reused id for another body = %d", code)
+	}
+
+	id, _ := claim(t, v, "claude-code")
+	ids, err := v.s.RecordOutcome(ctx, id, "a", store.RunResult{Status: "succeeded"}, store.Outcome{
+		Actions: []store.ProposedAction{{Type: "notify", Params: json.RawMessage(`{}`), Rule: "approve"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approve := `{"client_request_id":"d-1"}`
+	for i := 0; i < 2; i++ {
+		if code, body := call(t, "POST", v.srv.URL+"/api/v1/actions/"+ids[0]+"/approve", kanishk, approve); code != 200 || body["ok"] != true {
+			t.Fatalf("approve %d = %d %v", i, code, body)
+		}
+	}
+	if code, _ := call(t, "POST", v.srv.URL+"/api/v1/actions/"+ids[0]+"/approve", kanishk, ""); code != 409 {
+		t.Fatalf("approve without an id after a decision = %d", code)
 	}
 }
