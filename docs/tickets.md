@@ -320,16 +320,18 @@ filtering proxy. A socket proxy that permits `POST /containers/create` lets
 the caller ask for `Privileged`, a bind mount of `/`, the host network or
 the host PID namespace: whoever can create containers is root on the host.
 
-Instead a small launcher, `orbit sandboxd` (the same image, a separate
-compose service), holds the socket and exposes the only operation orbit
-needs, with every security-relevant option fixed in its code:
+**Built** (`internal/sandboxd`, `internal/egress`, `internal/sandbox`; not
+yet called by a build run). A small launcher, `orbit sandboxd` (the same
+image, a separate compose service), holds the socket and exposes the four
+operations orbit needs, with every security-relevant option fixed in its
+code (`internal/sandboxd/options.go`):
 
 | request (orbit -> sandboxd) | what sandboxd does |
 |---|---|
-| `POST /sandboxes` `{run_id, archive}` | creates a container from the build image pinned in sandboxd's own configuration, with a fresh volume at `/work` holding the archive; returns an id |
-| `POST /sandboxes/{id}/attach` | starts it with the CLI command line orbit sends (argv only, no options), streams stdio both ways |
-| `GET /sandboxes/{id}/archive` | `/work` as a tar |
-| `DELETE /sandboxes/{id}` | kills and removes the container and its volume |
+| `POST /v1/sandboxes?run_id=` with the workdir tar as the body | creates a container from the build image pinned in sandboxd's own configuration, unpacks the tar (sanitized) into a fresh volume at `/work`, starts it; returns an id |
+| `POST /v1/sandboxes/{id}/attach` `{argv, env}` | runs argv in it (env: the backend credential only), streams stdio both ways over an upgraded connection, ends with the exit status |
+| `GET /v1/sandboxes/{id}/archive` | `/work` as a tar (sanitized) |
+| `DELETE /v1/sandboxes/{id}` | kills and removes the container and its volume |
 
 Fixed, never taken from a request: the image digest; uid 10001; `CapDrop:
 ALL`; `no-new-privileges`; a read-only root filesystem with a tmpfs `/tmp`
@@ -338,16 +340,18 @@ limits; no bind mounts, devices or extra privileges; and the network. A run
 id label and a maximum lifetime let sandboxd reap containers orbit
 abandoned. The only environment it passes is the backend credential orbit
 sends (see below) and the proxy settings. sandboxd authenticates orbit with
-its own token (`ORBIT_SANDBOX_TOKEN`) on a docker network only the two
-share.
+its own token (`ORBIT_SANDBOX_TOKEN`) on its tailnet address. What each
+option guarantees, and what it does not: `docs/agents/security.md`.
 
 **Network.** The build container sits on an `internal` docker network with
-no route out. Its only egress is an allowlisting CONNECT proxy in sandboxd
-(`HTTPS_PROXY`), which allows the backend's API host and the package
-registries the repository's build needs (for Go: `proxy.golang.org`,
-`sum.golang.org`; per repository in configuration), and nothing else. It
-does not allow `github.com`: the checkout is already inside, and a sandbox
-that cannot reach GitHub cannot push even with a token it found.
+no route out (sandboxd refuses to start on one that is not internal). Its
+only egress is `orbit egress`, an allowlisting CONNECT proxy in its own
+container on that network and one other (`HTTPS_PROXY`), which allows the
+backend's API host and the package registries the repository's build needs
+(for Go: `proxy.golang.org`, `sum.golang.org`), on port 443 only, to public
+addresses only, and nothing else. It refuses to load an allowlist naming
+GitHub: the checkout is already inside, and a sandbox that cannot reach
+GitHub cannot push even with a token it found.
 
 **Where it runs.** sandboxd can run on any docker host orbit reaches over
 the tailnet; the default is oci (Open decisions). oci (the ARM CI host, already running CI runners and nothing

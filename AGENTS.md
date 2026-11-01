@@ -57,7 +57,11 @@ is the design; the topic documents below are the rules for changing it.
 - `internal/store/`: every database read and write; `migrations/` is the schema.
 - `internal/api/`: JSON API, the run and approval pages, `/healthz`, `/metrics`.
 - `examples/`: a complete configuration, loaded by tests and `make validate`.
-- `deploy/`: the image (`Dockerfile`) and the pinned agent CLIs (`cli/`).
+- `internal/sandboxd/`, `internal/egress/`, `internal/sandbox/`: the build
+  sandbox service (the only holder of a docker socket), its egress proxy,
+  and orbit's client for it.
+- `deploy/`: the image (`Dockerfile`), the build sandbox's image
+  (`build.Dockerfile`) and the pinned agent CLIs (`cli/`).
 
 ## Commands
 
