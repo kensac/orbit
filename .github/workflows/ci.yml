@@ -46,3 +46,21 @@ jobs:
           push: false
           platforms: linux/amd64
           cache-from: type=gha
+      # The build sandbox's image builds too (internal/sandboxd).
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        if: github.event_name == 'pull_request'
+        with:
+          context: .
+          file: deploy/build.Dockerfile
+          push: false
+          load: true
+          tags: orbit-build:ci
+          platforms: linux/amd64
+          cache-from: type=gha
+      # It runs the way sandboxd runs it: its tools work as uid 10001 on a
+      # read-only root, and /work is that uid's.
+      - if: github.event_name == 'pull_request'
+        run: >-
+          docker run --rm --read-only --tmpfs /tmp --user 10001:10001 --cap-drop ALL
+          --security-opt no-new-privileges:true orbit-build:ci
+          sh -c 'claude --version && go version && git --version && node --version && rg --version | head -1 && make --version | head -1 && test "$(stat -c %u /work)" = 10001'

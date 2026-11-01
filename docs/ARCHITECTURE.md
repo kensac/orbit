@@ -173,8 +173,11 @@ An action type is code (`internal/actions`): a name, a parameter schema shown
 to the agent, a validator, and an executor. An agent's spec maps types to
 `auto`, `approve` or `deny`; unnamed types are denied and not offered.
 Today: `notify` (an extra message to one of the agent's channels),
-`continue` (wake this agent again later, above) and `webhook:<endpoint>` (a JSON body to an endpoint whose URL and credentials
-are configuration, never chosen by the model).
+`continue` (wake this agent again later, above), `webhook:<endpoint>` (a
+JSON body to an endpoint whose URL and credentials are configuration, never
+chosen by the model), and `github:merge` (squash one of orbit's own
+`orbit/*` PRs, only if its head is still the approved commit and every
+required check passed; [tickets.md](tickets.md)).
 
 Approval happens from a signed link (`/ui/actions/{id}?sig=`), the API, or
 `orbit approve`. An action is executed at most once: one interrupted during
@@ -210,6 +213,52 @@ cost sums, the queue, running runs and next fires. Contract: docs/api.md.
   change is refused and the previous configuration kept
   (`orbit_config_valid` = 0).
 
+## The build sandbox (sandboxd)
+
+A build run's model writes files and runs commands, so it runs in a
+container that holds nothing worth taking. Three pieces, all in this
+repository and all built; a build run does not call them yet (tickets.md):
+
+```
+orbit (hetzner) --tailnet, bearer token--> orbit sandboxd (oci, holds the docker socket)
+                                              -> build container (deploy/build.Dockerfile)
+                                                 on the internal network orbit-sandbox
+                                                    -> orbit egress (CONNECT proxy) -> allowlisted hosts
+```
+
+- **`orbit sandboxd`** (`internal/sandboxd`) is the only orbit process with
+  a docker socket. It serves four operations (`internal/sandbox`: create
+  from a workdir tar, attach a process, read the workdir back as a tar,
+  destroy) and builds every docker request itself from fixed options
+  (`options.go`, whose test pins the whole create document): the image by
+  digest, uid 10001, no capabilities, `no-new-privileges`, read-only root,
+  `/work` (a fresh volume) and `/tmp` (tmpfs) the only writable paths,
+  memory, CPU, PID and lifetime limits, the internal network, no mounts of
+  the host. A caller chooses the tar's content, a run id label, an argv and
+  the backend credential, nothing else: an unknown request field is
+  refused. Every operation refuses a container without sandboxd's label, so
+  the API cannot reach another container on the host. After creating, it
+  inspects the container and refuses one the daemon did not make as asked.
+  A container's PID 1 is `sleep <lifetime>`, so its processes end at expiry
+  whatever sandboxd does; a reaper removes expired ones after a grace for
+  the readback.
+- **Tars both ways are rewritten** (`tarfilter.go`): files, directories and
+  links only (no devices or FIFOs), names inside the workdir, ownership set
+  to the sandbox uid on the way in and dropped on the way out, permission
+  bits only, no extended attributes, a size and entry cap. The readback is
+  spooled first, so a refusal is a clean error, never a truncated tar.
+- **`orbit egress`** (`internal/egress`) is the container's only route out:
+  a CONNECT proxy on the internal network and one other, allowing exact
+  hostnames on port 443 to public addresses, logging every decision, and
+  refusing to load an allowlist that names GitHub.
+- **Attach** is an HTTP upgrade: orbit writes the process's stdin and
+  half-closes it; sandboxd sends framed stdout, stderr and a final exit
+  status (`protocol.go`). Claude Code's stdio permission protocol (tickets.md,
+  Tool policy) rides on it.
+
+What this guarantees and what it does not: docs/agents/security.md. How it
+is deployed: docs/agents/deployment.md.
+
 ## Not built yet
 
 The direction, so changes now do not close it off:
@@ -222,8 +271,8 @@ The direction, so changes now do not close it off:
 
 - **Tickets and a build agent**: [tickets.md](tickets.md). A request or
   question thread a person files and discusses with an agent; an approved
-  plan becomes a build run in a short-lived container with a checkout and
-  write tools, no orbit secrets, and no GitHub credential; orbit commits,
+  plan becomes a build run in a sandboxd container (above) with a checkout
+  and write tools, no orbit secrets, and no GitHub credential; orbit commits,
   pushes `orbit/*` and opens the PR itself, and merging is an action
   (`github:merge`) whose executor refuses unless every required check is
   green, because in the fleet a merge is a deploy.

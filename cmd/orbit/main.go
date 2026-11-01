@@ -10,6 +10,8 @@
 //	orbit drain              tell the local server to drain (a deploy replacing it)
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
 //	orbit hook --root <dir> --state <dir> [--figures]   orbit's hook, run by Claude Code
+//	orbit sandboxd           the build sandbox service (holds the docker socket)
+//	orbit egress             the allowlisting proxy, a sandbox's only route out
 package main
 
 import (
@@ -73,6 +75,10 @@ func main() {
 		err = drainCmd()
 	case "mcp", "hook":
 		err = harnessCmd(os.Args[1], os.Args[2:])
+	case "sandboxd":
+		err = sandboxdCmd(ctx, log)
+	case "egress":
+		err = egressCmd(ctx, log)
 	case "version":
 		fmt.Println(revision)
 	default:
@@ -105,7 +111,7 @@ func harnessCmd(name string, args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | version | mcp | hook")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | version | mcp | hook | sandboxd | egress")
 	os.Exit(2)
 }
 
@@ -217,6 +223,9 @@ func validate(args []string) error {
 		if r.APIKeyEnv != "" {
 			refs[r.APIKeyEnv] = true
 		}
+	}
+	if g := cfg.Deployment.GitHub; g != nil {
+		refs[g.PrivateKeyEnv] = true
 	}
 	names := make([]string, 0, len(cfg.Agents))
 	for n := range cfg.Agents {

@@ -1,0 +1,232 @@
+package sandboxd
+
+import (
+	"encoding/json"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/kensac/orbit/internal/sandbox"
+)
+
+const testImage = "ghcr.io/kensac/orbit-build@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func testConfig() Config {
+	return Config{
+		Token:   strings.Repeat("t", 40),
+		Listen:  "unix:/run/sandboxd.sock",
+		Image:   testImage,
+		Network: "orbit-sandbox",
+		Proxy:   "orbit-egress:3128",
+		Docker:  "/var/run/docker.sock",
+	}
+}
+
+// TestContainerSpecDocument pins the whole create request. Any change to an
+// option docker receives changes this document, so it is reviewed as the
+// security change it is.
+func TestContainerSpecDocument(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	b, err := json.Marshal(containerSpec(testConfig(), "run-1", now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"Image":      testImage,
+		"User":       "10001:10001",
+		"Entrypoint": []any{"sleep", "3600"},
+		"Cmd":        nil,
+		"Env": []any{
+			"HOME=/tmp", "TMPDIR=/tmp", "LANG=C.UTF-8",
+			"HTTPS_PROXY=http://orbit-egress:3128", "HTTP_PROXY=http://orbit-egress:3128",
+			"https_proxy=http://orbit-egress:3128", "http_proxy=http://orbit-egress:3128",
+			"NO_PROXY=", "no_proxy=",
+			"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "DISABLE_AUTOUPDATER=1", "GIT_TERMINAL_PROMPT=0",
+		},
+		"WorkingDir": "/work",
+		"Hostname":   "sandbox",
+		"Labels": map[string]any{
+			"orbit.sandbox": "1", "orbit.sandbox.run_id": "run-1", "orbit.sandbox.expires": "1800003600",
+		},
+		"AttachStdin": false, "AttachStdout": false, "AttachStderr": false,
+		"OpenStdin": false, "Tty": false, "NetworkDisabled": false,
+		"HostConfig": map[string]any{
+			"Privileged":     false,
+			"ReadonlyRootfs": true,
+			"CapAdd":         nil,
+			"CapDrop":        []any{"ALL"},
+			"SecurityOpt":    []any{"no-new-privileges:true"},
+			"NetworkMode":    "orbit-sandbox",
+			"IpcMode":        "private",
+			"PidMode":        "",
+			"UTSMode":        "",
+			"UsernsMode":     "",
+			"CgroupnsMode":   "private",
+			"Binds":          nil,
+			"Mounts": []any{map[string]any{
+				"Type": "volume", "Target": "/work", "ReadOnly": false,
+				"VolumeOptions": map[string]any{"NoCopy": false, "Labels": map[string]any{"orbit.sandbox": "1", "orbit.sandbox.run_id": "run-1"}},
+			}},
+			"Tmpfs":           map[string]any{"/tmp": "rw,nosuid,nodev,size=2147483648,mode=1777"},
+			"Devices":         nil,
+			"PublishAllPorts": false,
+			"PortBindings":    nil,
+			"ExtraHosts":      nil,
+			"Memory":          float64(6 << 30),
+			"MemorySwap":      float64(6 << 30),
+			"NanoCpus":        float64(2_000_000_000),
+			"PidsLimit":       float64(1024),
+			"Ulimits":         []any{map[string]any{"Name": "nofile", "Soft": float64(8192), "Hard": float64(8192)}},
+			"OomScoreAdj":     float64(500),
+			"Init":            true,
+			"AutoRemove":      false,
+			"RestartPolicy":   map[string]any{"Name": "no"},
+		},
+		"NetworkingConfig": map[string]any{"EndpointsConfig": map[string]any{"orbit-sandbox": map[string]any{}}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		gb, _ := json.MarshalIndent(got, "", "  ")
+		t.Fatalf("create request changed:\n%s", gb)
+	}
+}
+
+func TestContainerSpecRuntime(t *testing.T) {
+	cfg := testConfig()
+	cfg.Runtime = "runsc"
+	if got := containerSpec(cfg, "r", time.Now()).HostConfig.Runtime; got != "runsc" {
+		t.Fatalf("runtime %q", got)
+	}
+}
+
+// TestSpecTakesNoCallerOptions holds the shape of the inputs: the create
+// spec is a function of sandboxd's config, a run id and the clock, and the
+// exec spec of an AttachRequest, whose only fields are argv and env.
+func TestSpecTakesNoCallerOptions(t *testing.T) {
+	ar := reflect.TypeOf(sandbox.AttachRequest{})
+	var fields []string
+	for i := range ar.NumField() {
+		fields = append(fields, ar.Field(i).Name)
+	}
+	if !reflect.DeepEqual(fields, []string{"Argv", "Env"}) {
+		t.Fatalf("AttachRequest fields %v: a new caller-controlled field is a security change", fields)
+	}
+	ct := reflect.TypeOf(containerSpec)
+	if ct.NumIn() != 3 || ct.In(0) != reflect.TypeOf(Config{}) || ct.In(1).Kind() != reflect.String || ct.In(2) != reflect.TypeOf(time.Time{}) {
+		t.Fatalf("containerSpec signature %v", ct)
+	}
+}
+
+func TestExecSpec(t *testing.T) {
+	got := execSpec(sandbox.AttachRequest{
+		Argv: []string{"claude", "-p"},
+		// Validate refuses the second; execSpec drops it regardless.
+		Env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "tok", "LD_PRELOAD": "/x.so"},
+	})
+	want := execCreate{
+		AttachStdin: true, AttachStdout: true, AttachStderr: true,
+		Tty: false, Privileged: false, User: "10001:10001", WorkingDir: "/work",
+		Cmd: []string{"claude", "-p"}, Env: []string{"CLAUDE_CODE_OAUTH_TOKEN=tok"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("exec spec %+v", got)
+	}
+}
+
+func goodState() containerState {
+	var c containerState
+	c.ID = strings.Repeat("a", 64)
+	c.Config.User = "10001:10001"
+	c.Config.Labels = map[string]string{LabelManaged: "1"}
+	c.HostConfig.ReadonlyRootfs = true
+	c.HostConfig.CapDrop = []string{"ALL"}
+	c.HostConfig.SecurityOpt = []string{"no-new-privileges:true"}
+	c.HostConfig.NetworkMode = "orbit-sandbox"
+	c.HostConfig.IpcMode = "private"
+	c.HostConfig.Memory = MemoryBytes
+	p := int64(Pids)
+	c.HostConfig.PidsLimit = &p
+	c.Mounts = append(c.Mounts, struct {
+		Type        string `json:"Type"`
+		Destination string `json:"Destination"`
+	}{"volume", "/work"})
+	return c
+}
+
+func TestVerifyCreated(t *testing.T) {
+	cfg := testConfig()
+	if err := verifyCreated(cfg, goodState()); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*containerState){
+		"no label":       func(c *containerState) { c.Config.Labels = nil },
+		"root user":      func(c *containerState) { c.Config.User = "" },
+		"privileged":     func(c *containerState) { c.HostConfig.Privileged = true },
+		"writable root":  func(c *containerState) { c.HostConfig.ReadonlyRootfs = false },
+		"cap added":      func(c *containerState) { c.HostConfig.CapAdd = []string{"SYS_ADMIN"} },
+		"caps kept":      func(c *containerState) { c.HostConfig.CapDrop = nil },
+		"new privileges": func(c *containerState) { c.HostConfig.SecurityOpt = nil },
+		"host network":   func(c *containerState) { c.HostConfig.NetworkMode = "host" },
+		"bind mount":     func(c *containerState) { c.HostConfig.Binds = []string{"/:/host"} },
+		"host pid":       func(c *containerState) { c.HostConfig.PidMode = "host" },
+		"host userns":    func(c *containerState) { c.HostConfig.UsernsMode = "host" },
+		"host ipc":       func(c *containerState) { c.HostConfig.IpcMode = "host" },
+		"no memory cap":  func(c *containerState) { c.HostConfig.Memory = 0 },
+		"no pids cap":    func(c *containerState) { c.HostConfig.PidsLimit = nil },
+		"bind in mounts": func(c *containerState) { c.Mounts[0].Type = "bind" },
+		"volume elsewhere": func(c *containerState) {
+			c.Mounts[0].Destination = "/etc"
+		},
+	} {
+		c := goodState()
+		mutate(&c)
+		if err := verifyCreated(cfg, c); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestConfigValidate(t *testing.T) {
+	if err := testConfig().Validate(); err != nil {
+		t.Fatal(err)
+	}
+	ok := []func(*Config){
+		func(c *Config) { c.Listen = "100.123.116.85:8091" },
+		func(c *Config) { c.Listen = "[fd7a:115c:a1e0::1]:8091" },
+		func(c *Config) { c.Image = "sha256:" + strings.Repeat("0", 64) },
+		func(c *Config) { c.Runtime = "runsc" },
+	}
+	for i, m := range ok {
+		c := testConfig()
+		m(&c)
+		if err := c.Validate(); err != nil {
+			t.Errorf("ok %d: %v", i, err)
+		}
+	}
+	for name, m := range map[string]func(*Config){
+		"short token":      func(c *Config) { c.Token = "short" },
+		"every interface":  func(c *Config) { c.Listen = ":8091" },
+		"unspecified ipv4": func(c *Config) { c.Listen = "0.0.0.0:8091" },
+		"unspecified ipv6": func(c *Config) { c.Listen = "[::]:8091" },
+		"hostname listen":  func(c *Config) { c.Listen = "oci:8091" },
+		"relative socket":  func(c *Config) { c.Listen = "unix:sandboxd.sock" },
+		"tag image":        func(c *Config) { c.Image = "ghcr.io/kensac/orbit-build:latest" },
+		"no image":         func(c *Config) { c.Image = "" },
+		"host network":     func(c *Config) { c.Network = "host" },
+		"bridge network":   func(c *Config) { c.Network = "bridge" },
+		"container net":    func(c *Config) { c.Network = "container:abc" },
+		"proxy no port":    func(c *Config) { c.Proxy = "orbit-egress" },
+		"other runtime":    func(c *Config) { c.Runtime = "kata" },
+		"relative docker":  func(c *Config) { c.Docker = "docker.sock" },
+	} {
+		c := testConfig()
+		m(&c)
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
