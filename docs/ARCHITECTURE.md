@@ -202,15 +202,16 @@ The direction, so changes now do not close it off:
 - **Transforms and gates** (above). A transform is a named, tested Go
   function from a source's bytes to smaller bytes, stored as its own
   artifact; a gate is a predicate over inputs and memory that ends the run
-  as `succeeded` without a backend call.
+  without a backend call, recorded as its own status (`skipped`, naming the
+  gate) so a run that judged nothing is distinguishable from one that did.
 
-- **Tickets.** A request thread: a person files it, discusses it with an
-  agent, approves a plan. Built on the existing messages, runs and actions.
-- **A build agent.** A separate trust tier from read-only agents: a
-  short-lived container per run with a checkout and write tools, no orbit
-  secrets, a GitHub credential limited to listed repositories. It opens PRs;
-  merging is an action (`github:merge`) whose executor refuses unless every
-  required check is green, because in the fleet a merge is a deploy.
+- **Tickets and a build agent**: [tickets.md](tickets.md). A request or
+  question thread a person files and discusses with an agent; an approved
+  plan becomes a build run in a short-lived container with a checkout and
+  write tools, no orbit secrets, and no GitHub credential; orbit commits,
+  pushes `orbit/*` and opens the PR itself, and merging is an action
+  (`github:merge`) whose executor refuses unless every required check is
+  green, because in the fleet a merge is a deploy.
 - **Event triggers** from webhooks (a ticket assigned, a comment).
 - **A worker fleet.** Executors on several hosts, as jobtracker's are; the
   queue already allows it (SKIP LOCKED claims, `runs_one_running`,
