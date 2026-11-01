@@ -729,8 +729,12 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 				return err
 			}
 		}
+		// Questions and actions take clock_timestamp(), not the
+		// transaction's now(), so each has its own time and the thread
+		// orders them as the run listed them.
 		for _, q := range o.Questions {
-			if _, err := tx.Exec(ctx, `INSERT INTO messages (agent, direction, body, run_id) VALUES ($1, 'from_agent', $2, $3)`,
+			if _, err := tx.Exec(ctx, `INSERT INTO messages (agent, direction, body, run_id, created_at)
+				VALUES ($1, 'from_agent', $2, $3, clock_timestamp())`,
 				agent, q, runID); err != nil {
 				return err
 			}
@@ -739,11 +743,11 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 			status := map[string]string{"auto": "approved", "approve": "pending", "deny": "denied"}[a.Rule]
 			var id string
 			if err := tx.QueryRow(ctx, `
-				INSERT INTO actions (run_id, agent, type, params, reason, rule, status, decided_by, decided_at, error)
+				INSERT INTO actions (run_id, agent, type, params, reason, rule, status, decided_by, decided_at, error, created_at)
 				VALUES ($1, $2, $3, $4, $5, $6, $7,
 				        CASE WHEN $6 = 'approve' THEN NULL ELSE 'rule' END,
 				        CASE WHEN $6 = 'approve' THEN NULL ELSE now() END,
-				        NULLIF($8, ''))
+				        NULLIF($8, ''), clock_timestamp())
 				RETURNING id::text`,
 				runID, agent, a.Type, []byte(a.Params), a.Reason, a.Rule, status, a.Error).Scan(&id); err != nil {
 				return err

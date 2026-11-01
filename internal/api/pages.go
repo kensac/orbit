@@ -114,9 +114,9 @@ func (s *Server) approvalSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// runPage shows a run's report, read-only and without the API token: the
-// tailnet bind is its boundary, as for the fleet's other tailnet UIs, and a
-// run id is an unguessable UUID.
+// runPage shows a run's report, read-only and without an API token:
+// authentik forward-auth in front of /ui is its boundary, so /ui must never
+// be routed around it.
 func (s *Server) runPage(w http.ResponseWriter, r *http.Request) {
 	run, err := s.Store.GetRun(r.Context(), r.PathValue("id"))
 	if err != nil {

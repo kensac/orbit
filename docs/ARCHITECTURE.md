@@ -79,6 +79,18 @@ Approval happens from a signed link (`/ui/actions/{id}?sig=`), the API, or
 `orbit approve`. An action is executed at most once: one interrupted during
 execution is failed for a person to check, never retried.
 
+## The API
+
+`internal/api` serves two listeners: the public one traefik routes to, where
+`/api/v1` takes authentik tokens verified by orbit (`internal/auth`) and
+`/ui` sits behind forward-auth, and an internal one that also takes the
+operator token. A conversation is read as one thread (messages and runs
+interleaved, `Store.Thread`), and a run is watched as Server-Sent Events
+(`/runs/{id}/stream`), which poll the stored transcript and turn it into
+prose and tool calls in code (`runner.Narrate`). The stream reads only rows,
+so it follows a run across a requeue, a deploy or another replica with no
+signalling between writers and readers. Contract: docs/api.md.
+
 ## Reliability
 
 - **Scheduling:** one leader by advisory lock. A fire is enqueued at most once
@@ -110,4 +122,4 @@ The direction, so changes now do not close it off:
   merging is an action (`github:merge`) whose executor refuses unless every
   required check is green, because in the fleet a merge is a deploy.
 - **Event triggers** from webhooks (a ticket assigned, a comment).
-- **A UI** over `/api/v1`.
+- **A UI** over `/api/v1` (the thread and the stream are its read side).
