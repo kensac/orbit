@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -44,6 +45,9 @@ func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
 		Author          string `json:"author"`
 		Wake            *bool  `json:"wake"`
 		ClientRequestID string `json:"client_request_id"`
+		// Agent is POST /conversations's: the agent to talk to, the
+		// built-in general agent when empty.
+		Agent string `json:"agent"`
 	}
 	if r.ContentLength != 0 {
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
@@ -51,7 +55,14 @@ func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	a, ok := s.Engine.Current().Config.Agents[r.PathValue("name")]
+	name := r.PathValue("name")
+	if name == "" {
+		name = body.Agent
+		if name == "" {
+			name = spec.BuiltinName
+		}
+	}
+	a, ok := s.Engine.Current().Config.Agents[name]
 	if !ok {
 		respond(w, nil, store.ErrNotFound)
 		return
