@@ -177,12 +177,18 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | Field | Type | Default | What it does |
 |---|---|---|---|
 | `name` | `^[a-z][a-z0-9-]{0,62}$` | required | The input's name; unique among sources and transforms. |
-| `kind` | `http`, `prometheus`, `file` | required | How it is fetched (below). |
-| `url` | URL | required for http, prometheus | Target; may use `${VAR}` and `{{today}}`-style templates. A credential in any field of the source is sent only under its `url_prefix`. |
-| `headers` | map | none | http request headers; values may use `${VAR}`. |
+| `kind` | `http`, `prometheus`, `loki`, `github`, `file` | required | How it is fetched (below). |
+| `url` | URL | required for http, prometheus, loki | Target; may use `${VAR}` and `{{today}}`-style templates. A credential in any field of the source is sent only under its `url_prefix`. |
+| `headers` | map | none | http and loki request headers; values may use `${VAR}`. |
 | `query` | map | none | http query values; may use `${VAR}` and templates. |
 | `paginate` | map | absent | Page-numbered http pagination (below). |
-| `expr` | PromQL | required for prometheus | Instant query sent to `<url>/api/v1/query`; the input is its `data`. |
+| `expr` | PromQL or LogQL | required for prometheus, loki | prometheus: an instant query sent to `<url>/api/v1/query`; the input is its `data`. loki: a `query_range` sent to `<url>/loki/api/v1/query_range` ending now, newest first; the input is `{resultType, result}` (Loki's stats left out). |
+| `since` | duration | `1h` | loki: how far back the query reads, at most `24h`. |
+| `limit` | int | loki `1000`, github `100` | loki: the most lines, at most 5000. github: the most items of a list, at most 1000 (300 for pulls). |
+| `repo` | `owner/name` | required for github | One of `github.read_repositories`. |
+| `resource` | `issues`, `pulls`, `checks`, `releases` | required for github | What is read (below). |
+| `ref` | branch, tag or sha | required for github checks | The commit whose check runs and statuses are read. |
+| `state` | `open`, `closed`, `all` | `open` | github issues and pulls: which are listed. |
 | `path` | path | required for file | A file on orbit's host, read as orbit's user (relative to orbit's working directory). |
 | `max_bytes` | int | `8388608` (8 MiB) | The most one source may fetch; more fails the run. |
 
@@ -190,6 +196,8 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 |---|---|---|
 | `http` | any URL with `GET`, with the headers given | Whatever the URL returns is model input, so it may carry instructions. |
 | `prometheus` | a Prometheus API | As http. |
+| `loki` | a Loki API, `query_range` only | As http; log lines can carry anything a service logged, instructions included. |
+| `github` | GitHub as the App, one repository of `github.read_repositories`, with a token minted for the fetch alone and revoked after it: `issues` (`issues: read`; pull requests left out; each body cut at 4000 bytes, `body_truncated` set), `pulls` (`pull_requests: read`), `checks` (`checks: read`, `statuses: read`: `{ref, check_runs, statuses}`), `releases` (`contents: read`) | Issue, PR and release text is written by anyone who can open one on that repository. Needs `github` in `needs`. |
 | `file` | any file orbit's user can read | Exposes orbit's host files to the model: name only files meant for it. Only a file agent may have one. |
 
 ### `sources[].paginate`

@@ -82,7 +82,7 @@ mail:
 
 ## Capabilities
 
-`needs: [<capability>, ...]` on an agent says what a host must have to run it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated; `*` alone is every agent, control's default when unset; a worker's default is none). A capability is `name` or `name:qualifier`, lower case (`spec.CapabilityRE`). An agent with no needs runs on any host. Give an agent a need for anything only some hosts have: a network its sources are on (`docker-network:hetzner`), a source credential that lives only on some hosts (`sure`), the GitHub App's key (`github`, required with `repos`), a tool (`browser`). The table of capabilities and the hosts that have them is docs/agents/deployment.md, Worker fleet. A run whose agent needs what no host has waits queued; nothing fails it.
+`needs: [<capability>, ...]` on an agent says what a host must have to run it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated; `*` alone is every agent, control's default when unset; a worker's default is none). A capability is `name` or `name:qualifier`, lower case (`spec.CapabilityRE`). An agent with no needs runs on any host. Give an agent a need for anything only some hosts have: a network its sources are on (`docker-network:hetzner`), a source credential that lives only on some hosts (`sure`), the GitHub App's key (`github`, required with `repos` or a `github` source), a tool (`browser`). The table of capabilities and the hosts that have them is docs/agents/deployment.md, Worker fleet. A run whose agent needs what no host has waits queued; nothing fails it.
 
 ## Transforms
 
@@ -129,6 +129,20 @@ A skipped run counts as a success for staleness (docs/agents/store.md).
 - `rrule` and `start`: an RFC 5545 recurrence rule (`internal/rrule`), anchored at `start`, a local time in the agent's timezone (`2026-11-03T09:00`). For what cron cannot say: `FREQ=WEEKLY;INTERVAL=2;BYDAY=TU` (every other Tuesday), `FREQ=MONTHLY;BYDAY=-1FR` (the last Friday), `FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=2` (the second weekday), and series that end (`COUNT`, `UNTIL`). `start` sets the first period and the time of day the rule does not name. Supported: `FREQ` from `MINUTELY` to `YEARLY`, `INTERVAL`, `COUNT` (at most 10000), `UNTIL`, `BYMONTH`, `BYMONTHDAY`, `BYDAY` (ordinals in `MONTHLY` and `YEARLY`), `BYHOUR`, `BYMINUTE`, `BYSECOND`, `BYSETPOS`, `WKST`; anything else fails the load. Days and longer are wall-clock (09:00 stays 09:00 across daylight saving); hours and minutes are elapsed time.
 
 Either kind takes `prompt`, the reason for the wake. Both go through the same scheduler (one fire per trigger and time, `runs_one_per_fire`; after downtime only the newest missed fire), and an ended series never fires again.
+
+## GitHub and Loki sources
+
+A `github` source reads one repository of `github.read_repositories` as the App: `resource: issues | pulls | checks | releases`, with `state` for issues and pulls, `ref` for checks, `limit` for lists. orbit mints a token of only that resource's permissions for the one fetch and revokes it after (docs/tickets.md, GitHub access), so the model never holds one; the agent needs `github` in `needs`. Lists are projected to the fields a review uses (number, title, state, author, labels, dates, URL, body cut at 4000 bytes), so a quiet repository is a small input and the `unchanged` gate sees only what changed.
+
+A `loki` source runs one LogQL `query_range` (`expr`) ending at the fetch, `since` back (default 1h, at most 24h), at most `limit` lines (default 1000, at most 5000), newest first. Count with a metric query (`sum by (container) (count_over_time({...} |= "error" [1h]))`) rather than reading lines when a number is the answer. Headers render like an http source's, under the credential binding.
+
+```yaml
+needs: [github, docker-network:hetzner]
+sources:
+  - {name: issues, kind: github, repo: kensac/orbit, resource: issues, state: open, limit: 50}
+  - {name: main-checks, kind: github, repo: kensac/orbit, resource: checks, ref: main}
+  - {name: errors, kind: loki, url: "http://loki:3100", expr: '{container=~"orbit|traefik"} |= "error"', since: 6h, limit: 500}
+```
 
 ## Templates in sources
 
