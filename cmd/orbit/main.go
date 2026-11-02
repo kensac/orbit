@@ -247,6 +247,21 @@ func validate(args []string) error {
 	if err != nil {
 		return err
 	}
+	names := make([]string, 0, len(cfg.Agents))
+	for n := range cfg.Agents {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	fmt.Printf("ok: %d agent(s): %s\n", len(names), strings.Join(names, ", "))
+	env := referencedEnv(cfg)
+	if len(env) > 0 {
+		fmt.Printf("environment referenced: %s\n", strings.Join(env, ", "))
+	}
+	return nil
+}
+
+// referencedEnv is the environment a configuration needs, sorted. The claude-code backend's is listed as its two alternatives in one entry.
+func referencedEnv(cfg *spec.Config) []string {
 	b, _ := json.Marshal(cfg)
 	refs := map[string]bool{}
 	for _, r := range spec.EnvRefs(string(b)) {
@@ -263,6 +278,9 @@ func validate(args []string) error {
 		if r.APIKeyEnv != "" {
 			refs[r.APIKeyEnv] = true
 		}
+		if r.Kind == "claude-code" {
+			refs[claudeBackend] = true
+		}
 	}
 	if g := cfg.Deployment.GitHub; g != nil {
 		refs[g.PrivateKeyEnv] = true
@@ -270,6 +288,7 @@ func validate(args []string) error {
 	if m := cfg.Deployment.Mail; m != nil {
 		refs[m.IMAP.UsernameEnv], refs[m.IMAP.PasswordEnv] = true, true
 	}
+	// A build or a sandboxed chat hands the sandbox the subscription token itself (engine.buildCredential), so these name it alone.
 	if b := cfg.Deployment.Build; b != nil {
 		refs[b.TokenEnv] = true
 		refs["CLAUDE_CODE_OAUTH_TOKEN"] = true
@@ -278,21 +297,12 @@ func validate(args []string) error {
 		refs[tokenEnv] = true
 		refs["CLAUDE_CODE_OAUTH_TOKEN"] = true
 	}
-	names := make([]string, 0, len(cfg.Agents))
-	for n := range cfg.Agents {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	fmt.Printf("ok: %d agent(s): %s\n", len(names), strings.Join(names, ", "))
-	var env []string
+	env := make([]string, 0, len(refs))
 	for r := range refs {
 		env = append(env, r)
 	}
 	sort.Strings(env)
-	if len(env) > 0 {
-		fmt.Printf("environment referenced: %s\n", strings.Join(env, ", "))
-	}
-	return nil
+	return env
 }
 
 func enqueue(ctx context.Context, args []string) error {

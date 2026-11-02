@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/kensac/orbit/internal/spec"
@@ -34,6 +35,27 @@ func TestAWorkerNamesTheCredentialsItLacks(t *testing.T) {
 	sure, _ := spec.ParseCapabilities("sure,docker-network:hetzner")
 	if got := missingEnv(cfg, sure, lookup("CLAUDE_CODE_OAUTH_TOKEN")); !reflect.DeepEqual(got, []string{"SURE_API_KEY"}) {
 		t.Fatalf("missing = %v, want the Sure key", got)
+	}
+	// The backend credential is either variable, and a worker with neither is told both names.
+	if got := missingEnv(cfg, bare, lookup("ANTHROPIC_API_KEY")); len(got) != 0 {
+		t.Fatalf("an API key alone misses %v", got)
+	}
+	if got := missingEnv(cfg, bare, lookup()); !reflect.DeepEqual(got, []string{"CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY"}) {
+		t.Fatalf("missing = %v, want both backend names", got)
+	}
+}
+
+func TestValidateNamesBothBackendCredentials(t *testing.T) {
+	cfg, err := spec.Load("../../examples")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := referencedEnv(cfg)
+	if !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY") {
+		t.Fatalf("environment = %v, want the claude-code runner's two alternatives", env)
+	}
+	if !slices.IsSorted(env) {
+		t.Fatalf("environment = %v, not sorted", env)
 	}
 }
 
