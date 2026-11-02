@@ -35,6 +35,8 @@ your head" is sent back and recomputed with a tool.
 
 After changing delegation, run one agent with `delegates` naming two others and `actions: {delegate: approve}` against the real CLI: message it asking for two independent pieces of work. Check the delegate action was approved by the attended rule, both task runs ran at once (different agents), each task is `done` with the run's report, one `delegation` run woke the parent, and its report integrates both.
 
+After changing skills or their wiring, run an agent with one skill whose `SKILL.md` tells it to read a file of the skill: the run's events show the `Skill` tool on `orbit:<name>`, then `mcp__orbit__skill` for `SKILL.md` and for the file, and the answer uses the file's content (seen on 2.1.316).
+
 After changing sessions or the live process, also run an agent with
 `session: {resume: true, live: 10m}` and `continue: approve`: a message (run
 fresh), a second message (`session_mode` live, one `claude` process), a

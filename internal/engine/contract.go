@@ -43,6 +43,9 @@ type Output struct {
 	// known and topics are the entries the run was shown and the topics it reads, set by the engine to resolve Entries.
 	known  []store.Entry
 	topics []string
+	// Skills are skill writes (skills.go); skills is what the run was given.
+	Skills []OutputSkill `json:"skills"`
+	skills []store.Skill
 	// task is the task whose conversation the run is in, set by the
 	// engine.
 	task *store.Task

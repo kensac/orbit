@@ -23,3 +23,13 @@ func TestNextFires(t *testing.T) {
 		t.Fatalf("disabled = %+v", got)
 	}
 }
+
+func TestNextFiresOfAnRRule(t *testing.T) {
+	a := &spec.Agent{Name: "a", Timezone: "America/New_York", Triggers: []spec.Trigger{
+		{RRule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU", Start: "2026-11-03T09:00"},
+	}}
+	got := NextFires(a, time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC))
+	if len(got) != 1 || got[0].RRule == "" || got[0].Schedule != "" || !got[0].At.Equal(time.Date(2026, 11, 17, 14, 0, 0, 0, time.UTC)) {
+		t.Fatalf("next = %+v", got)
+	}
+}
