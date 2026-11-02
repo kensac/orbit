@@ -77,6 +77,71 @@ while the agent waits on its person: an open question or a pending action.
 an agent with no schedule, a disabled one, or one no longer configured.
 Earlier memory is `GET /agents/{name}/memory` (below).
 
+## Defining agents
+
+An agent is defined in one of three places, reported as `origin` on every
+agent row (`GET /agents`, `GET /agents/{name}`), with `version` for a
+database agent:
+
+- `file`: `agents/<name>.yaml` in the configuration directory. Read-only
+  here: every change below is `409`.
+- `database`: defined through this API (`agent_definitions`). Every change
+  is a new version; nothing is overwritten or deleted.
+- `builtin`: defined in code (`spec.Builtins`): `orbit`, the general agent.
+  A file or database agent of the same name replaces it; the first `PUT
+  /agents/orbit` defines it in the database.
+
+A spec is the agent as JSON, with exactly the fields of an agent file
+(docs/agents/configuration.md; durations as strings, `"15m"`), and is
+validated by loading the whole configuration with it, as it will run: an
+unknown field, a bad cross-reference or a name a file agent has is a `400`
+with every problem in `error`. A change is in force on this instance when
+the response returns, and on every other instance within 30 s.
+
+`POST /agents`
+
+```json
+{"spec": {"name": "news", "description": "Morning headlines.",
+          "charter": "Summarize the news I care about.",
+          "triggers": [{"schedule": "0 8 * * *"}], "wake_on_message": true},
+ "dry_run": false}
+```
+
+returns `201`:
+
+```json
+{"valid": true,
+ "spec": {"name": "news", "...": "the agent as loaded, defaults applied"},
+ "definition": {"id": 7, "name": "news", "version": 1, "spec": {"...": "as stored"},
+                "enabled": true, "archived": false, "change": "create",
+                "author": "kanishk", "created_at": "..."},
+ "next_fires": [{"trigger_index": 0, "schedule": "0 8 * * *", "at": "..."}],
+ "agent": {"name": "news", "origin": "database", "version": 1, "...": "as in GET /agents"}}
+```
+
+- `dry_run: true` validates and stores nothing: `200 {"valid": true,
+  "spec": ..., "next_fires": [...]}` (no `definition`, no `agent`).
+- `spec.enabled` (default `true`) sets whether its schedules fire; it is
+  stored on the definition, not in `spec`.
+- A name already defined in the database (and not archived) is `409`; an
+  archived name may be created again, as its next version.
+- `author` is the token's person (`null` with the operator token).
+
+`PUT /agents/{name}` `{"spec": {...}, "dry_run": false}` replaces the spec
+with a new version: `200`, the same shape (`change: "update"`). `spec.name`
+may be omitted; if present it must be `{name}`. Omitting `spec.enabled`
+keeps the current state.
+
+`POST /agents/{name}/enable`, `/disable`, `/archive`: a new version with
+the same spec, `200` in the same shape. An archived agent is no longer
+configured (`present: false` in the list); its runs and conversations stay
+readable. Changing an archived agent is `404`; a file or built-in agent is
+`409`.
+
+`GET /agents/{name}/definitions` is `{"name": "news", "origin":
+"database", "versions": [<definition>, ...]}`, newest first (empty for a
+file or built-in agent).
+
 ## Conversations
 
 An agent has as many conversations as its person opens ("New chat"), and
@@ -324,6 +389,75 @@ An attempt (`store.Attempt`), oldest first:
 
 `payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.figures_unverified`, and a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`.
 
+### The journal
+
+A run's journal is its typed record: what the agent said, thought, called and changed, as items a client renders without reading any backend's event format. It is derived from the events above by code (`internal/journal`), written in the transaction that stores each event, and backfilled for runs from before it existed with the same code, so the rows are the same either way. It is append-only: an item that changes (a tool call that returns, a plan that is updated, a turn that ends) gets a new revision carrying its whole body, and earlier revisions stay as they were.
+
+**Addressing.** A row is `(run, epoch, seq)`. An epoch is one timeline: an attempt that resumed the interrupted attempt's session (`recovered_from`) continues its epoch, and an attempt that started over opens a new epoch numbered by itself. So a run handed back once and continued has one epoch, `1`; one whose second attempt started over has epochs `1` and `2`. `seq` counts rows within an epoch from 1, without gaps. A row's `cursor` is `"<epoch>.<seq>"`.
+
+`GET /runs/{id}/journal?epoch=&after=&limit=` reads one epoch's rows (every revision) in `seq` order:
+
+```json
+{"epoch": 1, "epochs": [1],
+ "items": [<row>],
+ "cursor": "1.42", "has_more": false, "reset": null}
+```
+
+- `epoch` defaults to the epoch of the run's latest attempt (`0` while the run has never started, with no items). `epochs` lists every epoch the run has, oldest first.
+- `after` is a cursor: rows after it are returned. A cursor into another epoch than the one read, or past its last row, is not continued: the response starts from the epoch's first row and `reset` says why (`epoch_changed`, `cursor_ahead`), and a client discards what it holds of that run. An `after` that is not a cursor is a 400.
+- `limit` defaults to 500, at most 2000. `cursor` is the last returned row's (or `after` when none was returned); pass it as `after` for the next page. `has_more` is true when rows follow.
+
+A row:
+
+```json
+{"run_id": "uuid", "epoch": 1, "seq": 7, "cursor": "1.7", "attempt": 1,
+ "item_id": "tool:toolu_01", "revision": 2, "kind": "tool_call",
+ "turn_id": "turn:1.1", "parent_id": null,
+ "at": "...", "v": 1, "body": {}}
+```
+
+- `item_id` is stable across revisions; `revision` counts from 1. To show the current state, keep the highest revision per `item_id`, placed where its revision 1 was. `GET /runs/{id}/journal/items/{item_id}?epoch=` is `{"item": <row>}`, an item's latest revision (404 when the epoch has none).
+- `turn_id` is the turn the item belongs to (a `turn` item's own id for the turn itself), `null` for orbit's steps outside any turn (fetching sources, planning a session).
+- `parent_id` is the subagent nesting: an item produced inside a subagent names the `tool_call` item of the call that spawned it (Claude Code's `Task`/`Agent`), and is `null` at the top level. Nested subagents nest the same way.
+- `at` is when orbit stored the event the row came from (the attempt's end for a turn closed by it). Order by `seq`, not `at`.
+- `v` is the body's schema version, 1 today. A body changes shape only with a new version; a reader reads older versions in the current shape (`journal.Upcast`), and a row from a newer version is served as stored.
+- `kind` is one of the kinds below, and may grow: a client shows a kind it does not know as nothing, never as an error.
+
+**Bounded values.** A value that can be large (a tool's output, a diff, a thought, a status payload) is sent as
+
+```json
+{"head": "first bytes...", "bytes": 48213, "sha256": "hex", "truncated": true}
+```
+
+`head` is at most 4096 bytes (`journal.HeadMax`), cut at a character boundary; `bytes` and `sha256` are the whole value's. When `truncated` is true, `GET /runs/{id}/journal/bodies/{sha256}` returns the whole value as stored (`text/plain; charset=utf-8`, or `application/octet-stream` when it is not UTF-8), 404 for a digest no row of that run cut short. When `truncated` is false, `head` is the whole value.
+
+**Kinds and bodies.** Ids are shown as patterns: `<a>.<s>.<i>` is the attempt, the source event's `seq` in its attempt, and the item's place among that event's items.
+
+| `kind` | `item_id` | body |
+|---|---|---|
+| `message` | `message:<a>.<s>.<i>` (Codex: `message:codex.<id>`) | `{"role": "assistant", "text": "..."}`; `role` is `assistant` for the agent's prose, `user` for a user turn the backend recorded (the prompt a subagent was given). One per block of prose; `text` is whole. |
+| `thinking` | `thinking:<a>.<s>.<i>` (Codex: `thinking:codex.<id>`) | `{"text": <bounded>, "tokens_estimate": 120, "redacted": true}`; the model's reasoning where the backend exposes it. `tokens_estimate` is the text's size in tokens, estimated from its bytes (4 per token), not a count the backend reported (a turn's `usage` has those). `redacted` (only when true) is a thought sent encrypted: no text, estimate 0. |
+| `tool_call` | `tool:<call id>` (Claude Code's `tool_use` id; Codex: `tool:codex.<item id>`) | `{"call_id": "toolu_01", "name": "Read", "input": {...}, "summary": "inputs/a.json", "state": "running", "result": <bounded>}`. Revision 1 is the call, `state: "running"`, no `result`; the revision written when it returns has `state` `completed` or `failed` (the tool reported an error, a command exited non-zero) and `result`, the tool's output as text. `input` is the call's input, whole. `summary` is one line (a path relative to the run's directory, a pattern, a command, a URL), at most 160 characters, possibly empty. Codex's are `shell` (`{"command"}`), `web_search` (`{"query"}`), `<server>.<tool>` (`{"arguments"}`) and `edit` (`{"changes"}`). The call that returns the final answer is not a tool call. |
+| `diff` | `diff:<call id>` (Codex: `diff:codex.<item id>.<n>`) | `{"call_id": "toolu_02", "path": "notes.md", "change": "edit", "patch": <bounded>}`; a change a file tool made, once it succeeded. `path` is relative to the run's directory. `change` is `edit` or `write` (Claude Code), or Codex's `add`, `delete`, `update`. `patch` is a unified diff of the replaced text (`--- a/<path>`, `+++ b/<path>`, one `@@` hunk per replacement, without line numbers, which Claude Code does not report); absent when the backend said only that the file changed (Codex). |
+| `plan` | `plan` (one per epoch) | `{"entries": [{"text": "read the inputs", "status": "completed"}], "text": "..."}`; the agent's working plan. `entries` is its todo list (Claude Code's `TodoWrite`, Codex's `todo_list`), each `status` `pending`, `in_progress` or `completed`. `text` (when present) is a plan it presented (`ExitPlanMode`). Each update is a revision. |
+| `approval` | `approval:<request id>` | `{"request_id": "...", "tool": "Bash", "input": {...}, "state": "pending", "message": "..."}`; a build's backend asking orbit's policy whether a tool call may run. Revision 1 is the request (`pending`); the decision is the next, `allowed` or `denied`, with orbit's `message`. Actions waiting for a person are a run's `actions`, not these. |
+| `question` | `question:<a>.<s>.<i>` (a question tool's: `question:<call id>.<n>`) | `{"text": "Which card?", "header": "...", "options": [{"label": "...", "description": "..."}], "multi_select": true}`; something the agent asked its person: a question in its final answer (`options` empty), or a question tool's, with what it offered. The thread's question messages are the ones a person replies to. |
+| `status` | `status:<a>.<s>.0` | `{"code": "orbit.source_fetched", "detail": <bounded>}`; something that happened to the run that is not the model's output: orbit's steps (`orbit.*`, as in Events), the backend's session start (`system.init`), a rate limit report (`rate_limit_event`), a line that was not JSON (`raw`). `detail` is the event's payload. |
+| `turn` | `turn:<a>.<n>` | below |
+
+**Turns.** A turn is one exchange with the backend, from the request to its result. It opens at the backend's first event (Claude Code's `system.init` or first message, Codex's `turn.started`, a Messages API response) and closes at its result; a live process answers several runs, one turn each.
+
+```json
+{"state": "completed", "outcome": "success",
+ "started_at": "...", "completed_at": "...", "duration_ms": 4200,
+ "cost_usd": 0.02, "usage": {}, "error": "..."}
+```
+
+- `state` is how the turn stands as orbit observed it: `running`; `completed` (the backend answered); `interrupted` (orbit saw its process end without a result: a timeout, a crash, a drain's hand-back); `unverifiable` (its attempt was lost, reaped without a heartbeat, and nothing observed how it ended).
+- `outcome` is the backend's own verdict, kept apart from `state`: `success`, `error`, `max_turns`, `max_tokens`, `refused`, or another word a backend reports. It is absent when none was reported, which is never success: an `interrupted` or `unverifiable` turn has none, and a `completed` turn can have `error` (an API error ends a turn too).
+- `completed_at` is absent while running and on an `unverifiable` turn. `duration_ms` and `cost_usd` are the backend's (Claude Code's result), `usage` its token counts, `error` its message when `outcome` is not `success`. Each is absent when not reported.
+- A turn is revision 1 when it opens and one more revision when it ends; the closing revision of an interrupted or lost attempt is written in the transaction that ends the attempt, so a reader that sees the run final sees how its turn ended.
+
 ### Artifacts
 
 `GET /runs/{id}/artifacts` is `{"artifacts": [<artifact>]}`, by attempt, direction and name, without content:
@@ -420,6 +554,51 @@ transition the ticket's state does not allow is 409.
 `GET /agents/{name}/memory?limit=`: the agent's memory versions, newest
 first, `{"versions": [{"id": 12, "run_id": "uuid", "content": "<markdown>",
 "created_at": "..."}]}`. `limit` defaults to 20; the maximum is 200.
+
+## Memory entries
+
+Beside each agent's memory document, orbit keeps **memory entries**: one durable fact each (a correction the person gave, a preference, a fact about their world, where something is), typed, versioned, and shared at one of three scopes:
+
+- `profile`: the person; every agent reads it.
+- `topic`: a domain such as `finance` or `homelab`; every agent that reads the topic (its spec's `topics`, or attached below).
+- `agent`: one agent's own.
+
+Every run of an agent is shown an index of the active entries it reads (`GET /agents/{name}/context`, below) and the entries in full as an input file (docs/ARCHITECTURE.md, Memory entries).
+
+An entry:
+
+```json
+{"id": "uuid", "scope": "topic", "topic": "finance", "key": "transfers-are-not-spending",
+ "version": 2, "status": "active",
+ "type": "feedback", "title": "Transfers are not spending",
+ "description": "one line for the index", "body": "<markdown>",
+ "why": "...", "how_to_apply": "...",
+ "superseded_by": null, "source": "person", "source_run_id": null,
+ "source_conversation_id": null, "author": "kanishk", "note": "",
+ "created_at": "...", "updated_at": "..."}
+```
+
+- `scope` with `topic` (scope `topic`) or `agent` (scope `agent`); neither for `profile`. Topic names are spec names (`^[a-z][a-z0-9-]{0,62}$`).
+- `key` is a slug (`^[a-z0-9][a-z0-9-]{0,79}$`) unique within its scope, stable across versions; omitted on create, it is made from the title (`-2`, `-3`, ... when taken). A key once used stays the entry's, retired or not.
+- `type` is one of Claude Code's memory types: `user` (who the person is), `feedback` (how they want work done), `project` (facts about their world and work), `reference` (where to find things).
+- `title` (one line, at most 200 bytes) and `body` (at most 16 KB) are required; `description` is one line of at most 400 bytes; `why` and `how_to_apply` at most 4 KB each.
+- `version` counts versions, the newest in force. `updated_at` is when it was written, `created_at` when the entry was. `status` is `active` or `retired`; `superseded_by` is the entry that replaced a retired one.
+- `source` is who wrote this version: `person` (this API), `learned` (a learning run), `import` (`POST /memory/import`). `source_run_id` and `source_conversation_id` name what it was learned from. `author` is the token's person (with the operator token, the body's `author`, if any). `note` says why this version was written.
+
+Nothing is deleted. Every change is a new version, kept:
+
+- `GET /memory/entries?scope=&topic=&agent=&type=&status=&q=&limit=`: `{"entries": [...]}`, current versions, by scope (profile, topics, agents), then name, then most recently changed. `topic` or `agent` (not both) selects one place. `status` is `active` (default), `retired` or `all`; `q` matches key, title, description, body, why and how_to_apply, case-insensitively. `limit` defaults to 200, at most 1000.
+- `POST /memory/entries` `{"scope", "topic"|"agent", "key"?, "type", "title", "description"?, "body", "why"?, "how_to_apply"?, "note"?}`: `201 {"entry": ...}`. An explicit `key` already used in the scope is 409; an `agent` that is not configured is 400. Unknown fields are 400.
+- `GET /memory/entries/{id}`: `{"entry": <current>, "versions": [...]}`, every version newest first.
+- `PATCH /memory/entries/{id}` `{"version"?, "type"?, "title"?, "description"?, "body"?, "why"?, "how_to_apply"?, "status"?, "note"?}`: the next version, with absent fields kept. `version` is the version the client read; another current one is 409, so two edits never silently overwrite each other (omit it to write regardless). `status: "active"` restores a retired entry (clearing `superseded_by`). An edit that changes nothing writes no version and returns the current one.
+- `POST /memory/entries/{id}/retire` `{"version"?, "superseded_by"?, "note"?}`: the next version, retired. `superseded_by` must be another, active entry (400 otherwise). This is how an entry is deleted.
+- `POST /memory/import` `{"dry_run": bool, "entries": [<entry as for create, key optional>], "note"?}`: matches each by scope and key. A new key creates an entry, a known one gets a new version when its content differs or it was retired, an identical one is left alone, so an import can be repeated. `{"dry_run", "results": [{"scope", "topic"|"agent", "key", "outcome": "created"|"updated"|"unchanged", "id", "version"}]}`, in request order. All of it is one transaction: one invalid entry fails the whole import (400, naming its index). `dry_run` reports and writes nothing (`id` is absent for an entry it would create). At most 500 entries. `orbit import claude-memory` calls this (deployment.md).
+- `GET /memory/topics`: `{"topics": [{"name", "entries", "agents"}]}` by name: every topic that holds entries or is read by an agent. `entries` counts its active entries; `agents` are the agents that read it, from their spec or attached.
+
+### What an agent reads
+
+- `GET /agents/{name}/context`: `{"agent", "topics": [{"name", "from": ["spec"|"api"]}], "entries": <count>, "index": "<markdown>"}`. `index` is exactly what a run's prompt carries (with `inputs/_memory.md` for the run's own inputs path), `""` when the agent reads no entries.
+- `PUT /agents/{name}/topics/{topic}`: attach a topic, `{"attached": true, "created": bool}` (`created` false when it was attached already). `DELETE /agents/{name}/topics/{topic}`: detach, `{"detached": true}`, 404 when not attached through the API (a topic the spec names stays until the spec changes). The agent must be configured (404).
 
 ## MCP
 

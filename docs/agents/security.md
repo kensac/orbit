@@ -105,6 +105,16 @@ types are not even offered.
   (file paths, commands, URLs): the same data `/events` already serves to
   the same callers.
 
+## Mail
+
+A mail is a message from a person, so it is held to who may send one (`internal/mail`):
+
+- **Who.** Only a sender in `mail.allow` (default: the smtp channels' recipients) is acted on. `From` can be forged, so a mail whose `Authentication-Results` says `dmarc=fail` is refused; a mail with no such header has the allow list as its only check. Requiring a DKIM pass would be stronger.
+- **Where.** A reply reaches a conversation only through a token signed with the operator token, so knowing a conversation id is not enough to write into it; any other mail opens a new conversation with `mail.agent`.
+- **What.** The text becomes a message like one typed into the API: the agent sees it as its person's words. Nothing in a mail is executed, and attachments reach the agent only as names.
+- **Loops.** Automatic mail is never acted on, so an auto-reply to orbit's report does not wake a run that mails again.
+- The IMAP password is in orbit's environment only, like every channel secret; a port other than 993 must offer STARTTLS before login.
+
 ## Workers
 
 A worker (`orbit worker`) holds the database URL, its backend credential and the source credentials of the capabilities it advertises; no API token, approval secret, channel credential, GitHub key or sandbox token (docs/agents/deployment.md, Environment per role). So a compromised worker host reaches what its own agents could read, plus the database: every run's inputs and transcripts, which is why workers run on fleet hosts only and reach orbit-db over the tailnet with TLS, never publicly. It cannot send a notification (control does, from `outbox`, with the links it signs) or execute an action (control's action loop executes only actions recorded under each agent's rules). Stored session transcripts (`session_transcripts`) are the same model-written state as the files above, now readable from the database too; a restore writes only regular files named for the session, under the claiming host's own projects directory.
