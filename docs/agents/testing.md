@@ -9,6 +9,7 @@
   stdin line, and can crash, hang, or send a control request mid-turn.
 - **The engine is tested end to end** with a fake runner and an httptest
   server standing in for sources, channels and endpoints.
+- **The CLI protocol has its own real-CLI check**: `ORBIT_REAL_CLAUDE=claude go test -run RealCLI ./internal/claudeproto/` (initialize with a host hook, set_permission_mode, can_use_tool allowed and denied, a hook_callback per call, an interrupt that withdraws a pending permission request). Run it after a CLI bump; it uses the person's own login, so it never runs in CI.
 
 ## The real-CLI smoke
 

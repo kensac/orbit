@@ -12,7 +12,7 @@ The model is the expensive, slow, non-deterministic part, so it gets only the pa
 ## One run
 
 ```
-trigger (schedule | manual | message | continue)
+trigger (schedule | manual | message | continue; a ticket's build runs its own path, below)
   -> runs row, status queued
   -> executor claims it (FOR UPDATE SKIP LOCKED; at most one running per agent;
      a continuation not before its run_after)
@@ -61,13 +61,7 @@ session between runs. Claude Code stores a session's transcript at
 `$CLAUDE_CONFIG_DIR/projects/<cwd, non-alphanumerics as ->/<id>.jsonl`
 (`runner.SessionFile`); orbit pins `CLAUDE_CONFIG_DIR` to
 `<data>/agents/<name>/home/.claude` and the cwd to `<data>/agents/<name>/work`,
-so `ORBIT_DATA_DIR` must be a persistent volume for resume to survive a restart. The
-transcript is on the volume that ran the session, which every instance of
-one deployment shares (Upgrades); a run claimed where it is missing starts
-fresh rather than failing. For the worker fleet (below), the
-central store would save it after a run and write it back before a resume,
-as the Agent SDK's SessionStore does (it materializes
-`<dir>/projects/<key>/<id>.jsonl` and points `CLAUDE_CONFIG_DIR` there).
+so `ORBIT_DATA_DIR` must be a persistent volume for resume to survive a restart. The transcript is also stored centrally (`session_transcripts`, Worker fleet below) and written back on whichever host claims the next run, as the Agent SDK's SessionStore does; a run claimed where it is on neither starts fresh rather than failing.
 
 - **Resume.** A run continues the session of its conversation's latest finished run
   when that run succeeded on Claude Code under the same spec within `idle`,
@@ -204,7 +198,7 @@ signalling between writers and readers. `GET /usage` and `GET /health` are
 the admin read side, computed from stored rows and the configuration in
 force: subscription windows from the newest `rate_limit_event` Claude Code
 wrote into a run's stream (what it last reported, not a live query), exact
-cost sums, the queue, running runs and next fires. Contract: docs/api.md.
+cost sums, the queue, running runs and next fires. `/mcp` serves the same reads and writes as MCP tools (`internal/api/mcp.go`, stateless Streamable HTTP), with an OAuth proxy in front of authentik for clients that need dynamic registration (`oauth.go`). Contract: docs/api.md.
 
 ## Reliability
 
@@ -224,6 +218,26 @@ cost sums, the queue, running runs and next fires. Contract: docs/api.md.
   (`ErrConflict`); its heartbeat sees that, or sees no beat land for
   `StaleAfter` less one beat, and cancels it before another attempt can
   start. So two instances never both work on one run.
+
+## Worker fleet
+
+orbit runs on several hosts, as jobtracker's workers do: one binary, two roles, one database.
+
+```
+orbit serve (hetzner, control)            orbit worker (oci, transmission, ...)
+  API, scheduler (leader lock), ticket      claims runs its capabilities cover,
+  loop, config sync (files -> database),    executes them from the specs in the
+  outbox delivery, actions, reaper,         database, writes every result to the
+  builds, and executors of its own          database; nothing else
+                 \                         /
+                  orbit-db (Postgres, over the tailnet with TLS)
+```
+
+- **Capabilities.** An agent's spec names what a host must have (`needs: [docker-network:hetzner, sure]`); a host advertises what it has (`ORBIT_CAPABILITIES`, a list; `*` is everything, control's default). `Store.ClaimRunFor` claims a run only when its agent's current spec needs a subset of the host's, reading `needs` from the spec JSON in `agent_specs`, so an agent defined by any writer of that table is covered. An agent with no needs runs anywhere. Build runs (they need the GitHub App and sandboxd) are claimed only by control.
+- **Specs from the database.** control records every loaded `orbit.yaml` (`deployment_specs`, the one in force in `deployment_current`) beside the agent specs it already recorded. A worker reads no file: before each run it rebuilds the configuration from those rows (`spec.FromStored`), so it runs the spec the claim's needs were checked against, with the SHA control computed. A worker waits until the schema is current (control migrates) and a deployment is recorded.
+- **Delivery and actions stay on control.** A worker holds no channel credential and no approval secret, so a worker's engine (`Outbox`) records each notification in `outbox` instead of sending it; control sends it every `outboxEvery` (5 s), adding the run link or the signed approval link, and records each attempt in `deliveries` as for its own runs. Actions a worker's run proposed are rows like any other; control's action loop executes them. Each row is sent once; one a dead control claimed is reclaimed after `store.OutboxReclaimAfter`.
+- **Sessions across hosts.** After a session agent's run, before the run is recorded as succeeded, and after any hand-back, the transcript (`<id>.jsonl` and `<id>/` from the CLI's projects directory, as a gzipped tar) goes to `session_transcripts`; before a resume or a recovery, a host without it writes it back under its own workdir's key (`engine/sessionstore.go`). Postgres rather than Garage: every host that runs agents already holds the database credential and needs nothing more, the write is ordered before the run's outcome so the next claim anywhere finds it, and it is backed up with every other row. A session id is stored once (every resume forks); an archive over `MaxSessionArchive` (64 MiB) stays on its host. A lost attempt (a crash) saved nothing, so its run starts over elsewhere, saying why.
+- **One subscription is shared**, so the fleet adds reach (a source only one host can see, a browser, a residential IP), not capacity.
 
 ## Upgrades
 
@@ -360,13 +374,4 @@ The direction, so changes now do not close it off:
 - **Tickets, what is left**: review comments on a PR's diff, and webhook
   events in place of the loop's polling ([tickets.md](tickets.md)).
 - **Event triggers** from webhooks (a ticket assigned, a comment).
-- **A worker fleet.** Executors on several hosts, as jobtracker's are; the
-  queue already allows it (SKIP LOCKED claims, `runs_one_running`,
-  heartbeats, one scheduler by advisory lock). What changes: agents declare
-  capabilities and workers advertise theirs, so a run is claimed only where
-  its sources are reachable (finance needs hetzner's docker network); source
-  credentials live only on hosts with the capability; delivery and actions
-  stay on one control host; workers read agent specs from the database, not
-  files; sessions are stored centrally so a conversation can continue on any
-  host. One subscription is shared, so the fleet adds reach, not capacity.
 - **A UI** over `/api/v1` (the thread and the stream are its read side).

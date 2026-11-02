@@ -43,13 +43,13 @@ is the design; the topic documents below are the rules for changing it.
 
 ## Repository map
 
-- `cmd/orbit/`: the binary: `serve` (scheduler, executors, action loop, drain,
-  reaper, config reload, HTTP), and operator commands.
+- `cmd/orbit/`: the binary: `serve` (control: scheduler, executors, action loop, outbox delivery, drain, reaper, config reload and sync, HTTP), `worker` (executors only, specs from the database; `worker.go`), and operator commands.
 - `internal/spec/`: configuration loading and validation (`orbit.yaml`,
   `agents/*.yaml`).
 - `internal/engine/`: one run end to end, and the output contract
   (`contract.go`: the schema and the prompts).
 - `internal/runner/`: model backends: `claude-code`, `codex`, `anthropic`.
+- `internal/claudeproto/`: Claude Code's stream-json protocol (turns, control requests both ways, permission answers recorded before they are sent, the transport's flags, the child's credential scrub), written against the Agent SDK's wire format, not the SDK.
 - `internal/sources/`: inputs the harness fetches (`http`, `prometheus`, `file`).
 - `internal/transforms/`: coded reducers over a source before the model sees it.
 - `internal/actions/`: action types, their parameter schemas and executors.
