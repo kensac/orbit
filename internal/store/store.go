@@ -533,6 +533,12 @@ func finishRun(ctx context.Context, tx pgx.Tx, runID string, r RunResult) error 
 		runID, r.Attempt, r.Status, r.CostUSD, r.SessionCostUSD, r.SessionID); err != nil {
 		return err
 	}
+	if r.Status == "failed" {
+		// Every way a run fails ends here (the engine, a build, the reaper).
+		if err := newAttention(ctx, tx, AttentionFailure, "failure:"+runID, runID, " run failed", nil, nil, nil, nil); err != nil {
+			return err
+		}
+	}
 	if r.Attempt < 1 {
 		return nil
 	}
@@ -944,9 +950,13 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 		// orders them as the run listed them.
 		for _, q := range o.Questions {
 			// A question is asked in the asking run's conversation.
-			if _, err := tx.Exec(ctx, `INSERT INTO messages (agent, direction, body, run_id, conversation_id, created_at)
-				SELECT $1, 'from_agent', $2, $3, conversation_id, clock_timestamp() FROM runs WHERE id = $3`,
-				agent, q, runID); err != nil {
+			var id string
+			if err := tx.QueryRow(ctx, `INSERT INTO messages (agent, direction, body, run_id, conversation_id, created_at)
+				SELECT $1, 'from_agent', $2, $3, conversation_id, clock_timestamp() FROM runs WHERE id = $3
+				RETURNING id::text`, agent, q, runID).Scan(&id); err != nil {
+				return err
+			}
+			if err := newAttention(ctx, tx, AttentionQuestion, "question:"+id, runID, " has a question", nil, &id, nil, nil); err != nil {
 				return err
 			}
 		}
@@ -989,7 +999,10 @@ func insertAction(ctx context.Context, tx pgx.Tx, runID, agent string, a Propose
 		        NULLIF($8, ''), clock_timestamp())
 		RETURNING id::text`,
 		runID, agent, a.Type, []byte(a.Params), a.Reason, a.Rule, status, a.Error).Scan(&id)
-	return id, err
+	if err != nil || status != "pending" {
+		return id, err
+	}
+	return id, newAttention(ctx, tx, AttentionApproval, "action:"+id, runID, " wants to "+a.Type, &id, nil, nil, nil)
 }
 
 // ---------------------------------------------------------------- actions

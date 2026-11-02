@@ -77,6 +77,18 @@ bounded in delay and chain length and, like any type, denied unless named. A web
 `deny` is the default for every type an agent does not name, and denied
 types are not even offered.
 
+## Web Push
+
+- A push leaves orbit for a third party (the browser vendor's push
+  service, then the device's lock screen), so it carries only the
+  attention row's title (an agent name and a fixed phrase) and a link into
+  the app. Never a report, a question, an error or an action's parameters:
+  agents read finance data. The payload is encrypted to the device, so the
+  push service sees only its size.
+- A subscription's endpoint is a URL a browser chose, and orbit posts to it
+  from inside the network, so registration accepts only https URLs on the
+  known push services (`push.AllowedEndpoint`).
+
 ## The API
 
 - Deployed behind traefik at a public hostname. `/ui/` is behind authentik
