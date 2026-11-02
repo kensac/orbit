@@ -266,7 +266,7 @@ func (c *claudeCode) runLive(ctx context.Context, sess *Session, args, env []str
 		if sess.Resume != "" {
 			mode = "resumed"
 		}
-		full, err := claudeproto.Args(claudeproto.Transport{Stream: true, Resume: sess.Resume}, withModel(args, req))
+		full, err := claudeproto.Args(claudeproto.Transport{Stream: true, Resume: sess.Resume, ResumeAt: sess.ResumeAt}, withModel(args, req))
 		if err != nil {
 			return nil, true, err
 		}

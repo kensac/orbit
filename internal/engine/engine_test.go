@@ -70,7 +70,7 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 			req.Session.Attached(sid)
 		}
 	}
-	emit(runner.Event{Kind: "assistant", Payload: []byte(`{"type":"assistant","session_id":"` + sid + `"}`)})
+	emit(runner.Event{Kind: "assistant", Payload: []byte(`{"type":"assistant","uuid":"msg-` + sid + `","session_id":"` + sid + `"}`)})
 	if f.calls <= f.stalls {
 		emit(runner.Event{Kind: "orbit.stalled", Payload: []byte(`{"idle_ms":600000,"stall_ms":600000}`)})
 		return nil, fmt.Errorf("%w: no line from the CLI for 10m0s and no tool call running", runner.ErrStalled)

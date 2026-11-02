@@ -304,9 +304,9 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	}
 	extra := c.chatArgs(req, home, keepDays)
 	env := c.env(home)
-	resume := ""
+	resume, resumeAt := "", ""
 	if sess != nil {
-		resume = sess.Resume
+		resume, resumeAt = sess.Resume, sess.ResumeAt
 	}
 	key := hashArgs(c.bin, req.Workdir, extra, env)
 
@@ -327,7 +327,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			mode = "resumed"
 		}
 		tools := &chatTools{}
-		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, Resume: resume, Ephemeral: sess == nil}, withModel(extra, req))
+		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, Resume: resume, ResumeAt: resumeAt, Ephemeral: sess == nil}, withModel(extra, req))
 		if err != nil {
 			return nil, err
 		}

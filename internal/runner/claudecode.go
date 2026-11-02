@@ -275,7 +275,7 @@ func (c *claudeCode) resumed(ctx context.Context, sess *Session, args, env []str
 	if err := sess.Started(mode, sess.Resume); err != nil {
 		return nil, err
 	}
-	full, err := claudeproto.Args(claudeproto.Transport{Resume: sess.Resume}, withModel(args, req))
+	full, err := claudeproto.Args(claudeproto.Transport{Resume: sess.Resume, ResumeAt: sess.ResumeAt}, withModel(args, req))
 	if err != nil {
 		return nil, err
 	}

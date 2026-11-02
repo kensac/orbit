@@ -97,6 +97,9 @@ type Session struct {
 	Home string
 	// Resume is the session to continue; empty starts a fresh one.
 	Resume string
+	// ResumeAt, with Resume, continues it only up to this assistant
+	// message (a fork's point, claudeproto.Transport.ResumeAt).
+	ResumeAt string
 	// BaseCostUSD is the backend's cumulative cost total saved with Resume.
 	// The CLI reports a running total per session, so this run's cost is
 	// the difference.

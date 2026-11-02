@@ -70,6 +70,15 @@ type Conversation struct {
 	// agent's runner's own; null is the runner's.
 	Model  *string `json:"model"`
 	Effort *string `json:"effort"`
+	// ForkedFrom names the conversation and message a fork was started at
+	// (ForkConversation); null for any other.
+	ForkedFrom *ForkPoint `json:"forked_from"`
+}
+
+// ForkPoint is where a fork was started.
+type ForkPoint struct {
+	ConversationID string `json:"conversation_id"`
+	MessageID      string `json:"message_id"`
 }
 
 const conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived, c.created_at, c.last_activity_at,
@@ -78,7 +87,9 @@ const conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived
 	OR EXISTS (SELECT 1 FROM actions x JOIN runs xr ON xr.id = x.run_id
 	           WHERE xr.conversation_id = c.id AND x.status = 'pending'),
 	(SELECT t.id::text FROM tickets t WHERE t.conversation_id = c.id), c.purpose,
-	(SELECT k.id::text FROM tasks k WHERE k.conversation_id = c.id), c.model, c.effort`
+	(SELECT k.id::text FROM tasks k WHERE k.conversation_id = c.id), c.model, c.effort,
+	CASE WHEN c.forked_from IS NOT NULL
+	     THEN json_build_object('conversation_id', c.forked_from, 'message_id', c.forked_at_message) END`
 
 // GetConversation returns one conversation.
 func (s *Store) GetConversation(ctx context.Context, id string) (*Conversation, error) {

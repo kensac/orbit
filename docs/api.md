@@ -176,7 +176,7 @@ conversation is never deleted, only archived.
   "id": "uuid", "agent": "finance", "title": "How much on Uber Eats in October?",
   "is_default": false, "archived": false,
   "created_at": "...", "last_activity_at": "...", "needs_input": true,
-  "ticket_id": null, "model": null, "effort": null}],
+  "ticket_id": null, "model": null, "effort": null, "forked_from": null}],
  "has_more": false, "next_before": null}
 ```
 
@@ -221,6 +221,8 @@ characters (400 otherwise).
 
 `model` and `effort` are what the conversation's runs use instead of the agent's runner's own; `null` or `""` returns one to the runner's, and an absent field is left as it is. Both are checked against the agent's runner (`spec.CheckModel`, 400 naming the problem): a model is an alias or id (`opus`, `claude-opus-4-5`, `sonnet[1m]`, `gpt-5-codex`: lowercase letters, digits and `. _ : -`), an `anthropic` runner's an id starting `claude-`; `effort` is only for `claude-code`, one of `low`, `medium`, `high`, `xhigh`, `max`. A run reads them when it starts and records what it ran with (a run's `model` and `effort`). A conversation's live process takes a change at its next turn without ending (`set_model`, and `apply_flag_settings` with `effortLevel`), so the session and its cache carry on; a process that refuses either is closed and the turn starts one with `--model` and `--effort`. A stored pair the runner no longer takes (the agent moved to another runner) is not used, and the run's `orbit.model_skipped` event `{"reason"}` says why. The default conversation cannot be archived
 (409). A message to an archived conversation brings it back.
+
+`POST /conversations/{id}/fork` `{"message_id": "uuid", "client_request_id": "optional"}` returns `201 {"conversation": {...}}`: a new conversation of the same agent that starts from that message, with `forked_from` `{"conversation_id", "message_id"}` (`null` on every other conversation). It holds the thread as it stood once the message was answered: up to the finish of the run that read it (a person's message) or asked it (a question), or up to the message itself when no run has read it. It keeps the parent's title with ` (fork)`, its `model` and `effort`, and a chat agent's workspace as of that point. The fork's own thread (`GET /conversations/{id}/thread`) holds only its own items; what came before is the parent's thread up to `forked_from.message_id`. The fork's runs are told the parent's thread up to that point as text; when the answering run succeeded on Claude Code under the agent's spec and within its `session.idle`, the fork's first run instead continues that run's session cut at its last assistant message (`--resume-session-at`, so what a live process added after is dropped; seen on 2.1.316), and its `orbit.session` event carries `forked_from` `{"conversation_id", "run_id", "at"}`. A message whose reply is still being written is `409`; a message not in the conversation `404`; a malformed id `400`. A retry with the same `client_request_id` returns the first fork.
 
 `POST /conversations/{id}/messages` takes and returns exactly what
 `POST /agents/{name}/messages` does (below), in that conversation.
