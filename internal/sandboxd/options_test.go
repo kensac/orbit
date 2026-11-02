@@ -150,10 +150,7 @@ func goodState() containerState {
 	c.HostConfig.Memory = MemoryBytes
 	p := int64(Pids)
 	c.HostConfig.PidsLimit = &p
-	c.Mounts = append(c.Mounts, struct {
-		Type        string `json:"Type"`
-		Destination string `json:"Destination"`
-	}{"volume", "/work"})
+	c.Mounts = append(c.Mounts, mountState{Type: "volume", Destination: "/work"})
 	return c
 }
 

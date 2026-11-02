@@ -37,6 +37,18 @@ type fakeDocker struct {
 	tamper func(*containerState)
 	// extra is added to every readback.
 	extra []entry
+	// names maps container names to ids (a create with ?name=).
+	names map[string]string
+	// createQueries are the query strings of every create.
+	createQueries []string
+	// ttys are the running fake TTY processes by pid; resizes are what
+	// each exec was resized to.
+	ttys    map[int]net.Conn
+	resizes map[string][]string
+	nextPid int
+	// sessions are the tmux sessions has-session reports alive.
+	sessions map[string]bool
+	exits    map[string]int
 }
 
 type fakeContainer struct {
@@ -85,6 +97,18 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		id := newID()
 		f.mu.Lock()
 		f.created = append(f.created, spec)
+		f.createQueries = append(f.createQueries, r.URL.RawQuery)
+		if n := r.URL.Query().Get("name"); n != "" {
+			if f.names == nil {
+				f.names = map[string]string{}
+			}
+			if _, taken := f.names[n]; taken {
+				f.mu.Unlock()
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			f.names[n] = id
+		}
 		f.containers[id] = &fakeContainer{spec: spec, labels: spec.Labels}
 		f.mu.Unlock()
 		w.WriteHeader(http.StatusCreated)
@@ -93,6 +117,9 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 	get := func(w http.ResponseWriter, id string) *fakeContainer {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if n, ok := f.names[id]; ok {
+			id = n
+		}
 		c := f.containers[id]
 		if c == nil {
 			w.WriteHeader(http.StatusNotFound)
@@ -107,7 +134,15 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		}
 		var st containerState
 		st.ID = r.PathValue("id")
+		f.mu.Lock()
+		if n, ok := f.names[st.ID]; ok {
+			st.ID = n
+		}
+		f.mu.Unlock()
 		st.Config.User = c.spec.User
+		st.Config.Image = c.spec.Image
+		st.Created = "2026-11-02T00:00:00Z"
+		st.HostConfig.Binds = c.spec.HostConfig.Binds
 		st.Config.Labels = c.labels
 		h := c.spec.HostConfig
 		st.HostConfig.Privileged = h.Privileged
@@ -121,10 +156,7 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		pl := h.PidsLimit
 		st.HostConfig.PidsLimit = &pl
 		for _, m := range h.Mounts {
-			st.Mounts = append(st.Mounts, struct {
-				Type        string `json:"Type"`
-				Destination string `json:"Destination"`
-			}{m.Type, m.Target})
+			st.Mounts = append(st.Mounts, mountState{Type: m.Type, Name: m.Source, Destination: m.Target})
 		}
 		st.State.Running = c.running
 		if f.tamper != nil {
@@ -182,12 +214,33 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 			w.WriteHeader(http.StatusNoContent)
 		}
 	})
+	mux.HandleFunc("POST "+p+"/containers/{id}/stop", func(w http.ResponseWriter, r *http.Request) {
+		if c := get(w, r.PathValue("id")); c != nil {
+			f.mu.Lock()
+			c.running = false
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		}
+	})
+	mux.HandleFunc("POST "+p+"/exec/{id}/resize", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		if f.resizes == nil {
+			f.resizes = map[string][]string{}
+		}
+		f.resizes[r.PathValue("id")] = append(f.resizes[r.PathValue("id")], r.URL.Query().Get("w")+"x"+r.URL.Query().Get("h"))
+		f.mu.Unlock()
+	})
 	mux.HandleFunc("DELETE "+p+"/containers/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("force") != "true" || r.URL.Query().Get("v") != "true" {
 			t.Errorf("remove without force and v: %s", r.URL.RawQuery)
 		}
 		if c := get(w, r.PathValue("id")); c != nil {
 			f.mu.Lock()
+			for n, id := range f.names {
+				if id == r.PathValue("id") {
+					delete(f.names, n)
+				}
+			}
 			delete(f.containers, r.PathValue("id"))
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
@@ -234,7 +287,17 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		if r.Header.Get("Upgrade") != "tcp" {
 			t.Error("exec start without upgrade")
 		}
-		_, _ = io.Copy(io.Discard, r.Body)
+		var start struct {
+			Tty         bool  `json:"Tty"`
+			ConsoleSize []int `json:"ConsoleSize"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&start)
+		f.mu.Lock()
+		e := f.execs[r.PathValue("id")]
+		f.mu.Unlock()
+		if start.Tty != e.Tty {
+			t.Errorf("exec started with Tty %v, created with %v", start.Tty, e.Tty)
+		}
 		conn, buf, err := w.(http.Hijacker).Hijack()
 		if err != nil {
 			t.Error(err)
@@ -243,6 +306,14 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		defer conn.Close()
 		_, _ = buf.WriteString("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
 		_ = buf.Flush()
+		if e.Tty {
+			f.fakeTTY(r.PathValue("id"), conn, buf.Reader)
+			return
+		}
+		if len(e.Cmd) > 0 && (e.Cmd[0] == "tmux" || e.Cmd[0] == "kill") {
+			f.fakeCommand(r.PathValue("id"), e.Cmd)
+			return
+		}
 		in, _ := io.ReadAll(buf.Reader)
 		frame := func(stream byte, p []byte) {
 			var h [8]byte
@@ -255,7 +326,13 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		frame(2, []byte("bye"))
 	})
 	mux.HandleFunc("GET "+p+"/exec/{id}/json", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(execState{Running: false, ExitCode: 7})
+		f.mu.Lock()
+		code, ok := f.exits[r.PathValue("id")]
+		f.mu.Unlock()
+		if !ok {
+			code = 7
+		}
+		_ = json.NewEncoder(w).Encode(execState{Running: false, ExitCode: code})
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -295,7 +372,8 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	dir := socketDir(t)
-	fd := &fakeDocker{containers: map[string]*fakeContainer{}, volumes: map[string]map[string]string{}, execs: map[string]execCreate{}}
+	fd := &fakeDocker{containers: map[string]*fakeContainer{}, volumes: map[string]map[string]string{}, execs: map[string]execCreate{},
+		names: map[string]string{}, ttys: map[int]net.Conn{}, sessions: map[string]bool{}, exits: map[string]int{}, nextPid: 41}
 	serveUnix(t, filepath.Join(dir, "docker.sock"), fd.handler(t))
 	cfg := testConfig()
 	cfg.Docker = filepath.Join(dir, "docker.sock")
