@@ -3,7 +3,7 @@
 A deployment is a directory: `orbit.yaml` plus `agents/<name>.yaml`
 (`examples/` is complete and loaded by tests). Unknown fields fail the load;
 so does any invalid cross-reference. `orbit validate <dir>` checks a
-directory and lists the environment variables it references.
+directory and lists the environment variables it references. Every field, its type and default is in [spec-reference.md](spec-reference.md); this file is the rules behind them.
 
 ## Agent names
 
@@ -131,7 +131,7 @@ timezone. An unknown `{{name}}` fails the fetch.
 Each kind is listed once in `internal/spec` (`channelKinds`, `sourceKinds`,
 `runnerKinds`) and implemented once in its package. Add both, plus the
 validation of its required fields, plus a test, plus the table in
-docs/ARCHITECTURE.md. A kind validation accepts that no package implements
+docs/ARCHITECTURE.md and the kind's row in spec-reference.md. A kind validation accepts that no package implements
 fails at runtime, not at load.
 
 ## Chat agents
