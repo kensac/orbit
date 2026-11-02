@@ -330,6 +330,12 @@ func proposePlan(ctx context.Context, tx pgx.Tx, id, runID, body string) (int, e
 		RETURNING version`, id, body, runID).Scan(&version); err != nil {
 		return 0, err
 	}
+	if runID != "" {
+		if err := newAttention(ctx, tx, AttentionDecision, fmt.Sprintf("plan:%s:%d", id, version), runID,
+			" has a plan to approve", nil, nil, &id, &version); err != nil {
+			return 0, err
+		}
+	}
 	return version, setStatus(ctx, tx, id, from, TicketPlanned, "agent", TicketUpdate{}, map[string]any{"plan": version})
 }
 

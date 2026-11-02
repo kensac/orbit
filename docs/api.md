@@ -368,6 +368,37 @@ An attempt (`store.Attempt`), oldest first:
   decider is the token's person. Only with the operator token, `{"by":
   "name"}` names it (default `operator`).
 
+## Attention and push
+
+Something waiting on a person is an **attention** row, written in the same transaction as the thing itself, one per thing (`key`): a pending approval (`approval`, key `action:<id>`), a run's question (`question`, `question:<message id>`), a failed run (`failure`, `failure:<run id>`) and a ticket plan to approve (`decision`, `plan:<ticket id>:<version>`). Whether it is still open is read from the thing at query time: the action still `pending`, the question unanswered, the plan the ticket's newest while it is `planned`, a failure until a later run of its conversation succeeds or the person writes there. Dismissing closes any of them for the inbox only (a dismissed approval stays pending).
+
+`GET /attention?limit=<n>` is everything open, newest first (`limit` defaults to and is at most 500):
+
+```json
+{"items": [{
+  "id": "uuid", "key": "action:uuid", "kind": "approval", "agent": "finance",
+  "run_id": "uuid", "conversation_id": "uuid", "action_id": "uuid",
+  "message_id": null, "ticket_id": null, "plan_version": null,
+  "title": "finance wants to webhook:pay", "detail": "<the action's reason>",
+  "push": true, "created_at": "...", "link": "/orbit/c/<conversation_id>#action-<action_id>"}]}
+```
+
+`title` is the agent's name and a fixed phrase, never anything a run wrote. `detail` is the question, the action's reason, the run's error or the ticket's title, for a signed-in inbox only. `push` is false for a run a person's message woke (`engine.Attended`): listed, not pushed. `link` is where to act, under `ORBIT_PUSH_LINK_BASE`: the conversation, with `#action-<id>` or `#message-<id>` for an approval or a question. `POST /attention/{id}/dismiss` is `{"ok": true}` (repeating it is fine; 404 for an unknown id).
+
+**Web Push.** Control sends each attention row with `push` set to every registered device, straight to the browser's push service (RFC 8291 encryption, RFC 8292 VAPID; `internal/webpush`). The payload is only `{"title", "url", "tag", "kind", "count"}`: the title above and the link. Rows that arrive within 20 s of the previous push (`push.Gap`) wait and go out together as one summary (`"3 things need you: finance, ops"`, url `<base>/inbox`, tag `orbit-inbox`); a row that closed before its turn, or waited more than a day (`push.MaxAge`), is not sent. `tag` and the `Topic` header are the row's key, so a device and the push service each keep one notification per thing. A send that fails is not retried; the inbox still lists it.
+
+- `GET /push` is `{"enabled": true, "public_key": "<VAPID public key, base64url>"}` (`enabled: false`, `public_key: null` without keys).
+- `POST /push/subscriptions` takes a browser's `PushSubscription.toJSON()` (`{"endpoint", "keys": {"p256dh", "auth"}}`) and an optional `label`, and returns `201 {"id": "uuid"}`. The endpoint must be https on a known push service (FCM, Apple, Windows, Mozilla; `push.AllowedEndpoint`), else 400. The same endpoint again refreshes its row. 503 when push is not configured.
+- `GET /push/subscriptions` is the caller's active devices (`id`, `endpoint`, `author`, `label`, `created_at`, `last_sent_at`, `last_error`, `failures`; never the keys); every device for the operator token.
+- `DELETE /push/subscriptions` with `{"endpoint": "..."}` stops pushing to it (404 when none is active). A push service answering 404 or 410 revokes it too.
+- `POST /push/test` sends `orbit notifications are on` to the caller's devices now, ignoring the gap: `{"sent": <devices that accepted it>}`.
+
+| variable | meaning |
+|---|---|
+| `ORBIT_VAPID_PUBLIC_KEY`, `ORBIT_VAPID_PRIVATE_KEY` | the VAPID pair, base64url (`orbit vapid` prints a new one). Both unset: push is off, the inbox still works. Set but invalid or mismatched: `serve` refuses to start. Rotating the pair invalidates every subscription (browsers bind them to the key), so devices subscribe again. |
+| `ORBIT_VAPID_SUBJECT` | the contact push services may use, `mailto:` or `https:`. Required with the keys. |
+| `ORBIT_PUSH_LINK_BASE` | the app path links start with, default `/orbit` (the portfolio's chat). |
+
 ## Tickets
 
 A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)):

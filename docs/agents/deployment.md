@@ -70,6 +70,10 @@ Rendered from Infisical (`HETZNER_ORBIT_*`). The Claude Code subscription
 token comes from `claude setup-token` and lasts a year; when it expires every
 run fails with `Not logged in`, which pages through the failure notification.
 
+Web Push needs `ORBIT_VAPID_PUBLIC_KEY`, `ORBIT_VAPID_PRIVATE_KEY` (from
+`orbit vapid`) and `ORBIT_VAPID_SUBJECT` on control (docs/api.md, Attention
+and push); without them push is off and `serve` logs so.
+
 ## sandboxd and egress on oci
 
 The build sandbox runs on oci (tailnet `100.123.116.85`), not hetzner: a

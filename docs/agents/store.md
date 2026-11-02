@@ -36,6 +36,8 @@ an agent's beliefs changed.
   run and move the ticket together. `build_decisions` and `build_sandboxes`
   rows are written only by the attempt holding the run's claim.
 
+- attention (`attention`): written with its thing (`newAttention`: `finishRun` for a failure, `insertAction` for a pending approval, `RecordOutcome` for a question, `proposePlan` for a plan), one row per `key`; open is computed from the thing (`attentionOpen`), never stored, so no decision path has to remember to close it. `pushed_at` is set once by `ClaimPush`; `dismissed_at` once by a person.
+- push subscriptions (`push_subscriptions`): revoked, never deleted; the same endpoint subscribing again revives its row.
 - outbox (`outbox`, written by a worker's engine): unsent, claimed by one control instance (`ClaimOutbox`, reclaimed after `OutboxReclaimAfter`), then `sent_at` set once its deliveries are recorded. Rows are kept.
 - session transcripts (`session_transcripts`): written once per session id (`ON CONFLICT DO NOTHING`; a resume forks to a new id), never updated.
 - deployment (`deployment_specs`, `deployment_current`): every version kept, as `agent_specs`; `SyncDeployment` moves the pointer before `SyncAgents` records the agents loaded with it.
