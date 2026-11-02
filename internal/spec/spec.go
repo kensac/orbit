@@ -6,6 +6,7 @@
 package spec
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -60,6 +61,8 @@ type Deployment struct {
 	// Build is how orbit builds approved tickets (build.go). Without it no
 	// ticket is built.
 	Build *Build `yaml:"build,omitempty" json:"build,omitempty"`
+	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
+	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -177,7 +180,19 @@ type Agent struct {
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
+	// Origin is where the agent is defined: OriginFile, OriginDatabase or
+	// OriginBuiltin. Only database agents are changed through the API.
+	Origin string `yaml:"-" json:"-"`
+	// Version is a database agent's definition version (agent_definitions).
+	Version int `yaml:"-" json:"-"`
 }
+
+// Where an agent is defined.
+const (
+	OriginFile     = "file"
+	OriginDatabase = "database"
+	OriginBuiltin  = "builtin"
+)
 
 // SessionSpec is an agent's opt-in to continuing its Claude Code session.
 type SessionSpec struct {
@@ -384,7 +399,41 @@ func ParseSchedule(expr string) (cron.Schedule, error) { return cronParse.Parse(
 // Load reads orbit.yaml and every agents/*.yaml under dir, then validates the
 // whole configuration. An invalid file fails the load: a deployment never
 // runs with part of its configuration silently skipped.
-func Load(dir string) (*Config, error) {
+func Load(dir string) (*Config, error) { return load(dir, nil, false) }
+
+// Definition is an agent defined in the database (agent_definitions): its
+// newest version, which LoadAll merges with the files.
+type Definition struct {
+	Name    string
+	Version int
+	Enabled bool
+	// Spec is the agent as JSON, the same fields as an agents/*.yaml file.
+	Spec json.RawMessage
+}
+
+// LoadAll is the configuration orbit runs: the files under dir, the
+// database's agent definitions, and the built-in agents (builtin.go). A
+// database agent named like a file agent is a configuration error; a
+// built-in agent yields to a file or database agent of its name, so a
+// deployment can replace it.
+func LoadAll(dir string, defs []Definition) (*Config, error) { return load(dir, defs, true) }
+
+// DecodeAgent reads one agent's JSON as strictly as a file is read: an
+// unknown field is an error.
+func DecodeAgent(b []byte) (*Agent, error) {
+	a := &Agent{}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(a); err != nil {
+		return nil, err
+	}
+	if dec.More() {
+		return nil, errors.New("more than one JSON value")
+	}
+	return a, nil
+}
+
+func load(dir string, defs []Definition, all bool) (*Config, error) {
 	cfg := &Config{Agents: map[string]*Agent{}}
 	if err := decodeFile(filepath.Join(dir, "orbit.yaml"), &cfg.Deployment); err != nil {
 		return nil, err
@@ -405,7 +454,30 @@ func Load(dir string) (*Config, error) {
 		if _, dup := cfg.Agents[a.Name]; dup {
 			return nil, fmt.Errorf("%s: duplicate agent %q", f, a.Name)
 		}
+		a.Origin = OriginFile
 		cfg.Agents[a.Name] = a
+	}
+	for _, d := range defs {
+		a, err := DecodeAgent(d.Spec)
+		if err != nil {
+			return nil, fmt.Errorf("database agent %q version %d: %w", d.Name, d.Version, err)
+		}
+		if a.Name != d.Name {
+			return nil, fmt.Errorf("database agent %q version %d: its spec names %q", d.Name, d.Version, a.Name)
+		}
+		if _, dup := cfg.Agents[a.Name]; dup {
+			return nil, fmt.Errorf("agent %q is defined twice: in agents/%s.yaml and in the database", a.Name, a.Name)
+		}
+		enabled := d.Enabled
+		a.Enabled, a.Origin, a.Version = &enabled, OriginDatabase, d.Version
+		cfg.Agents[a.Name] = a
+	}
+	if all {
+		for _, a := range Builtins(cfg.Deployment) {
+			if _, taken := cfg.Agents[a.Name]; !taken {
+				cfg.Agents[a.Name] = a
+			}
+		}
 	}
 	cfg.applyDefaults()
 	cfg.applyBuildDefaults()
@@ -447,6 +519,7 @@ func (c *Config) applyDefaults() {
 		// needs more names its own.
 		d.Defaults.Timeout = Duration(15 * time.Minute)
 	}
+	c.applyMailDefaults()
 	if d.Defaults.MemoryMaxBytes == 0 {
 		// About 4k tokens: memory rides in every prompt, so it must stay a
 		// small fraction of the context the run needs for its inputs.
@@ -563,6 +636,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, c.validateAgent(c.Agents[n])...)
 	}
 	errs = append(errs, c.validateBuild()...)
+	errs = append(errs, c.validateMail()...)
 	return errors.Join(errs...)
 }
 

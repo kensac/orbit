@@ -11,6 +11,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -50,6 +51,10 @@ type Server struct {
 	// internal listener's POST /api/v1/drain starts it. Nil is never
 	// draining.
 	Drain *engine.Drain
+	// Reload puts the configuration and the database's agent definitions
+	// in force after the API changes a definition. Nil reloads through
+	// Engine.Reload alone (tests).
+	Reload func(context.Context) error
 	// OAuth, when set, serves the authorization server MCP clients sign in through (oauth.go) on the public listener. Without it /mcp still takes an authentik token from a client that has one.
 	OAuth *OAuthProxy
 }
@@ -71,6 +76,12 @@ func (s *Server) routes(internal bool) http.Handler {
 	api := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.authenticate(internal, h)) }
 	api("GET /api/v1/agents", s.listAgents)
 	api("GET /api/v1/agents/{name}", s.getAgent)
+	api("POST /api/v1/agents", s.createAgent)
+	api("PUT /api/v1/agents/{name}", s.updateAgent)
+	api("POST /api/v1/agents/{name}/enable", s.setAgentState("enable"))
+	api("POST /api/v1/agents/{name}/disable", s.setAgentState("disable"))
+	api("POST /api/v1/agents/{name}/archive", s.setAgentState("archive"))
+	api("GET /api/v1/agents/{name}/definitions", s.agentDefinitions)
 	api("GET /api/v1/agents/{name}/thread", s.thread)
 	api("GET /api/v1/agents/{name}/conversations", s.listConversations)
 	api("POST /api/v1/agents/{name}/conversations", s.createConversation)
@@ -195,7 +206,19 @@ func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	agents, err := s.Store.ListAgents(r.Context())
+	s.withOrigin(agents)
 	respond(w, map[string]any{"agents": orEmpty(agents)}, err)
+}
+
+// withOrigin fills each row's origin and version from the configuration in
+// force.
+func (s *Server) withOrigin(rows []store.AgentRow) {
+	cfg := s.Engine.Current().Config
+	for i := range rows {
+		if a, ok := cfg.Agents[rows[i].Name]; ok {
+			rows[i].Origin, rows[i].Version = a.Origin, a.Version
+		}
+	}
 }
 
 func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
@@ -205,6 +228,7 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
+	s.withOrigin(agents)
 	for _, a := range agents {
 		if a.Name == name {
 			mem, err := s.Store.Memory(r.Context(), name)
