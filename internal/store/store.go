@@ -607,6 +607,9 @@ func finishRun(ctx context.Context, tx pgx.Tx, runID string, r RunResult) error 
 		runID, r.Attempt, r.Status, r.CostUSD, r.SessionCostUSD, r.SessionID); err != nil {
 		return err
 	}
+	if err := wakeForSteers(ctx, tx, runID); err != nil {
+		return err
+	}
 	if err := recordTokens(ctx, tx, runID, r.Attempt, r.Tokens); err != nil {
 		return err
 	}
