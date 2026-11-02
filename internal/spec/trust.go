@@ -206,5 +206,11 @@ func Widening(cur, next *Agent) []string {
 			out = append(out, "connector "+n)
 		}
 	}
+	for _, t := range next.Triggers {
+		// A webhook lets an outside sender start unattended runs with a body it wrote.
+		if t.IsWebhook() && !slices.ContainsFunc(cur.Triggers, func(c Trigger) bool { return c.Webhook == t.Webhook && c.Secret == t.Secret }) {
+			out = append(out, "webhook "+t.Webhook)
+		}
+	}
 	return out
 }

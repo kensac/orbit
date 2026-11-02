@@ -97,7 +97,7 @@ func (s *connRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 	return &runner.Result{Output: json.RawMessage(s.output), CostUSD: &cost, SessionID: "s1"}, nil
 }
 
-const quietOutput = `{"summary": "done", "report": "done", "notify": {"send": false, "priority": "default", "title": ""},
+const connQuietOutput = `{"summary": "done", "report": "done", "notify": {"send": false, "priority": "default", "title": ""},
   "memory": {"update": false, "content": ""}, "questions": [], "actions": []}`
 
 type connectorHarness struct {
@@ -232,7 +232,7 @@ func server(t *testing.T, req runner.Request) runner.ConnectorServer {
 func TestConnectorToolsAreListedAndAReadToolRuns(t *testing.T) {
 	var got []string
 	var file, fileContent string
-	sr := &connRunner{output: quietOutput, script: func(ctx context.Context, req runner.Request) error {
+	sr := &connRunner{output: connQuietOutput, script: func(ctx context.Context, req runner.Request) error {
 		for _, tl := range server(t, req).Tools {
 			got = append(got, fmt.Sprintf("%s ask=%v ro=%v", tl.Name, tl.Ask, tl.ReadOnly))
 		}
@@ -310,7 +310,7 @@ func TestConnectorToolsAreListedAndAReadToolRuns(t *testing.T) {
 
 func TestAnApproveToolWaitsForItsPersonInTheChat(t *testing.T) {
 	var ch *connectorHarness
-	sr := &connRunner{output: quietOutput, script: func(ctx context.Context, req runner.Request) error {
+	sr := &connRunner{output: connQuietOutput, script: func(ctx context.Context, req runner.Request) error {
 		server(t, req)
 		// The person approves the first call and declines the second, from the chat.
 		go func() {
@@ -372,7 +372,7 @@ func TestAnApproveToolWaitsForItsPersonInTheChat(t *testing.T) {
 }
 
 func TestAnApproveToolInAnUnattendedRunBecomesAPendingAction(t *testing.T) {
-	sr := &connRunner{output: quietOutput, script: func(ctx context.Context, req runner.Request) error {
+	sr := &connRunner{output: connQuietOutput, script: func(ctx context.Context, req runner.Request) error {
 		p := req.Connectors.Permit(ctx, "hw", "create_view", "toolu_1", json.RawMessage(`{"name":"later"}`))
 		if p.Allow || !strings.Contains(p.Message, "waiting for your person's approval") {
 			t.Errorf("unattended permit = %+v", p)
@@ -517,7 +517,7 @@ connectors:
 		t.Fatal(err)
 	}
 	found := 0
-	sr := &connRunner{output: quietOutput, script: func(ctx context.Context, req runner.Request) error {
+	sr := &connRunner{output: connQuietOutput, script: func(ctx context.Context, req runner.Request) error {
 		if r := req.Connectors.Call(ctx, "hw", "find", "toolu_1", json.RawMessage(`{}`)); !r.IsError {
 			found++
 		}

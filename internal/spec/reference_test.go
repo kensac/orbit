@@ -27,6 +27,7 @@ var referenceTables = map[string]any{
 	"`credentials.<VAR>`":               Credential{},
 	"`connectors.<name>`":               Connector{},
 	"`connectors.<name>.auth`":          ConnectorAuth{},
+	"`webhook_secrets.<VAR>`":           WebhookSecret{},
 	"`mail`":                            Mail{},
 	"`mail.imap`":                       IMAP{},
 	"Agent":                             Agent{},

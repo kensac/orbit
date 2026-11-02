@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kensac/orbit/internal/runner"
@@ -30,11 +31,16 @@ type attemptState struct {
 	keeps       bool
 	sessionID   string
 	baseCostUSD float64
+	// instructor is the person the run answers (runInstructor).
+	instructor string
 	// cancel is closed when a person asks the run to stop.
 	cancel     chan struct{}
 	cancelOnce sync.Once
 	// task is the task whose conversation the run is in, nil for none.
 	task *store.Task
+	// steer is set while a chat turn runs: where the attempt's poll hands
+	// the conversation's steer messages (steer.go).
+	steer atomic.Pointer[steerFeed]
 }
 
 // stop closes cancel once.

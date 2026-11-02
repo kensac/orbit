@@ -149,6 +149,21 @@ func (l *Live) drop(p *liveProc) {
 	p.stop(true)
 }
 
+// discard closes the idle live process of key, if there is one.
+func (l *Live) discard(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	p := l.procs[key]
+	if p == nil || p.busy {
+		return
+	}
+	if p.timer != nil {
+		p.timer.Stop()
+	}
+	delete(l.procs, key)
+	l.async(func() { p.stop(false) })
+}
+
 func (l *Live) expire(p *liveProc) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -166,7 +181,10 @@ type liveProcess interface {
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
-	Interrupt(ctx context.Context) error
+	Interrupt(ctx context.Context, cancelQueued bool) (*claudeproto.InterruptReceipt, error)
+	SendUUID(text, uuid string) error
+	CancelQueued(ctx context.Context, uuid string) (bool, error)
+	Capable(name string) bool
 }
 
 // closeIdle closes every idle live process, for a sandbox slot or memory.
@@ -193,7 +211,7 @@ func (l *Live) async(f func()) {
 // startLive starts a process. Its Conn reads for the process's whole life and answers every control request at once: a connector's calls and permission prompts go to the turn in progress (chatTools), and anything else is refused, so the CLI never waits on orbit.
 func startLive(bin string, args, env []string, dir string, conns *Connectors) (*liveProc, error) {
 	tools := &chatTools{}
-	tools.set(nil, conns)
+	tools.connectors(conns)
 	proc, err := claudeproto.Start(claudeproto.Command{Bin: bin, Args: args, Env: env, Dir: dir}, tools.handler())
 	if err != nil {
 		return nil, err
@@ -245,9 +263,9 @@ func (c *claudeCode) runLive(ctx context.Context, sess *Session, args, env []str
 		sess.Live.drop(p)
 		return nil, true, err
 	}
-	p.tools.set(nil, req.Connectors)
+	p.tools.connectors(req.Connectors)
 	final, err = p.turn(ctx, req.Prompt, emit)
-	p.tools.set(nil, nil)
+	p.tools.connectors(nil)
 	if err != nil {
 		sess.Live.drop(p)
 		return nil, true, err

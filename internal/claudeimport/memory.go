@@ -30,7 +30,7 @@ var indexLineRE = regexp.MustCompile(`^\s*[-*]\s*\[([^\]]+)\]\(([^)]+\.md)\)`)
 // MemoryIndexFile is the index Claude Code keeps beside the entries; it is read for titles, never imported as an entry.
 const MemoryIndexFile = "MEMORY.md"
 
-// ReadMemoryDir reads every memory file in dir (not recursively). A file it cannot map is skipped with a warning naming it, so one odd file does not stop an import.
+// ReadMemoryDir reads every memory file in dir (not recursively), leaving out an operating system's droppings (Junk). A file it cannot map is skipped with a warning naming it, so one odd file does not stop an import.
 func ReadMemoryDir(dir string) ([]Memory, []string, error) {
 	titles, err := indexTitles(filepath.Join(dir, MemoryIndexFile))
 	if err != nil {
@@ -46,7 +46,7 @@ func ReadMemoryDir(dir string) ([]Memory, []string, error) {
 	keys := map[string]string{}
 	for _, f := range files {
 		base := filepath.Base(f)
-		if base == MemoryIndexFile {
+		if base == MemoryIndexFile || Junk(base) {
 			continue
 		}
 		b, err := os.ReadFile(f)
