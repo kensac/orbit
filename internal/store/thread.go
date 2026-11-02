@@ -275,10 +275,7 @@ func (s *Store) Thread(ctx context.Context, agent string, before *ThreadCursor, 
 // and runs (every trigger): the newest limit items before the cursor (nil:
 // the newest), oldest first.
 func (s *Store) ConversationThread(ctx context.Context, conversationID string, before *ThreadCursor, limit int) (*ThreadPage, error) {
-	if limit <= 0 {
-		limit = DefaultThreadLimit
-	}
-	limit = min(limit, MaxThreadLimit)
+	limit = clampLimit(limit, DefaultThreadLimit, MaxThreadLimit)
 	at, rank, id := any(nil), rankMessage+1, "ffffffff-ffff-ffff-ffff-ffffffffffff"
 	if before != nil {
 		at, rank, id = before.At, before.Rank, before.ID
