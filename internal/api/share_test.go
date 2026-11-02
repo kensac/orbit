@@ -31,7 +31,12 @@ func TestTemplatesAreSharedAndImportedGrantingNothing(t *testing.T) {
 	if code, b := call(t, "GET", v.srv.URL+path, "", ""); code != 200 || len(b["templates"].([]any)) != 1 {
 		t.Fatalf("the link without a token = %d %v", code, b)
 	}
-	if code, _ := call(t, "GET", v.srv.URL+path[:len(path)-1]+"0", "", ""); code != 403 {
+	// Change the signature's last hex digit to another one (a fixed replacement is no change one time in sixteen).
+	flip := map[byte]string{'0': "1"}[path[len(path)-1]]
+	if flip == "" {
+		flip = "0"
+	}
+	if code, _ := call(t, "GET", v.srv.URL+path[:len(path)-1]+flip, "", ""); code != 403 {
 		t.Fatalf("a tampered link = %d", code)
 	}
 	if code, _ := call(t, "POST", u+"/share", tok, `{"templates": [{"name": "news"}], "link": true, "expires_in_hours": 1000}`); code != 400 {
