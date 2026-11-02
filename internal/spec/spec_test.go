@@ -263,6 +263,35 @@ build:
 	}
 }
 
+func TestLoadAllMergesTheDatabaseAndBuiltins(t *testing.T) {
+	dir := write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\n"})
+	cfg, err := LoadAll(dir, []Definition{{Name: "b", Version: 3, Enabled: false, Spec: []byte(`{"name":"b","charter":"y"}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := cfg.Agents["a"]; a.Origin != OriginFile {
+		t.Fatalf("a = %+v", a)
+	}
+	if b := cfg.Agents["b"]; b.Origin != OriginDatabase || b.Version != 3 || b.IsEnabled() || b.Runner != "r" {
+		t.Fatalf("b = %+v: defaults apply to database agents", b)
+	}
+	if o := cfg.Agents[BuiltinName]; o == nil || o.Origin != OriginBuiltin || o.Runner != "r" {
+		t.Fatalf("builtin = %+v", o)
+	}
+	if _, err := LoadAll(dir, []Definition{{Name: "a", Version: 1, Enabled: true, Spec: []byte(`{"name":"a","charter":"y"}`)}}); err == nil ||
+		!strings.Contains(err.Error(), "defined twice") {
+		t.Fatalf("a name in both = %v", err)
+	}
+	if _, err := LoadAll(dir, []Definition{{Name: "c", Version: 1, Enabled: true, Spec: []byte(`{"name":"c","charter":"y","runner":"none"}`)}}); err == nil {
+		t.Fatal("a database agent is validated like a file")
+	}
+	// A file agent named like the builtin replaces it.
+	cfg, err = LoadAll(write(t, map[string]string{"orbit.yaml": base, "agents/orbit.yaml": "name: orbit\ncharter: mine\n"}), nil)
+	if err != nil || cfg.Agents[BuiltinName].Origin != OriginFile {
+		t.Fatalf("override = %v %+v", err, cfg)
+	}
+}
+
 func TestTriggersTakeCronOrAnRRule(t *testing.T) {
 	load := func(triggers string) error {
 		_, err := Load(write(t, map[string]string{"orbit.yaml": base,
