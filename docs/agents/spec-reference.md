@@ -17,6 +17,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `credentials` | map of variable to credential | none | The variables sources and endpoint headers may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
+| `connectors` | map of name to connector | none | MCP servers agents may be given; orbit calls them on the agents' behalf and holds their credentials (below). |
 | `expires` | map of variable to `YYYY-MM-DD` | none | When a credential orbit cannot inspect stops working (the Claude Code subscription token), exported as `orbit_credential_expiry_timestamp_seconds{credential}` at midnight UTC of the date so an alert fires before it lapses. Nothing else reads it. |
 | `webhook_secrets` | map of variable to webhook secret | none | The signing secrets inbound webhooks are verified with, each bound to the agents whose webhook triggers may name it (below). |
 | `usage_poll` | map: `every` (default 5m, at least 1m), `token_env` (default `CLAUDE_CODE_OAUTH_TOKEN`) | absent | Poll the subscription's usage windows (configuration.md, Subscription usage and low-priority agents). |
@@ -128,6 +129,29 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 |---|---|---|---|
 | `url_prefix` | http(s) URL, path ending in `/` | required | Every request the variable is rendered into (a source's, redirects included, or an endpoint's), must start with it; no user, query or fragment (configuration.md, Secrets). |
 
+### `connectors.<name>`
+
+Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connector's tools as `mcp__<name>__<tool>` (configuration.md, Connectors).
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `transport` | `http` | `http` | MCP streamable HTTP. `stdio` is refused: it is not built (it would run in sandboxd). |
+| `url` | http(s) URL | required | The server's MCP endpoint. orbit follows no redirect from it. |
+| `description` | string | none | What the server is for, shown to the model. |
+| `auth` | map | `kind: none` | How orbit signs the server's requests (below). |
+| `write_tools` | list of tool names | none | The server's tools that change the world: each waits for a person unless the agent's rules say otherwise. Every other tool runs at once. |
+
+### `connectors.<name>.auth`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `kind` | `none`, `header`, `oauth` | `none` | `header` sends one header; `oauth` sends a token a person signed in for (docs/api.md, Connectors). |
+| `header` | header name | required for `header` | The header, such as `Authorization`. |
+| `value` | string | required for `header` | Its value; each `${VAR}` must be in `credentials` with a `url_prefix` the connector's `url` starts with. |
+| `scopes` | list of strings | the server's `scopes_supported` | What an `oauth` sign-in asks for. |
+| `client_id` | string | none | An `oauth` client registered by hand; without it orbit registers itself (dynamic client registration). |
+| `client_secret_env` | env var | none | That client's secret, for a confidential client; needs `client_id`. |
+
 ### `webhook_secrets.<VAR>`
 
 | Field | Type | Default | What it does |
@@ -193,6 +217,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `sandbox` | `workstation`, `build` | none | Needs `chat` and a sandboxd. Runs the CLI in a sandboxd container per conversation: `workstation` has every Claude Code tool and egress to any public host; `build` has its `tools` and the build allowlist (security.md, Sandboxed chats). A `workstation` agent also has a box for terminals (docs/workspace.md). |
 | `needs` | list of capabilities | none | What a host must have to run the agent (`docker-network:hetzner`); without any, every host. |
 | `delegates` | list of agent names, or `["*"]` | none | Agents this one may hand tasks to; the `delegate` action also needs a rule. |
+| `connectors` | list of connector names | none | `orbit.yaml` connectors whose tools the agent's runs may call; claude-code only. Each tool's rule is `mcp:<connector>:<tool>` in `actions`. Adding one widens the agent. |
 | `repos` | list (below) | none | Repositories every run reads: the tree at a commit under `inputs/repos/<name>/`, plus orbit's history and pull request tools. Each must be in `github.read_repositories`; needs `github` in `needs` and a claude-code or codex runner. |
 | `priority` | `normal`, `low` | `normal` | `low` is work that can wait: with `defer_low_priority`, its scheduled runs are held while the subscription is nearly spent. |
 
@@ -299,6 +324,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint, with `path` params filling its path's placeholders; never a URL, method or header of the model's. No redirect is followed. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
 | `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |
+| `mcp:<connector>:<tool>` | The rule for one connector tool, overriding its default: `approve` for a tool in the connector's `write_tools`, `auto` for any other. A `deny` tool is not offered. An `approve` call is recorded as the action `connector:<connector>/<tool>` (configuration.md, Connectors). | the connector in `connectors` |
 | `schedule:add`, `schedule:pause`, `schedule:resume`, `schedule:remove` | Changes one trigger (or, pausing and resuming, every trigger) of this agent or one in `delegates`, as a new revertible version; times are the person's words, parsed by code (configuration.md, Changing schedules by talking). `approve` applies directly in a run answering the person's message. | a database or built-in target |
 | `agent:save` | Saves the conversation as a new agent: the model writes its name, description, charter and starters; orbit adds what the conversation did and proposes it as an `agent:define` that always waits for a person (configuration.md, Saving a conversation as an agent). | |
 | `run:now` | Starts a manual run of this agent or one in `delegates`; a run no message woke cannot start its own agent. `approve` applies directly in a run answering the person's message. | |

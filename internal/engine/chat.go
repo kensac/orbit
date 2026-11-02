@@ -428,6 +428,8 @@ type chatTurn struct {
 	extra string
 	// plugin is the skills plugin directory, when the run has skills.
 	plugin string
+	// connectors are the run's connectors (connectors.go).
+	connectors *runner.Connectors
 	// fresh is a workspace the person changed since the last turn
 	// (runner.Chat.Fresh).
 	fresh bool
@@ -500,7 +502,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	}
 	req := runner.Request{
 		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
-		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin,
+		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin, Connectors: t.connectors,
 	}
 	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
 		return nil, nil, err

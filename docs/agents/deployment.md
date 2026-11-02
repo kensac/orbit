@@ -251,6 +251,7 @@ Design: docs/ARCHITECTURE.md, Worker fleet. One control instance (hetzner) and w
 | `ORBIT_API_TOKEN`, `ORBIT_OIDC_*` | yes | no (no API) |
 | channel credentials (`ORBIT_NTFY_TOPIC`, `SMTP_*`) | yes | no (control delivers) |
 | `ORBIT_GITHUB_APP_PRIVATE_KEY`, `ORBIT_SANDBOX_TOKEN` | yes | no (builds and actions are control's) |
+| `ORBIT_CONNECTOR_KEY`, connector header credentials | yes (sign-ins, approved connector actions) | only on a host advertising `connectors` |
 | `ORBIT_LISTEN` | public listener | `/healthz`, `/readyz`, `/metrics` only; publish it on the tailnet address |
 
 A worker logs `agents this worker may claim reference unset variables` with the names when a covered agent's source needs a variable it lacks (such a run fails on that worker with the source's error), or when it has neither backend credential (`CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY`).
@@ -264,6 +265,7 @@ A worker logs `agents this worker may claim reference unset variables` with the 
 | `sandbox` | holds `ORBIT_SANDBOX_TOKEN` and reaches sandboxd | hetzner |
 | `github` | holds the GitHub App's key, so it can fetch the repositories agents read (`repos`) | hetzner |
 | `browser` | has a browser for an agent to drive | none yet (the image has none) |
+| `connectors` | holds `ORBIT_CONNECTOR_KEY` and the connectors' credentials, so an agent with `connectors` can call them | hetzner, once a connector is registered |
 
 So today: hetzner `ORBIT_CAPABILITIES=docker-network:hetzner,sure,sandbox,github`; oci and transmission none (they run agents that need nothing). The finance agent needs `[docker-network:hetzner, sure]` and stays on hetzner. A new capability is a name agreed here, a host advertising it, and the credentials it implies on exactly those hosts.
 
