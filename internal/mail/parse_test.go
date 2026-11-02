@@ -37,18 +37,18 @@ func TestHTMLText(t *testing.T) {
 }
 
 func TestTokens(t *testing.T) {
-	secret := []byte("s3cret")
+	key := []byte("s3cret")
 	conv := "0b6f3c1e-2a4d-4c5e-9f00-123456789abc"
-	tok := Token(secret, conv)
-	if len(tok) != 44 || Conversation(secret, tok) != conv || Conversation(secret, strings.ToUpper(tok)) != conv {
+	tok := Token(key, conv)
+	if len(tok) != 44 || Conversation(key, tok) != conv || Conversation(key, strings.ToUpper(tok)) != conv {
 		t.Fatalf("token %q does not round-trip", tok)
 	}
 	flip := "a"
 	if tok[43] == 'a' {
 		flip = "b"
 	}
-	if Conversation([]byte("other"), tok) != "" || Conversation(secret, tok[:43]+flip) != "" {
-		t.Fatal("a token signed with another secret, or altered, must not resolve")
+	if Conversation([]byte("other"), tok) != "" || Conversation(key, tok[:43]+flip) != "" {
+		t.Fatal("a token signed with another key, or altered, must not resolve")
 	}
 	addr := ReplyAddress("orbit@example.com", tok)
 	if addr != "orbit+"+tok+"@example.com" || len(addr[:strings.IndexByte(addr, '@')]) > 64 {
@@ -103,5 +103,17 @@ func TestParse(t *testing.T) {
 	}
 	if _, err := Parse(raw(map[string]string{"From": "a@b.c"}, "hi"), "orbit@example.com"); err == nil {
 		t.Fatal("a mail without a Message-ID must not parse")
+	}
+}
+
+// TestTokenIsStable pins a token recorded before the key derivation moved to internal/secret: reply addresses already in people's mailboxes must keep resolving.
+func TestTokenIsStable(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef-golden")
+	conv := "7A1C2D3E-0000-4000-8000-000000000002"
+	if got, want := Token(key, conv), "7a1c2d3e000040008000000000000002beda42d06e1b"; got != want {
+		t.Fatalf("Token = %s, want %s", got, want)
+	}
+	if Conversation(key, "7a1c2d3e000040008000000000000002beda42d06e1b") != strings.ToLower(conv) {
+		t.Fatal("a token signed before the change no longer resolves")
 	}
 }

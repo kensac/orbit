@@ -22,6 +22,7 @@ trigger (schedule: cron or RRULE | manual | message | continue | task | delegati
   -> a fresh session: the recent thread, packed into a byte budget, as conversation.md
   -> sources fetched by the harness, written to <workdir>/inputs/, stored as artifacts
   -> transforms run over sources, each output an input (a source only transforms read is withheld)
+  -> repositories (repos): each fetched into orbit's mirror, its tree at the ref's commit under inputs/repos/<name>, _repos.json an input
   -> gates (scheduled runs, no message waiting): one that finds nothing to judge ends the run skipped
   -> runner called with: system contract, prompt, workdir, tools, output schema
   -> output validated against the contract
@@ -103,6 +104,7 @@ A chat agent is a plain Claude Code session, as a person's own terminal is: the 
 - **The contract.** No `--json-schema`: the reply is the turn's final message (the `result` line's text), stored as the run's report, its first line the summary. Memory, questions and actions are tools orbit serves during the turn, `mcp__orbit__remember`, `mcp__orbit__ask` and `mcp__orbit__act` (the agent's enabled action types, each validated when called), and become the run's outcome exactly as a report agent's output does (`RecordOutcome`). They are an SDK MCP server (`{"type": "sdk", "name": "orbit"}` in `--mcp-config`): the CLI sends each JSON-RPC message to orbit's process as an `mcp_message` control request on its stdout and orbit answers on its stdin (`claudeproto.Handler.MCP`; verified on 2.1.316), so the tools run in orbit, with the store, wherever the CLI runs.
 - **The workspace** is the conversation's directory (`<data>/conversations/<id>/work`, HOME beside it), kept between messages. After every run its files (without `inputs/` and `.orbit/`) are stored as a snapshot (`workspaces`, every one kept, a new row only when the tar changed); a host whose copy is not the newest snapshot restores it before the run (`workspace.sha256` marks which it has). So a conversation continues on any host, and `GET /conversations/{id}/files` reads the snapshot, not a host's disk.
 - **Sessions and the live process** work as for any session agent (below), keyed by the conversation; the built-in has `resume` for a day and `live` for 10 minutes.
+- **Instructions.** A chat run answering its person's message treats their message as the instruction: `mcp__orbit__act` executes an action whose rule is `auto` or `approve` during the turn (`Store.StartActionNow`, then the executor, then `FinishAction`), with the turn's workspace (`runner.WorkspaceOf`: the sandbox's `/work` over attach, or the workdir), and records `instructed_by`. Unattended runs keep their rules. An action executed later by the action loop gets the conversation's stored workspace.
 - **Stop.** `POST /runs/{id}/cancel` on a running run sets `cancel_requested_at`; the attempt polls it (`engine.cancelPoll`, 2 s) and, for a chat turn, sends the CLI an `interrupt` control request, which ends the turn with a result; the run ends `cancelled` with the reply so far.
 - **Sandboxed** (`sandbox: workstation | build`, needs sandboxd: `sandbox:` or `build:` in orbit.yaml). The CLI runs in a sandboxd container (The build sandbox, below) created from the workspace's tar, attached with `sh -c 'CLAUDE_CONFIG_DIR=/work/.orbit/claude exec claude ...'` (the environment a caller may set is the credential alone) and `--permission-mode bypassPermissions`: the container is the boundary. The profile is sandboxd's choice of box, named at create (`?profile=`): `workstation` gives the session Claude Code's full tool set (no `--tools` list), a HOME kept with the workspace (`/work/.orbit/home`, stored beside it as `box-home/` without `.cache`, with `~/.local/bin`, `~/go/bin` and an npm prefix on `PATH` so user installs persist) and egress to any public host through sandboxd's workstation proxy (`ORBIT_SANDBOX_WORKSTATION_PROXY`, an `orbit egress` with the allowlist `*`); `build` gives the tools the agent names and the build allowlist. A later workstation tier (root inside, a docker daemon of its own, stronger isolation) is another profile behind the same name. The conversation's session transcripts ride into the tar under `.orbit/claude/projects/-work/` and come back to HOME after every turn, with the workspace (`Archive`), so resume, the session store and recovery work unchanged. A live sandbox stays up with its process (`session.live`, inside the sandbox's one-hour lifetime); files a later message brings (uploads, inputs) are pushed into it with `tar -x` over an attach of their own. When sandboxd is full (429), idle live sandboxes are closed and the create retried once. The built-in `orbit` is a `workstation` whenever orbit.yaml names sandboxd, and then needs the `sandbox` capability; without sandboxd it runs on orbit's host with read-only file tools, the web and subagents.
 
@@ -122,6 +124,7 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
   (below): the tool server asks the engine over a per-agent unix socket
   (`engine/search.go`), the engine fills in the agent, and its results are
   not ledgered, since an earlier run's words back no figure.
+  With `repos`, the repository tools (Repositories, below) are served the same way, over a socket of their own, and are not ledgered either.
 - **Hooks** (`orbit hook`, from `--settings`; with `--setting-sources ""` no
   other hook is loaded, so `disableAllHooks` is on whenever orbit has none):
   PreToolUse on Read, Glob and Grep denies a path that leaves the workdir after
@@ -138,11 +141,17 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
   and Stop (the stream already records every tool result, and the output to
   verify is the StructuredOutput call, not the stop).
 
+## Repositories
+
+An agent reads git repositories through orbit, not through the web (`internal/repos`, `engine/repos.go`; configuration.md, Repositories). orbit keeps a bare mirror of each repository in `github.read_repositories` that an agent names, under `<data>/mirrors/`: every branch, tag and pull request head (`refs/pull/<n>/head`), fetched before each run with a `contents: read` token that exists only for that fetch. The run gets the tree at the ref's commit, without `.git`, at `inputs/repos/<name>/`, and `_repos.json` (repo, ref, sha) as an input: the prompt names each path and commit, the `unchanged` gate sees a new commit as a change, and a recovered attempt extracts the same commits again. A tree is not stored as artifacts; its commit is the record, and the mirror can give it again.
+
+History and GitHub's state are tools orbit runs, never a credential or a `.git` in the model's reach: `git_log`, `git_show`, `git_diff` and `git_blame` over the mirror, and `pr_list` (every page up to its limit, `merged_at` set only for a merge) and `pr_view` (with the head commit's check runs and statuses) from GitHub with a read token minted per call. A Claude Code report agent reaches them through `orbit mcp`, which asks the engine over a per-agent unix socket (as search does); a chat agent has them among its SDK tools. A build's new clone is seeded from the mirror's default branch head (`build.Pool.Seed`), so its fetch from GitHub transfers only what the mirror lacked.
+
 ## Mail
 
 With `mail` configured (configuration.md), a person talks to orbit by mail as well as by the API (`internal/mail`):
 
-- **Out.** Every mail orbit sends for a run carries `Reply-To: local+<token>@domain` and `Message-ID: <orbit.<token>.<random>@domain>`, where the token is the run's conversation id and an HMAC of it under the operator token (`mail.Token`), plus `References: <orbit.<token>@domain>` so a mail client threads a conversation. A report for a run that read a mail is always sent (whatever `notify.when` is, except `never`), as a reply to that mail (`In-Reply-To`, `Re:` its subject).
+- **Out.** Every mail orbit sends for a run carries `Reply-To: local+<token>@domain` and `Message-ID: <orbit.<token>.<random>@domain>`, where the token is the run's conversation id and an HMAC of it under the operator token (`mail.Token`), plus `References: <orbit.<token>@domain>` so a mail client threads a conversation. A run that read a mail is answered by mail, whatever `notify.when` is (`never` included) and although a message triggered it: its report and questions, or a short note with the first line of the error when it fails, go to the mail's sender (`To`), as a reply to that mail (`In-Reply-To`, `References` after the conversation's, `Re:` its subject), through one channel: the agent's first `smtp` channel, else the deployment's first by name. Nothing goes to the agent's other channels. A later chat message in the same conversation is answered in the chat only, since its run read no mail; a run answering the portfolio chat notifies nothing.
 - **In.** A poller (every `poll`, on each instance that takes claims) reads the unseen mails of the IMAP mailbox. Each is parsed in code: the sender, the tokens it names (a recipient's plus address, then `In-Reply-To`, then `References`), and its text (plain, or the HTML as text) with the quoted mail and signature cut deterministically (`StripQuoted`). A mail from an allowed sender that names a signed token becomes a message in that conversation; one that names none opens a new conversation with `mail.agent`, titled by its subject. Automatic mail (`Auto-Submitted`, `Precedence: bulk`) and a failed DMARC result in `Authentication-Results` are ignored, so an out-of-office reply cannot start a loop. The author is the sender's address.
 - **Once.** `IngestMail` writes the message, its run and the `mail_in` row in one transaction keyed by Message-ID, and the mail is marked seen only after; a database error leaves it unseen for the next poll.
 - **Attachments** are not uploads yet: the message names each (file, type, size) and the raw mail is kept in `mail_in`.
@@ -183,6 +192,8 @@ given a strict schema in which each action type's parameters are spelled out;
 the engine validates against a looser envelope and then judges each action on
 its own, so one malformed proposal is denied without losing the report.
 
+The person reads the report, so it must hold the whole answer: the contract says so, and the engine enforces it (`fullReport`). When the run's final assistant prose (`journal.FinalProse`: its last run of top-level assistant messages, projected from the transcript as the journal is) holds more than the submitted report (that is empty, one line where the prose has several, or shorter), the prose becomes the report. The submitted summary stays, and `output.json` keeps the submitted report.
+
 ## Backends are interchangeable
 
 A runner takes a fully built request and returns the output JSON. Nothing an
@@ -221,7 +232,7 @@ carries a title and a link only; bursts fold into one summary push.
   questions are shown to the conversation's next run so it does not ask
   again.
 - **Messages** to an agent are consumed by the first run of their
-  conversation that starts after them. A run that fails or is interrupted hands them back.
+  conversation that starts after them. A run that fails or is interrupted hands them back. Each attempt's read is a `message_reads` row, kept when it hands the message back (`released_at`); a message waits while no attempt holds it (`store.waitingMessage`).
 
 ## Memory entries
 
@@ -254,7 +265,7 @@ An action type is code (`internal/actions`): a name, a parameter schema shown
 to the agent, a validator, and an executor. An agent's spec maps types to
 `auto`, `approve` or `deny`; unnamed types are denied and not offered.
 Today: `notify` (an extra message to one of the agent's channels),
-`continue` (wake this agent again later, above), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; docs/api.md, Defining agents), `webhook:<endpoint>` (a
+`continue` (wake this agent again later, above), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; a change that widens it waits for a person; docs/api.md, Defining agents), `github:clone` and `github:pr` (a chat agent's repository work: orbit clones into its workspace and commits and pushes its working tree to `orbit/chat/<branch>`, `build.Git`), `webhook:<endpoint>` (a
 JSON body to an endpoint whose URL and credentials are configuration, never
 chosen by the model), and `github:merge` (squash one of orbit's own
 `orbit/*` PRs, only if its head is still the approved commit and every
@@ -469,3 +480,4 @@ The direction, so changes now do not close it off:
 
 - **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)).
 - **Event triggers** from webhooks (a ticket assigned, a comment).
+- **The workspace**: an IDE in the portfolio chat over files, terminals and git in a conversation's snapshot or an agent's box ([workspace.md](workspace.md)).

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -31,5 +32,24 @@ func TestCommandReportsAndReturnsRegressions(t *testing.T) {
 	}
 	if !json.Valid(out.Bytes()) {
 		t.Fatalf("missing regression report: %s", out.String())
+	}
+}
+
+func TestCommandRejectsUnsupportedNumbersWithoutRegressionReport(t *testing.T) {
+	for _, expected := range []string{"1e1001", "1"} {
+		dir := t.TempDir()
+		suite := filepath.Join(dir, "suite.json")
+		results := filepath.Join(dir, "results.json")
+		if err := os.WriteFile(suite, []byte(`{"version":1,"cases":[{"name":"same-number","provenance":"synthetic exact comparison","inputs":{},"checks":[{"pointer":"/n","op":"equals","value":`+expected+`}]}]}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(results, []byte(`[{"name":"same-number","output":{"n":1e1001},"cost_usd":0}]`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err := evaluateCmd([]string{"--suite", suite, "--results", results}, &out)
+		if err == nil || !strings.Contains(err.Error(), "number exceeds exact comparison bounds") || out.Len() != 0 {
+			t.Fatalf("wanted invalid input without a report, got %q, %v", out.String(), err)
+		}
 	}
 }

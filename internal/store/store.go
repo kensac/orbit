@@ -430,12 +430,31 @@ func endAttempt(ctx context.Context, tx pgx.Tx, runID string, attempt int, outco
 }
 
 // releaseMessages hands a run's consumed messages back to the inbox, so the
-// next run reads what this one did not finish with. messages.json in the
-// run's artifacts keeps the record that this attempt saw them.
+// next run reads what this one did not finish with. The attempt's read rows
+// and messages.run_id are kept: they are the record that it read them.
 func releaseMessages(ctx context.Context, db execer, runID string) error {
-	_, err := db.Exec(ctx, `UPDATE messages SET run_id = NULL WHERE run_id = $1 AND direction = 'to_agent'`, runID)
+	if _, err := db.Exec(ctx, `UPDATE message_reads SET released_at = now() WHERE run_id = $1 AND released_at IS NULL`, runID); err != nil {
+		return err
+	}
+	// A read without a row (giveComments, an older image) is recorded as
+	// handed back here, or the message would stay held (waitingMessage).
+	_, err := db.Exec(ctx, `INSERT INTO message_reads (message_id, run_id, attempt, read_at, released_at)
+		SELECT m.id, r.id, r.attempt, COALESCE(r.started_at, m.created_at), now()
+		FROM messages m JOIN runs r ON r.id = m.run_id
+		WHERE m.run_id = $1 AND m.direction = 'to_agent'
+		  AND NOT EXISTS (SELECT 1 FROM message_reads x WHERE x.message_id = m.id)`, runID)
 	return err
 }
+
+// waitingMessage is true of a person's message (alias m) that no attempt
+// holds, so the next run of its conversation reads it: never read, or
+// handed back by every attempt that read it (message_reads). A message
+// with run_id set and no read row was marked read without an attempt (a
+// build given review comments when enqueued, giveComments) or by an image
+// older than message_reads, which may still run during a deploy; it is held.
+const waitingMessage = `m.direction = 'to_agent' AND (m.run_id IS NULL OR (
+	NOT EXISTS (SELECT 1 FROM message_reads x WHERE x.message_id = m.id AND x.released_at IS NULL)
+	AND EXISTS (SELECT 1 FROM message_reads x WHERE x.message_id = m.id)))`
 
 // SetRunner records the backend and the spec an attempt executes under,
 // on the run and on the attempt. The spec can differ from the one it was
@@ -758,15 +777,19 @@ func (s *Store) ListArtifacts(ctx context.Context, runID string) ([]Artifact, er
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[Artifact])
 }
 
-// GetArtifactContent returns one artifact's bytes and media type.
-func (s *Store) GetArtifactContent(ctx context.Context, id string) ([]byte, string, error) {
-	var b []byte
-	var mt string
-	err := s.Pool.QueryRow(ctx, `SELECT content, media_type FROM artifacts WHERE id = $1`, id).Scan(&b, &mt)
+// OpenArtifact returns one artifact and a reader of its content.
+func (s *Store) OpenArtifact(ctx context.Context, id string) (Artifact, *Blob, error) {
+	var a Artifact
+	err := s.Pool.QueryRow(ctx, `SELECT id::text, run_id::text, attempt, direction, name, media_type, sha256, bytes, created_at
+		FROM artifacts WHERE id = $1`, id).
+		Scan(&a.ID, &a.RunID, &a.Attempt, &a.Direction, &a.Name, &a.MediaType, &a.SHA256, &a.Bytes, &a.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, "", ErrNotFound
+		return a, nil, ErrNotFound
 	}
-	return b, mt, err
+	if err != nil {
+		return a, nil, err
+	}
+	return a, s.blob(ctx, blobArtifact, a.ID, a.Bytes), nil
 }
 
 // ---------------------------------------------------------------- memory
@@ -889,15 +912,31 @@ func (s *Store) StartRunContext(ctx context.Context, runID, agent string) (*RunC
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
+		// One running run per agent (runs_one_running) is the only reader
+		// of its conversations' messages; message_reads_one_holder holds it.
 		rows, err := tx.Query(ctx, `
-			UPDATE messages SET run_id = $2
-			WHERE agent = $1 AND direction = 'to_agent' AND run_id IS NULL
-			  AND conversation_id = (SELECT conversation_id FROM runs WHERE id = $2)
+			UPDATE messages m SET run_id = $2
+			WHERE m.agent = $1 AND `+waitingMessage+`
+			  AND m.conversation_id = (SELECT conversation_id FROM runs WHERE id = $2)
 			RETURNING id::text, agent, direction, body, reply_to::text, run_id::text, author, created_at`, agent, runID)
 		if err != nil {
 			return err
 		}
 		if rc.Messages, err = pgx.CollectRows(rows, pgx.RowToStructByPos[Message]); err != nil {
+			return err
+		}
+		ids := make([]string, len(rc.Messages))
+		for i, m := range rc.Messages {
+			ids[i] = m.ID
+		}
+		// A read an older image handed back (run_id = NULL) left its row
+		// open; it ends where this one starts.
+		if _, err := tx.Exec(ctx, `UPDATE message_reads SET released_at = now()
+			WHERE message_id = ANY($1::uuid[]) AND released_at IS NULL`, ids); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO message_reads (message_id, run_id, attempt)
+			SELECT unnest($1::uuid[]), id, attempt FROM runs WHERE id = $2`, ids, runID); err != nil {
 			return err
 		}
 		rows, err = tx.Query(ctx, `
@@ -926,6 +965,9 @@ type ProposedAction struct {
 	// Error says why the harness denied it regardless of rule (unknown
 	// type, invalid params).
 	Error string
+	// InstructedBy is the person whose message the run answered. An
+	// approve-rule action they asked for is approved by them.
+	InstructedBy string
 }
 
 // Outcome is everything a successful run writes besides its row.
@@ -1010,19 +1052,56 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 // and never executed.
 func insertAction(ctx context.Context, tx pgx.Tx, runID, agent string, a ProposedAction) (string, error) {
 	status := map[string]string{"auto": "approved", "approve": "pending", "deny": "denied"}[a.Rule]
+	decidedBy := "rule"
+	switch {
+	case a.Rule == "approve" && a.InstructedBy != "" && a.Error == "":
+		status, decidedBy = "approved", a.InstructedBy
+	case a.Rule == "approve":
+		decidedBy = ""
+	}
 	var id string
 	err := tx.QueryRow(ctx, `
-		INSERT INTO actions (run_id, agent, type, params, reason, rule, status, decided_by, decided_at, error, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7,
-		        CASE WHEN $6 = 'approve' THEN NULL ELSE 'rule' END,
-		        CASE WHEN $6 = 'approve' THEN NULL ELSE now() END,
-		        NULLIF($8, ''), clock_timestamp())
+		INSERT INTO actions (run_id, agent, type, params, reason, rule, status, decided_by, decided_at, error, created_at, instructed_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''),
+		        CASE WHEN $8 = '' THEN NULL ELSE now() END,
+		        NULLIF($9, ''), clock_timestamp(), NULLIF($10, ''))
 		RETURNING id::text`,
-		runID, agent, a.Type, []byte(a.Params), a.Reason, a.Rule, status, a.Error).Scan(&id)
+		runID, agent, a.Type, []byte(a.Params), a.Reason, a.Rule, status, decidedBy, a.Error, a.InstructedBy).Scan(&id)
 	if err != nil || status != "pending" {
 		return id, err
 	}
 	return id, newAttention(ctx, tx, AttentionApproval, "action:"+id, runID, " wants to "+a.Type, &id, nil, nil, nil)
+}
+
+// StartActionNow records an action a running chat turn executes at once
+// (its rule auto, or approve and its person asked for it): the row starts
+// executing, decided by the rule or the person, and FinishAction ends it.
+// Only the run's own running claim may do this.
+func (s *Store) StartActionNow(ctx context.Context, runID string, attempt int, agent string, a ProposedAction) (string, error) {
+	var running bool
+	if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs WHERE id = $1 AND status = 'running' AND attempt = $2)`,
+		runID, attempt).Scan(&running); err != nil {
+		return "", err
+	}
+	if !running {
+		return "", fmt.Errorf("run %s attempt %d: %w (not its running claim)", runID, attempt, ErrConflict)
+	}
+	var id string
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var err error
+		if id, err = insertAction(ctx, tx, runID, agent, a); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `UPDATE actions SET status = 'executing', executing_since = now() WHERE id = $1 AND status = 'approved'`, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("action %s was not approved: %w", id, ErrConflict)
+		}
+		return nil
+	})
+	return id, err
 }
 
 // ---------------------------------------------------------------- actions
@@ -1043,10 +1122,14 @@ type Action struct {
 	Result     json.RawMessage `json:"result,omitempty"`
 	Error      *string         `json:"error,omitempty"`
 	CreatedAt  time.Time       `json:"created_at"`
+	// InstructedBy is the person whose message the action answers: they
+	// asked for it in the conversation, which approves an action whose
+	// rule is approve.
+	InstructedBy *string `json:"instructed_by,omitempty"`
 }
 
 const actionCols = `id::text, run_id::text, agent, type, params, reason, rule, status, decided_by,
-	decided_at, executed_at, result, error, created_at`
+	decided_at, executed_at, result, error, created_at, instructed_by`
 
 // GetAction returns one action.
 func (s *Store) GetAction(ctx context.Context, id string) (*Action, error) {

@@ -95,8 +95,8 @@ func (w *world) job(runID string, steps ...map[string]any) Job {
 		Purpose: "build",
 		Policy:  orbitRepo,
 		Model:   "m", MaxTurns: 30, Timeout: time.Minute,
-		Credential: testCredential,
-		Author:     Identity{Name: "orbit-kensac[bot]", Email: "351241810+orbit-kensac[bot]@users.noreply.github.com"},
+		Env:    map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": testCredential},
+		Author: Identity{Name: "orbit-kensac[bot]", Email: "351241810+orbit-kensac[bot]@users.noreply.github.com"},
 	}
 }
 

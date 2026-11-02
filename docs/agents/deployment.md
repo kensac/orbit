@@ -8,6 +8,15 @@ orbit's control instance runs on hetzner, from `hetzner-vps-config/compose.orbit
 every push to main, for amd64 and arm64. hetzner pins a digest; a release
 reaches it when that pin moves.
 
+### The workstation image
+
+`ghcr.io/kensac/orbit-workstation:{sha-<commit>,latest}` (`deploy/workstation.Dockerfile`, workflow `workstation.yml`) is an agent's persistent box: a container sandboxd keeps per agent under gVisor (`runsc`), where a person gets Claude Code in a browser terminal as on a laptop and the agent's own turns run beside it. It runs on hetzner (amd64) and oci (arm64), so it is built for both; a pull request that touches it builds it natively on each architecture and runs every tool's `--version` as its user, and main pushes it. Like the build image it is pinned by digest where it runs, so a push reaches a box only when that pin moves.
+
+- **Tools:** Debian trixie with git, jq, ripgrep, fd, fzf, curl, wget, make, build-essential, tmux, neovim, nano, sqlite3, psql, ssh, less, procps, iproute2, unzip and sudo; Go (go.mod's toolchain), Node 24 with npm and pnpm (corepack, `deploy/workstation/package.json`), python3 with uv, yq, gh, and Docker (engine, CLI, containerd, buildx, compose) for a dockerd inside the box; Claude Code at deploy/cli's lockfile with its auto-updater off.
+- **User:** `agent`, uid 10001 (sandboxd's uid), `HOME=/home/agent`, passwordless sudo (which needs a container without `no-new-privileges`), in the `docker` group. `/work` is its own. Locale `en_US.UTF-8`, `TERM=xterm-256color`; `/etc/tmux.conf` sets `set-clipboard on`, `window-size latest`, `mouse on` and 10,000 lines of history.
+- **GitHub:** the image holds no credential. When orbit writes a token to `/run/orbit/gh-token`, the `gh` wrapper (`/usr/local/bin/gh`) exports it as `GH_TOKEN` and the system git credential helper (`git-credential-orbit`) answers `https://github.com` with it; without the file both step aside, so `gh auth login` and `gh auth setup-git` work as usual.
+- **Pins:** images by digest, yq by each architecture's sha256 (renovate.json's custom manager recomputes it for a new release), pnpm by its `packageManager` hash, the GitHub CLI and Docker apt keys by sha256. The apt packages themselves are whatever Debian's, GitHub's and Docker's repositories serve at build time.
+
 ## Rolling out a new image
 
 Never recreate the container in place: traefik routes nothing until the new
@@ -64,6 +73,8 @@ interrupted run can be continued). It must be a named volume, owned by uid
 10001, shared by the old and new container during a rollout; on the
 container's own layer every restart starts those sessions fresh.
 
+It also holds `mirrors/`, a bare mirror of each repository agents read (`repos`), and `checkouts/`, the builds' kept clones. Both are caches: a lost one is fetched again on the next run that needs it. The two instances of a rollout share them; a fetch takes a lock file beside its mirror.
+
 ## Credentials
 
 Rendered from Infisical (`HETZNER_ORBIT_*`). The Claude Code subscription
@@ -105,6 +116,8 @@ The build sandbox runs on hetzner today, beside orbit, in `hetzner-vps-config` a
 - **Claiming it is deployed:** `docker logs orbit-sandboxd` shows `sandboxd: serving` (it exits on a failed host check: no seccomp, a network that is not internal, an image it cannot get), and `docker logs orbit-egress` shows `egress: serving` with the allowlist.
 
 **Workstation profile** (sandboxed chats, `sandbox: workstation`): a second `orbit egress` with `ORBIT_EGRESS_ALLOW=*` (any public host on 443, never a private or tailnet address) on the `orbit-sandbox` and `orbit-egress` networks, named for example `orbit-egress-open`, and sandboxd's environment gains `ORBIT_SANDBOX_WORKSTATION_PROXY=orbit-egress-open:3128`. Without it sandboxd refuses that profile (400), and the built-in agent's runs fail naming the variable.
+
+**Box profile** (agents' boxes and their terminals, docs/workspace.md): on top of the workstation profile, sandboxd's environment gains `ORBIT_SANDBOX_BOX_IMAGE=ghcr.io/kensac/orbit-workstation@sha256:<digest>` (sandboxd pulls it without credentials at start, so the package must be public or pulled on the host first) and, when the host has gVisor, `ORBIT_SANDBOX_BOX_RUNTIME=runsc` (unset is runc). Without the image sandboxd refuses boxes (400) and creating a terminal fails naming the variable. Each agent whose chats run in a workstation sandbox gets one container, `orbit-box-<agent>`, on `ORBIT_SANDBOX_NETWORK` with the workstation proxy, and two named volumes, `orbit-box-<agent>-home` (`/home/agent`) and `orbit-box-<agent>-work` (`/work`). Docker creates them on the box's first start; they are state that exists nowhere else, carry the label `orbit.box=<agent>` (never `orbit.sandbox`, so the reaper never touches them), and must never be pruned. The container has restart policy `unless-stopped`, so it comes back after a reboot; a stopped one is recreated on the current image pin when a terminal next needs it (its volumes kept), and a running one keeps its image until it stops. On orbit, `ORBIT_WORKSPACE_ORIGINS` (comma list, default `https://kanishksachdev.com,https://www.kanishksachdev.com`) is the Origins a terminal socket accepts; traefik passes `/api/v1/terminals/{id}/ws` with its upgrade on the `/api/v1` router without forward-auth. **Claiming it works:** `docker logs orbit-sandboxd` shows `sandboxd: serving` with `box_image`; `GET /api/v1/agents/orbit/workspace` answers a `box` workspace; creating a terminal logs `sandboxd: box created` (the first time) and `box started`; an attach logs `terminal attached` on orbit and `tty attached` on sandboxd; `docker ps --filter label=orbit.box` lists the box.
 
 ## Building tickets: what hetzner needs
 
@@ -153,9 +166,10 @@ A worker logs `agents this worker may claim reference unset variables` with the 
 | `docker-network:hetzner` | can reach containers on hetzner's `proxy` network by name | hetzner |
 | `sure` | holds `ORBIT_SURE_API_KEY` (Sure's API) | hetzner |
 | `sandbox` | holds `ORBIT_SANDBOX_TOKEN` and reaches sandboxd | hetzner |
+| `github` | holds the GitHub App's key, so it can fetch the repositories agents read (`repos`) | hetzner |
 | `browser` | has a browser for an agent to drive | none yet (the image has none) |
 
-So today: hetzner `ORBIT_CAPABILITIES=docker-network:hetzner,sure,sandbox`; oci and transmission none (they run agents that need nothing). The finance agent needs `[docker-network:hetzner, sure]` and stays on hetzner. A new capability is a name agreed here, a host advertising it, and the credentials it implies on exactly those hosts.
+So today: hetzner `ORBIT_CAPABILITIES=docker-network:hetzner,sure,sandbox,github`; oci and transmission none (they run agents that need nothing). The finance agent needs `[docker-network:hetzner, sure]` and stays on hetzner. A new capability is a name agreed here, a host advertising it, and the credentials it implies on exactly those hosts.
 
 ### orbit-db on the tailnet, with TLS
 
@@ -191,7 +205,7 @@ volumes:
   orbit-db-tls:
 ```
 
-The control `orbit` service keeps `sslmode=disable` over the docker network and gains `ORBIT_CAPABILITIES=docker-network:hetzner,sure,sandbox`. Check: from oci, `psql "postgres://orbit:...@100.79.4.41:5434/orbit?sslmode=require" -c 'select ssl from pg_stat_ssl where pid = pg_backend_pid()'` is `t`; `ss -lntp | grep 5434` on hetzner shows only `100.79.4.41`.
+The control `orbit` service keeps `sslmode=disable` over the docker network and gains `ORBIT_CAPABILITIES=docker-network:hetzner,sure,sandbox,github`. Check: from oci, `psql "postgres://orbit:...@100.79.4.41:5434/orbit?sslmode=require" -c 'select ssl from pg_stat_ssl where pid = pg_backend_pid()'` is `t`; `ss -lntp | grep 5434` on hetzner shows only `100.79.4.41`.
 
 ### Worker compose (oci, transmission)
 
