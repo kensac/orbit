@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/workspace"
 )
@@ -29,18 +30,10 @@ const UploadURLTTL = 15 * time.Minute
 // beyond the file itself.
 const multipartOverhead = 1 << 20
 
-// uploadSigner keys signed upload URLs from the operator token, so either
-// instance of a rollout verifies the other's, and rotating the token voids
-// every outstanding URL.
-func (s *Server) uploadKey() []byte {
-	m := hmac.New(sha256.New, []byte(s.Token))
-	m.Write([]byte("orbit upload url"))
-	return m.Sum(nil)
-}
-
 // uploadSig signs the values a signed upload URL carries, in a fixed order.
 func (s *Server) uploadSig(v url.Values) string {
-	m := hmac.New(sha256.New, s.uploadKey())
+	// Keyed from the operator token, so either instance of a rollout verifies the other's, and rotating the token voids every outstanding URL.
+	m := hmac.New(sha256.New, secret.Key(s.Token).Derive(secret.UploadURL))
 	for _, k := range []string{"c", "n", "t", "b", "e", "a", "k"} {
 		m.Write([]byte(k + "=" + v.Get(k) + "\x00"))
 	}

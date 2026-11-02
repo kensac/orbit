@@ -73,6 +73,8 @@ interrupted run can be continued). It must be a named volume, owned by uid
 10001, shared by the old and new container during a rollout; on the
 container's own layer every restart starts those sessions fresh.
 
+It also holds `mirrors/`, a bare mirror of each repository agents read (`repos`), and `checkouts/`, the builds' kept clones. Both are caches: a lost one is fetched again on the next run that needs it. The two instances of a rollout share them; a fetch takes a lock file beside its mirror.
+
 ## Credentials
 
 Rendered from Infisical (`HETZNER_ORBIT_*`). The Claude Code subscription
@@ -164,9 +166,10 @@ A worker logs `agents this worker may claim reference unset variables` with the 
 | `docker-network:hetzner` | can reach containers on hetzner's `proxy` network by name | hetzner |
 | `sure` | holds `ORBIT_SURE_API_KEY` (Sure's API) | hetzner |
 | `sandbox` | holds `ORBIT_SANDBOX_TOKEN` and reaches sandboxd | hetzner |
+| `github` | holds the GitHub App's key, so it can fetch the repositories agents read (`repos`) | hetzner |
 | `browser` | has a browser for an agent to drive | none yet (the image has none) |
 
-So today: hetzner `ORBIT_CAPABILITIES=docker-network:hetzner,sure,sandbox`; oci and transmission none (they run agents that need nothing). The finance agent needs `[docker-network:hetzner, sure]` and stays on hetzner. A new capability is a name agreed here, a host advertising it, and the credentials it implies on exactly those hosts.
+So today: hetzner `ORBIT_CAPABILITIES=docker-network:hetzner,sure,sandbox,github`; oci and transmission none (they run agents that need nothing). The finance agent needs `[docker-network:hetzner, sure]` and stays on hetzner. A new capability is a name agreed here, a host advertising it, and the credentials it implies on exactly those hosts.
 
 ### orbit-db on the tailnet, with TLS
 
@@ -202,7 +205,7 @@ volumes:
   orbit-db-tls:
 ```
 
-The control `orbit` service keeps `sslmode=disable` over the docker network and gains `ORBIT_CAPABILITIES=docker-network:hetzner,sure,sandbox`. Check: from oci, `psql "postgres://orbit:...@100.79.4.41:5434/orbit?sslmode=require" -c 'select ssl from pg_stat_ssl where pid = pg_backend_pid()'` is `t`; `ss -lntp | grep 5434` on hetzner shows only `100.79.4.41`.
+The control `orbit` service keeps `sslmode=disable` over the docker network and gains `ORBIT_CAPABILITIES=docker-network:hetzner,sure,sandbox,github`. Check: from oci, `psql "postgres://orbit:...@100.79.4.41:5434/orbit?sslmode=require" -c 'select ssl from pg_stat_ssl where pid = pg_backend_pid()'` is `t`; `ss -lntp | grep 5434` on hetzner shows only `100.79.4.41`.
 
 ### Worker compose (oci, transmission)
 
