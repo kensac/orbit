@@ -116,3 +116,11 @@ func TestRejectsAmbiguityAndUnsupportedText(t *testing.T) {
 		t.Fatal("accepted missing anchor")
 	}
 }
+
+func TestAnchorMidnightGapIsRefused(t *testing.T) {
+	loc := location(t, "America/Sao_Paulo")
+	anchor := instant(t, "2018-11-04T06:00:00Z")
+	if _, err := Parse("daily at 9am", anchor, loc); err == nil || !strings.Contains(err.Error(), "no local midnight") {
+		t.Fatalf("midnight gap: %v", err)
+	}
+}
