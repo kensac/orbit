@@ -294,6 +294,16 @@ func (a *Agent) RuleFor(actionType string) Rule {
 	return RuleDeny
 }
 
+// ReservedAgentNames are the names an agent may not take: the portfolio
+// serves an agent at /orbit/<name>, beside these static segments of its own
+// (personal-portfolio app/orbit), plus orbit-admin, the authentik
+// application. A new top-level segment in the UI is added here first, or an
+// existing agent of that name would become unreachable.
+var ReservedAgentNames = map[string]bool{
+	"admin": true, "api": true, "c": true, "new": true, "components": true, "lib": true,
+	"orbit-admin": true,
+}
+
 var (
 	nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 	// CapabilityRE is a capability's shape: a name, optionally qualified
@@ -508,6 +518,9 @@ func (c *Config) validateAgent(a *Agent) []error {
 	}
 	if !nameRE.MatchString(a.Name) {
 		at("name must match %s", nameRE)
+	}
+	if ReservedAgentNames[a.Name] {
+		at("name is reserved: the UI routes /orbit/%s to its own page, so an agent there could never be opened", a.Name)
 	}
 	if strings.TrimSpace(a.Charter) == "" {
 		at("charter is required")

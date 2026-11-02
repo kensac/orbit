@@ -170,9 +170,14 @@ func latestBuildIs(ctx context.Context, tx pgx.Tx, runID string) (ticketID, stat
 // FinishBuild records a build run that delivered its PR, and moves its
 // ticket from building to review with the branch, PR and head, in one
 // transaction. A ticket that moved on meanwhile (abandoned) keeps its state;
-// the run is still recorded as what it did.
+// the run is still recorded as what it did. A run with r.Gate set delivered
+// without calling the model (an earlier attempt's pushed commit) and is
+// skipped, not succeeded.
 func (s *Store) FinishBuild(ctx context.Context, runID string, r RunResult, u TicketUpdate) error {
-	r.Status = "succeeded"
+	r.Status = StatusSucceeded
+	if r.Gate != "" {
+		r.Status = StatusSkipped
+	}
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		id, status, newest, err := latestBuildIs(ctx, tx, runID)
 		if err != nil {

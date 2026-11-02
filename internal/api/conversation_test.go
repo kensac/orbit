@@ -590,6 +590,78 @@ func TestStepsMatchTheStream(t *testing.T) {
 				}
 			}
 		}
+		// The runs list and a run's detail count the same steps.
+		_, got := call(t, "GET", v.internal.URL+"/api/v1/runs/"+run, token, "")
+		if n := got["run"].(map[string]any)["steps"]; n != float64(tools) {
+			t.Fatalf("%s: GET /runs/{id} steps = %v, want %d", kind, n, tools)
+		}
+		_, list := call(t, "GET", v.internal.URL+"/api/v1/runs?agent=a", token, "")
+		for _, it := range list["runs"].([]any) {
+			if r := it.(map[string]any); r["id"] == run && r["steps"] != float64(tools) {
+				t.Fatalf("%s: GET /runs steps = %v, want %d", kind, r["steps"], tools)
+			}
+		}
+	}
+}
+
+// TestActionsFilterByRunAndPage: run_id narrows the list, and walking
+// next_before visits every action once, newest first.
+func TestActionsFilterByRunAndPage(t *testing.T) {
+	v := newEnv(t, nil)
+	var runs []string
+	for range 2 {
+		run := enqueue(t, v)
+		_, attempt := claim(t, v, "claude-code")
+		acts := make([]store.ProposedAction, 3)
+		for i := range acts {
+			acts[i] = store.ProposedAction{Type: "notify", Params: json.RawMessage(`{}`), Reason: "r", Rule: "approve"}
+		}
+		if _, err := v.s.RecordOutcome(ctx, run, "a", store.RunResult{Attempt: attempt, Status: "succeeded"},
+			store.Outcome{Actions: acts}); err != nil {
+			t.Fatal(err)
+		}
+		runs = append(runs, run)
+	}
+	_, one := call(t, "GET", v.internal.URL+"/api/v1/actions?run_id="+runs[0], token, "")
+	if got := one["actions"].([]any); len(got) != 3 || one["has_more"] != false || one["next_before"] != nil {
+		t.Fatalf("run_id filter = %v", one)
+	}
+	for _, a := range one["actions"].([]any) {
+		if a.(map[string]any)["run_id"] != runs[0] {
+			t.Fatalf("action of another run: %v", a)
+		}
+	}
+	if code, _ := call(t, "GET", v.internal.URL+"/api/v1/actions?run_id=nope", token, ""); code != 400 {
+		t.Fatalf("bad run_id = %d", code)
+	}
+	if code, _ := call(t, "GET", v.internal.URL+"/api/v1/actions?before=nope", token, ""); code != 400 {
+		t.Fatalf("bad cursor = %d", code)
+	}
+	seen := map[string]bool{}
+	before := ""
+	for pages := 0; ; pages++ {
+		u := v.internal.URL + "/api/v1/actions?limit=4"
+		if before != "" {
+			u += "&before=" + before
+		}
+		_, page := call(t, "GET", u, token, "")
+		for _, a := range page["actions"].([]any) {
+			id := a.(map[string]any)["id"].(string)
+			if seen[id] {
+				t.Fatalf("action %s repeated", id)
+			}
+			seen[id] = true
+		}
+		if page["has_more"] == false {
+			if page["next_before"] != nil || pages != 1 {
+				t.Fatalf("last page = %v after %d pages", page, pages)
+			}
+			break
+		}
+		before = page["next_before"].(string)
+	}
+	if len(seen) != 6 {
+		t.Fatalf("saw %d actions, want 6", len(seen))
 	}
 }
 
