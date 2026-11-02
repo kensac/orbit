@@ -92,6 +92,9 @@ type Conversation struct {
 	// ForkedFrom names the conversation and message a fork was started at
 	// (ForkConversation); null for any other.
 	ForkedFrom *ForkPoint `json:"forked_from"`
+	// TitleSource is who titled it: first_line (code), model (the titles
+	// runner) or person; null for one titled otherwise.
+	TitleSource *string `json:"title_source"`
 }
 
 // ForkPoint is where a fork was started.
@@ -119,7 +122,8 @@ var conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived, 
 	 FROM runs r WHERE r.conversation_id = c.id ORDER BY r.created_at DESC, r.id DESC LIMIT 1),
 	c.read_through, c.from_session::text, c.model, c.effort,
 	CASE WHEN c.forked_from IS NOT NULL
-	     THEN json_build_object('conversation_id', c.forked_from, 'message_id', c.forked_at_message) END`
+	     THEN json_build_object('conversation_id', c.forked_from, 'message_id', c.forked_at_message) END,
+	c.title_source`
 
 // GetConversation returns one conversation.
 func (s *Store) GetConversation(ctx context.Context, id string) (*Conversation, error) {
@@ -270,7 +274,8 @@ func (s *Store) CreateConversation(ctx context.Context, n NewConversation) (res 
 				return nil, err
 			}
 		}
-		err := tx.QueryRow(ctx, `INSERT INTO conversations (agent, title, from_session, seed_session) VALUES ($1, $2, $3, $4) RETURNING id::text`,
+		err := tx.QueryRow(ctx, `INSERT INTO conversations (agent, title, from_session, seed_session, title_source)
+			VALUES ($1, $2, $3, $4, CASE WHEN $2 <> '' THEN 'person' END) RETURNING id::text`,
 			n.Agent, title, fromSession, seedSession).Scan(&r.ConversationID)
 		if isForeignKeyViolation(err) {
 			return nil, ErrNotFound
@@ -317,6 +322,7 @@ func (s *Store) UpdateConversation(ctx context.Context, id string, u Conversatio
 	}
 	tag, err := s.Pool.Exec(ctx, `UPDATE conversations SET
 		    title = COALESCE($2, title), archived = COALESCE($3, archived),
+		    title_source = CASE WHEN $2::text IS NULL THEN title_source ELSE 'person' END,
 		    model = CASE WHEN $4::text IS NULL THEN model ELSE NULLIF($4, '') END,
 		    effort = CASE WHEN $5::text IS NULL THEN effort ELSE NULLIF($5, '') END
 		WHERE id = $1 AND NOT (is_default AND COALESCE($3, false))`, id, u.Title, u.Archived, u.Model, u.Effort)
@@ -330,4 +336,48 @@ func (s *Store) UpdateConversation(ctx context.Context, id string, u Conversatio
 		return fmt.Errorf("the default conversation cannot be archived: %w", ErrConflict)
 	}
 	return nil
+}
+
+// TitleJob is a conversation the titles runner names: its first message.
+type TitleJob struct {
+	ConversationID string
+	Agent          string
+	Body           string
+}
+
+// ClaimTitles takes up to limit conversations still titled by their first
+// line that the titles runner has not taken, oldest first, and marks them
+// taken: each is tried once, by one instance (SKIP LOCKED), whatever comes of
+// it.
+func (s *Store) ClaimTitles(ctx context.Context, limit int) ([]TitleJob, error) {
+	rows, err := s.Pool.Query(ctx, `
+		UPDATE conversations c SET title_tried_at = now()
+		WHERE c.id IN (SELECT id FROM conversations
+		               WHERE title_source = 'first_line' AND title_tried_at IS NULL
+		               ORDER BY created_at LIMIT $1 FOR UPDATE SKIP LOCKED)
+		RETURNING c.id::text, c.agent,
+		          COALESCE((SELECT m.body FROM messages m WHERE m.conversation_id = c.id AND m.direction = 'to_agent'
+		                    ORDER BY m.created_at, m.id LIMIT 1), '')`, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[TitleJob])
+}
+
+// SetModelTitle gives a conversation the titles runner's title, unless
+// someone titled it since it was claimed (a person's rename wins). It
+// reports whether it did; cost is the call's, kept either way.
+func (s *Store) SetModelTitle(ctx context.Context, id, title string, cost *float64) (bool, error) {
+	if _, err := s.Pool.Exec(ctx, `UPDATE conversations SET title_cost_usd = $2 WHERE id = $1`, id, cost); err != nil {
+		return false, err
+	}
+	if title == "" {
+		return false, nil
+	}
+	tag, err := s.Pool.Exec(ctx, `UPDATE conversations SET title = $2, title_source = 'model'
+		WHERE id = $1 AND title_source = 'first_line'`, id, title)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
