@@ -14,7 +14,7 @@ The model is the expensive, slow, non-deterministic part, so it gets only the pa
 ```
 trigger (schedule: cron or RRULE | manual | message | continue | task | delegation; a ticket's build runs its own path, below)
   -> runs row, status queued
-  -> executor claims it (FOR UPDATE SKIP LOCKED; at most one running per agent;
+  -> executor claims it (FOR UPDATE SKIP LOCKED; at most one running per agent, per conversation for a chat agent;
      a continuation not before its run_after)
   -> StartRunContext: memory + unread messages (marked consumed) + open questions
   -> memory entries the agent reads: an index in the prompt, the entries in full as an input
@@ -54,9 +54,12 @@ the agent-level API speak. Every message and run is in exactly one
 keeps it the agent's own), and a row written without one (the previous
 release during a deploy) lands in the default by trigger. What a run reads
 of its person is its conversation's only: unread messages, open questions,
-the thread below, and the session it continues. Memory, schedules, rules
-and `runs_one_running` stay per agent, so an agent's conversations queue
-behind each other rather than race on its memory.
+the thread below, and the session it continues. Memory, schedules and rules
+stay per agent, and so does the running run (`runs_one_running_lane`), so a
+report agent's conversations queue behind each other rather than race on its
+memory. A chat agent's conversations are separate sessions with separate
+workspaces, so its lane is the conversation: one run per conversation, side
+by side (`store.laneOf`); two that both replace its memory keep the later.
 
 A run that starts a fresh session is shown its conversation's recent thread: the
 person's messages earlier runs read, earlier reports and errors, and the
@@ -171,7 +174,7 @@ the session continued when the agent has one.
 
 One agent coordinates others. An agent whose spec names `delegates` (agents, or `"*"`) and a rule for `delegate` proposes `delegate` with a batch of tasks: each a `key`, an `agent`, a `brief`, optionally `after` (keys of the same batch it waits for), `fresh` and `decision`. Executing it (`store.Delegate`, one transaction) gives each task its own conversation of its agent, with the brief as the first message (author `agent:<parent>`), and returns the tasks' ids as the handle. Code does the rest (`store.ReconcileTasks`, on control after each run, after delegation actions and every 5 s):
 
-- **Start.** A task starts, as a `task` run in its conversation, once its dependencies are done and any decision approved; the run is told it reports to an agent, not a person, and given its dependencies' reports. Tasks of different agents run in parallel; one agent's queue behind each other (`runs_one_running`).
+- **Start.** A task starts, as a `task` run in its conversation, once its dependencies are done and any decision approved; the run is told it reports to an agent, not a person, and given its dependencies' reports. Tasks of different agents run in parallel; one agent's queue behind each other (`runs_one_running_lane`), except a chat agent's, one per conversation.
 - **Settle.** A task is `working` while a run of its conversation is queued or running, or one of its actions is approved and not yet executed (a `continue` about to queue); then its newest run decides: failed or cancelled end it so, an open question makes it `needs_input`, otherwise it is `done` and that run's summary and report are its `report`. A failed or cancelled dependency cancels its dependents.
 - **Wake, never poll.** A task needing input is due to its parent at once; finished tasks when their whole batch is over (`report_due_at`). A parent conversation with a due task and no run started since gets one `delegation` run (`runs_one_delegation`), whose prompt lists every task with its status and, in full, what is new: reports, questions with their ids, errors. Any run in that conversation sees the same section, and one that started after the change clears it, so a parent is told once.
 - **Mailboxes.** A task's questions go to its parent, never to the person (a task's run notifies nothing but approvals, and its open questions do not make anything need the person's input). The parent answers with `task:message` (`reply_to` the question), which writes into the task's conversation and queues a run to read it (a done task reopens), or escalates by asking its own person. `task:cancel` ends a task. A person can read and write any task's conversation like any other.
@@ -354,7 +357,7 @@ for twice. The rollout contract is in docs/agents/deployment.md.
 
 - **Two instances at once** share the database and the `/data` volume, and
   nothing else. Claims are split by `FOR UPDATE SKIP LOCKED` and
-  `runs_one_running`; one scheduler leads by advisory lock and the other
+  `runs_one_running_lane`; one scheduler leads by advisory lock and the other
   takes over within its 30 s retry when the leader exits; each polls its own
   config mount and reloads; actions are claimed one at a time, and an
   action is failed as orphaned only after `engine.OrphanAfter` executing, so

@@ -69,7 +69,7 @@ Nothing about a thread is built twice. What tickets add is the lifecycle:
 
 **Scoping** is the conversation's: two tickets with the same agent never see
 each other's words, and ticket work never touches the agent's other
-conversations. Memory, schedules, rules and `runs_one_running` stay per
+conversations. Memory, schedules, rules and the running run (`runs_one_running_lane`) stay per
 agent, so an agent's tickets queue behind each other rather than race on
 its memory.
 
