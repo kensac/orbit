@@ -9,11 +9,14 @@ import (
 	"github.com/kensac/orbit/internal/store"
 )
 
+// fireBase is now, so a fire the tests enqueue is within its grace (missed.go).
+var fireBase = time.Now().UTC().Truncate(time.Minute)
+
 // scheduled enqueues and claims a schedule fire at the given minute.
 func scheduled(t *testing.T, e *engine.Engine, s *store.Store, minute int) *store.ClaimedRun {
 	t.Helper()
 	a := e.Current().Config.Agents["finance"]
-	idx, at := 0, time.Date(2026, 10, 1, 9, minute, 0, 0, time.UTC)
+	idx, at := 0, fireBase.Add(time.Duration(minute)*time.Minute)
 	if _, err := s.EnqueueRun(ctx, store.NewRun{Agent: "finance", SpecSHA: a.SHA, Trigger: "schedule", TriggerIndex: &idx, ScheduledFor: &at}); err != nil {
 		t.Fatal(err)
 	}

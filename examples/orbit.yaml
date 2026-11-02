@@ -47,7 +47,7 @@ mail:
     password_env: ORBIT_SMTP_PASS
   allow: [me@example.com]
 
-# Secrets a source may send, each only to URLs under its prefix. These are
+# Secrets a source or an endpoint may send, each only to URLs under its prefix. These are
 # the only ${VAR}s an agent defined through the API or by agent:define may
 # reference (docs/agents/configuration.md, Secrets).
 credentials:
@@ -58,6 +58,29 @@ endpoints:
   home-assistant:
     url: http://homeassistant.example.ts.net:8123/api/webhook/orbit
     method: POST
+  # Set one Sure transaction's category: the model names the transaction and
+  # the category, each checked here, never the URL (configuration.md, Endpoints).
+  sure-categorize:
+    url: https://sure.example.com/api/v1
+    method: PUT
+    path: /transactions/{id}
+    description: Set one transaction's category.
+    params:
+      id: {type: string, pattern: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"}
+    headers:
+      X-Api-Key: ${SURE_API_KEY}
+    body_schema:
+      type: object
+      additionalProperties: false
+      required: [transaction]
+      properties:
+        transaction:
+          type: object
+          additionalProperties: false
+          required: [category_id, user_modified]
+          properties:
+            category_id: {type: string, pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"}
+            user_modified: {const: true}
 
 # The GitHub App orbit acts as (docs/tickets.md). Tickets may target only
 # these repositories; the key is read by orbit and never given to a model.
@@ -84,3 +107,10 @@ build:
                  git status, git diff, git log, git show, ls, rg]
       protected: ["deploy/**"]
       max_diff_lines: 2000
+
+# Inbound webhooks: each secret is verified with its sender's scheme and may
+# be named only by the agents listed (docs/agents/configuration.md, Webhooks).
+webhook_secrets:
+  ORBIT_HOOK_GITHUB:
+    scheme: github
+    agents: [triage]
