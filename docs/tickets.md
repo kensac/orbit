@@ -465,21 +465,18 @@ needs today.
 ### No orbit secrets inside
 
 The container receives: the checkout (no `.git/config` credentials), the
-CLI command line, the prompt on stdin, and the backend credential
-(`CLAUDE_CODE_OAUTH_TOKEN`, else `ANTHROPIC_API_KEY`, chosen as for an ordinary run), which the CLI needs to reach its own backend
+CLI command line, the prompt on stdin, and a credential proxy token in the backend credential's place
+(`CLAUDE_CODE_OAUTH_TOKEN`, else `ANTHROPIC_API_KEY`, chosen as for an ordinary run), with which the CLI reaches its own backend through `orbit credproxy`
 (AGENTS.md rule 2). It never receives a GitHub token, the App key, orbit's
 database URL, the API token, or any source or channel secret.
 
-The backend credential is still reachable by code the model runs: `go test`
+Whatever the process holds is reachable by code the model runs: `go test`
 executes whatever the model wrote, as the same user as the CLI, and can read
-`/proc/<cli pid>/environ`. Two measures, in order of preference:
+`/proc/<cli pid>/environ`. Two measures:
 
-1. **Keep the token out of the container**: point the CLI at a credential
-   proxy (`ANTHROPIC_BASE_URL`) that adds the real credential on the way
-   out, and give the container a placeholder. Verified against the real CLI
-   (below); not yet built.
+1. **Keep the credential out of the container**: sandboxd gives the CLI a token only `orbit credproxy` can open, bound to the container's address and expiry, and points it there (`ANTHROPIC_BASE_URL`); the proxy adds the real credential on the way out (internal/credproxy; what it guarantees: docs/agents/security.md). Verified against the real CLI (below) before it was built.
 2. **Catch it on the way out**: the diff policy refuses any diff containing
-   the exact credential value (orbit knows it) or a secret pattern, before
+   the exact credential value (orbit knows it), a credential proxy token or another secret pattern, before
    anything is committed, since orbit's repository is public.
 
 ### Credential proxy: what the CLI does (seen on 2.1.316)
@@ -491,7 +488,7 @@ Seen on 2026-11-02 against the real CLI (2.1.316, the `deploy/cli` pin) on macOS
 - **Nothing bypassed the base URL**: the refusing listener behind `HTTPS_PROXY` received no request in any run, and the only path the proxy saw was `/v1/messages`. `NO_PROXY` was honoured for an IP and for a hostname.
 - **A refusal fails the turn at once**: a proxy answer of 403 gave one request and the result `Failed to authenticate. API Error: 403 denied` (`is_error: true`, exit 1), with no retry.
 
-So the proxy needs to allow only `POST /v1/messages` (and `POST /v1/messages/count_tokens`, the same API's token count) and to forward the response body unbuffered; a per-run placeholder can itself be the token the proxy checks.
+So the proxy allows only `POST /v1/messages` (and `POST /v1/messages/count_tokens`, the same API's token count) and forwards the response body unbuffered, and the per-run placeholder is itself the token the proxy checks (internal/credproxy).
 
 ### Tool policy inside the sandbox
 
@@ -723,8 +720,8 @@ confirmed them.
 - **Which PRs orbit merges.** Default: only its own `orbit/*` branches in
   the same repository, not Renovate's or anyone else's. Owner to confirm.
 - **Keeping the backend credential out of the build container** (the
-  credential proxy above). Verified against the real CLI (Credential proxy: what the CLI does); not yet built. **Precondition:** until it is built and deployed, build runs target only `kensac/orbit`, whose
-  diff is reviewed before every merge, and no other repository.
+  credential proxy above). Built; deploying it is the owner's (deployment.md). **Precondition:** until it is deployed, build runs target only `kensac/orbit`, whose
+  diff is reviewed before every merge, and no other repository (`internal/spec/build.go` holds it). Lifting it after is the owner's call: an allowed host is still a channel for what a build read.
 
 ## Configuration
 
@@ -759,11 +756,11 @@ build:
 
 Validated at load (`internal/spec/build.go`): the github block exists,
 every repository is in `github.repositories` and, until the credential
-proxy is verified, is `kensac/orbit`; the agent exists, uses a
+proxy is deployed and the owner lifts the precondition, is `kensac/orbit`; the agent exists, uses a
 claude-code runner and has a timeout of at most `spec.MaxBuildTimeout`
 (50m, inside the sandbox's one-hour lifetime); commands are plain words;
 protected paths are relative globs. The build's model and turn limit are
-the agent's runner's `model` and `max_turns`; its credential is the one an ordinary run would get (`build.SandboxEnv`: orbit's `CLAUDE_CODE_OAUTH_TOKEN`, else its `ANTHROPIC_API_KEY`, never both), the only secret the sandbox receives. The egress
+the agent's runner's `model` and `max_turns`; its credential is the one an ordinary run would get (`build.SandboxEnv`: orbit's `CLAUDE_CODE_OAUTH_TOKEN`, else its `ANTHROPIC_API_KEY`, never both), which the sandbox receives only as a credential proxy token. The egress
 allowlist and the image are sandboxd's and egress's own configuration
 (docs/agents/deployment.md).
 
