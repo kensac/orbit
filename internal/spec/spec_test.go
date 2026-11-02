@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -431,6 +432,44 @@ func TestAPrecheckIsForFileAgentsOnly(t *testing.T) {
 		Spec: []byte(`{"name":"b","charter":"y","gates":[{"kind":"precheck","command":"cat /proc/1/environ"}]}`)}})
 	if err == nil || !strings.Contains(err.Error(), "only an agent in the configuration files") {
 		t.Fatalf("a database agent's precheck = %v", err)
+	}
+}
+
+func TestWebhookTriggersAreBoundToTheirSecrets(t *testing.T) {
+	hooks := "\nwebhook_secrets:\n  HOOK_GH: {scheme: github, agents: [a]}\n  HOOK_STD: {scheme: standard, agents: [b]}\n"
+	load := func(agent string) error {
+		_, err := Load(write(t, map[string]string{"orbit.yaml": base + hooks, "agents/a.yaml": "name: a\ncharter: x\n" + agent}))
+		return err
+	}
+	ok := "triggers: [{webhook: issues, secret: HOOK_GH, max_bytes: 4096}, {schedule: \"0 9 * * *\"}]\nsources: [{name: event, kind: webhook}]\n"
+	if err := load(ok); err != nil {
+		t.Fatal(err)
+	}
+	for bad, want := range map[string]string{
+		"triggers: [{webhook: issues}]":                                                                  "needs a secret",
+		"triggers: [{webhook: issues, secret: NOPE}]":                                                    "NOPE is not in orbit.yaml's webhook_secrets",
+		"triggers: [{webhook: issues, secret: HOOK_STD}]":                                                "HOOK_STD is not bound to this agent",
+		"triggers: [{webhook: Issues, secret: HOOK_GH}]":                                                 `webhook "Issues" must match`,
+		"triggers: [{webhook: issues, secret: HOOK_GH, schedule: \"@daily\"}]":                           "takes no schedule",
+		"triggers: [{webhook: i, secret: HOOK_GH}, {webhook: i, secret: HOOK_GH}]":                       "named by trigger 0 already",
+		"triggers: [{webhook: issues, secret: HOOK_GH, max_bytes: 999999999}]":                           "max_bytes must be between",
+		"triggers: [{schedule: \"@daily\", secret: HOOK_GH}]":                                            "secret and max_bytes are for a webhook trigger",
+		"sources: [{name: e, kind: webhook}]":                                                            "needs a webhook trigger",
+		"triggers: [{webhook: i, secret: HOOK_GH}]\nsources: [{name: e, kind: webhook, url: http://x/}]": "takes no url",
+	} {
+		if err := load(bad); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err = %v, want %q", bad, err, want)
+		}
+	}
+	_, err := Load(write(t, map[string]string{"orbit.yaml": base + "\nwebhook_secrets:\n  bad-name: {scheme: gitlab, agents: []}\n"}))
+	for _, want := range []string{`webhook secret "bad-name": the name is an environment variable`, "scheme must be one of", "agents must name"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want %q", err, want)
+		}
+	}
+	// A webhook trigger has no schedule, so the scheduler passes it by.
+	if _, err := TriggerSchedule(Trigger{Webhook: "issues"}, time.UTC); !errors.Is(err, ErrWebhookTrigger) {
+		t.Fatalf("TriggerSchedule(webhook) = %v", err)
 	}
 }
 

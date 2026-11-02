@@ -12,7 +12,7 @@ The model is the expensive, slow, non-deterministic part, so it gets only the pa
 ## One run
 
 ```
-trigger (schedule: cron or RRULE | manual | message | continue | task | delegation; a ticket's build runs its own path, below)
+trigger (schedule: cron or RRULE | webhook | manual | message | continue | task | delegation; a ticket's build runs its own path, below)
   -> runs row, status queued
   -> executor claims it (FOR UPDATE SKIP LOCKED; at most one running per agent, per conversation for a chat agent;
      a continuation not before its run_after)
@@ -23,7 +23,7 @@ trigger (schedule: cron or RRULE | manual | message | continue | task | delegati
   -> sources fetched by the harness, written to <workdir>/inputs/, stored as artifacts
   -> transforms run over sources, each output an input (a source only transforms read is withheld)
   -> repositories (repos): each fetched into orbit's mirror, its tree at the ref's commit under inputs/repos/<name>, _repos.json an input
-  -> gates (scheduled runs, no message waiting): one that finds nothing to judge ends the run skipped
+  -> gates (scheduled and webhook runs, no message waiting): one that finds nothing to judge ends the run skipped
   -> runner called with: system contract, prompt, workdir, tools, output schema
   -> output validated against the contract
   -> RecordOutcome, one transaction: run succeeded, memory version, questions, actions
@@ -312,6 +312,7 @@ Everything a person or an agent wrote is searchable (`Store.Search`, `GET /searc
 - **Scheduling:** one leader by advisory lock. A fire is enqueued at most once
   (`runs_one_per_fire`). After downtime, each trigger runs once for its newest
   missed fire; a trigger that has never fired is not backfilled.
+- **Webhooks:** a signed delivery to `/hooks/{agent}/{trigger}` (`internal/api/hooks.go`, verified by `internal/webhook`) is enqueued with its body in one transaction, at most once per delivery id (`webhook_deliveries_once`), so a sender's retry or a second instance starts nothing new. The body is the run's `webhook` source, read from the database, so any host can run it.
 - **Low-priority work waits for the subscription.** With
   `defer_low_priority`, the scheduler's leader holds the scheduled runs of
   `priority: low` agents in the queue (`run_after`, recorded in
@@ -485,6 +486,5 @@ ticket loop, every 30 s: checks green -> github:merge proposed (approve for orbi
 
 The direction, so changes now do not close it off:
 
-- **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)).
-- **Event triggers** from webhooks (a ticket assigned, a comment).
+- **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)); agents already take webhook triggers (Reliability, Webhooks).
 - **The workspace**: an IDE in the portfolio chat over files, terminals and git in a conversation's snapshot or an agent's box ([workspace.md](workspace.md)).

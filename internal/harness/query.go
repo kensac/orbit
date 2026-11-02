@@ -130,8 +130,13 @@ func Decode(b []byte) (any, error) {
 }
 
 // Records returns the array of records at the dot path items in doc
-// (empty: doc is the array). name says which document an error is about.
+// (empty: doc is the array; ".": doc is the one record). name says which
+// document an error is about.
 func Records(name string, doc any, items string) ([]any, error) {
+	if items == "." {
+		// The document itself is the one record: a webhook delivery's event is an object, not an array.
+		return []any{doc}, nil
+	}
 	if items != "" {
 		v, ok := lookup(doc, items)
 		if !ok {

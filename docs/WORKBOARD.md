@@ -46,6 +46,7 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | Workspace: an IDE in the portfolio chat (explorer, editor, terminals with Claude Code (direct), diffs with line comments), one shell with the chat | #78 docs/workspace-contract (design); items below | design [docs/workspace.md](workspace.md), contract docs/api.md, Workspace |
 | Delegation hardening: task outcomes (succeeded, failed, blocked), waking the parent at a task's failure, `task:retry` with a circuit breaker, a stall check for batches nothing can move | branches deleg-*, one PR per item, in order | claude-delegation |
 | Delegation hardening: task outcomes (succeeded, failed, blocked), waking the parent at a task's failure, `task:retry` with a circuit breaker, a stall check for batches nothing can move, `after` across batches | #92 #94 #99 #101 #112, branches deleg-*, merged in that order | claude-delegation. Next: `task:message` to a working task should steer its live run (a correction reaching the worker mid-turn) once the claudeproto steering work (#104) is merged; today it waits for the run's next turn |
+| Event triggers and scheduling hygiene: webhook triggers (`/hooks/{agent}/{trigger}`, signed, deduped, the body a `webhook` source), missed-fire grace, a backend circuit breaker, folded skips in the thread | #96 webhook-triggers, then the PRs after it (claude-triggers) | typed schedule actions (`schedule:add`, `schedule:pause`) are another agent's |
 
 ### Workspace: implementation items, in order
 
