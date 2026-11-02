@@ -151,7 +151,9 @@ readable. Changing an archived agent is `404`; a file or built-in agent is
 
 `POST /agents/{name}/definitions/{version}/revert` puts an earlier version back: a new version with that version's spec and enabled state (`change: "revert"`, `reverts: <version>`), `200` in the same shape. A version that archived the agent cannot be reverted to (`400`); an archived agent is `404`.
 
-**Agents change agents.** An agent whose rules enable `agent:define` (the built-in `orbit` does, `auto`) proposes `{"spec": {...}}`: a whole agent, as `POST /agents` takes it, for a new agent or one already defined in the database or built in, itself included. Executed, it goes through the same validation and is stored as the next version with the run as `run_id`. A file agent cannot be changed this way (the action fails, naming why).
+A database or built-in agent's spec may not have a `file` source, a `${VAR}` that is not in orbit.yaml's `credentials`, without a `sandbox`, a tool outside `Read`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task` and `TodoWrite`, a precheck or a `run` hook: each is a `400` naming it (docs/agents/configuration.md, Agents in the database).
+
+**Agents change agents.** An agent whose rules enable `agent:define` (the built-in `orbit` does, `auto`) proposes `{"spec": {...}}`: a whole agent, as `POST /agents` takes it, for a new agent or one already defined in the database or built in, itself included. Executed, it goes through the same validation and is stored as the next version with the run as `run_id`. A file agent cannot be changed this way (the action fails, naming why). A change that widens the agent compared with its current version (a tool, source, credential, delegate target or need it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily; for a new agent, any of these) is recorded with `rule: "approve"` and waits as `pending` for a person, whatever the agent's rule; one executing by rule that widens the agent as it is by then fails, naming what it widens.
 
 `GET /agents/{name}/definitions` is `{"name": "news", "origin":
 "database", "versions": [<definition>, ...]}`, newest first (empty for a
@@ -269,6 +271,7 @@ conversation:
   {"kind": "message", "id": "uuid", "at": "...", "from": "person",
    "body": "How much did I spend on Uber Eats?", "author": "kanishk",
    "run_id": "uuid-of-run-that-read-it",
+   "reads": [{"run_id": "uuid-of-run-that-read-it", "attempt": 1, "read_at": "...", "released_at": null}],
    "attachments": [{"id": "uuid", "name": "receipt.png", "media_type": "image/png",
                     "bytes": 48213, "sha256": "hex", "created_at": "..."}]},
   {"kind": "run", "id": "uuid", "at": "...", "trigger": "message",
@@ -300,8 +303,8 @@ conversation:
 - **Messages.** `from` is `person` (to the agent) or `agent` (a question it
   asked). `author` is the person who wrote it (absent for questions).
   `reply_to`, when set, is the message it answers. `attachments` are the uploads it carries (Uploads, above), in order; always an array. `run_id` is the run that
-  read a person's message (`null` until one starts) or the run that asked a
-  question.
+  holds a person's message (`null` while it waits for a run: none has read it, or every attempt that did handed it back) or the run that asked a
+  question. `reads` (a person's message, once a run has read it) is every attempt that read it, oldest first: `{"run_id", "attempt", "read_at", "released_at"}`, where `released_at` is when a failed or interrupted attempt handed it back, `null` for the one holding it.
 - **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again), `build` (a ticket's build run, docs/tickets.md), `learn` (a learning run, below; only in an agent's learning conversation), `task` (in a delegated task's conversation: the task starting, or its parent writing to it) or `delegation` (the agent woken because tasks it delegated settled; below). `status` is
   `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
   ended without a backend call because a gate, code, found nothing to judge;
