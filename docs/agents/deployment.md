@@ -23,6 +23,7 @@ Never recreate the container in place: traefik routes nothing until the new
 one is healthy, and runs in progress are cut. Instead, two instances run
 side by side for the switch (docs/ARCHITECTURE.md, Upgrades):
 
+0. **Preflight the new image** against the live database, before anything starts: `orbit preflight --config /config` in a one-off container of the new image with the service's environment and networks (compose: `docker compose run --rm --no-deps -l traefik.enable=false --entrypoint orbit orbit preflight --config /config`). It exits non-zero, and the rollout stops with the old instance untouched, when a pending migration is not expand-only, fails on the live schema or rows (a dry run, rolled back), or the configuration does not load (docs/agents/store.md, Migrations). An image without the command (before it existed) is rolled out without it.
 1. **Start the new container** beside the old one, same image config,
    environment, networks, `/config` mount and **the same `/data` volume**
    (sessions live there; a new instance on its own volume starts every

@@ -34,6 +34,16 @@ jobs:
           version: v2.15.0
       - run: make lint
       - run: make test
+      # The previous release keeps working on this change's schema, as it
+      # must while a rollout runs both (deploy/compat.sh): a pull request's
+      # base, or the commit a push to main moved from.
+      - name: Previous release on the new schema
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = 0000000000000000000000000000000000000000 ]; then echo "no previous commit to check against"; exit 0; fi
+          git fetch -q --no-tags --depth=1 origin "$BASE"
+          make compat BASE="$BASE"
       - run: make vuln
       # The image builds, for both architectures the fleet runs. Pushing is
       # build-push-ghcr.yml's job, on main only.
