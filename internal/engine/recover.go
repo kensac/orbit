@@ -25,8 +25,10 @@ var errLostClaim = errors.New("this attempt lost its claim on the run")
 // costing it when it is handed back.
 type attemptState struct {
 	home, workdir string
-	sessionID     string
-	baseCostUSD   float64
+	// keeps is true for an agent whose session outlives the run.
+	keeps       bool
+	sessionID   string
+	baseCostUSD float64
 }
 
 // spent reads what the attempt's session had cost when it stopped, from
@@ -93,13 +95,12 @@ func (e *Engine) planRecovery(ctx context.Context, a *spec.Agent, c *store.Claim
 	case prev.SpecSHA == nil || *prev.SpecSHA != a.SHA:
 		skipped = "the agent's spec changed since the interrupted attempt"
 	default:
-		path, ok := runner.SessionFile(home, workdir, *prev.SessionID)
-		if !ok {
+		if _, ok := runner.SessionFile(home, workdir, *prev.SessionID); !ok {
 			skipped = "the interrupted attempt's transcript path is too long to locate"
-		} else if _, serr := os.Stat(path); errors.Is(serr, os.ErrNotExist) {
-			skipped = "the interrupted attempt's transcript is gone (is " + e.DataDir + " a volume shared by every instance?)"
-		} else if serr != nil {
+		} else if present, serr := e.ensureSession(ctx, home, workdir, *prev.SessionID); serr != nil {
 			return nil, "", serr
+		} else if !present {
+			skipped = "the interrupted attempt's transcript is gone (is " + e.DataDir + " a volume shared by every instance?" + e.storeHint() + ")"
 		}
 	}
 	if skipped != "" {

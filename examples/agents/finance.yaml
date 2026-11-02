@@ -11,6 +11,9 @@ triggers:
     prompt: Review last month, which has just closed.
   - schedule: "0 9 15 * *"
     prompt: Mid-month check on this month so far. Only notify if something is off.
+# Sure is reachable from hetzner's docker network only, and only hosts
+# advertising these hold ORBIT_SURE_API_KEY.
+needs: [docker-network:hetzner, sure]
 sources:
   - name: transactions
     kind: http

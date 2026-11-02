@@ -12,7 +12,7 @@ import (
 	"github.com/kensac/orbit/internal/journal"
 )
 
-// The journal (internal/journal, migration 00009) is written from
+// The journal (internal/journal, migration 00010) is written from
 // run_events: each appended event is projected in the transaction that
 // stores it, and syncAttempt catches up anything a writer did not project
 // (rows from before the journal existed, or written by an instance that

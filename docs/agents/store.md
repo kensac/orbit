@@ -16,6 +16,10 @@ Nothing ages out. Rows that look disposable are the record: `run_events` is
 the transcript, `artifacts` is what the model saw, `memory_versions` is how
 an agent's beliefs changed.
 
+## The journal
+
+`journal_items` is derived from `run_events` by `journal.Project`, a pure function of an attempt's events in order. Keep it pure: the live write (in `AppendEvent`'s transaction) and the backfill (`syncAttempt`, run at start and every 30 s for recent runs, and by a reader before it reads) must write the same rows, and `TestBackfillWritesWhatTheLiveWriterWould` holds them together. Rows are append-only: a change is a new revision, never an UPDATE. A body's shape changes only with a new `journal.Version` and an upcaster in `journal.Upcast`; stored rows keep their version. Every journal write of a run holds its advisory lock (`lockJournal`), which is what keeps `seq` gapless. A transition that ends an attempt (`finishRun`, `endAttempt`, `HandBack`) syncs that attempt in its own transaction, so the turn it left open closes with it.
+
 ## State machines
 
 - run: `queued -> running -> succeeded | failed | skipped`, `queued -> cancelled`,
@@ -35,6 +39,10 @@ an agent's beliefs changed.
   `building` in one transaction; `FinishBuild` and `FailBuild` finish the
   run and move the ticket together. `build_decisions` and `build_sandboxes`
   rows are written only by the attempt holding the run's claim.
+
+- outbox (`outbox`, written by a worker's engine): unsent, claimed by one control instance (`ClaimOutbox`, reclaimed after `OutboxReclaimAfter`), then `sent_at` set once its deliveries are recorded. Rows are kept.
+- session transcripts (`session_transcripts`): written once per session id (`ON CONFLICT DO NOTHING`; a resume forks to a new id), never updated.
+- deployment (`deployment_specs`, `deployment_current`): every version kept, as `agent_specs`; `SyncDeployment` moves the pointer before `SyncAgents` records the agents loaded with it.
 
 A client request id (`receipts`) is written in the same transaction as the
 message or decision it records, so a retry returns the first result and a

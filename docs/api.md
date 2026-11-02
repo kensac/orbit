@@ -173,8 +173,7 @@ conversation:
   `reply_to`, when set, is the message it answers. `run_id` is the run that
   read a person's message (`null` until one starts) or the run that asked a
   question.
-- **Runs.** `trigger` is `schedule`, `manual`, `message` or `continue` (the
-  agent asked to be woken again). `status` is
+- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again) or `build` (a ticket's build run, docs/tickets.md). `status` is
   `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
   ended without a backend call because a gate, code, found nothing to judge;
   `gate` names it, and is `null` for every other status). `attempt` counts
@@ -276,37 +275,160 @@ the concatenated `text`: `text` is what the agent narrated while working.
 
 ## Runs, events, artifacts
 
-- `GET /runs?agent=&status=&before=&limit=`: `{"runs": [...]}`, newest
-  first; `before` is an RFC 3339 time (a run's `created_at`). Each run, and
-  `GET /runs/{id}`'s, carries `steps`, counted as a thread's run item counts
-  it.
-- `GET /runs/{id}`: `{"run": {...}, "attempts": [...]}`. Each attempt
-  (oldest first) is `{"attempt", "worker", "runner_kind", "spec_sha",
-  "started_at", "ended_at", "outcome", "session_id", "recovered_from",
-  "recover_skipped", "cost_usd", "session_cost_usd"}`: `outcome` is
-  `succeeded`, `failed`, `handed_back` (stopped by its instance) or `lost`
-  (reaped without a heartbeat), absent while running; `recovered_from` is the
-  attempt whose session it continued, `recover_skipped` why it started over
-  instead. `cost_usd` is the attempt's share, absent when unknown (a killed
-  process saved none); the run's `cost_usd` is every attempt's. The run has
-  also `session_mode` (`fresh`, `resumed`, `live`),
-  `session_parent` and `session_depth` for an agent with a session, and
-  `run_after`, `chain` and `continues` for a `continue` run.
-- `POST /runs/{id}/cancel`: `200 {"cancelled": true}`; queued runs only, 409
-  otherwise
-- `GET /runs/{id}/events?attempt=&after=&limit=`: the backend's raw stream
-- `GET /runs/{id}/artifacts`, `GET /artifacts/{id}`: what the run read and wrote
-- `GET /runs/{id}/deliveries`
+### A run
+
+`GET /runs?agent=&status=&before=&limit=` is `{"runs": [<run>]}`, newest first. `before` is an RFC 3339 time (a run's `created_at`); `limit` defaults to 50, at most 500. `GET /runs/{id}` is `{"run": <run>, "attempts": [<attempt>]}`. A run (`store.Run`):
+
+```json
+{"id": "uuid", "attempt": 1, "agent": "finance", "spec_sha": "hex",
+ "trigger": "schedule", "trigger_index": 0, "scheduled_for": "...",
+ "prompt": "", "status": "succeeded",
+ "runner_kind": "claude-code", "model": "...", "worker": "orbit/0",
+ "created_at": "...", "started_at": "...", "finished_at": "...",
+ "error": "...", "summary": "...", "report": "<markdown>",
+ "output": {}, "usage": {}, "cost_usd": 0.03, "session_id": "...",
+ "session_mode": "fresh", "session_parent": "uuid", "session_depth": 1,
+ "run_after": "...", "continues": "uuid", "chain": 1,
+ "gate": "unchanged", "steps": 4}
+```
+
+- Always present: `id`, `attempt`, `agent`, `spec_sha`, `trigger`, `prompt` (`""` when none), `status`, `created_at` and `steps`. Every other field is omitted when it has no value (not `null`).
+- `trigger` and `status` are as in a thread run item. `trigger_index` and `scheduled_for` are set on a `schedule` run: which of the agent's triggers fired, and the fire time.
+- `runner_kind`, `model` and `worker` are the latest attempt's backend, its model (absent when the runner names none) and the instance that claimed it. `spec_sha` is the spec the latest attempt ran under.
+- `output` is the backend's raw structured output and `usage` its token usage, as it reported them. `cost_usd` is every attempt's cost together.
+- `session_id` is the backend session the run ended in. `session_mode` (`fresh`, `resumed`, `live`), `session_parent` (the run whose session it continued) and `session_depth` are set for an agent with a session.
+- `run_after`, `continues` (the run that asked) and `chain` (its place in the chain, from 1) are set on a `continue` run.
+- `gate` names what ended a `skipped` run.
+- `steps` is the number of tool calls in the latest attempt, counted as a thread's run item counts it.
+
+An attempt (`store.Attempt`), oldest first:
+
+```json
+{"attempt": 2, "worker": "orbit/0", "runner_kind": "claude-code", "spec_sha": "hex",
+ "started_at": "...", "ended_at": "...", "outcome": "succeeded",
+ "session_id": "...", "recovered_from": 1, "recover_skipped": "...",
+ "cost_usd": 0.01, "session_cost_usd": 0.04}
+```
+
+`attempt`, `worker` and `started_at` are always present; the rest is omitted when unset. `outcome` is `succeeded`, `failed`, `skipped`, `handed_back` (stopped by its instance) or `lost` (reaped without a heartbeat), absent while the attempt runs. `recovered_from` is the attempt whose session it continued, `recover_skipped` why it started over instead. `cost_usd` is the attempt's share, absent when unknown (a killed process saved none); `session_cost_usd` is the backend's running total for the session after it.
+
+`POST /runs/{id}/cancel` is `200 {"cancelled": true}` for a queued run, 409 otherwise.
+
+### Events
+
+`GET /runs/{id}/events?attempt=&after=&limit=` is `{"events": [<event>]}`, one attempt's transcript in order: `attempt` (default: the run's latest), the events with `seq` above `after` (default 0), at most `limit` (default 1000, at most 5000). Page by passing the last `seq` as `after`.
+
+```json
+{"attempt": 1, "seq": 12, "at": "...", "kind": "assistant", "payload": {}}
+```
+
+`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.figures_unverified`, and a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`.
+
+### The journal
+
+A run's journal is its typed record: what the agent said, thought, called and changed, as items a client renders without reading any backend's event format. It is derived from the events above by code (`internal/journal`), written in the transaction that stores each event, and backfilled for runs from before it existed with the same code, so the rows are the same either way. It is append-only: an item that changes (a tool call that returns, a plan that is updated, a turn that ends) gets a new revision carrying its whole body, and earlier revisions stay as they were.
+
+**Addressing.** A row is `(run, epoch, seq)`. An epoch is one timeline: an attempt that resumed the interrupted attempt's session (`recovered_from`) continues its epoch, and an attempt that started over opens a new epoch numbered by itself. So a run handed back once and continued has one epoch, `1`; one whose second attempt started over has epochs `1` and `2`. `seq` counts rows within an epoch from 1, without gaps. A row's `cursor` is `"<epoch>.<seq>"`.
+
+`GET /runs/{id}/journal?epoch=&after=&limit=` reads one epoch's rows (every revision) in `seq` order:
+
+```json
+{"epoch": 1, "epochs": [1],
+ "items": [<row>],
+ "cursor": "1.42", "has_more": false, "reset": null}
+```
+
+- `epoch` defaults to the epoch of the run's latest attempt (`0` while the run has never started, with no items). `epochs` lists every epoch the run has, oldest first.
+- `after` is a cursor: rows after it are returned. A cursor into another epoch than the one read, or past its last row, is not continued: the response starts from the epoch's first row and `reset` says why (`epoch_changed`, `cursor_ahead`), and a client discards what it holds of that run. An `after` that is not a cursor is a 400.
+- `limit` defaults to 500, at most 2000. `cursor` is the last returned row's (or `after` when none was returned); pass it as `after` for the next page. `has_more` is true when rows follow.
+
+A row:
+
+```json
+{"run_id": "uuid", "epoch": 1, "seq": 7, "cursor": "1.7", "attempt": 1,
+ "item_id": "tool:toolu_01", "revision": 2, "kind": "tool_call",
+ "turn_id": "turn:1.1", "parent_id": null,
+ "at": "...", "v": 1, "body": {}}
+```
+
+- `item_id` is stable across revisions; `revision` counts from 1. To show the current state, keep the highest revision per `item_id`, placed where its revision 1 was. `GET /runs/{id}/journal/items/{item_id}?epoch=` is `{"item": <row>}`, an item's latest revision (404 when the epoch has none).
+- `turn_id` is the turn the item belongs to (a `turn` item's own id for the turn itself), `null` for orbit's steps outside any turn (fetching sources, planning a session).
+- `parent_id` is the subagent nesting: an item produced inside a subagent names the `tool_call` item of the call that spawned it (Claude Code's `Task`/`Agent`), and is `null` at the top level. Nested subagents nest the same way.
+- `at` is when orbit stored the event the row came from (the attempt's end for a turn closed by it). Order by `seq`, not `at`.
+- `v` is the body's schema version, 1 today. A body changes shape only with a new version; a reader reads older versions in the current shape (`journal.Upcast`), and a row from a newer version is served as stored.
+- `kind` is one of the kinds below, and may grow: a client shows a kind it does not know as nothing, never as an error.
+
+**Bounded values.** A value that can be large (a tool's output, a diff, a thought, a status payload) is sent as
+
+```json
+{"head": "first bytes...", "bytes": 48213, "sha256": "hex", "truncated": true}
+```
+
+`head` is at most 4096 bytes (`journal.HeadMax`), cut at a character boundary; `bytes` and `sha256` are the whole value's. When `truncated` is true, `GET /runs/{id}/journal/bodies/{sha256}` returns the whole value as stored (`text/plain; charset=utf-8`, or `application/octet-stream` when it is not UTF-8), 404 for a digest no row of that run cut short. When `truncated` is false, `head` is the whole value.
+
+**Kinds and bodies.** Ids are shown as patterns: `<a>.<s>.<i>` is the attempt, the source event's `seq` in its attempt, and the item's place among that event's items.
+
+| `kind` | `item_id` | body |
+|---|---|---|
+| `message` | `message:<a>.<s>.<i>` (Codex: `message:codex.<id>`) | `{"role": "assistant", "text": "..."}`; `role` is `assistant` for the agent's prose, `user` for a user turn the backend recorded (the prompt a subagent was given). One per block of prose; `text` is whole. |
+| `thinking` | `thinking:<a>.<s>.<i>` (Codex: `thinking:codex.<id>`) | `{"text": <bounded>, "tokens_estimate": 120, "redacted": true}`; the model's reasoning where the backend exposes it. `tokens_estimate` is the text's size in tokens, estimated from its bytes (4 per token), not a count the backend reported (a turn's `usage` has those). `redacted` (only when true) is a thought sent encrypted: no text, estimate 0. |
+| `tool_call` | `tool:<call id>` (Claude Code's `tool_use` id; Codex: `tool:codex.<item id>`) | `{"call_id": "toolu_01", "name": "Read", "input": {...}, "summary": "inputs/a.json", "state": "running", "result": <bounded>}`. Revision 1 is the call, `state: "running"`, no `result`; the revision written when it returns has `state` `completed` or `failed` (the tool reported an error, a command exited non-zero) and `result`, the tool's output as text. `input` is the call's input, whole. `summary` is one line (a path relative to the run's directory, a pattern, a command, a URL), at most 160 characters, possibly empty. Codex's are `shell` (`{"command"}`), `web_search` (`{"query"}`), `<server>.<tool>` (`{"arguments"}`) and `edit` (`{"changes"}`). The call that returns the final answer is not a tool call. |
+| `diff` | `diff:<call id>` (Codex: `diff:codex.<item id>.<n>`) | `{"call_id": "toolu_02", "path": "notes.md", "change": "edit", "patch": <bounded>}`; a change a file tool made, once it succeeded. `path` is relative to the run's directory. `change` is `edit` or `write` (Claude Code), or Codex's `add`, `delete`, `update`. `patch` is a unified diff of the replaced text (`--- a/<path>`, `+++ b/<path>`, one `@@` hunk per replacement, without line numbers, which Claude Code does not report); absent when the backend said only that the file changed (Codex). |
+| `plan` | `plan` (one per epoch) | `{"entries": [{"text": "read the inputs", "status": "completed"}], "text": "..."}`; the agent's working plan. `entries` is its todo list (Claude Code's `TodoWrite`, Codex's `todo_list`), each `status` `pending`, `in_progress` or `completed`. `text` (when present) is a plan it presented (`ExitPlanMode`). Each update is a revision. |
+| `approval` | `approval:<request id>` | `{"request_id": "...", "tool": "Bash", "input": {...}, "state": "pending", "message": "..."}`; a build's backend asking orbit's policy whether a tool call may run. Revision 1 is the request (`pending`); the decision is the next, `allowed` or `denied`, with orbit's `message`. Actions waiting for a person are a run's `actions`, not these. |
+| `question` | `question:<a>.<s>.<i>` (a question tool's: `question:<call id>.<n>`) | `{"text": "Which card?", "header": "...", "options": [{"label": "...", "description": "..."}], "multi_select": true}`; something the agent asked its person: a question in its final answer (`options` empty), or a question tool's, with what it offered. The thread's question messages are the ones a person replies to. |
+| `status` | `status:<a>.<s>.0` | `{"code": "orbit.source_fetched", "detail": <bounded>}`; something that happened to the run that is not the model's output: orbit's steps (`orbit.*`, as in Events), the backend's session start (`system.init`), a rate limit report (`rate_limit_event`), a line that was not JSON (`raw`). `detail` is the event's payload. |
+| `turn` | `turn:<a>.<n>` | below |
+
+**Turns.** A turn is one exchange with the backend, from the request to its result. It opens at the backend's first event (Claude Code's `system.init` or first message, Codex's `turn.started`, a Messages API response) and closes at its result; a live process answers several runs, one turn each.
+
+```json
+{"state": "completed", "outcome": "success",
+ "started_at": "...", "completed_at": "...", "duration_ms": 4200,
+ "cost_usd": 0.02, "usage": {}, "error": "..."}
+```
+
+- `state` is how the turn stands as orbit observed it: `running`; `completed` (the backend answered); `interrupted` (orbit saw its process end without a result: a timeout, a crash, a drain's hand-back); `unverifiable` (its attempt was lost, reaped without a heartbeat, and nothing observed how it ended).
+- `outcome` is the backend's own verdict, kept apart from `state`: `success`, `error`, `max_turns`, `max_tokens`, `refused`, or another word a backend reports. It is absent when none was reported, which is never success: an `interrupted` or `unverifiable` turn has none, and a `completed` turn can have `error` (an API error ends a turn too).
+- `completed_at` is absent while running and on an `unverifiable` turn. `duration_ms` and `cost_usd` are the backend's (Claude Code's result), `usage` its token counts, `error` its message when `outcome` is not `success`. Each is absent when not reported.
+- A turn is revision 1 when it opens and one more revision when it ends; the closing revision of an interrupted or lost attempt is written in the transaction that ends the attempt, so a reader that sees the run final sees how its turn ended.
+
+### Artifacts
+
+`GET /runs/{id}/artifacts` is `{"artifacts": [<artifact>]}`, by attempt, direction and name, without content:
+
+```json
+{"id": "uuid", "run_id": "uuid", "attempt": 1, "direction": "in",
+ "name": "inputs/transactions.json", "media_type": "application/json",
+ "sha256": "hex", "bytes": 48213, "created_at": "..."}
+```
+
+`direction` is `in` (what the run read) or `out` (`output.json`, what the backend returned). The inputs the model was shown are under `inputs/` (`inputs/<run>-<attempt>/` for an agent with a session); a source only transforms read is under `sources/`; `memory.md`, `messages.json`, `conversation.md`, `system.md`, `prompt.md` and `schema.json` are the rest of what the run was given. `GET /artifacts/{id}` is the content itself, with its `media_type` as `Content-Type` (served with `nosniff` and a `default-src 'none'` CSP).
+
+### Deliveries
+
+`GET /runs/{id}/deliveries` is `{"deliveries": [<delivery>]}`, every notification attempt of the run, oldest first:
+
+```json
+{"id": 7, "run_id": "uuid", "action_id": "uuid", "channel": "phone",
+ "purpose": "approval", "status": "failed", "error": "...", "attempted_at": "..."}
+```
+
+`purpose` is `report`, `failure`, `approval` (an action waiting for a person; `action_id` names it) or `action` (an approved action whose execution failed; `action_id` names it). `status` is `sent` or `failed`, with the channel's `error`. `run_id`, `action_id` and `error` are omitted when unset.
 
 ## Actions
 
-- `GET /actions?agent=&status=pending&run_id=&before=<cursor>&limit=<n>`:
-  `{"actions": [...], "has_more": false, "next_before": null}`, newest
-  first. `status` is as in a thread action, `run_id` narrows to one run's
-  proposals (400 when it is not a UUID). Paging is as for a thread:
-  `next_before` is an opaque cursor, `null` exactly when `has_more` is
-  false; `limit` defaults to 100, at most 500.
-- `GET /actions/{id}`
+`GET /actions?agent=&status=&run_id=&before=<cursor>&limit=<n>` is `{"actions": [<action>], "has_more": false, "next_before": null}`, newest first. `status` is as in a thread action; `run_id` narrows to one run's proposals (400 when it is not a UUID). Paging is as for a thread: `next_before` is an opaque cursor, `null` exactly when `has_more` is false; `limit` defaults to 100, at most 500. `GET /actions/{id}` is `{"action": <action>}`:
+
+```json
+{"id": "uuid", "run_id": "uuid", "agent": "finance", "type": "webhook:home-assistant",
+ "params": {}, "reason": "...", "rule": "approve", "status": "executed",
+ "decided_by": "kanishk", "decided_at": "...", "executed_at": "...",
+ "result": {}, "error": "...", "created_at": "..."}
+```
+
+`rule` is the agent's rule for the type when it was proposed (`auto`, `approve`, `deny`). `decided_by` is the person, or `rule` for an action its rule approved or denied. `result` is what the executor returned; `error` is why it was denied (an unknown type, invalid params, a limit) or why it failed. `decided_by`, `decided_at`, `executed_at`, `result` and `error` are omitted when unset.
+
 - `POST /actions/{id}/approve`, `POST /actions/{id}/reject`: `200 {"ok":
   true}`; 404 for an unknown action; 409 when it was already decided. With
   `{"client_request_id": "..."}` (same rules as `client_message_id`), a retry
