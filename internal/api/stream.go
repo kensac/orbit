@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/status"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -28,6 +29,11 @@ const streamPing = 15 * time.Second
 
 // eventPage bounds one events read; a stream loops until it is caught up.
 const eventPage = 1000
+
+// sameStatus reports whether a client showing a would show b the same.
+func sameStatus(a, b status.Status) bool {
+	return a.State == b.State && a.Kind == b.Kind && a.Detail == b.Detail && a.Source == b.Source
+}
 
 // streamRun serves GET /runs/{id}/stream: Server-Sent Events replaying the
 // run's latest attempt from its start, then following it live until the
@@ -69,6 +75,17 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 		}
 		return rc.Flush()
 	}
+	// agentStatus is the last agent_status sent; one is sent with every
+	// status, and on its own whenever it changes.
+	var agentStatus *status.Status
+	sendAgentStatus := func(p *store.RunProgress) error {
+		if agentStatus != nil && sameStatus(*agentStatus, p.AgentStatus) {
+			return nil
+		}
+		st := p.AgentStatus
+		agentStatus = &st
+		return send("agent_status", "", st)
+	}
 	// continues is the earlier attempt the current one continues (it
 	// resumed that attempt's session), 0 for none; every status says it.
 	continues := 0
@@ -77,7 +94,11 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 		if continues > 0 {
 			m["continues"] = continues
 		}
-		return send("status", "", m)
+		if err := send("status", "", m); err != nil {
+			return err
+		}
+		agentStatus = nil
+		return sendAgentStatus(p)
 	}
 	// A reconnecting client names the last narration it has; everything up
 	// to it in the narration it belongs to is skipped. Skipped narration is
@@ -201,6 +222,8 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 			if sendStatus(p) != nil {
 				return true
 			}
+		} else if sendAgentStatus(p) != nil {
+			return true
 		}
 		if store.Terminal(status) {
 			finish()

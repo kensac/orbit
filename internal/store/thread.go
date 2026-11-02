@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/kensac/orbit/internal/status"
 )
 
 // ThreadItem is one entry of an agent's conversation: exactly one of
@@ -81,6 +83,8 @@ type ThreadRun struct {
 	// NeedsInput is true when the run is waiting on its person: one of its
 	// questions is open or one of its actions awaits approval.
 	NeedsInput bool `json:"needs_input"`
+	// AgentStatus is the agent's status in this run (status.Derive).
+	AgentStatus status.Status `json:"agent_status"`
 }
 
 // ThreadQuestion is a question a run asked; ID is its from_agent message,
@@ -136,14 +140,15 @@ const threadRunSelect = `
 	       COALESCE((SELECT json_agg(json_build_object('id', a.id, 'type', a.type, 'status', a.status,
 	                                                   'reason', a.reason, 'params', a.params)
 	                                 ORDER BY a.created_at, a.id)
-	                 FROM actions a WHERE a.run_id = r.id), '[]')
+	                 FROM actions a WHERE a.run_id = r.id), '[]'),
+	       r.hook_status
 	FROM runs r`
 
 func scanThreadRun(row pgx.Row) (*ThreadRun, error) {
 	r := ThreadRun{Kind: "run"}
-	var questions, actions []byte
+	var questions, actions, hook []byte
 	if err := row.Scan(&r.ID, &r.At, &r.Trigger, &r.Status, &r.Attempt, &r.StartedAt, &r.FinishedAt, &r.Steps,
-		&r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions); err != nil {
+		&r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions, &hook); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -155,12 +160,17 @@ func scanThreadRun(row pgx.Row) (*ThreadRun, error) {
 	if err := json.Unmarshal(actions, &r.Actions); err != nil {
 		return nil, err
 	}
+	openQ, pending := false, false
 	for _, q := range r.Questions {
-		r.NeedsInput = r.NeedsInput || q.Open
+		openQ = openQ || q.Open
 	}
 	for _, a := range r.Actions {
-		r.NeedsInput = r.NeedsInput || a.Status == "pending"
+		pending = pending || a.Status == "pending"
 	}
+	r.NeedsInput = openQ || pending
+	r.AgentStatus = status.Derive(status.Run{ID: r.ID, Status: r.Status, Attempt: r.Attempt, CreatedAt: r.At,
+		StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, Error: r.Error, OpenQuestion: openQ, PendingAction: pending,
+		Hook: hookSnapshot(hook)})
 	return &r, nil
 }
 
@@ -347,20 +357,27 @@ func (c ThreadCursor) less(o ThreadCursor) bool {
 	return c.ID < o.ID
 }
 
-// RunProgress is what a stream polls: where the run is.
+// RunProgress is what a stream polls: where the run is, and the agent's
+// status in it.
 type RunProgress struct {
-	Status     string
-	Attempt    int
-	RunnerKind string
+	Status      string
+	Attempt     int
+	RunnerKind  string
+	AgentStatus status.Status
 }
 
-// GetRunProgress returns a run's status, attempt and backend.
+// GetRunProgress returns a run's status, attempt, backend and agent status.
 func (s *Store) GetRunProgress(ctx context.Context, id string) (*RunProgress, error) {
 	var p RunProgress
-	err := s.Pool.QueryRow(ctx, `SELECT status, attempt, COALESCE(runner_kind, '') FROM runs WHERE id = $1`, id).
-		Scan(&p.Status, &p.Attempt, &p.RunnerKind)
+	var f RunFacts
+	err := s.Pool.QueryRow(ctx, `SELECT r.status, r.attempt, COALESCE(r.runner_kind, ''), `+runFacts("r")+`
+		FROM runs r WHERE r.id = $1`, id).
+		Scan(&p.Status, &p.Attempt, &p.RunnerKind, &f)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
+	}
+	if err == nil {
+		p.AgentStatus = status.Derive(*f.run())
 	}
 	return &p, err
 }

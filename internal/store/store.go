@@ -20,6 +20,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+
+	"github.com/kensac/orbit/internal/status"
 )
 
 //go:embed migrations/*.sql
@@ -142,6 +144,9 @@ type AgentRow struct {
 	// NeedsInput is true while the agent waits on its person: an open
 	// question or an action pending approval.
 	NeedsInput bool `json:"needs_input"`
+	// AgentStatus is the agent's status (status.Aggregate over its current
+	// run: the running one, else the newest).
+	AgentStatus status.Status `json:"agent_status"`
 }
 
 // RunSummary is the short form of a run.
@@ -161,7 +166,8 @@ func (s *Store) ListAgents(ctx context.Context) ([]AgentRow, error) {
 		       lr.id, lr.status, lr.trigger, lr.created_at, lr.finished_at, lr.summary,
 		       (SELECT count(*) FROM messages m
 		         WHERE m.agent = a.name AND `+openQuestion+`),
-		       (SELECT count(*) FROM actions x WHERE x.agent = a.name AND x.status = 'pending')
+		       (SELECT count(*) FROM actions x WHERE x.agent = a.name AND x.status = 'pending'),
+		       `+currentRun("a.name", "sr.agent = a.name")+`
 		FROM agents a
 		JOIN agent_specs sp ON sp.sha = a.spec_sha
 		LEFT JOIN LATERAL (
@@ -176,17 +182,19 @@ func (s *Store) ListAgents(ctx context.Context) ([]AgentRow, error) {
 	var out []AgentRow
 	for rows.Next() {
 		var a AgentRow
-		var id, status, trigger *string
+		var id, runStatus, trigger *string
 		var created *time.Time
 		var finished *time.Time
 		var summary *string
+		var current *RunFacts
 		if err := rows.Scan(&a.Name, &a.SpecSHA, &a.Spec, &a.Present, &a.Enabled, &a.FirstSeen, &a.UpdatedAt,
-			&id, &status, &trigger, &created, &finished, &summary, &a.Unread, &a.Pending); err != nil {
+			&id, &runStatus, &trigger, &created, &finished, &summary, &a.Unread, &a.Pending, &current); err != nil {
 			return nil, err
 		}
 		a.NeedsInput = a.Unread > 0 || a.Pending > 0
+		a.AgentStatus = StatusFacts{Run: current, OpenQuestion: a.Unread > 0, PendingAction: a.Pending > 0}.Status()
 		if id != nil {
-			a.LastRun = &RunSummary{ID: *id, Status: *status, Trigger: *trigger, CreatedAt: *created, FinishedAt: finished, Summary: summary}
+			a.LastRun = &RunSummary{ID: *id, Status: *runStatus, Trigger: *trigger, CreatedAt: *created, FinishedAt: finished, Summary: summary}
 		}
 		out = append(out, a)
 	}
@@ -437,6 +445,19 @@ func (s *Store) SetRunner(ctx context.Context, runID string, attempt int, kind, 
 	})
 }
 
+// hookSnapshot reads a stored hook_status; nil when there is none or it
+// does not parse (status then falls back to the run's row).
+func hookSnapshot(b []byte) *status.Snapshot {
+	if len(b) == 0 {
+		return nil
+	}
+	var s status.Snapshot
+	if json.Unmarshal(b, &s) != nil {
+		return nil
+	}
+	return &s
+}
+
 // SetHookStatus records what the run's hooks last reported (a
 // status.Snapshot, as JSON) while the attempt still holds the running run.
 // ErrConflict means it no longer does: a report that arrives after the run
@@ -567,20 +588,30 @@ type Run struct {
 	Gate *string `json:"gate,omitempty"`
 	// HookStatus is what the run's hooks last reported (status.Snapshot).
 	HookStatus json.RawMessage `json:"-"`
+	// AgentStatus is the agent's status in this run (status.Derive).
+	AgentStatus status.Status `json:"agent_status"`
 }
 
 // runCols reads a run aliased r: stepsCount names it.
 const runCols = `r.id::text, r.attempt, r.agent, r.spec_sha, r.trigger, r.trigger_index, r.scheduled_for, r.prompt, r.status,
 	r.runner_kind, r.model, r.worker, r.created_at, r.started_at, r.finished_at, r.error, r.summary, r.report,
 	r.output, r.usage, r.cost_usd::float8, r.session_id, r.session_mode, r.session_parent, r.session_depth,
-	r.run_after, r.continues::text, r.chain, r.gate, r.hook_status, ` + stepsCount
+	r.run_after, r.continues::text, r.chain, r.gate, r.hook_status,
+	EXISTS (SELECT 1 FROM messages m WHERE m.run_id = r.id AND ` + openQuestion + `),
+	EXISTS (SELECT 1 FROM actions pa WHERE pa.run_id = r.id AND pa.status = 'pending'), ` + stepsCount
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
+	var openQ, pending bool
 	err := row.Scan(&r.ID, &r.Attempt, &r.Agent, &r.SpecSHA, &r.Trigger, &r.TriggerIndex, &r.ScheduledFor, &r.Prompt,
 		&r.Status, &r.RunnerKind, &r.Model, &r.Worker, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.Error,
 		&r.Summary, &r.Report, &r.Output, &r.Usage, &r.CostUSD, &r.SessionID, &r.SessionMode, &r.SessionParent,
-		&r.SessionDepth, &r.RunAfter, &r.Continues, &r.Chain, &r.Gate, &r.HookStatus, &r.Steps)
+		&r.SessionDepth, &r.RunAfter, &r.Continues, &r.Chain, &r.Gate, &r.HookStatus, &openQ, &pending, &r.Steps)
+	if err == nil {
+		r.AgentStatus = status.Derive(status.Run{ID: r.ID, Status: r.Status, Attempt: r.Attempt, CreatedAt: r.CreatedAt,
+			StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, Error: r.Error, OpenQuestion: openQ, PendingAction: pending,
+			Hook: hookSnapshot(r.HookStatus)})
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

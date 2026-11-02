@@ -85,3 +85,25 @@ func Derive(r Run) Status {
 func None() Status { return Status{State: Idle, Source: SourceRun} }
 
 func ptr(t time.Time) *time.Time { return &t }
+
+// Aggregate is an agent's or a conversation's status: that of its current
+// run (the running one, else the newest), except that a finished current
+// run gives way to anything of the agent or conversation that waits on its
+// person (openQuestion, pendingAction), however old: an unanswered
+// question outlives the scheduled runs after it. latest nil means no run.
+func Aggregate(latest *Run, openQuestion, pendingAction bool) Status {
+	if latest == nil {
+		return None()
+	}
+	st := Derive(*latest)
+	if st.State == Queued || st.State == Working || st.State == Waiting || (st.State == Errored && st.Source == SourceHooks) {
+		return st
+	}
+	switch {
+	case pendingAction:
+		st.State, st.Kind, st.Detail, st.Source = Waiting, Approval, "", SourceRun
+	case openQuestion:
+		st.State, st.Kind, st.Detail, st.Source = Waiting, Question, "", SourceRun
+	}
+	return st
+}
