@@ -599,3 +599,37 @@ func (orphanErr) Error() string {
 }
 
 var errOrphan = orphanErr{}
+
+func TestASubmittedReviewIsBuiltBeforeTheMerge(t *testing.T) {
+	e := newEnv(t, "approve")
+	id := e.approvedTicket()
+	e.tick()
+	e.finishBuild(id, githubtest.Head)
+	if _, err := e.s.AddReviewComment(ctx, store.NewComment{TicketID: id, Path: "main.go", StartLine: 3, EndLine: 3, Body: "use a constant", Author: "kanishk"}); err != nil {
+		t.Fatal(err)
+	}
+	// The checks are green, but a submitted review comes first: a revise,
+	// not a merge.
+	if _, _, err := e.s.SubmitReview(ctx, id, "kanishk", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	e.tick()
+	tk := e.ticket(id)
+	b, _ := e.s.LatestBuild(ctx, id)
+	if tk.Status != store.TicketBuilding || tk.MergeActionID != nil || b.Purpose != store.BuildPurposeRevise {
+		t.Fatalf("after the review: %+v, build %+v", tk, b)
+	}
+	const revised = "6666666666666666666666666666666666666666"
+	e.gh.Mu.Lock()
+	e.gh.PR["head"].(map[string]any)["sha"] = revised
+	e.gh.Mu.Unlock()
+	run := e.finishBuild(id, revised)
+	cs, _ := e.s.ReviewComments(ctx, id)
+	if len(cs) != 1 || cs[0].Status != store.CommentDelivered || *cs[0].DeliveredBy != run {
+		t.Fatalf("comments = %+v", cs)
+	}
+	e.tick()
+	if tk := e.ticket(id); tk.Status != store.TicketMerging {
+		t.Fatalf("after the revise: %s", tk.Status)
+	}
+}
