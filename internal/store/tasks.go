@@ -774,13 +774,6 @@ func reconcileOne(ctx context.Context, tx pgx.Tx, id, status, conv string, decis
 	return TaskDone, &TaskReport{RunID: runID, Summary: deref(summary), Report: deref(rep)}, "", "", nil
 }
 
-func deref(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
-}
-
 // clipText cuts s to at most n bytes on a rune boundary and says so.
 func clipText(s string, n int) string {
 	if len(s) <= n {

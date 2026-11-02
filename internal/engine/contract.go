@@ -194,6 +194,10 @@ type promptRun struct {
 	Continuing bool
 	// Tasks are the tasks the run's conversation delegated.
 	Tasks []store.Task
+	// Known is the index of the memory entries the agent reads (known.go),
+	// "" when it has none. Repeated in a continued session, as memory is:
+	// it may have changed since the session's last run.
+	Known string
 }
 
 // userPrompt is the run's content: charter, why it woke, memory and inbox.
@@ -220,6 +224,9 @@ func userPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 		b.WriteString("(empty: this is your first run, or nothing has been kept yet)\n")
 	} else {
 		b.WriteString(rc.Memory + "\n")
+	}
+	if run.Known != "" {
+		b.WriteString("\n" + run.Known)
 	}
 	if len(convo) > 0 {
 		b.WriteString("\n# Conversation so far (oldest first; earlier runs' reports are yours)\n\n")
