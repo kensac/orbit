@@ -148,8 +148,23 @@ func TestSearchBackfillsRowsWrittenBeforeIt(t *testing.T) {
 	if _, err := s.SendToAgent(ctx, "a", "the heat pump is loud", "kanishk", nil); err != nil {
 		t.Fatal(err)
 	}
-	searchedRun(t, s, "a", []string{`{"type":"assistant","message":{"content":[{"type":"text","text":"Checking the heat pump logs."}]}}`},
-		"Heat pump fine", "The heat pump ran normally.", "heat pump: quiet mode on")
+	// The run is finished in SQL as that schema had it: today's finishRun reads columns later migrations add.
+	id := manual(t, s, "a")
+	c, err := s.ClaimRun(ctx, "w")
+	if err != nil || c == nil || c.ID != id {
+		t.Fatalf("claim: %v %v", c, err)
+	}
+	if err := s.AppendEvent(ctx, id, c.Attempt, 1, "assistant",
+		[]byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"Checking the heat pump logs."}]}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx, `UPDATE runs SET status = 'succeeded', finished_at = now(), summary = 'Heat pump fine',
+		report = 'The heat pump ran normally.' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO memory_versions (agent, run_id, content) VALUES ('a', $1, 'heat pump: quiet mode on')`, id); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}

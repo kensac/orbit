@@ -175,10 +175,15 @@ func postMessage(ctx context.Context, tx pgx.Tx, p PostMessage) (PostResult, err
 			r.Delivered, r.RunID, delivery = DeliveredSteered, running, DeliverySteer
 		}
 	}
-	err := tx.QueryRow(ctx, `
-		INSERT INTO messages (agent, direction, body, author, reply_to, conversation_id, delivery)
-		VALUES ($1, 'to_agent', $2, NULLIF($3, ''), $4, $5, $6) RETURNING id::text`,
-		p.Agent, p.Body, p.Author, p.ReplyTo, conv, delivery).Scan(&r.MessageID)
+	// A queued message is the column's default, so it is written as every message was before deliveries existed.
+	insert := `INSERT INTO messages (agent, direction, body, author, reply_to, conversation_id)
+		VALUES ($1, 'to_agent', $2, NULLIF($3, ''), $4, $5) RETURNING id::text`
+	args := []any{p.Agent, p.Body, p.Author, p.ReplyTo, conv}
+	if delivery == DeliverySteer {
+		insert = `INSERT INTO messages (agent, direction, body, author, reply_to, conversation_id, delivery)
+			VALUES ($1, 'to_agent', $2, NULLIF($3, ''), $4, $5, 'steer') RETURNING id::text`
+	}
+	err := tx.QueryRow(ctx, insert, args...).Scan(&r.MessageID)
 	if isForeignKeyViolation(err) {
 		return r, ErrNotFound
 	}
