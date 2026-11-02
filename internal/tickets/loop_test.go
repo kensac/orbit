@@ -3,6 +3,7 @@ package tickets
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -272,17 +273,40 @@ func TestDoneWhenOrbitRunsTheMergeCommit(t *testing.T) {
 	}
 }
 
-func TestFailingChecksGetBoundedFixAttempts(t *testing.T) {
+// failCheck makes the required check fail as an Actions job, 991.
+func (e *env) failCheck() {
+	e.gh.Mu.Lock()
+	defer e.gh.Mu.Unlock()
+	e.gh.CheckRuns[0]["status"], e.gh.CheckRuns[0]["conclusion"] = "completed", "failure"
+	e.gh.CheckRuns[0]["id"], e.gh.CheckRuns[0]["html_url"] = 991, "https://github.com/x/runs/991"
+	e.gh.CheckRuns[0]["app"] = map[string]any{"id": 15368, "slug": "github-actions"}
+	e.gh.JobLogs = map[int64]string{991: strings.Repeat("noise\n", 5000) + "2026-11-01T10:00:00.1234567Z \x1b[31m--- FAIL: TestThing\x1b[0m\n"}
+}
+
+func TestFailingChecksAreRerunOnceThenGetBoundedFixAttempts(t *testing.T) {
 	e := newEnv(t, "approve")
 	id := e.approvedTicket()
 	e.tick()
 	e.finishBuild(id, githubtest.Head)
+	e.failCheck()
+	// The first failure on a head is rerun, not fixed: a flaky test costs
+	// a rerun, not a build.
+	e.tick()
+	if st := e.ticket(id).Status; st != store.TicketReview {
+		t.Fatalf("after the first failure: %s", st)
+	}
 	e.gh.Mu.Lock()
-	e.gh.CheckRuns[0]["conclusion"], e.gh.CheckRuns[0]["id"], e.gh.CheckRuns[0]["html_url"] = "failure", 991, "https://github.com/x/runs/991"
-	e.gh.CheckRuns[0]["app"] = map[string]any{"id": 15368, "slug": "github-actions"}
-	e.gh.JobLogs = map[int64]string{991: strings.Repeat("noise\n", 5000) + "--- FAIL: TestThing\n"}
+	reruns, status := e.gh.Reruns, e.gh.CheckRuns[0]["status"]
 	e.gh.Mu.Unlock()
+	if len(reruns) != 1 || reruns[0] != 991 || status != "queued" {
+		t.Fatalf("reruns = %v, check %v", reruns, status)
+	}
+	e.tick() // the rerun is queued: wait
+	if st := e.ticket(id).Status; st != store.TicketReview {
+		t.Fatalf("while the rerun runs: %s", st)
+	}
 	for attempt := 1; attempt <= MaxFixAttempts; attempt++ {
+		e.failCheck()
 		e.tick()
 		tk := e.ticket(id)
 		if tk.Status != store.TicketBuilding {
@@ -295,15 +319,137 @@ func TestFailingChecksGetBoundedFixAttempts(t *testing.T) {
 		var report []map[string]any
 		_ = json.Unmarshal(b.Failure, &report)
 		tail, _ := report[0]["log_tail"].(string)
-		if len(report) != 1 || report[0]["name"] != "check" || !strings.HasSuffix(tail, "--- FAIL: TestThing\n") || len(tail) > logTailBytes {
+		if len(report) != 1 || report[0]["name"] != "check" || report[0]["on_base"] != "absent" ||
+			!strings.HasSuffix(tail, "noise\n--- FAIL: TestThing\n") || strings.Count(tail, "\n") != logTailLines {
 			t.Fatalf("report = %v", report)
 		}
 		e.finishBuild(id, githubtest.Head)
 	}
+	e.failCheck()
 	e.tick()
 	tk := e.ticket(id)
 	if tk.Status != store.TicketFailed || !strings.Contains(*tk.Error, "check (failure) https://github.com/x/runs/991") {
 		t.Fatalf("after %d fixes: %+v", MaxFixAttempts, tk)
+	}
+	if e.gh.Reruns[0] != 991 || len(e.gh.Reruns) != 1 {
+		t.Fatalf("a head is rerun once by the loop: %v", e.gh.Reruns)
+	}
+}
+
+func TestARefusedRerunFallsBackToAFix(t *testing.T) {
+	e := newEnv(t, "approve")
+	id := e.approvedTicket()
+	e.tick()
+	e.finishBuild(id, githubtest.Head)
+	e.failCheck()
+	e.gh.Mu.Lock()
+	e.gh.RerunStatus = 403
+	e.gh.Mu.Unlock()
+	e.tick()
+	if st := e.ticket(id).Status; st != store.TicketBuilding {
+		t.Fatalf("a refused rerun: %s", st)
+	}
+	rr, _ := e.s.TicketReruns(ctx, id)
+	if len(rr) != 1 || rr[0].Error == nil || !strings.Contains(*rr[0].Error, "Resource not accessible") || rr[0].RequestedBy != "orbit" {
+		t.Fatalf("reruns = %+v", rr)
+	}
+}
+
+func TestAFailureTheBaseSharesSpendsNoFix(t *testing.T) {
+	e := newEnv(t, "approve")
+	id := e.approvedTicket()
+	e.tick()
+	e.finishBuild(id, githubtest.Head)
+	e.gh.Mu.Lock()
+	e.gh.CommitChecks = map[string][]map[string]any{"base": {{"name": "check", "status": "completed", "conclusion": "failure"}}}
+	e.gh.Mu.Unlock()
+	e.failCheck()
+	e.tick() // rerun
+	e.failCheck()
+	e.tick()
+	tk := e.ticket(id)
+	if tk.Status != store.TicketFailed || !strings.Contains(*tk.Error, "also fails on base") {
+		t.Fatalf("%+v", tk)
+	}
+	if b, _ := e.s.LatestBuild(ctx, id); b.Purpose != "build" {
+		t.Fatalf("a fix was spent on a failure the base has: %s", b.Purpose)
+	}
+}
+
+func TestAPersonRerunsTheChecksOfAFailedTicket(t *testing.T) {
+	e := newEnv(t, "approve")
+	id := e.approvedTicket()
+	e.tick()
+	e.finishBuild(id, githubtest.Head)
+	if err := e.s.TransitionTicket(ctx, id, store.TicketFailed, "orbit", store.TicketUpdate{Error: "checks failed"}); err != nil {
+		t.Fatal(err)
+	}
+	e.failCheck()
+	if _, err := e.s.RequestRerun(ctx, id, "kanishk"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.s.RequestRerun(ctx, id, "kanishk"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("a second request while one waits = %v", err)
+	}
+	e.tick()
+	tk := e.ticket(id)
+	if tk.Status != store.TicketReview {
+		t.Fatalf("after the rerun: %+v", tk)
+	}
+	rr, _ := e.s.TicketReruns(ctx, id)
+	if len(rr) != 1 || rr[0].DoneAt == nil || rr[0].Error != nil || !strings.Contains(string(rr[0].Jobs), `"job_id": 991`) {
+		t.Fatalf("reruns = %+v", rr)
+	}
+	if e.gh.Reruns[0] != 991 {
+		t.Fatalf("GitHub reruns = %v", e.gh.Reruns)
+	}
+
+	// A request whose head moved on is answered with why, and the ticket
+	// stays where it is.
+	_ = e.s.TransitionTicket(ctx, id, store.TicketFailed, "orbit", store.TicketUpdate{Error: "checks failed"})
+	if _, err := e.s.RequestRerun(ctx, id, "kanishk"); err != nil {
+		t.Fatal(err)
+	}
+	e.gh.Mu.Lock()
+	e.gh.PR["head"].(map[string]any)["sha"] = "5555555555555555555555555555555555555555"
+	e.gh.Mu.Unlock()
+	e.tick()
+	rr, _ = e.s.TicketReruns(ctx, id)
+	if tk := e.ticket(id); tk.Status != store.TicketFailed || len(rr) != 2 || rr[1].Error == nil || !strings.Contains(*rr[1].Error, "head is 555555555555") {
+		t.Fatalf("ticket %s, reruns %+v", tk.Status, rr)
+	}
+}
+
+func TestReruningNeedsAPR(t *testing.T) {
+	e := newEnv(t, "approve")
+	id := e.approvedTicket()
+	if _, err := e.s.RequestRerun(ctx, id, "kanishk"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("an approved ticket = %v", err)
+	}
+	// failed -> review is a rerun's alone.
+	e.tick()
+	e.finishBuild(id, githubtest.Head)
+	_ = e.s.TransitionTicket(ctx, id, store.TicketFailed, "orbit", store.TicketUpdate{Error: "x"})
+	if err := e.s.TransitionTicket(ctx, id, store.TicketReview, "kanishk", store.TicketUpdate{}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("failed -> review by hand = %v", err)
+	}
+}
+
+func TestTidyLog(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"a\r\nb\n", "a\nb\n"},
+		{"2026-11-01T10:00:00.1234567Z \x1b[1;31mFAIL\x1b[0m x\n", "FAIL x\n"},
+		{"1\n2\n3\n4\n", "3\n4\n"},
+		{"no newline", "no newline"},
+	} {
+		if got := TidyLog(c.in, 2); got != c.want {
+			t.Errorf("TidyLog(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// A tail cut mid-line loses its partial first line.
+	long := "partial" + strings.Repeat("x", logTailBytes) + "\nwhole\n"
+	if got := TidyLog(long, 10); got != "whole\n" {
+		t.Errorf("cut tail = %q", got)
 	}
 }
 

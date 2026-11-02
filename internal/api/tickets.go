@@ -114,7 +114,26 @@ func (s *Server) getTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events, err := s.Store.TicketEvents(r.Context(), id)
-	respond(w, map[string]any{"ticket": t, "plans": orEmpty(plans), "events": orEmpty(events)}, err)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	reruns, err := s.Store.TicketReruns(r.Context(), id)
+	respond(w, map[string]any{"ticket": t, "plans": orEmpty(plans), "events": orEmpty(events), "reruns": orEmpty(reruns)}, err)
+}
+
+// rerunChecks records a person's request to rerun a PR's failed checks;
+// the ticket loop carries it out on its next tick, with the only token
+// that can.
+func (s *Server) rerunChecks(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		By string `json:"by"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	rr, err := s.Store.RequestRerun(r.Context(), r.PathValue("id"), decider(r, body.By))
+	respondStatus(w, http.StatusAccepted, map[string]any{"rerun": rr}, err)
 }
 
 func (s *Server) approvePlan(w http.ResponseWriter, r *http.Request) {

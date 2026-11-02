@@ -19,7 +19,7 @@ This document is the design. What exists today:
 | the `plan` output field and `ticket.json` input; a plan stored with its run's outcome | **Built**, unit-tested | `internal/engine/ticket.go`, `store.RecordOutcome` |
 | the `build:` section of `orbit.yaml` | **Built**, unit-tested | `internal/spec/build.go` |
 | the build runner: clone, sandbox, the CLI under orbit's permission handler, readback, diff policy, commit, push, PR; decisions and sandboxes recorded per attempt | **Built**; tested against a fake sandboxd and a fake GitHub, with a real git remote; the permission protocol **seen** against the real CLI 2.1.316 (`TestRealCLIPermissionProtocol`); the whole run against a real sandboxd and docker in CI (`TestIntegrationBuild`) | `internal/build`, `internal/engine/build.go`, `internal/store/builds.go`, `migrations/00007_builds.sql` |
-| the ticket loop: build enqueue, PR and checks polling, proposing the merge, fix attempts with the failure report, done on deploy, reconciliation, closing an abandoned ticket's PR, the self-hosting rules | **Built**, tested against a fake GitHub and real Postgres | `internal/tickets` |
+| the ticket loop: build enqueue, PR and checks polling, proposing the merge, reruns of failed jobs (its own and a person's), fix attempts with the failure report, done on deploy, reconciliation, closing an abandoned ticket's PR, the self-hosting rules | **Built**, tested against a fake GitHub and real Postgres | `internal/tickets` |
 | review comments; `skipped` as a run status for gates | not built | specified below |
 
 Nothing has run against the real GitHub API yet; the fake
@@ -114,6 +114,7 @@ request:
    +------ open (plan revised)   failed  (fix) failed  failed       |
    +------------------------------ failed (person reopens to discuss)
   approved <- failed (person retries the build with the same plan)
+  review <- failed (person reruns the PR's failed checks)
   review, failed -> merged (reconciliation: GitHub says the PR merged)
   any state before merged -> abandoned
 ```
@@ -128,7 +129,7 @@ request:
 | `merging` | a `github:merge` action exists | the action executing (`merged`), failing (`failed`), or being rejected (`failed`) |
 | `merged` | the PR is merged; for orbit itself, the new revision is not yet running | deployment confirmed (`done`) |
 | `done`, `abandoned` | terminal | nothing |
-| `failed` | a build, its checks or its merge failed; `error` says which | a person retrying (`approved`) or reopening (`open`), or abandoning |
+| `failed` | a build, its checks or its merge failed; `error` says which | a person retrying (`approved`), reopening (`open`) or rerunning the PR's failed checks (`review`), or abandoning |
 
 Every transition is a guarded UPDATE in `internal/store` (`WHERE status =
 ANY(<allowed from>)`) and inserts its `ticket_events` row in the same
@@ -188,16 +189,15 @@ reopen to discuss (`failed -> open`), or abandon from any state before
 `merged`. Abandoning a ticket with an open PR closes the PR (orbit, with the
 build token) and keeps the branch.
 
-**Fixing failed checks.** When a required check fails, code collects what
-failed: each failing check's name, conclusion and URL, and the last 16 KB
-of its log (GitHub Actions job logs, read with the `checks: read`,
-`actions: read` token; the log's storage redirect is followed by hand,
-with no credential), at most five checks. A fix run (`ticket_builds.purpose
-= fix`, `review -> building`) gets exactly that, as data, with the approved
-plan, starts from the PR's head and commits on top of it; its prompt says
-"make these checks pass without changing the plan". After
-`tickets.MaxFixAttempts` (2) fixes on one PR the ticket fails with the
-checks' names and URLs, for a person.
+**Fixing failed checks.** When a required check fails, code acts before any model does (`internal/tickets/checks.go`):
+
+1. **Rerun once.** The head's failed Actions jobs are rerun (`POST /actions/jobs/{id}/rerun`, with a token of `actions: write` alone), once per head commit (`tickets.MaxReruns`), so a flaky test or a lost runner costs a rerun, not a build. A refused rerun (the App lacks the permission) is recorded with its error and the loop goes on to a fix.
+2. **Compare with the base.** Each failing check is looked up on the commit the build started from: `on_base` is `failed`, `passed`, `pending` or `absent`. When every failing check fails there too, the change did not cause it, and the ticket fails with that, without a fix.
+3. **Report.** Each failing check's name, conclusion, URL and `on_base`, and the end of its log (GitHub Actions job logs, read with the `checks: read`, `actions: read` token; the log's storage redirect is followed by hand, with no credential): the last 16 KB, cut to whole lines, at most 150, with terminal escapes and Actions' timestamps removed (`tickets.TidyLog`), at most five checks.
+
+A fix run (`ticket_builds.purpose = fix`, `review -> building`) gets exactly that, as data, with the approved plan, starts from the PR's head and commits on top of it. Its prompt (`build.fixInstructions`) has it decide, from the logs and the code, which failures this change caused, fix only those with the smallest change, and report the rest in its notes. After `tickets.MaxFixAttempts` (2) fixes on one PR the ticket fails with the checks' names and URLs, for a person.
+
+**Rerunning checks by hand.** `POST /tickets/{id}/checks/rerun` records a request (`ticket_check_reruns`, one waiting per ticket) on a PR in `review` or `failed`; the loop carries it out on its next tick: it reruns the failed Actions jobs at the head the request named and moves a failed ticket back to `review` in the same transaction as the request's outcome (`store.FinishRerun`, the only way along `failed -> review`). A PR that closed or whose head moved answers the request with why, and the ticket stays.
 
 **Review comments.** A person can review the PR's diff in orbit: line
 comments `{path, start_line, end_line, body}` are stored as
@@ -232,10 +232,11 @@ reconciles at a time, stopped by a drain) holds no state between ticks:
 | `building` | the build run failed or was cancelled without moving it (the reaper ran out of attempts) | `failed` with the run's error |
 | `review` | PR merged / closed / head moved off what orbit built | `merged` / `failed` / `failed` |
 | `review` | checks green at the head orbit built | proposes `github:merge` (`merging`); waits while another ticket of the repository merges |
-| `review` | a check failed | a fix (`building`), or `failed` after `MaxFixAttempts` |
+| `review` | a check failed | a rerun (once per head), then a fix (`building`), or `failed` after `MaxFixAttempts` or when the base fails it too |
 | `merging` | the action executed | `merged` with its merge commit |
 | `merging` | the action failed, was rejected or orphaned | `merged` if the PR merged anyway, else `failed` with why |
 | `failed` (reached merging) | the PR merged | `merged` |
+| `review`, `failed` | a person's rerun request waits | reruns the failed jobs; `failed` -> `review` |
 | `merged` | another repository / orbit runs the merge commit or a descendant | `done` |
 | `abandoned` with an open PR | | closes the PR, keeps the branch |
 
@@ -255,11 +256,12 @@ same id for a different request is a 409.
 |---|---|---|---|
 | `POST` | `/tickets` | `{"kind": "request", "title": "...", "body": "...", "agent": "orbit", "repo": "kensac/orbit", "wake": true, "client_request_id": "..."}` | `201 {"ticket_id", "conversation_id", "message_id", "run_id"}` |
 | `GET` | `/tickets?status=&agent=&before=&limit=` | | `{"tickets": [...]}`, newest first |
-| `GET` | `/tickets/{id}` | | `{"ticket", "plans", "events"}` |
+| `GET` | `/tickets/{id}` | | `{"ticket", "plans", "events", "reruns"}` |
 | `POST` | `/tickets/{id}/plans/{version}/approve` | `{"client_request_id"}` | `{"ok": true}`; 409 unless it is the newest plan of a `planned` ticket |
 | `POST` | `/tickets/{id}/abandon` | `{"reason"}` | `{"ok": true}`; 409 once merged or terminal |
 | `POST` | `/tickets/{id}/retry` | | `{"ok": true}`; `failed -> approved` |
 | `POST` | `/tickets/{id}/reopen` | | `{"ok": true}`; `failed -> open` |
+| `POST` | `/tickets/{id}/checks/rerun` | | `202 {"rerun": {...}}`; the loop reruns the PR's failed checks; 409 without a PR in `review` or `failed`, or while one waits |
 
 A ticket's thread and its messages are its conversation's:
 `GET /conversations/{conversation_id}/thread` and
@@ -309,6 +311,7 @@ The permission sets are named in code, one per use:
 | build delivery (push `orbit/*`, open the PR, close it on abandon) | `contents: write`, `pull_requests: write` |
 | merge (read the PR and its checks, update the body, merge) | `contents: write`, `pull_requests: write`, `checks: read`, `statuses: read` |
 | failure report (read failing checks and their job logs) | `checks: read`, `actions: read` |
+| rerun (run failed Actions jobs again) | `actions: write` |
 
 `metadata: read` is implicit in every token. No set includes `workflows`, so
 a pushed change to `.github/workflows/` is refused by GitHub itself: a build
@@ -720,15 +723,7 @@ An agent enables merges with `actions: {github:merge: approve}`.
 
 ## Deploying it
 
-**The App** is `orbit-kensac` (App ID `5571920`; `orbit` was taken), owned
-by `kensac` and installed on all of its repositories. Webhook inactive
-(orbit polls). Repository permissions, exactly: Contents read and write,
-Pull requests read and write, Checks read, Commit statuses read, Actions
-read (job logs of failing checks), Metadata read. No Workflows, no
-organization or account permissions. Events: none until event triggers
-exist; then Check run, Check suite, Pull request and Status. Every token
-orbit mints is still limited to one repository and one permission set.
-Commits orbit makes are authored by `orbit-kensac[bot]`.
+**The App** is `orbit-kensac` (App ID `5571920`; `orbit` was taken), owned by `kensac` and installed on all of its repositories. Webhook inactive (orbit polls). Repository permissions, exactly: Contents read and write, Pull requests read and write, Checks read, Commit statuses read, Actions read (job logs of failing checks), Metadata read. Rerunning failed jobs needs Actions read and write, which the owner grants on the App's settings page; until then every rerun is refused, recorded with GitHub's answer, and the loop goes straight to a fix. No Workflows, no organization or account permissions. Events: none until event triggers exist; then Check run, Check suite, Pull request and Status. Every token orbit mints is still limited to one repository and one permission set. Commits orbit makes are authored by `orbit-kensac[bot]`.
 
 **The key** is in Infisical as `HETZNER_ORBIT_GITHUB_APP_PRIVATE_KEY`:
 base64 of the PEM GitHub issued, on one line, so it renders into
