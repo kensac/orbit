@@ -242,9 +242,19 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	inputsDir := "inputs"
 	keepScratch := func() bool { return ctx.Err() != nil }
 	withSession := a.Session != nil && a.Session.Resume && claudeCode
-	if withSession {
+	chat := a.Chat && claudeCode
+	if withSession || chat {
 		base := filepath.Join(e.DataDir, "agents", a.Name)
 		workdir, home = filepath.Join(base, "work"), filepath.Join(base, "home")
+		if chat {
+			// A chat's workspace is its conversation's, kept between
+			// messages and stored after every run.
+			workdir, home = e.chatDirs(c.ConversationID)
+			if err := e.restoreWorkspace(ctx, c.ConversationID, workdir); err != nil {
+				return nil, nil, err
+			}
+			defer e.snapshotWorkspace(ctx, c, workdir)
+		}
 		inputsDir = filepath.Join("inputs", attemptName)
 		// Earlier runs' inputs are in their artifacts; a crashed run's may
 		// still be here.
@@ -454,7 +464,12 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	var hr *runner.Harness
 	if e.Harness != "" && r.Kind() == "claude-code" {
-		hr = &runner.Harness{Bin: e.Harness, Figures: figures}
+		hr = &runner.Harness{Bin: e.Harness, Figures: figures && !chat}
+	}
+	if chat {
+		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
+			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
+			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel})
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr != nil)
 	if tk != nil {

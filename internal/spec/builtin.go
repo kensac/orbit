@@ -48,6 +48,16 @@ func Builtins(d Deployment) []*Agent {
 	if runner == "" {
 		return nil
 	}
+	sandbox := d.Build != nil && d.Build.Sandboxd != ""
+	// Claude Code's own tools. Writing and running commands only in a
+	// sandbox: on orbit's host they would reach orbit's own files.
+	tools := []string{"WebSearch", "WebFetch", "Task", "TodoWrite"}
+	var needs []string
+	if sandbox {
+		tools = append([]string{"Read", "Edit", "Write", "Bash", "Glob", "Grep"}, tools...)
+		// Only hosts that reach sandboxd claim its runs.
+		needs = []string{"sandbox"}
+	}
 	sess := &SessionSpec{Resume: true, Idle: Duration(builtinIdle), Live: Duration(builtinLive)}
 	if d.Runners[runner].MaxBudgetUSD > 0 {
 		// A live process's budget would cover every run fed into it.
@@ -58,7 +68,10 @@ func Builtins(d Deployment) []*Agent {
 		Description:     "A Claude Code session you can reach from anywhere.",
 		Charter:         builtinCharter,
 		Runner:          runner,
-		Tools:           []string{"WebSearch", "WebFetch"},
+		Tools:           tools,
+		Chat:            true,
+		Sandbox:         sandbox,
+		Needs:           needs,
 		MessagesTrigger: true,
 		Session:         sess,
 		// Replies stay in orbit; failures and approvals still notify.

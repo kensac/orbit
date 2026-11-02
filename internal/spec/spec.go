@@ -177,6 +177,15 @@ type Agent struct {
 	// claims a run only when its ORBIT_CAPABILITIES cover every one; an
 	// agent with none runs anywhere (docs/ARCHITECTURE.md, Worker fleet).
 	Needs []string `yaml:"needs,omitempty" json:"needs,omitempty"`
+	// Chat makes the agent a conversation, as a Claude Code session is
+	// (claude-code only): its reply is the session's final message, not a
+	// report schema, and memory, questions and actions are orbit's tools it
+	// may call (docs/ARCHITECTURE.md, Chat agents).
+	Chat bool `yaml:"chat,omitempty" json:"chat,omitempty"`
+	// Sandbox runs a chat agent's CLI in a sandboxd container per
+	// conversation, over a workspace kept between messages, with every tool
+	// it names (Bash, Edit, Write ...) inside it. Needs build.sandboxd.
+	Sandbox bool `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
@@ -785,6 +794,17 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("needs: %q is listed twice", n)
 		}
 		seenNeed[n] = true
+	}
+	if a.Chat && c.Deployment.Runners[a.Runner].Kind != "claude-code" {
+		at("chat: needs a claude-code runner (runner %q is %q)", a.Runner, c.Deployment.Runners[a.Runner].Kind)
+	}
+	if a.Sandbox {
+		if !a.Chat {
+			at("sandbox: needs chat: true")
+		}
+		if c.Deployment.Build == nil || c.Deployment.Build.Sandboxd == "" {
+			at("sandbox: needs build.sandboxd in orbit.yaml")
+		}
 	}
 	if ss := a.Session; ss != nil {
 		rs := c.Deployment.Runners[a.Runner]

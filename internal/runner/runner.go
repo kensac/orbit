@@ -48,6 +48,9 @@ type Request struct {
 	// Harness, when set, gives a claude-code run orbit's tools (`orbit
 	// mcp`) and hooks (`orbit hook`). Other backends ignore it.
 	Harness *Harness
+	// Chat, when set, makes a claude-code run a chat run (chat.go): no
+	// OutputSchema, the reply its final message.
+	Chat *Chat
 }
 
 // Harness is orbit's own code inside the CLI's process tree.
@@ -113,6 +116,10 @@ type Result struct {
 	// SessionCostUSD is the backend's cumulative cost for the session, when
 	// the run had one; CostUSD is then this run's share of it.
 	SessionCostUSD *float64
+	// Reply is a chat run's answer: the turn's final message.
+	Reply string
+	// Interrupted is a chat turn a person stopped (Chat.Interrupt).
+	Interrupted bool
 }
 
 // Runner is a model backend.

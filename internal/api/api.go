@@ -394,8 +394,12 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {
-	err := s.Store.CancelRun(r.Context(), r.PathValue("id"))
-	respond(w, map[string]any{"cancelled": err == nil}, err)
+	st, err := s.Store.CancelRun(r.Context(), r.PathValue("id"), actor(r, ""))
+	code := http.StatusOK
+	if st == "cancelling" {
+		code = http.StatusAccepted
+	}
+	respondStatus(w, code, map[string]any{"cancelled": st == store.StatusCancelled, "status": st}, err)
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
