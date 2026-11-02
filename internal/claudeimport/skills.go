@@ -20,9 +20,20 @@ type Skill struct {
 }
 
 // skipNames are files and directories that are a tool's droppings, not part of a skill.
-var skipNames = map[string]bool{".DS_Store": true, "__pycache__": true, ".git": true, "node_modules": true, ".venv": true}
+var skipNames = map[string]bool{"__pycache__": true, ".git": true, "node_modules": true, ".venv": true}
 
-// ReadSkillsDir reads each directory directly under dir that holds a SKILL.md, as Claude Code's ~/.claude/skills and a project's .claude/skills are laid out. A directory without one (a plugin, a sync bucket) or a skill orbit cannot take (a name or size out of bounds, a symlink) is skipped with a warning naming it.
+// junkNames are what an operating system leaves beside a person's files: Finder's view settings and the folders macOS keeps on a volume, Windows' thumbnail cache and folder settings, and the folder a macOS zip holds resource forks in.
+var junkNames = map[string]bool{
+	".DS_Store": true, ".localized": true, ".AppleDouble": true, ".Spotlight-V100": true, ".Trashes": true,
+	".fseventsd": true, ".TemporaryItems": true, "__MACOSX": true, "Thumbs.db": true, "desktop.ini": true,
+}
+
+// Junk reports whether a file or directory name is an operating system's dropping rather than something a person wrote: one of junkNames, or an AppleDouble file ("._name", the resource fork and extended attributes macOS writes beside a file on a volume or into a tar it makes). An import skips these by name, whatever they contain.
+func Junk(name string) bool {
+	return junkNames[name] || strings.HasPrefix(name, "._")
+}
+
+// ReadSkillsDir reads each directory directly under dir that holds a SKILL.md, as Claude Code's ~/.claude/skills and a project's .claude/skills are laid out. A directory without one (a plugin, a sync bucket) or a skill orbit cannot take (a name or size out of bounds, a symlink) is skipped with a warning naming it; an operating system's droppings (Junk) are left out without one.
 func ReadSkillsDir(dir string) ([]Skill, []string, error) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -31,7 +42,7 @@ func ReadSkillsDir(dir string) ([]Skill, []string, error) {
 	var out []Skill
 	var warnings []string
 	for _, e := range ents {
-		if !e.IsDir() || skipNames[e.Name()] {
+		if !e.IsDir() || skipNames[e.Name()] || Junk(e.Name()) {
 			continue
 		}
 		k, err := ReadSkill(filepath.Join(dir, e.Name()))
@@ -45,7 +56,7 @@ func ReadSkillsDir(dir string) ([]Skill, []string, error) {
 	return out, warnings, nil
 }
 
-// ReadSkill reads one skill directory. Its name is SKILL.md's frontmatter name, or the directory's.
+// ReadSkill reads one skill directory, without tool and operating system droppings (skipNames, Junk). Its name is SKILL.md's frontmatter name, or the directory's.
 func ReadSkill(dir string) (Skill, error) {
 	b, err := os.ReadFile(filepath.Join(dir, "SKILL.md"))
 	if err != nil {
@@ -68,7 +79,7 @@ func ReadSkill(dir string) (Skill, error) {
 		if err != nil {
 			return err
 		}
-		if skipNames[d.Name()] {
+		if skipNames[d.Name()] || (p != dir && Junk(d.Name())) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}

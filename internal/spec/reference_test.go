@@ -19,6 +19,7 @@ var referenceTables = map[string]any{
 	"`defaults`":                        Defaults{},
 	"`channels.<name>`":                 Channel{},
 	"`endpoints.<name>`":                Endpoint{},
+	"`endpoints.<name>.params.<name>`":  EndpointParam{},
 	"`runners.<name>`":                  RunnerSpec{},
 	"`github`":                          GitHub{},
 	"`build`":                           Build{},

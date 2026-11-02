@@ -26,6 +26,7 @@ import (
 
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/build"
+	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
@@ -204,6 +205,9 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 			return e.failHeld(ctx, snap, a, c, start, err, res, h)
 		}
 		return e.fail(ctx, snap, a, c, start, err, res)
+	}
+	if st.remembered != "" && out != nil {
+		out.Report = strings.TrimRight(out.Report, "\n") + "\n\n" + st.remembered
 	}
 	if st.keeps && res != nil {
 		// Stored before the run is recorded as succeeded, so the
@@ -419,6 +423,24 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			return nil, nil, err
 		}
 	}
+	// A person's /remember is code's to do (remember.go): written now, confirmed in the reply. A run their message woke that has nothing else to answer ends here.
+	if task == nil && len(rc.Messages) > 0 {
+		rm, err := e.remember(ctx, a, c, rc.Messages)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(rm.lines) > 0 {
+			report := rememberReport(rm.lines)
+			if len(rm.rest) == 0 && Attended(c.Trigger) {
+				return &Output{Summary: chatSummary(report), Report: report}, nil, nil
+			}
+			st.remembered = report
+			rc.Messages = rm.rest
+			if len(rc.Messages) > 0 {
+				rc.Messages[0].Body = "(orbit has saved to memory what you asked with /remember; your reply is followed by:\n" + report + ")\n\n" + rc.Messages[0].Body
+			}
+		}
+	}
 
 	figures := a.Verifies("figures")
 	events := e.events(ctx, c, log, figures)
@@ -434,7 +456,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		emit("orbit.recovery", map[string]any{"recovers_attempt": recFrom(rec), "skipped_because": skipped})
 	}
 	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env,
-		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted()}
+		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted(),
+		GitHub: func(ctx context.Context, repo string, perms github.Permissions) (*github.Token, error) {
+			return e.readToken(ctx, snap.Config.Deployment, repo, perms)
+		}}
 	if c.Trigger == store.TriggerWebhook {
 		d, err := e.Store.WebhookForRun(ctx, c.ID)
 		if err != nil {
@@ -604,13 +629,13 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	var known string
 	if rec == nil {
-		if known, inputs, err = e.knownInput(ctx, c, knownEntries, workdir, inputsDir, inputs); err != nil {
+		if known, inputs, err = e.knownInput(ctx, e.Searchable(a), c, knownEntries, workdir, inputsDir, inputs); err != nil {
 			return nil, nil, err
 		}
 	}
 	var hr *runner.Harness
 	if e.Harness != "" && r.Kind() == "claude-code" {
-		hr = &runner.Harness{Bin: e.Harness, Figures: figures && !chat, Search: e.searchSocket(a.Name), Repos: e.repoSocket(a), AgentHooks: agentHooks(a)}
+		hr = &runner.Harness{Bin: e.Harness, Figures: figures && !chat, Search: e.searchSocket(a.Name), Repos: e.repoSocket(a), Prometheus: e.promSocket(a), AgentHooks: agentHooks(a)}
 	} else if len(a.Hooks) > 0 {
 		emit("orbit.hooks_skipped", map[string]any{"reason": "the agent's hooks need claude-code with orbit's harness binary"})
 	}

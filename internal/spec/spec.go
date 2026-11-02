@@ -77,7 +77,7 @@ type Deployment struct {
 	// DeferLowPriority holds the scheduled runs of priority: low agents
 	// while a subscription window is nearly spent (internal/usage).
 	DeferLowPriority bool `yaml:"defer_low_priority,omitempty" json:"defer_low_priority,omitempty"`
-	// Credentials are the variables a source may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
+	// Credentials are the variables a source or an endpoint's headers may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
 	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
 	// Expires records when a credential orbit cannot inspect stops working (the Claude Code subscription token lasts a year), keyed by its variable, as YYYY-MM-DD (expires.go). It only feeds orbit_credential_expiry_timestamp_seconds, so an alert fires before the date.
 	Expires map[string]string `yaml:"expires,omitempty" json:"expires,omitempty"`
@@ -182,12 +182,20 @@ type Channel struct {
 }
 
 // Endpoint is a named HTTP target a `webhook` action may call. The agent
-// chooses only the endpoint name and the body; the URL and credentials stay
-// in configuration, so a model cannot point a write at anything new.
+// chooses only the endpoint name, the body and the values of the path's
+// placeholders, each checked against Params; the URL, method and credentials
+// stay in configuration, so a model cannot point a write at anything new.
 type Endpoint struct {
 	URL     string            `yaml:"url" json:"url"`
 	Method  string            `yaml:"method" json:"method"`
 	Headers map[string]string `yaml:"headers" json:"headers"`
+	// Description tells the model what the endpoint does.
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+	// Path is appended to URL; each {name} in it is filled from the action's path params, declared in Params (endpoint.go).
+	Path   string                   `yaml:"path,omitempty" json:"path,omitempty"`
+	Params map[string]EndpointParam `yaml:"params,omitempty" json:"params,omitempty"`
+	// BodySchema is a JSON Schema the action's body must satisfy; without one, any object.
+	BodySchema map[string]any `yaml:"body_schema,omitempty" json:"body_schema,omitempty"`
 }
 
 // RunnerSpec configures one model backend.
@@ -239,7 +247,8 @@ type Agent struct {
 	Verify []string `yaml:"verify,omitempty" json:"verify,omitempty"`
 	// Topics are the shared memory topics (finance, homelab) whose entries
 	// every run of this agent is shown, beside the profile's and its own.
-	// The API can attach more (docs/api.md, Memory entries).
+	// "*" (AllTopics) is every topic there is. The API can attach more
+	// (docs/api.md, Memory entries).
 	Topics []string `yaml:"topics,omitempty" json:"topics,omitempty"`
 	// Skills are skills from orbit's library (docs/api.md, Skills) this agent runs with; the API can attach more.
 	Skills []string `yaml:"skills,omitempty" json:"skills,omitempty"`
@@ -531,10 +540,19 @@ type Source struct {
 	Headers  map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 	Query    map[string]string `yaml:"query,omitempty" json:"query,omitempty"`
 	Paginate *Paginate         `yaml:"paginate,omitempty" json:"paginate,omitempty"`
-	// prometheus
+	// prometheus (PromQL) and loki (LogQL)
 	Expr string `yaml:"expr,omitempty" json:"expr,omitempty"`
 	// file
 	Path string `yaml:"path,omitempty" json:"path,omitempty"`
+	// github: Repo is one of github.read_repositories, Resource one of GitHubResources; Ref is the commit checks reads, State the issues or pulls listed.
+	Repo     string `yaml:"repo,omitempty" json:"repo,omitempty"`
+	Resource string `yaml:"resource,omitempty" json:"resource,omitempty"`
+	Ref      string `yaml:"ref,omitempty" json:"ref,omitempty"`
+	State    string `yaml:"state,omitempty" json:"state,omitempty"`
+	// Limit bounds a github list's items or a loki query's lines.
+	Limit int `yaml:"limit,omitempty" json:"limit,omitempty"`
+	// Since is how far back a loki query reads, ending now.
+	Since Duration `yaml:"since,omitempty" json:"since,omitempty"`
 	// MaxBytes bounds one source's fetched size.
 	MaxBytes int64 `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
 }
@@ -722,7 +740,7 @@ var (
 	// Kinds every adapter registry must cover. Kept here so validation does
 	// not import the adapters (which import spec).
 	channelKinds = []string{"ntfy", "smtp", "webhook", "log"}
-	sourceKinds  = []string{"http", "prometheus", "file", "webhook"}
+	sourceKinds  = []string{"http", "prometheus", "loki", "github", "file", "webhook"}
 	runnerKinds  = []string{"claude-code", "codex", "anthropic"}
 	notifyWhen   = []string{"", "always", "agent", "never"}
 	verifyChecks = []string{"figures"}
@@ -926,16 +944,8 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
-	for name, ep := range d.Endpoints {
-		if !nameRE.MatchString(name) {
-			errs = append(errs, fmt.Errorf("endpoint %q: invalid name", name))
-		}
-		if ep.URL == "" {
-			errs = append(errs, fmt.Errorf("endpoint %q: url is required", name))
-		}
-		if ep.Method != "" && !slices.Contains([]string{"POST", "PUT", "PATCH"}, ep.Method) {
-			errs = append(errs, fmt.Errorf("endpoint %q: method must be POST, PUT or PATCH", name))
-		}
+	for _, name := range slices.Sorted(maps.Keys(d.Endpoints)) {
+		errs = append(errs, c.validateEndpoint(name, d.Endpoints[name])...)
 	}
 	for name, r := range d.Runners {
 		if !nameRE.MatchString(name) {
@@ -1059,6 +1069,18 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if s.URL == "" || s.Expr == "" {
 				at("source %q: prometheus needs url and expr", s.Name)
 			}
+		case "loki":
+			if s.URL == "" || s.Expr == "" {
+				at("source %q: loki needs url and expr", s.Name)
+			}
+			if s.Since < 0 || time.Duration(s.Since) > MaxLokiSince {
+				at("source %q: since is at most %s", s.Name, MaxLokiSince)
+			}
+			if s.Limit < 0 || s.Limit > MaxLokiLimit {
+				at("source %q: limit is at most %d lines", s.Name, MaxLokiLimit)
+			}
+		case "github":
+			errs = append(errs, c.validateGitHubSource(a, s)...)
 		case "file":
 			if s.Path == "" {
 				at("source %q: path is required", s.Name)
@@ -1070,6 +1092,15 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if !a.hasWebhook() {
 				at("source %q: a webhook source needs a webhook trigger", s.Name)
 			}
+		}
+		if s.Kind != "github" && (s.Repo != "" || s.Resource != "" || s.Ref != "" || s.State != "") {
+			at("source %q: repo, resource, ref and state are for a github source", s.Name)
+		}
+		if s.Kind != "github" && s.Kind != "loki" && s.Limit != 0 {
+			at("source %q: limit is for a github or loki source", s.Name)
+		}
+		if s.Kind != "loki" && s.Since != 0 {
+			at("source %q: since is for a loki source", s.Name)
 		}
 	}
 	for _, t := range a.Transforms {
@@ -1232,6 +1263,12 @@ func (c *Config) validateAgent(a *Agent) []error {
 	}
 	seenTopic := map[string]bool{}
 	for _, t := range a.Topics {
+		if t == AllTopics {
+			if len(a.Topics) > 1 {
+				at("topics: %q is every topic, so it stands alone", AllTopics)
+			}
+			continue
+		}
 		if !nameRE.MatchString(t) {
 			at("topics: %q must match %s", t, nameRE)
 		}

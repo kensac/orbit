@@ -339,7 +339,7 @@ A message carries uploads with `attachments` (below): ids of uploads of the same
 
 ## Chat agents
 
-An agent with `chat: true` (the built-in `orbit` is one) is a Claude Code session rather than a report writer: its run's `report` is the session's final message, as written, and `summary` that reply's first line. It changes its memory, asks questions and proposes actions with orbit's tools during the turn instead of in a schema, so its runs carry `questions` and `actions` as any run does. Each conversation has its own workspace (`GET /conversations/{id}/files`): files the agent writes, and the person's uploads, stay between messages. **Instructions.** In a run that answers its person's message, a chat agent's actions are that person's instructions, as typing into Claude Code is: an action whose rule is `auto`, or `approve` (the person asked for it), executes during the turn and the agent reads its result; the row records `instructed_by` and, for `approve`, `decided_by` as that person. A run nobody's message woke (a schedule, a manual run, a continuation) keeps its rules: `approve` waits. `deny` is never offered. On a worker, which holds no executor credentials, every action waits for control.
+An agent with `chat: true` (the built-in `orbit` is one) is a Claude Code session rather than a report writer: its run's `report` is the session's final message, as written, and `summary` that reply's first line. It changes its memory, asks questions and proposes actions with orbit's tools during the turn instead of in a schema, so its runs carry `questions` and `actions` as any run does; it searches its earlier work and the memory entries it reads with the same tool (`mcp__orbit__search`) other runs have. Each conversation has its own workspace (`GET /conversations/{id}/files`): files the agent writes, and the person's uploads, stay between messages. **Instructions.** In a run that answers its person's message, a chat agent's actions are that person's instructions, as typing into Claude Code is: an action whose rule is `auto`, or `approve` (the person asked for it), executes during the turn and the agent reads its result; the row records `instructed_by` and, for `approve`, `decided_by` as that person. A run nobody's message woke (a schedule, a manual run, a continuation) keeps its rules: `approve` waits. `deny` is never offered. On a worker, which holds no executor credentials, every action waits for control.
 
 **GitHub** (the built-in has `github:clone` auto, `github:pr` and `github:merge` approve): `github:clone {repo, dir}` puts a repository's default branch into the workspace; `github:pr {repo, dir, branch, title, body, push_only}` takes the working tree at `dir` (never its `.git`), commits it as the App's bot user on top of the default branch, holds it to the build's diff policy (no `.github/`, no credential in an added line), pushes `orbit/chat/<branch>` and opens or updates its PR; `github:merge` merges it once every required check passed. Tokens stay in orbit; the repositories are `github.repositories`.
 
@@ -954,7 +954,7 @@ first, `{"versions": [{"id": 12, "run_id": "uuid", "content": "<markdown>",
 Beside each agent's memory document, orbit keeps **memory entries**: one durable fact each (a correction the person gave, a preference, a fact about their world, where something is), typed, versioned, and shared at one of three scopes:
 
 - `profile`: the person; every agent reads it.
-- `topic`: a domain such as `finance` or `homelab`; every agent that reads the topic (its spec's `topics`, or attached below).
+- `topic`: a domain such as `finance` or `homelab`; every agent that reads the topic (its spec's `topics`, or attached below). An agent whose `topics` is `["*"]` reads every topic; the built-in `orbit` agent does.
 - `agent`: one agent's own.
 
 Every run of an agent is shown an index of the active entries it reads (`GET /agents/{name}/context`, below) and the entries in full as an input file (docs/ARCHITECTURE.md, Memory entries).
@@ -988,11 +988,21 @@ Nothing is deleted. Every change is a new version, kept:
 - `POST /memory/entries/{id}/restore` `{"restore": <version>, "version"?, "note"?}`: the next version, a copy of an earlier one's content and status (and its `superseded_by` while that entry is still active). `restore` must be an earlier version (400); `version` is as for `PATCH`. `note` defaults to `restored version <n>`.
 - `POST /memory/entries/{id}/retire` `{"version"?, "superseded_by"?, "note"?}`: the next version, retired. `superseded_by` must be another, active entry (400 otherwise). This is how an entry is deleted.
 - `POST /memory/import` `{"dry_run": bool, "entries": [<entry as for create, key optional>], "note"?}`: matches each by scope and key. A new key creates an entry, a known one gets a new version when its content differs or it was retired, an identical one is left alone, so an import can be repeated. `{"dry_run", "results": [{"scope", "topic"|"agent", "key", "outcome": "created"|"updated"|"unchanged", "id", "version"}]}`, in request order. All of it is one transaction: one invalid entry fails the whole import (400, naming its index). `dry_run` reports and writes nothing (`id` is absent for an entry it would create). At most 500 entries. `orbit import claude-memory` calls this (deployment.md).
-- `GET /memory/topics`: `{"topics": [{"name", "entries", "agents"}]}` by name: every topic that holds entries or is read by an agent. `entries` counts its active entries; `agents` are the agents that read it, from their spec or attached.
+- `GET /memory/topics`: `{"topics": [{"name", "entries", "agents"}]}` by name: every topic that holds entries or is read by an agent. `entries` counts its active entries; `agents` are the agents that read it, from their spec (an agent reading every topic is on each) or attached.
 
 ### Entries agents write
 
 An agent writes entries itself, without approval: every run's output carries `entries` (docs/ARCHITECTURE.md, Memory entries), applied with the run's outcome as versions with `source: "learned"`, `source_run_id` the run and `source_conversation_id` its conversation. A person reverts one with `restore` or `retire` above. A write the store refuses (a stale version, a key taken, an invalid field, a ref the run was not shown) is skipped and the rest apply. Each run's writes and what became of them are its `entries.json` artifact (`GET /runs/{id}/artifacts`): `[{"op", "ref", "title", "result": {"outcome": "written"|"unchanged"|"refused", "error", "id", "key", "version"}}]`, in output order.
+
+### Remembering from a conversation
+
+A message from the person that starts with `/remember` writes an entry at once, in the run that reads it, and that run's reply says what was saved: `/remember [--agent | --topic <name>] [--feedback | --user | --project | --reference] <text>`.
+
+- **Place:** the profile; `--agent` is the conversation's agent's own; `--topic <name>` (or `--topic=<name>`) a topic the agent reads.
+- **Type:** the flag's, else inferred: a link or "can be found" is `reference`, "I am", "I live", "my job" `user`, "we", "our", a deadline `project`, anything else `feedback`.
+- **Entry:** title the text's first sentence (at most 80 bytes), body the whole text, `source: "person"`, `author` the message's, `source_run_id` and `source_conversation_id` the run and its conversation, `note` `/remember in a conversation`.
+- **Reply:** `Saved to memory: [<type>] <title> (<ref>), for every agent.` (or `for <agent> only.`, `for the agents that read <topic>.`); `Already in memory: ...` when the same text is in that place (nothing written); `Not saved: <why>.` for an unknown flag, no text, or a topic the agent does not read. A run woken only by `/remember` messages succeeds with that reply as its report and no backend call; with other messages beside them, the agent answers those and the confirmation follows its reply.
+- Messages an agent wrote (a task's) are never commands. The learning pass leaves `/remember` messages out.
 
 ### Learning runs
 
@@ -1002,7 +1012,7 @@ After a conversation goes quiet, orbit runs a short learning pass over it (trigg
 
 ### What an agent reads
 
-- `GET /agents/{name}/context`: `{"agent", "topics": [{"name", "from": ["spec"|"api"]}], "entries": <count>, "index": "<markdown>"}`. `index` is exactly what a run's prompt carries (with `inputs/_memory.md` for the run's own inputs path), `""` when the agent reads no entries.
+- `GET /agents/{name}/context`: `{"agent", "topics": [{"name", "from": ["spec"|"api"]}], "entries": <count>, "index": "<markdown>"}`. For an agent reading every topic, `topics` is each topic there is, `from` `spec`. `index` is exactly what a run's prompt carries (with `inputs/_memory.md` for the run's own inputs path), `""` when the agent reads no entries; when it cannot list every entry within its 8 KB it keeps feedback first, then the most recently changed, and says how many it left out and how to find them.
 - `PUT /agents/{name}/topics/{topic}`: attach a topic, `{"attached": true, "created": bool}` (`created` false when it was attached already). `DELETE /agents/{name}/topics/{topic}`: detach, `{"detached": true}`, 404 when not attached through the API (a topic the spec names stays until the spec changes). The agent must be configured (404).
 
 ## MCP
@@ -1097,7 +1107,7 @@ Full-text search across everything orbit stores, ranked best first.
    {"kind": "report", "agent": "finance", "conversation_id": "uuid", "run_id": "uuid",
     "attempt": 1, "seq": null, "message_id": null, "memory_version_id": null,
     "entry_id": null, "entry_version": null, "scope": null, "owner": null, "title": null,
-    "author": null, "tool": null, "at": "...", "rank": 0.083,
+    "author": null, "tool": null, "external_session_id": null, "at": "...", "rank": 0.083,
     "snippet": "The electricity bill rose because of a rate change ...",
     "snippet_parts": [{"text": "The ", "match": false}, {"text": "electricity", "match": true},
                       {"text": " ", "match": false}, {"text": "bill", "match": true},
@@ -1106,13 +1116,37 @@ Full-text search across everything orbit stores, ranked best first.
               "conversation": "/api/v1/conversations/uuid/thread"}}]}
 ```
 
-- **`kind`** is what matched: `message` (a person's message to an agent; `author`, `message_id`), `question` (an agent's question; `message_id`, `run_id`), `report` (a run's summary and report), `error` (a failed run's error), `narration` (the prose a backend wrote while working, one transcript line; `attempt`, `seq` locate it in `GET /runs/{id}/events`), `tool_call` (one tool call's input as JSON, `tool` its name; tool results are not searched), `memory` (an agent's memory document; `memory_version_id`), `memory_entry` (a memory entry: `entry_id`, `entry_version`, `scope`, `owner`, `title`, and `agent` for an agent's own, `null` for a profile or topic entry). Of an agent's memory versions only the newest matching one is returned; a memory entry only as its current version, and never once retired. The `kind` parameter is a comma list of these.
+- **`kind`** is what matched: `message` (a person's message to an agent; `author`, `message_id`), `question` (an agent's question; `message_id`, `run_id`), `report` (a run's summary and report), `error` (a failed run's error), `narration` (the prose a backend wrote while working, one transcript line; `attempt`, `seq` locate it in `GET /runs/{id}/events`), `tool_call` (one tool call's input as JSON, `tool` its name; tool results are not searched), `memory` (an agent's memory document; `memory_version_id`), `memory_entry` (a memory entry: `entry_id`, `entry_version`, `scope`, `owner`, `title`, and `agent` for an agent's own, `null` for a profile or topic entry), `session` (one line of an imported session that carries prose: the person's prompt, the assistant's text, a summary; `external_session_id`, and `seq` its line number, as in `GET /sessions/{id}/lines`; `agent` is `null`, so an agent's own search never returns one). A line a resumed session repeats from its parent is one result, under the session it was imported with first. Of an agent's memory versions only the newest matching one is returned; a memory entry only as its current version, and never once retired. The `kind` parameter is a comma list of these.
 - **`q`** is web-search syntax: words (all must match, stemmed: `bills` finds `bill`), `"a quoted phrase"`, `or` between alternatives, `-word` to exclude. Required (`400` without one). A query of only stop words matches nothing.
 - **Ranking** is Postgres `ts_rank_cd` normalised by document length (`rank`, comparable only within one response), ties newest first. A memory entry's title weighs more than its body, and a tool's name more than its input.
 - **`snippet`** is up to two fragments of the matching text joined by ` ... `; `snippet_parts` is the same text split into runs, `match` true on matched words, so a client highlights without parsing markup (the text is never escaped or marked up).
 - **Filters:** `agent` (that agent's documents; a profile or topic entry belongs to none), `conversation_id`, `run_id` (a UUID, else `400`); `from` and `to` are a calendar day in the deployment's timezone (`to` includes its day) or an RFC 3339 time (`to` excluded), by the document's `at` (a message's or memory version's creation, a run's finish, a transcript line's time). `limit` defaults to 20, at most 100; `offset` pages, at most 1000. `total` counts every match within the filters, whatever the page.
-- **`links`** are where the result is read in full: the run (`run`, and `run_page` when `public_url` is set) and its conversation's thread. A memory version names its run's conversation when it has one.
+- **`links`** are where the result is read in full: the run (`run`, and `run_page` when `public_url` is set) and its conversation's thread, or for a session line the session (`session`). A memory version names its run's conversation when it has one.
 - Documents are derived by triggers as rows are written, and existing rows were indexed by the migration that added search, so a result is there as soon as its row is.
+
+## Imported sessions
+
+Sessions run outside orbit, a person's own Claude Code sessions on their laptop, are imported so search covers them (above) and orbit can learn from them. `orbit import claude-sessions` sends them (deployment.md). A session:
+
+```json
+{"id": "uuid", "source": "claude-code", "session_id": "<Claude Code's session id>",
+ "cwd": "/Users/p/work/widget", "branch": "main", "repo": "someone/widget",
+ "title": null, "first_prompt": "Why is the widget flaky?",
+ "generation": 1, "lines": 120, "offset": 482113, "prefix_sha256": "<hex>", "content_sha256": "<hex>",
+ "first_at": "...", "last_at": "...", "created_at": "...", "updated_at": "..."}
+```
+
+- `source` is `claude-code`; `session_id` is the source's id, unique per source. `cwd` and `branch` are the newest a line named; `repo` is the repository the client found `cwd` to be a checkout of (its origin remote, `owner/name` on GitHub). `title` is a title the session was given (a custom title, the CLI's summary line), `null` when none; `first_prompt` is the person's first typed message (not a tool result, a meta line or a command the CLI wrapped in tags).
+- `lines` counts the current generation's lines; `offset` is how many bytes of the file they came from and `prefix_sha256` the SHA-256 of those bytes, which is how an import knows what to send next. `content_sha256` chains the line digests in order (`sha256(previous || digest)` in hex, from the SHA-256 of nothing): two sessions with the same lines have the same hash. `first_at` and `last_at` are the earliest and newest line timestamps (`last_at` is the import time for a session whose lines have none).
+- A line is stored in a canonical form: a JSON object with its keys sorted and without `sessionId`, credentials replaced by `[REDACTED]` (the values of Claude Code's credential variables and of any secret-named assignment, Authorization and bearer credentials, passwords in URLs, provider-format tokens, private key blocks), and a line over 1 MiB cut to its skeleton: its placing fields (`type`, `uuid`, `parentUuid`, `timestamp`, `cwd`, ...), `orbitOmittedBytes`, and its message with each content block replaced by a note, a tool call keeping its id and name and a tool result its call's id. Each line's content is stored once, by the SHA-256 of that form, so a session resumed or forked from another (which starts with its parent's lines under a new id) adds only its own.
+- Nothing is deleted. A file whose start no longer matches what orbit holds is imported again as the session's next `generation`; the earlier generation's lines stay stored.
+
+Routes:
+
+- `POST /sessions/import` `{"dry_run"?, "source"?, "sessions": [{"session_id", "repo"?, "from_offset", "from_prefix_sha256", "rewrite"?, "to_offset", "to_prefix_sha256", "lines": [<line object>, ...]}]}`: each item is a stretch of one session's file, its complete lines from `from_offset` (where orbit's copy ends, `from_prefix_sha256` the hash of the bytes before it; `0` and `""` for a session orbit does not have) to `to_offset` (`to_prefix_sha256` the hash of the bytes before it). `rewrite: true` (with `from_offset` 0) replaces a session whose prefix changed with a new generation. Items apply in order in one transaction, so several stretches of one session may follow each other. `{"dry_run", "results": [{"session_id", "id", "outcome", "added", "new", "lines", "offset", "generation", "error"?}]}` in request order: `outcome` is `created`, `appended`, `rewritten`, `unchanged` (no lines, nothing moved) or `conflict` (the item does not continue orbit's copy: `error` says where orbit is, `lines`, `offset` and `generation` are orbit's, and nothing of it is written). `added` counts the lines added, `new` those whose content was not stored before. `dry_run` reports and writes nothing (`id` absent for a session it would create). `source` defaults to `claude-code`. At most 200 items and 20,000 lines; a body over 24 MiB is 400, as is a line that is not a JSON object (naming its item and line) or a `session_id` that is not a UUID.
+- `GET /sessions?source=&repo=&before=&limit=`: `{"sessions": [...], "has_more", "next_before"}`, newest `last_at` first, paged as conversations are (`limit` defaults to 100, at most 1000).
+- `GET /sessions/{id}`: `{"session": {...}}`; 404 for an unknown id.
+- `GET /sessions/{id}/lines?after=&limit=`: `{"lines": [{"n", "digest", "line": <the stored line>}]}`, the current generation's lines after line `after` (default 0; lines count from 1), at most `limit` (default 200, at most 1000).
 
 ## Webhooks
 
@@ -1153,6 +1187,19 @@ A Claude Code run of such an agent has six read-only tools, `mcp__orbit__<name>`
 | `pr_view` | `number` (required) | `{"pull_request": {...pr_list's fields, "body", "merged", "mergeable", "mergeable_state", "merge_commit_sha", "additions", "deletions", "changed_files", "commits"}, "checks": [{"name", "status", "conclusion", "url"}], "statuses": [{"context", "state", "url"}]}`, the checks and statuses of its head commit |
 
 A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main~3`, or a pull request's head as `refs/pull/<n>/head`.
+
+## Prometheus
+
+An agent with a `prometheus` source (docs/agents/configuration.md, Prometheus queries) also has `prometheus_query` (`mcp__orbit__prometheus_query` in a Claude Code run, an SDK tool of that name in a chat), run by orbit against that source's URL with its credentials; the model writes only the PromQL and the times. An unknown argument, a source that is not one of the agent's prometheus sources, or a query outside the bounds is a tool error the model reads, and nothing is sent.
+
+| argument | meaning |
+|---|---|
+| `query` | PromQL (required, at most 4000 bytes), sent as written: never rendered, so a `${VAR}` or `{{today}}` in it reaches Prometheus as text |
+| `source` | the prometheus source's name; may be left out when the agent has one |
+| `time` | an instant query's time: RFC 3339, `now`, or `now-<duration>` (`s`, `m`, `h`, `d`); default now |
+| `start`, `end`, `step` | a range query (`start` makes it one; `time` is then refused): `end` defaults to now, `step` (a duration) to the range over 250 points; at most 31 days and 1000 points per series |
+
+The answer is Prometheus's `data`, `{"resultType", "result"}`, with `warnings` when Prometheus sent any. Every query asks Prometheus for at most 500 series (`limit`, which it reports as a warning when it cuts) and a 20 s evaluation timeout; an answer over 256 KiB is an error asking for a narrower query, never a cut document. In a report run its answers are in the figures ledger, so a number read from Prometheus backs a figure as a `query` result does.
 
 ## Usage
 

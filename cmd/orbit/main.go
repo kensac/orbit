@@ -13,6 +13,8 @@
 //	orbit drain              tell the local server to drain (a deploy replacing it)
 //	orbit import claude-memory <dir> --scope <s> [--apply]   seed memory entries through the API
 //	orbit import skills <dir> [--attach <agent>] [--apply]   seed the skills library through the API
+//	orbit import claude-sessions <dir> [--apply]   import Claude Code session transcripts through the API
+//	orbit sync claude [--memory-dir <dir>] [--apply <digest>]   write orbit's skills and memory entries into Claude Code's files
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
 //	orbit hook --root <dir> --state <dir> [--figures] [--status <socket>]   orbit's hook, run by Claude Code
 //	orbit agent-hook --root <dir> --def <hook>   one of an agent's own hooks, run by Claude Code
@@ -98,6 +100,8 @@ func main() {
 		err = drainCmd()
 	case "import":
 		err = importCmd(ctx, os.Args[2:])
+	case "sync":
+		err = syncCmd(ctx, os.Args[2:], os.Stdout)
 	case "mcp", "hook":
 		err = harnessCmd(os.Args[1], os.Args[2:])
 	case "agent-hook":
@@ -134,6 +138,7 @@ func harnessCmd(name string, args []string) error {
 	statusSock := fs.String("status", "", "the run's status socket the hook posts every event to")
 	search := fs.String("search", "", "the engine's search socket for this agent (mcp)")
 	repoSock := fs.String("repos", "", "the engine's repository tools socket for this agent (mcp)")
+	promSock := fs.String("prometheus", "", "the engine's prometheus tool socket for this agent (mcp)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -141,7 +146,7 @@ func harnessCmd(name string, args []string) error {
 		return errors.New(name + ": --root is required")
 	}
 	if name == "mcp" {
-		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, *repoSock, revision)
+		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, *repoSock, *promSock, revision)
 	}
 	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state, Status: *statusSock})
 }
@@ -163,7 +168,7 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | restore-check [--expect file] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | restore-check [--expect file] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills|claude-sessions <dir> | sync claude | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
 	os.Exit(2)
 }
 
