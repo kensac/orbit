@@ -27,7 +27,6 @@ import (
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/harness"
-	"github.com/kensac/orbit/internal/journal"
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/notify"
@@ -382,25 +381,14 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 	}
 
-	seq := 0
 	figures := a.Verifies("figures")
-	var transcript [][]byte  // the backend's message lines, for the figure check
-	var said []journal.Event // the lines that can hold the agent's prose, for fullReport
+	events := e.events(ctx, c, log, figures)
 	emit := func(kind string, payload any) {
 		b, ok := payload.([]byte)
 		if !ok {
 			b, _ = json.Marshal(payload)
 		}
-		if figures && (kind == "assistant" || kind == "user") {
-			transcript = append(transcript, b)
-		}
-		seq++
-		if kind == "assistant" || kind == "response" || strings.HasPrefix(kind, "item.") {
-			said = append(said, journal.Event{Attempt: c.Attempt, Seq: seq, Kind: kind, Payload: b})
-		}
-		if err := e.Store.AppendEvent(context.WithoutCancel(ctx), c.ID, c.Attempt, seq, kind, b); err != nil {
-			log.Warn("append event", "err", err)
-		}
+		events.emit(kind, b)
 	}
 
 	if c.Attempt > 1 && claudeCode {
@@ -625,7 +613,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	out.known, out.topics, out.skills = knownEntries, topics, skills
 	out.task = task
-	prose := fullReport(out, journal.FinalProse(said))
+	prose := fullReport(out, events.prose())
 	if figures {
 		// The hook already sent the output back for these, up to
 		// MaxFigureDenials times (claude-code); this is the same check on
@@ -635,7 +623,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		for _, in := range inputs {
 			backed.AddJSON(in.Content)
 		}
-		for _, t := range harness.OrbitToolResults(transcript) {
+		for _, t := range harness.OrbitToolResults(events.messages()) {
 			backed.AddText(t)
 		}
 		if missing := backed.Unbacked(harness.ReportText(res.Output) + "\n" + prose); len(missing) > 0 {
