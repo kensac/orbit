@@ -119,13 +119,14 @@ A worker rebuilds agents from the database without their origin and does not rep
   request arrived on is a property of the socket; a header saying a request
   is internal could be sent by anyone, so none is trusted. Never give the
   internal port a traefik router or a public port mapping.
+- **Every key orbit signs or seals with is derived from the operator token** by `secret.Key.Derive(purpose)` (`internal/secret`): HMAC-SHA256 of a purpose label under the token, one label per use, so no two uses share a key and rotating the token voids all of them together. The purposes are `secret.Approval(id)` (`action:<id>`, whose output is the approval link's signature), `secret.Mail(id)` (`mail:<id>`, whose first 12 hex digits sign a mail token), `secret.UploadURL` (`orbit upload url`, the key of signed upload URLs), `secret.WorkspaceUploadURL` (`orbit workspace upload url`, the key of signed workspace upload URLs) and `secret.MCPOAuth` (`orbit mcp oauth`, the OAuth proxy's sealing key). Each is byte-identical to what orbit signed before the package existed, and golden tests (`internal/secret`, `internal/mail`, `internal/engine`, `internal/api` `derive_test.go`) hold them there: changing a label voids every approval link, reply address, upload URL and in-flight OAuth sign-in already sent. A new use gets a new label; an existing label never changes.
 - `POST /api/v1/drain` takes an instance out of service; it exists only on
   the internal listener, so nobody on the public one can, whatever their
   token.
 - Only asymmetric signatures are accepted. An `HS*` token would be verified
   with the client secret, which every client holds, so any client could mint
   any person.
-- `/ui/actions/{id}` accepts `sig`, an HMAC of the action id under the
+- `/ui/actions/{id}` accepts `sig`, the action's approval purpose derived from the
   operator token, so a phone can approve from a notification without a
   login. The GET only shows; deciding is a POST from the page, so a link
   preview cannot approve anything. Rotating the token invalidates every
@@ -157,15 +158,25 @@ A worker (`orbit worker`) holds the database URL, its backend credential and the
 
 The App (`orbit-kensac`, docs/tickets.md) has its private key in orbit's
 environment only. Every token minted
-from it names one repository from `github.repositories` and one permission
+from it names one repository and one permission
 set from `internal/github` (never an empty set, which would mean all of the
 installation's), is revoked after its operation, and is refused if GitHub
-grants more than was asked. `github:merge` lets a compromised model ask to
+grants more than was asked. The repository is one of `github.repositories` for tickets, builds and merges, and one of `github.read_repositories` for agents that read (below); the two lists are separate, so reading a repository never lets anything write to it. `github:merge` lets a compromised model ask to
 merge an orbit PR whose checks are green; the executor re-checks the head
 commit, the branch and every check itself, and the rule decides whether a
 person approves first. In the fleet a merge is a deploy: keep it `approve`.
 
 `actions: write` (rerunning failed jobs) also covers dispatching and cancelling workflows; orbit mints it alone, only in the ticket loop, for `RerunJob` on the job ids of checks that failed, and no model sees it.
+
+## Repositories agents read
+
+An agent's `repos` (configuration.md, Repositories) are read by orbit, never by the model with a credential (`internal/repos`, `engine/repos.go`):
+
+- **Tokens.** Two permission sets, each minted for one repository of `github.read_repositories`, for one operation, and revoked after it: `ReadContents` (`contents: read`) for each fetch into the mirror, and `ReadPulls` (`pull_requests: read`, `checks: read`, `statuses: read`) for each `pr_list` or `pr_view` call. Neither can push, comment, merge, rerun or change anything; `ReadContents` reads every file and branch of that one repository, which is the point. A token lives in orbit's memory and in the environment of the one `git fetch` or `ls-remote` that uses it (`GIT_CONFIG_*`, as for builds), never in a file, a remote URL or the mirror's config (the remote is given on the command line), and never in a model's process or a sandbox.
+- **The mirror** (`<data>/mirrors/<owner>__<name>.git`) is bare and written only by orbit's git, run with no system or global config and no hooks. A run gets the tree at one commit through `git archive`, unpacked through `os.Root` into its inputs: regular files and directories only (symlinks and submodules left out, so nothing in a repository can point outside the run's directory), no `.git`, at most `repos.MaxTreeBytes` and `repos.MaxTreeEntries`.
+- **The tools** (`git_log`, `git_show`, `git_diff`, `git_blame`, `pr_list`, `pr_view`) run in orbit's process: for a report agent the tool server asks the engine over a per-agent unix socket (as search does), for a chat agent the engine answers the SDK tool call itself. The engine reads the agent's spec in force and refuses any repository it does not name. A model's revision or path is never read as an option (a leading `-` is refused, and every command has `--end-of-options` or `--`), only reads are ever run, and an answer is at most `repos.MaxOutput`. They need no Bash, no WebFetch and no token in the model's reach.
+- **What a compromised model gains:** the contents and history of the repositories its agent names, and their pull requests and checks, which its run already reads. A repository's text is data like any input: a file can carry instructions. A network tool (`WebFetch`, a workstation's egress) could carry what it read out; give `repos` naming a private repository only to agents whose tools you would let see it leave. `agent:define` can give a database agent `repos`, but only within `github.read_repositories`.
+- **Workers** hold no App key, so an agent with `repos` must need `github`, a capability only control advertises.
 
 ## The build sandbox
 

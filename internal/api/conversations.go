@@ -14,33 +14,32 @@ import (
 // default conversation is also /agents/{name}/thread and /messages.
 
 func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
-	var before *store.ConversationCursor
-	if b := r.URL.Query().Get("before"); b != "" {
-		c, err := store.ParseConversationCursor(b)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, "before: "+err.Error())
-			return
-		}
-		before = c
-	}
-	archived := r.URL.Query().Get("archived") == "true"
 	var limit int
 	if !queryInt(w, r, "limit", &limit) {
 		return
 	}
-	page, err := s.Store.ListConversations(r.Context(), r.PathValue("name"), archived, before, limit)
+	resp, err := s.conversationPage(r.Context(), r.PathValue("name"), r.URL.Query().Get("archived") == "true",
+		r.URL.Query().Get("before"), limit)
+	respond(w, resp, err)
+}
+
+// conversationPage is a page of an agent's conversations for HTTP and MCP alike; before is the previous page's next_before.
+func (s *Server) conversationPage(ctx context.Context, agent string, archived bool, before string, limit int) (map[string]any, error) {
+	var c *store.ConversationCursor
+	if before != "" {
+		var err error
+		if c, err = store.ParseConversationCursor(before); err != nil {
+			return nil, requestError("before: " + err.Error())
+		}
+	}
+	page, err := s.Store.ListConversations(ctx, agent, archived, c, limit)
 	if err == nil {
-		err = s.withWorkspaceIDs(r.Context(), page.Conversations)
+		err = s.withWorkspaceIDs(ctx, page.Conversations)
 	}
 	if err != nil {
-		respond(w, nil, err)
-		return
+		return nil, err
 	}
-	resp := map[string]any{"conversations": orEmpty(page.Conversations), "has_more": page.HasMore, "next_before": nil}
-	if page.HasMore {
-		resp["next_before"] = page.NextBefore
-	}
-	respond(w, resp, nil)
+	return listPage("conversations", page.Conversations, page.HasMore, page.NextBefore), nil
 }
 
 func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {

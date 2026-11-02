@@ -516,7 +516,7 @@ A row:
  "sha256": "hex", "bytes": 48213, "created_at": "..."}
 ```
 
-`direction` is `in` (what the run read) or `out` (`output.json`, what the backend returned). The inputs the model was shown are under `inputs/` (`inputs/<run>-<attempt>/` for an agent with a session); a source only transforms read is under `sources/`; `memory.md`, `messages.json`, `conversation.md`, `system.md`, `prompt.md` and `schema.json` are the rest of what the run was given. `GET /artifacts/{id}` is the content itself, with its `media_type` as `Content-Type` (served with `nosniff` and a `default-src 'none'` CSP).
+`direction` is `in` (what the run read) or `out` (`output.json`, what the backend returned). The inputs the model was shown are under `inputs/` (`inputs/<run>-<attempt>/` for an agent with a session); a source only transforms read is under `sources/`; an agent with `repos` has `inputs/_repos.json` (Repositories, below; the trees themselves are not stored); `memory.md`, `messages.json`, `conversation.md`, `system.md`, `prompt.md` and `schema.json` are the rest of what the run was given. `GET /artifacts/{id}` is the content itself, with its `media_type` as `Content-Type` (served with `nosniff` and a `default-src 'none'` CSP).
 
 ### Deliveries
 
@@ -694,7 +694,7 @@ Reads are limited to 100 requests a second per person per workspace (per orbit i
 ```
 
 - `POST /workspaces/{id}/upload?dir=` takes `multipart/form-data`, any number of file parts, each at most 64 MiB (`too_large`), named by the part's file name (cleaned as conversation uploads are, without numbering), into `dir` (created when missing; default the root), all in one write. An existing name is `exists` unless `overwrite=1`, which trashes the old file first (a directory there is always `exists`); a name twice in one form is a `request` error. `201 {"entries": [<entry>]}`, in form order.
-- `POST /workspaces/{id}/upload/url` `{"path", "bytes", "media_type"?}` returns a signed `PUT` URL shaped as `POST /conversations/{id}/uploads/url`'s (`{"url", "method": "PUT", "headers", "expires_at", "max_bytes"}`), for `bytes` up to 1 GiB, writing to `path`; `exists` applies when it is issued and when it is used. The URL is `/api/v1/workspaces/signed?...`: no `Authorization` header (the signature, under a key of its own derived from `ORBIT_API_TOKEN`, names the workspace, the path, the type, `bytes` as the most it accepts, the person, who must be in the workspace group when it is issued, and an expiry 15 minutes ahead). It uploads once (a second `PUT` is `409` `exists`); an altered or expired URL is `403`, a larger body `413` `too_large`. `media_type` sets only the `Content-Type` the browser sends. It needs `public_url` in `orbit.yaml` (`503` without it).
+- `POST /workspaces/{id}/upload/url` `{"path", "bytes", "media_type"?}` returns a signed `PUT` URL shaped as `POST /conversations/{id}/uploads/url`'s (`{"url", "method": "PUT", "headers", "expires_at", "max_bytes"}`), for `bytes` up to 1 GiB, writing to `path`; `exists` applies when it is issued and when it is used. The URL is `/api/v1/workspaces/signed?...`: no `Authorization` header (the signature, under a key of its own derived from `ORBIT_API_TOKEN` (`secret.WorkspaceUploadURL`), names the workspace, the path, the type, `bytes` as the most it accepts, the person, who must be in the workspace group when it is issued, and an expiry 15 minutes ahead). It uploads once (a second `PUT` is `409` `exists`); an altered or expired URL is `403`, a larger body `413` `too_large`. `media_type` sets only the `Content-Type` the browser sends. It needs `public_url` in `orbit.yaml` (`503` without it).
 - `GET /workspaces/{id}/download?path=&ref=` is a file as a download (`application/octet-stream`, `Content-Disposition: attachment`, `nosniff`, a CSP that runs nothing, its version as the `ETag`), or a directory as `application/gzip` (a tar.gz named `<directory>.tar.gz`, `workspace.tar.gz` for the root, whose paths start with the directory's name; `.orbit/` left out), at most 1 GiB. `inline=1` serves a raster image (not SVG, as its content sniffs) inline with its own type, for a preview; any other file stays an attachment. A symlink is a `path` error. `ref` is as for `GET /files`.
 
 On the snapshot backend a write, mkdir, rename, trash, restore or upload stores a new snapshot (`source: person`, `run_id` null), made from the newest and applied again from the newest when another write got in first; it is refused with `busy` while a run of the conversation is running, since the run's own snapshot would follow it. `as_of` moves to it. The whole snapshot holds at most 256 MiB (`too_large`), so a signed upload larger than that is refused when it is asked for. Writes are limited to 20 a second per person per workspace (per instance), as reads are. A request's `X-Request-Id` (up to 128 printable characters; one is made when it has none) is echoed in the response and recorded with its events.
@@ -878,18 +878,19 @@ After a conversation goes quiet, orbit runs a short learning pass over it (trigg
 | tool | arguments | returns |
 |---|---|---|
 | `list_agents` | none | each configured agent: `name`, `description`, `enabled`, `needs_input`, `open_questions`, `pending_actions`, `last_run` |
-| `list_conversations` | `agent`, `archived`, `limit` | as `GET /agents/{name}/conversations` |
+| `list_conversations` | `agent`, `archived`, `limit`, `before` | as `GET /agents/{name}/conversations`: `conversations`, `has_more`, `next_before` |
 | `create_conversation` | `agent`, `title`, `message`, `wait_seconds` | `conversation_id`, `message_id`, `run_id`, and `reply` as `send_message` |
 | `send_message` | `body`, and `agent` (its default conversation) or `conversation_id`; `reply_to`, `wait_seconds` | `message_id`, `run_id`, `reply`: the run as a thread run item (`report`, `questions`, `actions`, `status`) |
 | `wait_for_reply` | `run_id`, `wait_seconds` | `reply`, the run as a thread run item |
-| `read_thread` | `agent` or `conversation_id`, `limit` (default 20), `before` | `items`, `has_more`, `next_before`, as a thread page |
-| `list_actions` | `agent`, `status` (default `pending`; `all`) | `actions` |
+| `read_thread` | `agent` or `conversation_id`, `limit` (default 20, at most 200), `before` | as a thread page: `items`, `has_more`, `next_before` |
+| `list_actions` | `agent`, `status` (default `pending`; `all` for every status), `run_id`, `limit`, `before` | as `GET /actions`: `actions`, `has_more`, `next_before` |
 | `approve_action`, `reject_action` | `action_id` | the decided `action`; a decided one is an error |
 | `search` | `q`, and as `GET /search`: `agent`, `conversation_id`, `run_id`, `kind`, `from`, `to`, `limit`, `offset` | as `GET /search` |
 
 - **Waiting.** `send_message` and `create_conversation` wait for the run they woke up to `wait_seconds` (default 45, at most 300; `-1` returns at once). A run still going when the wait ends is returned with its status and a `note` to call `wait_for_reply`. A message that woke no run (`wake_on_message` off) says so in `note`.
 - **Streaming.** When the call carries a `progressToken`, the wait sends the run's narration (the stream's `text` and `tool` events, a tool as `<name> <summary>`) as progress notifications on the call's response.
-- Results are one text content block of indented JSON. A tool error (an unknown agent, a missing field, a store conflict) is a tool result with `isError`.
+- **Same as HTTP.** A tool that mirrors an HTTP list or read makes the same store call and returns the same body as its HTTP counterpart, paging included: `before` is the previous page's `next_before`, which is `null` exactly when `has_more` is false. Only `read_thread`'s default `limit` (20) and `list_actions`' default `status` (`pending`) differ.
+- Results are one text content block of indented JSON. A tool error (an unknown agent, a missing field, a store conflict) is a tool result with `isError`, worded as the HTTP error body's `error` is (`not found`, `not a valid id`, `before: ...`, `no longer in a state that allows this`).
 
 ### Signing in: orbit's OAuth proxy
 
@@ -978,6 +979,23 @@ Full-text search across everything orbit stores, ranked best first.
 - **Filters:** `agent` (that agent's documents; a profile or topic entry belongs to none), `conversation_id`, `run_id` (a UUID, else `400`); `from` and `to` are a calendar day in the deployment's timezone (`to` includes its day) or an RFC 3339 time (`to` excluded), by the document's `at` (a message's or memory version's creation, a run's finish, a transcript line's time). `limit` defaults to 20, at most 100; `offset` pages, at most 1000. `total` counts every match within the filters, whatever the page.
 - **`links`** are where the result is read in full: the run (`run`, and `run_page` when `public_url` is set) and its conversation's thread. A memory version names its run's conversation when it has one.
 - Documents are derived by triggers as rows are written, and existing rows were indexed by the migration that added search, so a result is there as soon as its row is.
+
+## Repositories
+
+An agent with `repos` (docs/agents/configuration.md, Repositories) is given each repository's tree at one commit, without `.git`, at `inputs/repos/<name>/`. What it read is the input `_repos.json`, `[{"repo": "kensac/orbit", "ref": "main", "sha": "<40 hex>"}]` (`ref` absent for the default branch), and each repository is an `orbit.repo` event, `{"repo", "ref", "sha", "path", "files", "skipped"}` (`skipped`: symlinks and submodules left out); a fetch that fails is an `orbit.repo_failed` event `{"repo", "error"}` and fails the run, naming the repository.
+
+A Claude Code run of such an agent has six read-only tools, `mcp__orbit__<name>` (a chat agent's are its SDK tools of the same names), run by orbit against its mirror and GitHub. Every tool takes `repo` (`owner/name`, one of the agent's; it may be left out when the agent has one); an unknown argument, a repository the agent does not name, or a revision or path starting with `-` is a tool error the model reads. Text answers are at most 64 KiB, cut at a line end with a note saying how much was left out.
+
+| tool | arguments | answer |
+|---|---|---|
+| `git_log` | `rev` (default: the spec's `ref`, else the default branch), `path`, `since` (YYYY-MM-DD), `max` (default 20, at most 200) | `[{"sha", "author", "date", "subject"}]`, newest first |
+| `git_show` | `rev` (required), `path` | the commit (`--format=fuller`, stat and patch), or with `path` that file at `rev` |
+| `git_diff` | `base`, `head` (required), `path`, `stat` | the patch from `base` to `head`, or with `stat` the files and line counts |
+| `git_blame` | `path` (required), `rev` (default as for `git_log`), `start`, `end` (1-based, inclusive) | `git blame -l --date=short` of those lines |
+| `pr_list` | `state` (`open`, the default, `closed`, `all`), `limit` (default 30, at most 300) | `[{"number", "title", "state", "draft", "merged_at", "closed_at", "created_at", "updated_at", "html_url", "user": {"login"}, "head": {"ref", "sha"}, "base": {"ref"}}]`, most recently updated first, every page up to `limit`; `merged_at` is `null` unless it merged |
+| `pr_view` | `number` (required) | `{"pull_request": {...pr_list's fields, "body", "merged", "mergeable", "mergeable_state", "merge_commit_sha", "additions", "deletions", "changed_files", "commits"}, "checks": [{"name", "status", "conclusion", "url"}], "statuses": [{"context", "state", "url"}]}`, the checks and statuses of its head commit |
+
+A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main~3`, or a pull request's head as `refs/pull/<n>/head`.
 
 ## Usage
 

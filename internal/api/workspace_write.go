@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/workspace"
 )
@@ -631,17 +632,11 @@ func (s *Server) workspaceUpload(w http.ResponseWriter, r *http.Request, t *stor
 	})
 }
 
-// workspaceUploadKey keys workspace upload URLs from the operator token,
-// apart from conversation uploads' key, so neither kind of URL verifies as
-// the other.
-func (s *Server) workspaceUploadKey() []byte {
-	m := hmac.New(sha256.New, []byte(s.Token))
-	m.Write([]byte("orbit workspace upload url"))
-	return m.Sum(nil)
-}
-
+// workspaceUploadSig signs a workspace upload URL's values, in a fixed
+// order, under a key of their own (secret.WorkspaceUploadURL), so neither a
+// conversation's upload URL nor a workspace's verifies as the other.
 func (s *Server) workspaceUploadSig(v url.Values) string {
-	m := hmac.New(sha256.New, s.workspaceUploadKey())
+	m := hmac.New(sha256.New, secret.Key(s.Token).Derive(secret.WorkspaceUploadURL))
 	for _, k := range []string{"w", "p", "t", "b", "e", "a", "k"} {
 		m.Write([]byte(k + "=" + v.Get(k) + "\x00"))
 	}

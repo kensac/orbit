@@ -7,6 +7,7 @@ import (
 
 	"github.com/kensac/orbit/internal/build/buildtest"
 	"github.com/kensac/orbit/internal/github"
+	"github.com/kensac/orbit/internal/repos"
 )
 
 func TestTheCheckoutPoolKeepsATicketsCloneAndWarmsSpares(t *testing.T) {
@@ -60,5 +61,29 @@ func TestTheCheckoutPoolKeepsATicketsCloneAndWarmsSpares(t *testing.T) {
 	}
 	if _, err := pool.Dir("../escape"); err == nil {
 		t.Fatal("a key outside the pool")
+	}
+}
+
+func TestANewCloneIsSeededFromTheMirror(t *testing.T) {
+	w := newWorld(t)
+	m := &repos.Mirrors{Root: t.TempDir(), URL: func(string) string { return w.bare }}
+	if err := m.Fetch(ctx, "kensac/orbit", nil); err != nil {
+		t.Fatal(err)
+	}
+	pool := &Pool{Root: t.TempDir(), CloneURL: func(string) string { return w.bare }, Seed: m.Has}
+	w.runner.Pool = pool
+	g, err := pool.Acquire(ctx, TicketKey(testTicket), "kensac/orbit", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := buildtest.RevParse(g.dir, "refs/orbit/seed"), buildtest.RevParse(w.bare, "refs/heads/main"); got == "" || got != want {
+		t.Fatalf("the seeded head = %q, want %q", got, want)
+	}
+	// The objects are the clone's own: nothing borrows the mirror's.
+	if _, err := os.Stat(filepath.Join(g.dir, ".git", "objects", "info", "alternates")); !os.IsNotExist(err) {
+		t.Fatalf("alternates: %v", err)
+	}
+	if _, err := w.runner.Run(ctx, w.job("99999999-9999-4999-8999-999999999999", write("/work/hello.txt", "hi\n")), w.deps()); err != nil {
+		t.Fatalf("a build from a seeded clone: %v", err)
 	}
 }
