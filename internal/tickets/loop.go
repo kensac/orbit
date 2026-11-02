@@ -65,6 +65,12 @@ type Loop struct {
 	// Wake nudges the executors and the action loop after an enqueue or
 	// an auto merge.
 	Wake func()
+	// Restack moves a stacked ticket's branch onto a new base
+	// (build.Runner.Restack); nil leaves stacked tickets waiting.
+	Restack func(ctx context.Context, app *github.App, r build.Restack) (*build.Restacked, error)
+	// Checkouts is the builds' clone pool: kept warm here, and a ticket's
+	// clone released once it is done or abandoned. nil skips both.
+	Checkouts *build.Pool
 }
 
 // Run ticks until ctx ends.
@@ -139,7 +145,41 @@ func (l *Loop) Tick(ctx context.Context) error {
 			l.Log.Warn("ticket", "ticket", t.ID, "status", t.Status, "err", err)
 		}
 	}
+	k.prewarm(ctx)
 	return nil
+}
+
+// prewarm tops up the spare clones of every repository builds target, so
+// the next build starts from a checkout that needs only an incremental
+// fetch. A token is minted only for a repository that is short.
+func (k *tick) prewarm(ctx context.Context) {
+	p := k.l.Checkouts
+	if p == nil || p.Warm <= 0 {
+		return
+	}
+	for repo := range k.cfg.Deployment.Build.Repositories {
+		if n, err := p.Spares(repo); err != nil || n >= p.Warm {
+			continue
+		}
+		tok, err := k.app.Token(ctx, repo, github.ReadContents)
+		if err != nil {
+			k.l.Log.Warn("prewarm", "repo", repo, "err", err)
+			continue
+		}
+		if _, err := p.Prewarm(ctx, repo, tok.GitAuthEnv()); err != nil {
+			k.l.Log.Warn("prewarm", "repo", repo, "err", err)
+		}
+		_ = tok.Revoke(context.WithoutCancel(ctx))
+	}
+}
+
+// release drops a finished ticket's kept clone.
+func (k *tick) release(t *store.Ticket) {
+	if k.l.Checkouts != nil {
+		if err := k.l.Checkouts.Release(build.TicketKey(t.ID)); err != nil {
+			k.l.Log.Warn("release checkout", "ticket", t.ID, "err", err)
+		}
+	}
 }
 
 func (k *tick) reconcile(ctx context.Context, t *store.Ticket) error {
@@ -154,6 +194,9 @@ func (k *tick) reconcile(ctx context.Context, t *store.Ticket) error {
 	}
 	switch t.Status {
 	case store.TicketApproved:
+		if ready, err := k.stackReady(ctx, t); err != nil || !ready {
+			return err
+		}
 		return k.startBuild(ctx, t, store.BuildPurposeBuild, nil)
 	case store.TicketBuilding:
 		return k.building(ctx, t)
@@ -260,6 +303,10 @@ func (k *tick) review(ctx context.Context, t *store.Ticket) error {
 	case t.HeadSHA == nil || pr.Head.SHA != *t.HeadSHA:
 		return k.fail(ctx, t, fmt.Sprintf("PR #%d's head moved to %s after orbit built it; orbit merges only what it built", pr.Number, short(pr.Head.SHA)))
 	}
+	hold, moved, err := k.stacked(ctx, t, pr)
+	if err != nil || moved {
+		return err
+	}
 	// A person's submitted review comes before the checks: what they asked
 	// to change is built before anything is merged.
 	pending, err := k.l.Store.PendingReviewComments(ctx, t.ID)
@@ -284,6 +331,9 @@ func (k *tick) review(ctx context.Context, t *store.Ticket) error {
 	state, failing := github.Classify(required, runs, statuses)
 	switch state {
 	case github.ChecksGreen:
+		if hold {
+			return nil // stacked: it merges after the ticket below it
+		}
 		return k.proposeMerge(ctx, t, c, pr)
 	case github.ChecksFailed:
 		return k.checksFailed(ctx, t, c, pr, failing)
@@ -408,6 +458,9 @@ func (k *tick) merged(ctx context.Context, t *store.Ticket) error {
 		if errors.Is(err, store.ErrConflict) {
 			return nil
 		}
+		if err == nil {
+			k.release(t)
+		}
 		return err
 	}
 	if *t.Repo != spec.SelfRepo {
@@ -435,6 +488,7 @@ func (k *tick) merged(ctx context.Context, t *store.Ticket) error {
 
 // abandoned closes the PR of a ticket a person abandoned; the branch stays.
 func (k *tick) abandoned(ctx context.Context, t *store.Ticket) error {
+	k.release(t)
 	_, pr, err := k.pr(ctx, t)
 	if err != nil || pr.State != "open" {
 		return err

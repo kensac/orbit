@@ -48,6 +48,18 @@ func Builtins(d Deployment) []*Agent {
 	if runner == "" {
 		return nil
 	}
+	addr, _ := d.SandboxService()
+	// In a workstation sandbox the session has every Claude Code tool
+	// (tools is then unused). Without one it may not write or run
+	// commands: on orbit's host they would reach orbit's own files.
+	sandbox := ""
+	tools := []string{"WebSearch", "WebFetch", "Task", "TodoWrite"}
+	var needs []string
+	if addr != "" {
+		sandbox, tools = SandboxWorkstation, nil
+		// Only hosts that reach sandboxd claim its runs.
+		needs = []string{"sandbox"}
+	}
 	sess := &SessionSpec{Resume: true, Idle: Duration(builtinIdle), Live: Duration(builtinLive)}
 	if d.Runners[runner].MaxBudgetUSD > 0 {
 		// A live process's budget would cover every run fed into it.
@@ -58,7 +70,10 @@ func Builtins(d Deployment) []*Agent {
 		Description: "A Claude Code session you can reach from anywhere.",
 		Charter:     builtinCharter,
 		Runner:      runner,
-		Tools:       []string{"WebSearch", "WebFetch"},
+		Tools:       tools,
+		Chat:        true,
+		Sandbox:     sandbox,
+		Needs:       needs,
 		// The general agent coordinates the others: in its person's chat a
 		// delegation applies directly, unattended it waits for approval
 		// (docs/ARCHITECTURE.md, Delegation).
