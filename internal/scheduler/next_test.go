@@ -39,3 +39,24 @@ func TestNextFiresOfAnRRule(t *testing.T) {
 		t.Fatalf("next = %+v", got)
 	}
 }
+
+func TestAPausedTriggerSkipsItsFires(t *testing.T) {
+	a := &spec.Agent{Name: "a", Triggers: []spec.Trigger{
+		{Schedule: "0 9 * * *", Paused: true},
+		{Schedule: "0 9 * * *", Paused: true, PausedUntil: "2026-11-05T09:00"},
+		{RRule: "FREQ=DAILY", Start: "2026-11-01T08:00", Paused: true, PausedUntil: "2026-11-04T12:00"},
+	}}
+	if err := a.SetTimezone("America/New_York"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+	got := NextFires(a, now)
+	// The first never fires; the third at its first fire after the pause (08:00 on the 5th); the second at its end, which is a fire time itself (09:00 on the 5th).
+	if len(got) != 2 || got[0].TriggerIndex != 2 || !got[0].At.Equal(time.Date(2026, 11, 5, 13, 0, 0, 0, time.UTC)) ||
+		got[1].TriggerIndex != 1 || !got[1].At.Equal(time.Date(2026, 11, 5, 14, 0, 0, 0, time.UTC)) {
+		t.Fatalf("next = %+v", got)
+	}
+	if _, err := spec.TriggerSchedule(spec.Trigger{Schedule: "0 9 * * *", PausedUntil: "2026-11-05T09:00"}, time.UTC); err == nil {
+		t.Fatal("paused_until without paused loaded")
+	}
+}

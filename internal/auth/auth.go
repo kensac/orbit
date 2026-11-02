@@ -81,6 +81,9 @@ type Identity struct {
 	Person  string
 	Subject string
 	Issuer  string
+	// Groups is the token's groups claim, for checks narrower than the
+	// one Verify makes (the workspace group).
+	Groups []string
 }
 
 // Error is a rejected token. Check names the check that failed (token,
@@ -191,7 +194,7 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (*Identity, error) {
 	if strings.TrimSpace(c.PreferredUsername) == "" {
 		return nil, &Error{"preferred_username", "token has no preferred_username"}
 	}
-	return &Identity{Person: c.PreferredUsername, Subject: c.Subject, Issuer: set.issuer}, nil
+	return &Identity{Person: c.PreferredUsername, Subject: c.Subject, Issuer: set.issuer, Groups: c.Groups}, nil
 }
 
 // keySet is one issuer's cached JWKS.

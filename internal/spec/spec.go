@@ -77,8 +77,31 @@ type Deployment struct {
 	// DeferLowPriority holds the scheduled runs of priority: low agents
 	// while a subscription window is nearly spent (internal/usage).
 	DeferLowPriority bool `yaml:"defer_low_priority,omitempty" json:"defer_low_priority,omitempty"`
-	// Credentials are the variables a source may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
+	// Credentials are the variables a source or an endpoint's headers may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
 	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
+	// Connectors are MCP servers agents may be given (connectors.go); orbit calls them on the agents' behalf.
+	Connectors map[string]Connector `yaml:"connectors,omitempty" json:"connectors,omitempty"`
+	// Expires records when a credential orbit cannot inspect stops working (the Claude Code subscription token lasts a year), keyed by its variable, as YYYY-MM-DD (expires.go). It only feeds orbit_credential_expiry_timestamp_seconds, so an alert fires before the date.
+	Expires map[string]string `yaml:"expires,omitempty" json:"expires,omitempty"`
+	// WebhookSecrets are the signing secrets inbound webhooks are verified with, keyed by variable, each bound to the agents that may use it (webhook.go).
+	WebhookSecrets map[string]WebhookSecret `yaml:"webhook_secrets,omitempty" json:"webhook_secrets,omitempty"`
+	// Board tunes GET /board (docs/api.md, The board).
+	Board *Board `yaml:"board,omitempty" json:"board,omitempty"`
+}
+
+// Board tunes the board of every open conversation.
+type Board struct {
+	// Idle is how long a conversation with nothing waiting stays on the
+	// board after its last activity (default store.DefaultBoardIdle, 30m).
+	Idle Duration `yaml:"idle,omitempty" json:"idle,omitempty"`
+}
+
+// BoardIdle is board.idle, or 0 for the default.
+func (d Deployment) BoardIdle() time.Duration {
+	if d.Board == nil {
+		return 0
+	}
+	return time.Duration(d.Board.Idle)
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -134,6 +157,9 @@ type Defaults struct {
 	Channels []string `yaml:"channels" json:"channels"`
 	// MemoryMaxBytes bounds the memory document an agent may write back.
 	MemoryMaxBytes int `yaml:"memory_max_bytes" json:"memory_max_bytes"`
+	// DecisionStall is how long a delegated task's decision may wait for a
+	// person before its batch counts as stalled and its parent is woken.
+	DecisionStall Duration `yaml:"decision_stall" json:"decision_stall"`
 }
 
 // Channel is a notification destination. Kind selects the adapter; the
@@ -158,12 +184,20 @@ type Channel struct {
 }
 
 // Endpoint is a named HTTP target a `webhook` action may call. The agent
-// chooses only the endpoint name and the body; the URL and credentials stay
-// in configuration, so a model cannot point a write at anything new.
+// chooses only the endpoint name, the body and the values of the path's
+// placeholders, each checked against Params; the URL, method and credentials
+// stay in configuration, so a model cannot point a write at anything new.
 type Endpoint struct {
 	URL     string            `yaml:"url" json:"url"`
 	Method  string            `yaml:"method" json:"method"`
 	Headers map[string]string `yaml:"headers" json:"headers"`
+	// Description tells the model what the endpoint does.
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+	// Path is appended to URL; each {name} in it is filled from the action's path params, declared in Params (endpoint.go).
+	Path   string                   `yaml:"path,omitempty" json:"path,omitempty"`
+	Params map[string]EndpointParam `yaml:"params,omitempty" json:"params,omitempty"`
+	// BodySchema is a JSON Schema the action's body must satisfy; without one, any object.
+	BodySchema map[string]any `yaml:"body_schema,omitempty" json:"body_schema,omitempty"`
 }
 
 // RunnerSpec configures one model backend.
@@ -185,7 +219,9 @@ type Agent struct {
 	Name        string `yaml:"name" json:"name"`
 	Description string `yaml:"description" json:"description"`
 	// Charter is the standing instruction every run starts from.
-	Charter  string    `yaml:"charter" json:"charter"`
+	Charter string `yaml:"charter" json:"charter"`
+	// Starters are prompts a client offers for a new conversation with the agent (at most MaxStarters, each MaxStarterLen bytes).
+	Starters []string  `yaml:"starters,omitempty" json:"starters,omitempty"`
 	Enabled  *bool     `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	Timezone string    `yaml:"timezone,omitempty" json:"timezone,omitempty"`
 	Runner   string    `yaml:"runner,omitempty" json:"runner,omitempty"`
@@ -215,7 +251,8 @@ type Agent struct {
 	Verify []string `yaml:"verify,omitempty" json:"verify,omitempty"`
 	// Topics are the shared memory topics (finance, homelab) whose entries
 	// every run of this agent is shown, beside the profile's and its own.
-	// The API can attach more (docs/api.md, Memory entries).
+	// "*" (AllTopics) is every topic there is. The API can attach more
+	// (docs/api.md, Memory entries).
 	Topics []string `yaml:"topics,omitempty" json:"topics,omitempty"`
 	// Skills are skills from orbit's library (docs/api.md, Skills) this agent runs with; the API can attach more.
 	Skills []string `yaml:"skills,omitempty" json:"skills,omitempty"`
@@ -248,6 +285,8 @@ type Agent struct {
 	// The delegate rule still decides whether it may (docs/ARCHITECTURE.md,
 	// Delegation).
 	Delegates []string `yaml:"delegates,omitempty" json:"delegates,omitempty"`
+	// Connectors names orbit.yaml's connectors whose tools this agent's runs may call (claude-code only); each tool's rule is in actions as mcp:<connector>:<tool> (connectors.go).
+	Connectors []string `yaml:"connectors,omitempty" json:"connectors,omitempty"`
 	// Repos are git repositories every run reads: orbit fetches each into
 	// its mirror and gives the run the tree at Ref, without .git, under
 	// inputs/repos/<name>, with read-only history and GitHub tools
@@ -338,6 +377,12 @@ const (
 	MaxHookTimeout     = time.Minute
 )
 
+// Bounds on an agent's starters: a handful of buttons in a new chat, each a sentence or two.
+const (
+	MaxStarters   = 6
+	MaxStarterLen = 500
+)
+
 // LearnSpec configures an agent's learning runs.
 type LearnSpec struct {
 	// Enabled false turns learning off for the agent.
@@ -373,9 +418,9 @@ const MaxSessionIdle = 24 * time.Hour
 // resume picks up after it closes.
 const MaxSessionLive = time.Hour
 
-// Trigger is one way an agent wakes: a cron Schedule, or an RRule (RFC
-// 5545, internal/rrule) anchored at Start. Exactly one is set; the struct
-// leaves room for event triggers.
+// Trigger is one way an agent wakes: a cron Schedule, an RRule (RFC
+// 5545, internal/rrule) anchored at Start, or a Webhook (webhook.go).
+// Exactly one is set.
 type Trigger struct {
 	Schedule string `yaml:"schedule" json:"schedule"`
 	// RRule is a recurrence rule ("FREQ=WEEKLY;INTERVAL=2;BYDAY=TU"), for
@@ -388,6 +433,47 @@ type Trigger struct {
 	Start string `yaml:"start,omitempty" json:"start,omitempty"`
 	// Prompt is the reason for this wake, appended to the charter.
 	Prompt string `yaml:"prompt,omitempty" json:"prompt,omitempty"`
+	// Paused stops the trigger firing; PausedUntil, a local time in the agent's timezone as Start is, ends the pause there (fires before it are skipped, never caught up). The schedule:pause and schedule:resume actions write them.
+	Paused      bool   `yaml:"paused,omitempty" json:"paused,omitempty"`
+	PausedUntil string `yaml:"paused_until,omitempty" json:"paused_until,omitempty"`
+	// Webhook names an inbound route, POST /hooks/<agent>/<webhook>: a delivery signed with Secret starts a run.
+	Webhook string `yaml:"webhook,omitempty" json:"webhook,omitempty"`
+	// Secret is the variable holding the webhook's signing secret, one of orbit.yaml's webhook_secrets bound to this agent.
+	Secret string `yaml:"secret,omitempty" json:"secret,omitempty"`
+	// MaxBytes bounds a delivery's body; a larger one is refused.
+	MaxBytes int64 `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
+	// MissedGrace is how late a schedule fire may start; a later one is skipped as missed (MissedGraceFor).
+	MissedGrace Duration `yaml:"missed_grace,omitempty" json:"missed_grace,omitempty"`
+}
+
+// paused is a schedule with a pause: no fire before until, and none at all when until is zero.
+type paused struct {
+	Schedule
+	until time.Time
+}
+
+// Next is the inner schedule's first fire strictly after t that is not before until.
+func (p paused) Next(t time.Time) time.Time {
+	if p.until.IsZero() {
+		return time.Time{}
+	}
+	if from := p.until.Add(-time.Second); t.Before(from) {
+		// Fires are whole seconds (rrule.Rule.Start is truncated, cron has none), so a fire at until itself is after from.
+		t = from
+	}
+	return p.Schedule.Next(t)
+}
+
+// ParseLocal reads a local time in loc in the forms Trigger.Start is written in.
+func ParseLocal(s string, loc *time.Location) (time.Time, error) {
+	var err error
+	for _, l := range startLayouts {
+		var t time.Time
+		if t, err = time.ParseInLocation(l, s, loc); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, err
 }
 
 // Schedule is when a trigger fires: the first fire strictly after a time,
@@ -401,9 +487,31 @@ type Schedule interface {
 var startLayouts = []string{"2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-02 15:04"}
 
 // TriggerSchedule is a trigger's schedule, read in loc (the agent's
-// timezone).
+// timezone), its pause applied.
 func TriggerSchedule(t Trigger, loc *time.Location) (Schedule, error) {
+	sched, err := triggerSchedule(t, loc)
+	if err != nil {
+		return nil, err
+	}
 	switch {
+	case t.PausedUntil != "" && !t.Paused:
+		return nil, errors.New("paused_until needs paused")
+	case t.PausedUntil != "":
+		until, err := ParseLocal(t.PausedUntil, loc)
+		if err != nil {
+			return nil, fmt.Errorf("paused_until %q: want local time as 2026-11-09T00:00", t.PausedUntil)
+		}
+		return paused{sched, until}, nil
+	case t.Paused:
+		return paused{Schedule: sched}, nil
+	}
+	return sched, nil
+}
+
+func triggerSchedule(t Trigger, loc *time.Location) (Schedule, error) {
+	switch {
+	case t.IsWebhook():
+		return nil, ErrWebhookTrigger
 	case t.Schedule != "" && t.RRule != "":
 		return nil, errors.New("schedule and rrule cannot both be set")
 	case t.Schedule != "":
@@ -415,13 +523,7 @@ func TriggerSchedule(t Trigger, loc *time.Location) (Schedule, error) {
 		if t.Start == "" {
 			return nil, errors.New("an rrule needs a start (local time, 2026-11-02T09:00)")
 		}
-		var start time.Time
-		var err error
-		for _, l := range startLayouts {
-			if start, err = time.ParseInLocation(l, t.Start, loc); err == nil {
-				break
-			}
-		}
+		start, err := ParseLocal(t.Start, loc)
 		if err != nil {
 			return nil, fmt.Errorf("start %q: want local time as 2026-11-02T09:00", t.Start)
 		}
@@ -444,10 +546,19 @@ type Source struct {
 	Headers  map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 	Query    map[string]string `yaml:"query,omitempty" json:"query,omitempty"`
 	Paginate *Paginate         `yaml:"paginate,omitempty" json:"paginate,omitempty"`
-	// prometheus
+	// prometheus (PromQL) and loki (LogQL)
 	Expr string `yaml:"expr,omitempty" json:"expr,omitempty"`
 	// file
 	Path string `yaml:"path,omitempty" json:"path,omitempty"`
+	// github: Repo is one of github.read_repositories, Resource one of GitHubResources; Ref is the commit checks reads, State the issues or pulls listed.
+	Repo     string `yaml:"repo,omitempty" json:"repo,omitempty"`
+	Resource string `yaml:"resource,omitempty" json:"resource,omitempty"`
+	Ref      string `yaml:"ref,omitempty" json:"ref,omitempty"`
+	State    string `yaml:"state,omitempty" json:"state,omitempty"`
+	// Limit bounds a github list's items or a loki query's lines.
+	Limit int `yaml:"limit,omitempty" json:"limit,omitempty"`
+	// Since is how far back a loki query reads, ending now.
+	Since Duration `yaml:"since,omitempty" json:"since,omitempty"`
 	// MaxBytes bounds one source's fetched size.
 	MaxBytes int64 `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
 }
@@ -573,7 +684,7 @@ func (a *Agent) Verifies(check string) bool { return slices.Contains(a.Verify, c
 func (a *Agent) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
 
 // RuleFor returns the rule for an action type, deny if unnamed. The task
-// types (task:message, task:cancel) manage tasks the agent delegated, so
+// types (task:message, task:cancel, task:retry) manage tasks the agent delegated, so
 // unnamed they follow the delegate rule.
 func (a *Agent) RuleFor(actionType string) Rule {
 	if r, ok := a.Actions[actionType]; ok {
@@ -635,7 +746,7 @@ var (
 	// Kinds every adapter registry must cover. Kept here so validation does
 	// not import the adapters (which import spec).
 	channelKinds = []string{"ntfy", "smtp", "webhook", "log"}
-	sourceKinds  = []string{"http", "prometheus", "file"}
+	sourceKinds  = []string{"http", "prometheus", "loki", "github", "file", "webhook"}
 	runnerKinds  = []string{"claude-code", "codex", "anthropic"}
 	notifyWhen   = []string{"", "always", "agent", "never"}
 	verifyChecks = []string{"figures"}
@@ -768,6 +879,10 @@ func (c *Config) applyDefaults() {
 		d.Defaults.Timeout = Duration(15 * time.Minute)
 	}
 	c.applyMailDefaults()
+	if d.Defaults.DecisionStall == 0 {
+		// A person answers within a day, or the parent should hear about it.
+		d.Defaults.DecisionStall = Duration(24 * time.Hour)
+	}
 	c.applyUsageDefaults()
 	if d.Defaults.MemoryMaxBytes == 0 {
 		// About 4k tokens: memory rides in every prompt, so it must stay a
@@ -835,16 +950,8 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
-	for name, ep := range d.Endpoints {
-		if !nameRE.MatchString(name) {
-			errs = append(errs, fmt.Errorf("endpoint %q: invalid name", name))
-		}
-		if ep.URL == "" {
-			errs = append(errs, fmt.Errorf("endpoint %q: url is required", name))
-		}
-		if ep.Method != "" && !slices.Contains([]string{"POST", "PUT", "PATCH"}, ep.Method) {
-			errs = append(errs, fmt.Errorf("endpoint %q: method must be POST, PUT or PATCH", name))
-		}
+	for _, name := range slices.Sorted(maps.Keys(d.Endpoints)) {
+		errs = append(errs, c.validateEndpoint(name, d.Endpoints[name])...)
 	}
 	for name, r := range d.Runners {
 		if !nameRE.MatchString(name) {
@@ -878,6 +985,9 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	if d.Board != nil && d.Board.Idle < 0 {
+		errs = append(errs, fmt.Errorf("board.idle must not be negative"))
+	}
 	for _, ch := range d.Defaults.Channels {
 		if _, ok := d.Channels[ch]; !ok {
 			errs = append(errs, fmt.Errorf("defaults.channels: unknown channel %q", ch))
@@ -892,6 +1002,9 @@ func (c *Config) Validate() error {
 		errs = append(errs, c.validateAgent(c.Agents[n])...)
 	}
 	errs = append(errs, c.validateCredentials()...)
+	errs = append(errs, c.validateConnectors()...)
+	errs = append(errs, c.validateExpires()...)
+	errs = append(errs, c.validateWebhookSecrets()...)
 	errs = append(errs, c.validateBuild()...)
 	if sb := c.Deployment.Sandbox; sb != nil && !strings.HasPrefix(sb.Sandboxd, "unix:/") && !strings.Contains(sb.Sandboxd, ":") {
 		errs = append(errs, fmt.Errorf("sandbox: sandboxd %q is neither host:port nor unix:/path", sb.Sandboxd))
@@ -918,10 +1031,23 @@ func (c *Config) validateAgent(a *Agent) []error {
 	if err := a.SetTimezone(a.Timezone); err != nil {
 		at("timezone: %v", err)
 	}
-	if _, ok := c.Deployment.Runners[a.Runner]; !ok {
+	if r, ok := c.Deployment.Runners[a.Runner]; !ok {
 		at("unknown runner %q", a.Runner)
+	} else if len(a.Tools) > 0 && r.Kind != "claude-code" {
+		// codex and anthropic have no per-tool grant to map the list onto, so every run would fail; refuse the spec instead.
+		at("tools: runner %q is %s, which takes no tools (only a claude-code runner does)", a.Runner, r.Kind)
 	}
 	for i, t := range a.Triggers {
+		if t.IsWebhook() {
+			errs = append(errs, c.validateWebhookTrigger(a, i, t)...)
+			continue
+		}
+		if t.Secret != "" || t.MaxBytes != 0 {
+			at("trigger %d: secret and max_bytes are for a webhook trigger", i)
+		}
+		if g := time.Duration(t.MissedGrace); g != 0 && (g < MinMissedGrace || g > MaxMissedGrace) {
+			at("trigger %d: missed_grace must be between %s and %s", i, MinMissedGrace, MaxMissedGrace)
+		}
 		if _, err := TriggerSchedule(t, a.Location()); err != nil {
 			at("trigger %d: %v", i, err)
 		}
@@ -950,10 +1076,38 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if s.URL == "" || s.Expr == "" {
 				at("source %q: prometheus needs url and expr", s.Name)
 			}
+		case "loki":
+			if s.URL == "" || s.Expr == "" {
+				at("source %q: loki needs url and expr", s.Name)
+			}
+			if s.Since < 0 || time.Duration(s.Since) > MaxLokiSince {
+				at("source %q: since is at most %s", s.Name, MaxLokiSince)
+			}
+			if s.Limit < 0 || s.Limit > MaxLokiLimit {
+				at("source %q: limit is at most %d lines", s.Name, MaxLokiLimit)
+			}
+		case "github":
+			errs = append(errs, c.validateGitHubSource(a, s)...)
 		case "file":
 			if s.Path == "" {
 				at("source %q: path is required", s.Name)
 			}
+		case "webhook":
+			if s.URL != "" || s.Expr != "" || s.Path != "" || len(s.Headers) > 0 || len(s.Query) > 0 || s.Paginate != nil {
+				at("source %q: a webhook source is the delivery that started the run, and takes no url, expr, path, headers, query or paginate", s.Name)
+			}
+			if !a.hasWebhook() {
+				at("source %q: a webhook source needs a webhook trigger", s.Name)
+			}
+		}
+		if s.Kind != "github" && (s.Repo != "" || s.Resource != "" || s.Ref != "" || s.State != "") {
+			at("source %q: repo, resource, ref and state are for a github source", s.Name)
+		}
+		if s.Kind != "github" && s.Kind != "loki" && s.Limit != 0 {
+			at("source %q: limit is for a github or loki source", s.Name)
+		}
+		if s.Kind != "loki" && s.Since != 0 {
+			at("source %q: since is for a loki source", s.Name)
 		}
 	}
 	for _, t := range a.Transforms {
@@ -1015,8 +1169,9 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("action %q: rule must be auto, approve or deny", typ)
 		}
 		switch {
-		case typ == "notify", typ == "continue", typ == "agent:define":
-		case typ == "delegate", typ == "task:message", typ == "task:cancel":
+		case typ == "notify", typ == "continue", typ == "agent:define", typ == "agent:save",
+			typ == "schedule:add", typ == "schedule:pause", typ == "schedule:resume", typ == "schedule:remove", typ == "run:now":
+		case typ == "delegate", typ == "task:message", typ == "task:cancel", typ == "task:retry":
 			if len(a.Delegates) == 0 {
 				at("action %q: needs delegates, the agents this one may hand tasks to", typ)
 			}
@@ -1028,8 +1183,12 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if c.Deployment.GitHub == nil {
 				at("action %q: needs a github block in orbit.yaml", typ)
 			}
+		case strings.HasPrefix(typ, ConnectorRulePrefix):
+			// validateAgentConnectors
+		case strings.HasPrefix(typ, ConnectorActionPrefix):
+			at("action %q: a connector tool's rule is named mcp:<connector>:<tool>", typ)
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, delegate, task:message, task:cancel, webhook:<endpoint>, github:merge, github:clone or github:pr)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr or mcp:<connector>:<tool>)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
@@ -1050,6 +1209,14 @@ func (c *Config) validateAgent(a *Agent) []error {
 	}
 	if len(a.Hooks) > MaxHooks {
 		at("hooks: at most %d", MaxHooks)
+	}
+	if len(a.Starters) > MaxStarters {
+		at("starters: at most %d", MaxStarters)
+	}
+	for i, st := range a.Starters {
+		if strings.TrimSpace(st) == "" || len(st) > MaxStarterLen {
+			at("starters[%d]: 1 to %d bytes", i, MaxStarterLen)
+		}
 	}
 	for i, h := range a.Hooks {
 		if !slices.Contains(HookEvents, h.Event) {
@@ -1107,6 +1274,12 @@ func (c *Config) validateAgent(a *Agent) []error {
 	}
 	seenTopic := map[string]bool{}
 	for _, t := range a.Topics {
+		if t == AllTopics {
+			if len(a.Topics) > 1 {
+				at("topics: %q is every topic, so it stands alone", AllTopics)
+			}
+			continue
+		}
 		if !nameRE.MatchString(t) {
 			at("topics: %q must match %s", t, nameRE)
 		}
@@ -1175,6 +1348,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 	}
 	errs = append(errs, a.validateWeb()...)
 	errs = append(errs, c.validateTrust(a)...)
+	errs = append(errs, c.validateAgentConnectors(a)...)
 	if ss := a.Session; ss != nil {
 		rs := c.Deployment.Runners[a.Runner]
 		if rs.Kind != "claude-code" {
