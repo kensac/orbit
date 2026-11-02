@@ -170,6 +170,8 @@ func (s *Server) routes(internal bool) http.Handler {
 	s.skillsRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
+	// The signature is the credential (hooks.go); traefik routes /hooks/ past forward-auth.
+	mux.HandleFunc("POST /hooks/{agent}/{trigger}", s.hook)
 
 	if internal {
 		// Only the host's rollout reaches this listener; a person cannot

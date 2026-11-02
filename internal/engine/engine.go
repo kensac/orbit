@@ -136,6 +136,7 @@ func (e *Engine) SetConfig(cfg *spec.Config) error {
 	e.mu.Lock()
 	e.cfg = &Snapshot{Config: cfg, Channels: chans}
 	e.mu.Unlock()
+	metrics.SetExpiries(cfg.Deployment.Expiries())
 	return nil
 }
 
@@ -169,6 +170,9 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		return e.executeLearn(ctx, actx, snap, a, c, start, log)
 	}
 
+	if sk := missed(a, c, time.Now()); sk != nil {
+		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
+	}
 	st := &attemptState{cancel: make(chan struct{})}
 	go e.watchCancel(actx, c, st, a.Chat, lose)
 	out, res, err := e.attempt(actx, snap, a, c, log, st)
@@ -413,6 +417,16 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env,
 		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted()}
+	if c.Trigger == store.TriggerWebhook {
+		d, err := e.Store.WebhookForRun(ctx, c.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if d != nil {
+			fetcher.Delivery = &sources.Fetched{MediaType: d.MediaType, Content: d.Body,
+				Meta: map[string]any{"delivery_id": d.DeliveryID, "event": d.Event, "trigger": d.TriggerName}}
+		}
+	}
 	vars := sources.Vars(now)
 	var inputs []runner.Input
 	if rec != nil {
@@ -432,6 +446,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			break
 		}
 		f, err := fetcher.Fetch(ctx, s, vars)
+		if errors.Is(err, sources.ErrAbsent) {
+			// Its transforms are skipped and a gate on it counts no records (transform.go, gate.go).
+			emit("orbit.source_absent", map[string]any{"source": s.Name, "reason": err.Error()})
+			continue
+		}
 		if err != nil {
 			emit("orbit.source_failed", map[string]any{"source": s.Name, "error": err.Error()})
 			return nil, nil, fmt.Errorf("source %s: %w", s.Name, err)
