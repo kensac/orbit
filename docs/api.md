@@ -167,6 +167,8 @@ A database or built-in agent's spec may not have a `file` source, a `${VAR}` tha
 
 `triggers` are the indexes changed (as `next_fires`' `trigger_index`); `trigger` is the one added or removed; `rule` is set when one trigger changed; `paused_until` only for a pause with an end; `next_fires` are the changed triggers' next three fires, merged, as local times (`[]` when paused with no end); `version` only once executed. `run:now`'s result is `{"agent": "news", "run_id": "uuid"}`.
 
+**Save this conversation as an agent.** An agent with `agent:save` (the built-in `orbit`, `approve`) proposes `{"name", "description", "charter", "starters"}`. orbit drafts the rest from what the conversation did (docs/agents/configuration.md, Saving a conversation as an agent) and records the proposal as an `agent:define` with the drafted spec, `rule: "approve"` and `status: "pending"`; it never appears as an `agent:save` action unless it is refused (`denied`, with `error`, for example a name in use). Its `preview` is the dry-run diff (Actions, below); approving it creates the agent. `spec.starters` (on every agent row) are prompts a client offers for a new conversation.
+
 `GET /agents/{name}/definitions` is `{"name": "news", "origin":
 "database", "versions": [<definition>, ...]}`, newest first (empty for a
 file or built-in agent).
@@ -541,7 +543,7 @@ A row:
 
 ## Actions
 
-`GET /actions?agent=&status=&run_id=&before=<cursor>&limit=<n>` is `{"actions": [<action>], "has_more": false, "next_before": null}`, newest first. `status` is as in a thread action; `run_id` narrows to one run's proposals (400 when it is not a UUID). Paging is as for a thread: `next_before` is an opaque cursor, `null` exactly when `has_more` is false; `limit` defaults to 100, at most 500. `GET /actions/{id}` is `{"action": <action>, "preview": {...}}`. `preview` is what a `pending` action would do if it executed now, computed by orbit for the person deciding (for the schedule actions, the shape in Defining agents above); it is omitted for a decided action and a type without one, and replaced by `preview_error` (a string) when it would fail now. The approval page shows it too.
+`GET /actions?agent=&status=&run_id=&before=<cursor>&limit=<n>` is `{"actions": [<action>], "has_more": false, "next_before": null}`, newest first. `status` is as in a thread action; `run_id` narrows to one run's proposals (400 when it is not a UUID). Paging is as for a thread: `next_before` is an opaque cursor, `null` exactly when `has_more` is false; `limit` defaults to 100, at most 500. `GET /actions/{id}` is `{"action": <action>, "preview": {...}}`. `preview` is what a `pending` action would do if it executed now, computed by orbit for the person deciding: for the schedule actions, the shape in Defining agents above; for `agent:define`, a dry run of the change, `{"agent": "morning", "change": "create", "widens": ["tool WebFetch", "source news-example-com"], "diff": "+ {\n+   \"name\": \"morning\",\n..."}`, where `change` is `create` or `update`, `widens` is what it adds beyond the agent's current version (the same list that holds an `agent:define` for a person), and `diff` is every line of the spec as indented JSON, prefixed `  ` (unchanged), `- ` (removed) or `+ ` (added); it is omitted for a decided action and a type without one, and replaced by `preview_error` (a string) when it would fail now. The approval page shows it too.
 
 ```json
 {"id": "uuid", "run_id": "uuid", "agent": "finance", "type": "webhook:home-assistant",

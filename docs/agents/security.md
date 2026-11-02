@@ -89,6 +89,8 @@ A database agent is written through the API or by `agent:define`, and the built-
 - **No precheck and no `run` hook** (Prechecks and Agent hooks, below): either would run a command on orbit's host as orbit's user. `say` and `deny` hooks are allowed.
 - **A change that widens an agent waits for a person.** `spec.Widening` compares the change, loaded as it would run, with the agent's current version (nothing, for a new agent): a tool, a source added or changed, a credential, a delegate target, a need, a move to a sandbox profile, or an action type allowed more readily (deny, approve, auto). An `agent:define` that widens is recorded as `approve` whatever its rule says. One executing by rule alone is compared again against the agent as it is then, and fails if it widens, so a person's narrowing between proposal and execution holds.
 
+- **"Save this conversation as an agent" (`agent:save`) never lets a model choose reach.** The model writes the name, description, charter and starters; the tools, sources, rules and schedules come from the conversation's record, no broader than what happened (an approved type becomes `approve`, never `auto`), and the whole agent waits for a person as an `agent:define`, whatever the rule.
+
 What is left: an agent with `WebFetch` can send what its run read to any host, and a change within the agent's current reach (its charter, its triggers, narrowing) applies without a person.
 
 A worker rebuilds agents from the database without their origin and does not repeat these checks: control validated every spec it recorded, and the credential binding is checked on every fetch.

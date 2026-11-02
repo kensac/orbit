@@ -322,6 +322,14 @@ func (e *Engine) chatTools(a *spec.Agent, trigger string, types []actions.Type, 
 				b, _ := json.Marshal(res)
 				preview = " It will do this; tell the person the rule and the next fires: " + string(b)
 			}
+			if v.Type == actions.SaveType {
+				p, _ := actions.DecodeSave(v.Params)
+				if e.Current().Config.Agents[p.Name] != nil {
+					return fmt.Sprintf("an agent named %q exists; choose another name", p.Name), true
+				}
+				st.actions = append(st.actions, v)
+				return "Recorded: when your reply is sent, orbit adds what this conversation did (tools, fetched pages, approved action types, schedules asked for) and the person reviews the whole agent before it exists. A schedule:add with agent \"" + p.Name + "\" in this reply becomes its schedule.", false
+			}
 			st.actions = append(st.actions, v)
 			if ruleFor(a, v.Type, trigger) == spec.RuleAuto {
 				return "Recorded: it runs when your reply is sent." + preview, false

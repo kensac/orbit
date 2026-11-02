@@ -83,8 +83,9 @@ func Builtins(d Deployment) []*Agent {
 		// It may define agents, itself included (docs/api.md, Defining
 		// agents): each change is a new, revertible version. It delegates,
 		// changes schedules and starts runs under approve: directly in its
-		// person's chat, after approval when unattended.
-		Actions: map[string]Rule{"agent:define": RuleAuto, "delegate": RuleApprove,
+		// person's chat, after approval when unattended. agent:save is
+		// always proposed for approval (engine/save.go).
+		Actions: map[string]Rule{"agent:define": RuleAuto, "agent:save": RuleApprove, "delegate": RuleApprove,
 			"schedule:add": RuleApprove, "schedule:pause": RuleApprove, "schedule:resume": RuleApprove,
 			"schedule:remove": RuleApprove, "run:now": RuleApprove},
 		// Replies stay in orbit; failures and approvals still notify.

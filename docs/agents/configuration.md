@@ -27,6 +27,18 @@ An agent changes agents with the `agent:define` action (`internal/engine/define.
 
 Database and built-in agents are held to what orbit.yaml offers (`spec.validateTrust`): no `file` source, no `${VAR}` that is not in `credentials:`, without a `sandbox`, only the tools in `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite), no precheck and no `run` hook. A spec breaking one fails validation, naming it.
 
+### Saving a conversation as an agent
+
+`agent:save {name, description, charter, starters}` (the built-in `orbit` has it, `approve`) turns the conversation it is proposed in into a new agent (`internal/engine/save.go`). The model writes only those words; everything that decides the agent's reach comes from the conversation's record (`store.ConversationFacts`) and is no broader than what happened there:
+
+- `tools`: the tools its runs called (orbit's own `mcp__` tools are given to every run and are not listed). Without a sandbox, a tool outside `spec.UnsandboxedTools` is dropped; with one, the new agent gets the same `sandbox` and `needs`.
+- `sources`: the pages fetched with WebFetch, as `http` sources named by host (at most 5; a URL with `${` or `{{` is skipped).
+- `actions`: each type a person approved in the conversation (not one a rule approved), as `approve`, never `auto`. Delegation's types are left out: the record does not say which targets were meant.
+- `triggers`: every `schedule:add` proposed in the conversation that no person rejected, compiled as `schedule:add` compiles it; a `schedule:add` in the same reply with `agent` set to the new name becomes its schedule instead of an action of its own.
+- `runner`, `chat`, `session` and `timezone` from the agent it was saved from, `wake_on_message: true`, and the model's `starters`.
+
+It is proposed as an `agent:define` with `rule: "approve"`, whatever the agent's rules, so a person approves the whole agent, seen as a dry-run diff (`preview`, docs/api.md, Actions). A name already in use is refused at once.
+
 ## Secrets
 
 Never in YAML. Channels name variables with `*_env`; source urls, headers, query
