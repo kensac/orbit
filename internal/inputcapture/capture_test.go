@@ -51,12 +51,10 @@ func TestCaptureProvenanceAndExclusions(t *testing.T) {
 	a := artifact("inputs/session/data.json", "{\"x\":1}")
 	withheld := artifact("sources/private.json", "secret")
 	withheld.ID = "withheld"
-	memory := artifact("inputs/session/_memory.md", "private memory")
-	memory.ID = "memory"
 	old := a
 	old.Attempt = 1
 	old.ID = "old"
-	c, calls := server(t, []Artifact{a, withheld, old, memory}, "{\"x\":1}", 200)
+	c, calls := server(t, []Artifact{a, withheld, old}, "{\"x\":1}", 200)
 	target := filepath.Join(t.TempDir(), "capture")
 	m, err := Capture(context.Background(), c, "run", 2, target)
 	if err != nil {
@@ -188,5 +186,14 @@ func TestListingCapAndSymlinkNoClobber(t *testing.T) {
 	entries, err := os.ReadDir(destination)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("symlink modified: %v", err)
+	}
+}
+
+func TestRecordedMemoryInput(t *testing.T) {
+	a := artifact("inputs/session/_memory.md", "recorded memory")
+	c, calls := server(t, []Artifact{a}, "recorded memory", 200)
+	m, err := Capture(context.Background(), c, "run", 2, filepath.Join(t.TempDir(), "capture"))
+	if err != nil || !m.Complete || len(m.Inputs) != 1 || m.Inputs[0].Artifact != a || *calls != 1 {
+		t.Fatalf("recorded memory input: %+v %v", m, err)
 	}
 }

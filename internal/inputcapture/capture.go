@@ -1,4 +1,4 @@
-// Package inputcapture captures model-visible source artifacts without replaying a run.
+// Package inputcapture captures model-visible input artifacts without replaying a run.
 package inputcapture
 
 import (
@@ -83,7 +83,7 @@ func fetch(ctx context.Context, f Fetcher, endpoint string, max int) ([]byte, er
 }
 
 // Capture creates a new private directory, retaining verified inputs and a sanitized
-// manifest on remote failure. It never fetches withheld sources or context artifacts.
+// manifest on remote failure. It never fetches withheld sources or separate context artifacts.
 func Capture(ctx context.Context, f Fetcher, run string, attempt int, target string) (m Manifest, err error) {
 	segment, e := client.Segment(run)
 	if e != nil || attempt < 1 || target == "" {
@@ -99,7 +99,7 @@ func Capture(ctx context.Context, f Fetcher, run string, attempt int, target str
 		return m, e
 	}
 	defer root.Close()
-	m = Manifest{Version: 1, RunID: run, Attempt: attempt, Inputs: []Input{}, Limits: "Only direction=in inputs/ artifacts excluding reserved _memory.md from the selected attempt. Historical charter, memory, messages, skills, session state, output and withheld sources are not captured. Separate API reads are not an atomic snapshot. This fixture does not reproduce a complete model request or run a backend."}
+	m = Manifest{Version: 1, RunID: run, Attempt: attempt, Inputs: []Input{}, Limits: "Only direction=in inputs/ artifacts from the selected attempt. Recorded memory may be included when stored under inputs/. Historical charter, non-input memory, messages, skills, session state, output and withheld sources are not separately captured. Separate API reads are not an atomic snapshot. This fixture does not reproduce a complete model request or run a backend."}
 	defer func() {
 		data, _ := json.MarshalIndent(m, "", "  ")
 		if e := write(root, "manifest.json", data); e != nil {
@@ -134,7 +134,7 @@ func Capture(ctx context.Context, f Fetcher, run string, attempt int, target str
 			continue
 		}
 		// Reject malformed candidate paths before any content request.
-		if !strings.HasPrefix(a.Name, "inputs/") || path.Base(a.Name) == "_memory.md" {
+		if !strings.HasPrefix(a.Name, "inputs/") {
 			continue
 		}
 		_, idErr := client.Segment(a.ID)
@@ -153,7 +153,7 @@ func Capture(ctx context.Context, f Fetcher, run string, attempt int, target str
 		selected = append(selected, a)
 	}
 	if len(selected) == 0 {
-		fail("selected attempt has no model-visible source inputs")
+		fail("selected attempt has no model-visible inputs")
 		return
 	}
 	for _, a := range selected {

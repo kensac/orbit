@@ -1,4 +1,4 @@
-// orbitcapture saves selected model-visible source inputs through the public API.
+// orbitcapture saves selected model-visible inputs through the public API.
 package main
 
 import (
@@ -65,7 +65,7 @@ func run(ctx context.Context, args []string, out, notice io.Writer) error {
 	c := client.Client{BaseURL: *endpoint, Token: token, HTTP: hc}
 	m, err := inputcapture.Capture(ctx, &c, a[1], attempt, a[3])
 	if m.Version != 0 {
-		_, writeErr := fmt.Fprintf(out, "Captured %d verified inputs; complete: %t. Historical context and expectations are not captured.\n", len(m.Inputs), m.Complete)
+		_, writeErr := fmt.Fprintf(out, "Captured %d verified inputs; complete: %t. Context outside recorded inputs and expectations are not captured.\n", len(m.Inputs), m.Complete)
 		if writeErr != nil {
 			return writeErr
 		}

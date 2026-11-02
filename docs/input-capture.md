@@ -1,15 +1,16 @@
 # Captured evaluation inputs
 
 `go run ./cmd/orbitcapture [flags] capture RUN ATTEMPT NEW_DIRECTORY` saves
-only the model-visible source inputs from one explicit positive attempt. Set
+only the model-visible inputs from one explicit positive attempt. Set
 `ORBIT_URL`, `ORBIT_OIDC_ISSUER` and `ORBIT_OIDC_CLIENT_ID` for the public HTTPS
 API and device provider. Each invocation signs in separately and keeps its token
 in memory. The overall timeout defaults to five minutes and cannot exceed ten.
 
 The command reads `GET /runs/{id}/artifacts` and then the selected
 `GET /artifacts/{id}` contents. Only `direction: in` names under canonical
-`inputs/` paths qualify, excluding the reserved `_memory.md` entry generated
-from durable memory. It never fetches `sources/` content, runs a backend,
+`inputs/` paths qualify. This includes recorded durable memory when the run
+received it as an `inputs/_memory.md` artifact (possibly under a session prefix).
+It never fetches `sources/` content, runs a backend,
 refetches a source or applies proposed changes. No database access is involved.
 
 The new directory is private (0700) and files are private (0600). Existing paths
@@ -32,7 +33,8 @@ Local filesystem failures can prevent the manifest from being written. Inspect
 new directory to retry.
 
 This is capture material for authoring an evaluation fixture, not a runnable
-evaluation suite. Historical charter, memory, messages, skills, session state,
+evaluation suite. Historical charter, memory outside the recorded inputs, messages, skills,
+session state,
 output and expected properties are absent. Neither complete engine equivalence
 nor reproducible model output follows from this capture. Supply and review the
 missing context and deterministic expectations separately before evaluation.
