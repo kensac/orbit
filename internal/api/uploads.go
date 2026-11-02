@@ -8,14 +8,17 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/kensac/orbit/internal/store"
+	"github.com/kensac/orbit/internal/workspace"
 )
 
 // UploadURLTTL is how long a signed upload URL works: long enough for a
@@ -213,4 +216,71 @@ func serveFile(w http.ResponseWriter, name, mediaType string, b []byte) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 	_, _ = w.Write(b)
+}
+
+// workspaceFiles is GET /conversations/{id}/files: the regular files of the
+// conversation's workspace as of its newest snapshot (a chat agent's,
+// stored after each run), without orbit's own state.
+func (s *Server) workspaceFiles(w http.ResponseWriter, r *http.Request) {
+	c, err := s.Store.GetConversation(r.Context(), r.PathValue("id"))
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	ws, err := s.Store.LatestWorkspace(r.Context(), c.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		respond(w, map[string]any{"files": []workspace.File{}, "snapshot": nil}, nil)
+		return
+	}
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	files, err := workspace.List(ws.Archive, hiddenFile)
+	if files == nil {
+		files = []workspace.File{}
+	}
+	respond(w, map[string]any{"files": files, "snapshot": ws}, err)
+}
+
+// workspaceFile is GET /conversations/{id}/files/{path...}: one file,
+// always as a download.
+func (s *Server) workspaceFile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("path")
+	if hiddenFile(name) {
+		respond(w, nil, store.ErrNotFound)
+		return
+	}
+	ws, err := s.Store.LatestWorkspace(r.Context(), r.PathValue("id"))
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	b, err := workspace.Read(ws.Archive, name)
+	if errors.Is(err, fs.ErrNotExist) {
+		respond(w, nil, store.ErrNotFound)
+		return
+	}
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(name)}))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+	_, _ = w.Write(b)
+}
+
+// hiddenFile is orbit's own state in a workspace: the CLI's config and the
+// run's inputs (stored as artifacts).
+func hiddenFile(name string) bool {
+	name = strings.TrimPrefix(path.Clean("/"+name), "/")
+	for _, p := range []string{".orbit", "inputs"} {
+		if name == p || strings.HasPrefix(name, p+"/") {
+			return true
+		}
+	}
+	return false
 }
