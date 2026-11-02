@@ -190,6 +190,8 @@ merge an orbit PR whose checks are green; the executor re-checks the head
 commit, the branch and every check itself, and the rule decides whether a
 person approves first. In the fleet a merge is a deploy: keep it `approve`. A chat agent's `approve` rules are satisfied by its person's message in the conversation (`instructed_by`): a prompt injected into what the agent read during that turn can therefore get an approve-rule action executed while the person is chatting, as it could make Claude Code do anything its permissions allow. Unattended runs never get this. `github:pr` pushes only `orbit/chat/<branch>`, built by orbit from the working tree (the model's `.git` is never read or run), held to the build's diff policy; merging still needs every required check green.
 
+`github:comment` posts as the App in one of `github.comment_repositories` with a token of `issues: write` alone, minted for the comment and revoked after it; the executor re-checks the repository at execution. A compromised model can post any text (at most 20000 bytes, attribution lines scrubbed) on any issue or pull request of those repositories, under the rule, where every reader of the repository sees it: keep it `approve` for an agent whose inputs others write. `issues: write` also lets a token edit, label, close or lock issues; orbit's code posts only `POST /issues/{n}/comments` with it.
+
 `actions: write` (rerunning failed jobs) also covers dispatching and cancelling workflows; orbit mints it alone, only in the ticket loop, for `RerunJob` on the job ids of checks that failed, and no model sees it.
 
 ## GitHub and Loki sources

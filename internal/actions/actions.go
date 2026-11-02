@@ -74,6 +74,9 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 			out = append(out, prType(d))
 		}
 	}
+	if d.GitHub != nil && len(d.GitHub.CommentRepositories) > 0 && a.RuleFor(CommentType) != spec.RuleDeny {
+		out = append(out, commentType(d))
+	}
 	if a.RuleFor(DefineType) != spec.RuleDeny {
 		out = append(out, defineType(a))
 	}
@@ -378,6 +381,8 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 		return e.clone(ctx, c)
 	case typ == PRType:
 		return e.publish(ctx, c)
+	case typ == CommentType:
+		return e.comment(ctx, params)
 	case typ == store.DecisionType:
 		// A person approved it; the task it holds starts at the next
 		// reconcile. Nothing else happens here.
