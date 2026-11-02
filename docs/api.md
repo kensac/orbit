@@ -28,7 +28,7 @@ of:
 
 orbit is at `https://orbit.kanishksachdev.com`. The pages under `/ui` are
 behind authentik forward-auth; `/api/` is routed past forward-auth, and the
-JWT check is its gate (the portfolio on Vercel calls it server-side).
+JWT check is its gate (the portfolio on Vercel calls it server-side). `/hooks/` is routed past forward-auth too, and takes no token: a delivery's signature is its credential (Webhooks, below).
 
 ### Configuration
 
@@ -303,7 +303,7 @@ conversation:
   `reply_to`, when set, is the message it answers. `attachments` are the uploads it carries (Uploads, above), in order; always an array. `run_id` is the run that
   read a person's message (`null` until one starts) or the run that asked a
   question.
-- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again), `build` (a ticket's build run, docs/tickets.md), `learn` (a learning run, below; only in an agent's learning conversation), `task` (in a delegated task's conversation: the task starting, or its parent writing to it) or `delegation` (the agent woken because tasks it delegated settled; below). `status` is
+- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again), `build` (a ticket's build run, docs/tickets.md), `learn` (a learning run, below; only in an agent's learning conversation), `task` (in a delegated task's conversation: the task starting, or its parent writing to it), `delegation` (the agent woken because tasks it delegated settled; below) or `webhook` (a signed delivery to one of its webhook triggers; Webhooks, below). `status` is
   `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
   ended without a backend call because a gate, code, found nothing to judge;
   `gate` names it, and is `null` for every other status). `attempt` counts
@@ -403,7 +403,7 @@ The final answer is `done.report`, not the concatenated `text`: `text` is what t
 ```
 
 - Always present: `id`, `attempt`, `agent`, `spec_sha`, `trigger`, `prompt` (`""` when none), `status`, `created_at` and `steps`. Every other field is omitted when it has no value (not `null`).
-- `trigger` and `status` are as in a thread run item. `trigger_index` and `scheduled_for` are set on a `schedule` run: which of the agent's triggers fired, and the fire time.
+- `trigger` and `status` are as in a thread run item. `trigger_index` is set on a `schedule` or `webhook` run: which of the agent's triggers fired. `scheduled_for` is set on a `schedule` run: the fire time.
 - `runner_kind`, `model` and `worker` are the latest attempt's backend, its model (absent when the runner names none) and the instance that claimed it. `spec_sha` is the spec the latest attempt ran under.
 - `output` is the backend's raw structured output and `usage` its token usage, as it reported them. `cost_usd` is every attempt's cost together.
 - `session_id` is the backend session the run ended in. `session_mode` (`fresh`, `resumed`, `live`), `session_parent` (the run whose session it continued) and `session_depth` are set for an agent with a session.
@@ -967,6 +967,29 @@ Full-text search across everything orbit stores, ranked best first.
 - **Filters:** `agent` (that agent's documents; a profile or topic entry belongs to none), `conversation_id`, `run_id` (a UUID, else `400`); `from` and `to` are a calendar day in the deployment's timezone (`to` includes its day) or an RFC 3339 time (`to` excluded), by the document's `at` (a message's or memory version's creation, a run's finish, a transcript line's time). `limit` defaults to 20, at most 100; `offset` pages, at most 1000. `total` counts every match within the filters, whatever the page.
 - **`links`** are where the result is read in full: the run (`run`, and `run_page` when `public_url` is set) and its conversation's thread. A memory version names its run's conversation when it has one.
 - Documents are derived by triggers as rows are written, and existing rows were indexed by the migration that added search, so a result is there as soon as its row is.
+
+## Webhooks
+
+`POST /hooks/{agent}/{trigger}` (both listeners, no token: not under `/api/v1`) is a delivery to one of an agent's webhook triggers (docs/agents/configuration.md, Webhooks). The body is anything up to the trigger's `max_bytes` (default 1 MiB), signed under the trigger's secret by its scheme:
+
+| scheme | signature | delivery id | timestamp |
+|---|---|---|---|
+| `github` | `X-Hub-Signature-256: sha256=<hex HMAC-SHA256 of the body>` | `X-GitHub-Delivery` | none; `X-GitHub-Event` is recorded as the event |
+| `standard` | `webhook-signature: v1,<base64 HMAC-SHA256 of <id>.<timestamp>.<body>>` (several, space-separated, any may match) | `webhook-id` | `webhook-timestamp` (Unix seconds), within 5 minutes of orbit's clock |
+
+| status | body | when |
+|---|---|---|
+| `202` | `{"run_id": "uuid", "duplicate": false}` | a new delivery: a `webhook` run is queued in the agent's default conversation |
+| `200` | `{"run_id": "uuid", "duplicate": true}` | a delivery id already recorded for this agent and trigger: the first run, nothing new |
+| `200` | `{"ping": true}` | a `github` `ping` event: the secret is right, no run |
+| `400` | error | a header the scheme requires is missing or does not parse (a delivery id is at most 200 bytes) |
+| `401` | error | the signature does not match, or a `standard` timestamp is outside the tolerance |
+| `404` | error | no such agent, or it has no webhook trigger of that name |
+| `409` | error | the agent is disabled |
+| `413` | error | the body is larger than `max_bytes` |
+| `503` | error | the trigger's secret is not set in orbit's environment |
+
+The run's `prompt` is the trigger's prompt followed by `Webhook <trigger>: delivery <id>, event <event>.`; its `webhook` sources are the body, as received (`application/json` when it parses as JSON, else `text/plain`). Deliveries are counted in `orbit_webhook_deliveries_total{agent, trigger, outcome}`.
 
 ## Usage
 

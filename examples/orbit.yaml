@@ -81,3 +81,10 @@ build:
                  git status, git diff, git log, git show, ls, rg]
       protected: ["deploy/**"]
       max_diff_lines: 2000
+
+# Inbound webhooks: each secret is verified with its sender's scheme and may
+# be named only by the agents listed (docs/agents/configuration.md, Webhooks).
+webhook_secrets:
+  ORBIT_HOOK_GITHUB:
+    scheme: github
+    agents: [triage]

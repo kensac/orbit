@@ -396,6 +396,16 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env,
 		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted()}
+	if c.Trigger == store.TriggerWebhook {
+		d, err := e.Store.WebhookForRun(ctx, c.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if d != nil {
+			fetcher.Delivery = &sources.Fetched{MediaType: d.MediaType, Content: d.Body,
+				Meta: map[string]any{"delivery_id": d.DeliveryID, "event": d.Event, "trigger": d.TriggerName}}
+		}
+	}
 	vars := sources.Vars(now)
 	var inputs []runner.Input
 	if rec != nil {
@@ -415,6 +425,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			break
 		}
 		f, err := fetcher.Fetch(ctx, s, vars)
+		if errors.Is(err, sources.ErrAbsent) {
+			// Its transforms are skipped and a gate on it counts no records (transform.go, gate.go).
+			emit("orbit.source_absent", map[string]any{"source": s.Name, "reason": err.Error()})
+			continue
+		}
 		if err != nil {
 			emit("orbit.source_failed", map[string]any{"source": s.Name, "error": err.Error()})
 			return nil, nil, fmt.Errorf("source %s: %w", s.Name, err)

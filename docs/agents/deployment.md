@@ -53,6 +53,8 @@ the internal listener. Set compose `stop_grace_period` to at least
 overrides the drain's cap, which defaults to the longest agent timeout plus
 5 minutes.
 
+Routers: `/api/`, `/mcp` with the OAuth paths, and `/hooks/` (webhook deliveries, signed, docs/api.md) go past forward-auth, each with a priority above the host's catch-all; everything else (`/ui/`) is behind it. A webhook secret in orbit.yaml is in force only once its variable is in orbit's environment (a missing one answers `503`).
+
 A request that reaches the old instance in the seconds before traefik drops
 it is still served (the API is DB-backed); a run it enqueues is claimed by
 the new one within its 5 s poll.

@@ -31,6 +31,9 @@ var (
 	deliveries = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "orbit_deliveries_total", Help: "Notification attempts by channel and result.",
 	}, []string{"channel", "result"})
+	webhookDeliveries = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "orbit_webhook_deliveries_total", Help: "Inbound webhook deliveries to a configured trigger, by agent, trigger and outcome (accepted, duplicate, ping, bad_signature, stale, malformed, too_large, disabled, unconfigured).",
+	}, []string{"agent", "trigger", "outcome"})
 	actionsExecuted = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "orbit_actions_executed_total", Help: "Executed actions by agent, type and result.",
 	}, []string{"agent", "type", "result"})
@@ -83,6 +86,11 @@ func SeedLastSuccess(agent string, t time.Time) {
 // Delivery records one notification attempt.
 func Delivery(channel string, err error) {
 	deliveries.WithLabelValues(channel, result(err)).Inc()
+}
+
+// WebhookDelivery records one inbound delivery to a configured webhook trigger.
+func WebhookDelivery(agent, trigger, outcome string) {
+	webhookDeliveries.WithLabelValues(agent, trigger, outcome).Inc()
 }
 
 // ActionExecuted records one action execution.

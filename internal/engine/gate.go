@@ -25,12 +25,12 @@ type gateSkip struct {
 
 func (g *gateSkip) Error() string { return "skipped by gate " + g.gate + ": " + g.summary }
 
-// gated reports whether a run's gates apply: a scheduled run with no
-// person's message waiting. A message, a manual run, a continuation, a
-// build and a recovered attempt always reach the backend, because someone
-// asked for judgment (or already paid for part of it).
+// gated reports whether a run's gates apply: a scheduled or webhook run
+// with no person's message waiting. A message, a manual run, a
+// continuation, a build and a recovered attempt always reach the backend,
+// because someone asked for judgment (or already paid for part of it).
 func gated(a *spec.Agent, c *store.ClaimedRun, rc *store.RunContext, recovering bool) bool {
-	return len(a.Gates) > 0 && c.Trigger == "schedule" && len(rc.Messages) == 0 && !recovering
+	return len(a.Gates) > 0 && (c.Trigger == "schedule" || c.Trigger == store.TriggerWebhook) && len(rc.Messages) == 0 && !recovering
 }
 
 // gate runs the agent's gates in order over what the model would be shown
@@ -63,7 +63,12 @@ func (e *Engine) gate(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, w
 					"inputs unchanged since run %s, the last that succeeded", last.RunID)}, nil
 			}
 		case "items_above":
-			doc, err := harness.Decode(docs[g.Input])
+			raw, ok := docs[g.Input]
+			if !ok {
+				// A webhook source (or a transform of one) on a run no delivery started.
+				return &gateSkip{gate: g.Kind, summary: g.Input + " is absent: no webhook delivery started this run"}, nil
+			}
+			doc, err := harness.Decode(raw)
 			if err != nil {
 				return nil, fmt.Errorf("gate %d: %s is not JSON: %w", i, g.Input, err)
 			}

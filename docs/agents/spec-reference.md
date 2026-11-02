@@ -17,6 +17,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `credentials` | map of variable to credential | none | The variables sources may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
+| `webhook_secrets` | map of variable to webhook secret | none | The signing secrets inbound webhooks are verified with, each bound to the agents whose webhook triggers may name it (below). |
 
 ### `defaults`
 
@@ -107,6 +108,13 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 |---|---|---|---|
 | `url_prefix` | http(s) URL, path ending in `/` | required | Every request the variable is rendered into, redirects included, must start with it; no user, query or fragment (configuration.md, Secrets). |
 
+### `webhook_secrets.<VAR>`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `scheme` | `github`, `standard` | required | How the sender signs: GitHub's `X-Hub-Signature-256`, or Standard Webhooks (`webhook-id`, `webhook-timestamp`, `webhook-signature`; a `whsec_` secret is base64 after the prefix) (configuration.md, Webhooks). |
+| `agents` | list of agent names | required | The agents whose webhook triggers may name the secret; any other agent naming it fails the load. |
+
 ### `mail`
 
 | Field | Type | Default | What it does |
@@ -143,7 +151,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `triggers` | list | none | When the agent wakes on its own (below). |
 | `sources` | list | none | Data orbit fetches before a run (below). |
 | `transforms` | list | none | Code over a source before the model sees it (below). |
-| `gates` | list | none | Checks that skip a scheduled run before any backend call (below). |
+| `gates` | list | none | Checks that skip a scheduled or webhook run before any backend call (below). |
 | `tools` | list of tool names | none | Extra Claude Code tools (below). |
 | `actions` | map of type to rule | every type `deny` | The writes the agent may propose and what happens to each (below). |
 | `notify` | map | | Where unattended runs report (below). |
@@ -163,10 +171,13 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
-| `schedule` | cron (five fields) or descriptor | | When to fire, in the agent's timezone. Exactly one of `schedule` or `rrule`. |
+| `schedule` | cron (five fields) or descriptor | | When to fire, in the agent's timezone. Exactly one of `schedule`, `rrule` or `webhook`. |
 | `rrule` | RFC 5545 rule | | A recurrence cron cannot say (configuration.md, Triggers). |
 | `start` | local time `2026-11-03T09:00` | required with `rrule` | The rule's first period and its time of day; not allowed with `schedule`. |
 | `prompt` | string | none | The reason for this wake, appended to the charter. |
+| `webhook` | `^[a-z][a-z0-9-]{0,62}$` | | A signed delivery to `POST /hooks/<agent>/<webhook>` starts a run (configuration.md, Webhooks); unique per agent. |
+| `secret` | variable | required with `webhook` | The signing secret: one of `webhook_secrets`, listing this agent. |
+| `max_bytes` | int | `1048576` (1 MiB) | `webhook` only: the largest body accepted, at most 8 MiB; a larger one is `413`. |
 
 ### `sources[]`
 
@@ -175,7 +186,7 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | Field | Type | Default | What it does |
 |---|---|---|---|
 | `name` | `^[a-z][a-z0-9-]{0,62}$` | required | The input's name; unique among sources and transforms. |
-| `kind` | `http`, `prometheus`, `file` | required | How it is fetched (below). |
+| `kind` | `http`, `prometheus`, `file`, `webhook` | required | How it is fetched (below). `webhook` takes only `name` and `max_bytes`. |
 | `url` | URL | required for http, prometheus | Target; may use `${VAR}` and `{{today}}`-style templates. A credential in any field of the source is sent only under its `url_prefix`. |
 | `headers` | map | none | http request headers; values may use `${VAR}`. |
 | `query` | map | none | http query values; may use `${VAR}` and templates. |
@@ -189,6 +200,7 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | `http` | any URL with `GET`, with the headers given | Whatever the URL returns is model input, so it may carry instructions. |
 | `prometheus` | a Prometheus API | As http. |
 | `file` | any file orbit's user can read | Exposes orbit's host files to the model: name only files meant for it. Only a file agent may have one. |
+| `webhook` | the body of the delivery that started the run, as received; absent on any other run | The sender writes it: it is untrusted input, as http's is. Needs a webhook trigger. |
 
 ### `sources[].paginate`
 
@@ -211,7 +223,7 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 
 ### `gates[]`
 
-Checked in order on scheduled runs with no message waiting (configuration.md, Gates).
+Checked in order on scheduled and webhook runs with no message waiting (configuration.md, Gates).
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
