@@ -144,6 +144,23 @@ func (s *Server) managedOrError(w http.ResponseWriter, r *http.Request) (contain
 	return c, true
 }
 
+// profile is the configuration a create's profile runs under: the same
+// container options, and for a workstation its own egress proxy.
+func (s *Server) profile(name string) (Config, error) {
+	cfg := s.cfg
+	switch name {
+	case "", sandbox.ProfileBuild:
+	case sandbox.ProfileWorkstation:
+		if cfg.WorkstationProxy == "" {
+			return cfg, errors.New("the workstation profile is not configured here (ORBIT_SANDBOX_WORKSTATION_PROXY)")
+		}
+		cfg.Proxy = cfg.WorkstationProxy
+	default:
+		return cfg, fmt.Errorf("unknown profile %q", name)
+	}
+	return cfg, nil
+}
+
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	runID := r.URL.Query().Get("run_id")
@@ -151,8 +168,13 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "run_id must be 1 to 64 letters, digits or dashes")
 		return
 	}
+	cfg, err := s.profile(r.URL.Query().Get("profile"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	now := s.now()
-	spec := containerSpec(s.cfg, runID, now)
+	spec := containerSpec(cfg, runID, now)
 
 	s.mu.Lock()
 	existing, err := s.d.managed(ctx)
@@ -187,7 +209,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadGateway, err.Error())
 		return
 	}
-	if err := verifyCreated(s.cfg, c); err != nil {
+	if err := verifyCreated(cfg, c); err != nil {
 		fail(http.StatusInternalServerError, "the daemon did not create the container asked for: "+err.Error())
 		return
 	}
