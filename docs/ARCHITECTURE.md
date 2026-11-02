@@ -281,7 +281,7 @@ signalling between writers and readers. `GET /usage` and `GET /health` are
 the admin read side, computed from stored rows and the configuration in
 force: subscription windows from the newest `rate_limit_event` Claude Code
 wrote into a run's stream (what it last reported, not a live query), exact
-cost sums, the queue, running runs and next fires. `/mcp` serves the same reads and writes as MCP tools (`internal/api/mcp.go`, stateless Streamable HTTP), with an OAuth proxy in front of authentik for clients that need dynamic registration (`oauth.go`). Contract: docs/api.md.
+cost sums, the queue, running runs and next fires. `/mcp` serves the same reads and writes as MCP tools (`internal/api/mcp.go`, stateless Streamable HTTP), with an OAuth proxy in front of authentik for clients that need dynamic registration (`oauth.go`). The chat UI is the portfolio's (kanishksachdev.com/orbit, its own repository), a client of `/api/v1` and the streams. Contract: docs/api.md.
 
 ## Search
 
@@ -387,7 +387,7 @@ container that holds nothing worth taking. Three pieces, all in this
 repository and all built; build runs use them (below, and tickets.md):
 
 ```
-orbit (hetzner) --tailnet, bearer token--> orbit sandboxd (oci, holds the docker socket)
+orbit (hetzner) --internal network, bearer token--> orbit sandboxd (hetzner, holds the docker socket)
                                               -> build container (deploy/build.Dockerfile)
                                                  on the internal network orbit-sandbox
                                                     -> orbit egress (CONNECT proxy) -> allowlisted hosts
@@ -460,5 +460,4 @@ The direction, so changes now do not close it off:
 
 - **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)).
 - **Event triggers** from webhooks (a ticket assigned, a comment).
-- **A UI** over `/api/v1` (the thread and the stream are its read side).
 - **The workspace**: an IDE in the portfolio chat over files, terminals and git in a conversation's snapshot or an agent's box ([workspace.md](workspace.md)).

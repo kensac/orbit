@@ -294,9 +294,11 @@ in `orbit.yaml`. A ticket in the API:
  "conversation_id": "uuid",
  "repo": "kensac/orbit", "status": "review", "author": "kanishk",
  "approved_plan": 2, "branch": "orbit/3f2a9c1e", "pr_number": 41,
- "head_sha": "...", "merge_sha": null, "error": null, "stack_on": null,
+ "head_sha": "...",
  "created_at": "...", "updated_at": "..."}
 ```
+
+Fields not yet set (`merge_sha`, `error`, `stack_on`, ...) are omitted, not `null`; the full shape is in docs/api.md, Tickets.
 
 ## GitHub access: one App, per-run tokens
 
@@ -449,10 +451,7 @@ addresses only, and nothing else. It refuses to load an allowlist naming
 GitHub: the checkout is already inside, and a sandbox that cannot reach
 GitHub cannot push even with a token it found.
 
-**Where it runs.** sandboxd can run on any docker host orbit reaches over
-the tailnet; the default is oci (Open decisions). oci (the ARM CI host, already running CI runners and nothing
-public) is the better home than hetzner, which holds every other secret in
-the fleet: a container escape there reaches far less.
+**Where it runs.** sandboxd can run on any docker host orbit reaches; today it runs on hetzner beside orbit, reached over an internal docker network (docs/agents/deployment.md). Workstation sandboxes are planned for hetzner and oci. A container escape on hetzner reaches every other secret in the fleet; on oci (the ARM CI host, running CI runners and nothing public) it would reach far less.
 
 **Alternatives considered.** Rootless podman inside orbit's container needs
 user namespaces and `/dev/fuse` that docker's default seccomp profile
@@ -547,7 +546,7 @@ deterministic:
 | tool | allowed when |
 |---|---|
 | `Edit`, `Write` | the path resolves inside `/work`, outside `.git/`, and outside the repository's protected paths (configuration; for orbit: `.github/**`, `deploy/**`) |
-| `Bash` | the command parses (a POSIX shell parser, not a regex) into simple commands joined by `&&`, `\|\|`, `;` or `\|`, with no command or process substitution, no backgrounding, redirections only to files inside `/work` or `/dev/null`, and every command's argv prefix on the repository's list (for orbit: `go build`, `go test`, `go vet`, `gofmt`, `make check`, `make fmt`, `make test`, `git status`, `git diff`, `git log`, `git show`, `ls`, `rg`) |
+| `Bash` | the command parses (a POSIX shell parser, not a regex) into simple commands joined by `&&`, `\|\|`, `;` or `\|`, with no command or process substitution, no backgrounding, redirections only to files inside `/work` or `/dev/null`, and every command's argv prefix on the repository's list (for orbit: `go build`, `go test`, `go vet`, `gofmt`, `make check`, `make check-sandbox`, `make fmt`, `make test`, `git status`, `git diff`, `git log`, `git show`, `ls`, `rg`) |
 | anything else | never |
 
 A denial's message tells the model what is allowed, so it adapts instead of
@@ -563,6 +562,8 @@ process outside the container, which nothing inside can reach or alter. This lis
 is **not** the security boundary. `go test` and `make check` run code the
 model wrote, which can do anything the container allows. The boundary is
 the container, its network, and the absence of secrets in it.
+
+**Checks inside the sandbox.** The build container has no Postgres and no C compiler, so `make check` cannot pass there (`go test -race` needs cgo, and database tests need a server). A build of orbit runs `make check-sandbox` instead: the same format, vet, staticcheck, prose and example-config gates, and `go test ./...` without `-race`, with database tests skipping. CI's `check` job runs the full `make check` gates against Postgres on the PR before the merge.
 
 ### What the CLI's own sandbox does and does not guarantee
 
@@ -695,7 +696,7 @@ changes:
   ticket per repository).
 - **orbit cannot fix a broken orbit.** If the new revision does not start,
   no orbit run can revert it; recovery is the person rolling hetzner's pin
-  back. The build run's `make check` and the image build in CI are the only
+  back. The build run's checks and CI (its `check` job and the image build) are the only
   gates before that, which is why the merge stays `approve`.
 
 ## Open decisions
@@ -706,7 +707,7 @@ confirmed them.
 - **Which check conclusions pass.** Default: a required check passes only
   on `success`; with no required checks, `success`, `skipped` and
   `neutral` pass and anything else blocks. Owner to confirm.
-- **Where sandboxd runs.** Default: oci (above). Owner to confirm.
+- **Where sandboxd runs.** Today: hetzner (above). Moving it to oci, where an escape reaches less, is the owner's call.
 - **Which PRs orbit merges.** Default: only its own `orbit/*` branches in
   the same repository, not Renovate's or anyone else's. Owner to confirm.
 - **Keeping the backend credential out of the build container** (the
@@ -738,7 +739,7 @@ build:
   author: "orbit-kensac[bot] <351241810+orbit-kensac[bot]@users.noreply.github.com>"
   repositories:
     kensac/orbit:
-      commands: [go build, go test, go vet, gofmt, make check, make fmt, make test,
+      commands: [go build, go test, go vet, gofmt, make check, make check-sandbox, make fmt, make test,
                  git status, git diff, git log, git show, ls, rg]
       protected: ["deploy/**"]         # .github/** and .gitmodules always are
       max_diff_lines: 2000             # the default
@@ -794,5 +795,5 @@ An agent may merge only once its spec names the rule:
 request and the CI check (`check` for orbit), and leave the App off the
 bypass list.
 
-**The build runner** needs sandboxd and egress on oci and the `build:`
+**The build runner** needs sandboxd and egress and the `build:`
 section on hetzner: the steps are in docs/agents/deployment.md.
