@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,17 +15,6 @@ import (
 // means the ticket was no longer where the request assumed. The person is
 // the verified token's; body author and by count only with the operator
 // token.
-
-func decodeBody(w http.ResponseWriter, r *http.Request, into any) bool {
-	if r.ContentLength == 0 {
-		return true
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(into); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return false
-	}
-	return true
-}
 
 // decider is who decides a transition: the token's person, or with the
 // operator token whoever the body names, else "operator".
@@ -48,8 +36,11 @@ func (s *Server) createTicket(w http.ResponseWriter, r *http.Request) {
 		// Wake overrides the agent's wake_on_message for the first message.
 		Wake            *bool  `json:"wake"`
 		ClientRequestID string `json:"client_request_id"`
+		// StackOn files the request on top of another of the same
+		// repository (docs/tickets.md, Stacked tickets).
+		StackOn string `json:"stack_on"`
 	}
-	if !decodeBody(w, r, &body) {
+	if !decode(w, r, 64<<10, &body, bodyOptional) {
 		return
 	}
 	body.Title, body.Body = strings.TrimSpace(body.Title), strings.TrimSpace(body.Body)
@@ -79,7 +70,8 @@ func (s *Server) createTicket(w http.ResponseWriter, r *http.Request) {
 		wake = *body.Wake
 	}
 	res, replayed, err := s.Store.CreateTicket(r.Context(), store.NewTicket{Kind: body.Kind, Title: body.Title, Body: body.Body,
-		Agent: a.Name, SpecSHA: a.SHA, Repo: body.Repo, Author: actor(r, body.Author), Wake: wake, ClientID: body.ClientRequestID})
+		Agent: a.Name, SpecSHA: a.SHA, Repo: body.Repo, Author: actor(r, body.Author), Wake: wake, ClientID: body.ClientRequestID,
+		StackOn: body.StackOn})
 	if err == nil && res.RunID != "" && !replayed {
 		s.Wake()
 	}
@@ -88,7 +80,10 @@ func (s *Server) createTicket(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listTickets(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	f := store.TicketFilter{Status: q.Get("status"), Agent: q.Get("agent"), Limit: intParam(r, "limit")}
+	f := store.TicketFilter{Status: q.Get("status"), Agent: q.Get("agent")}
+	if !queryInt(w, r, "limit", &f.Limit) {
+		return
+	}
 	if b := q.Get("before"); b != "" {
 		t, err := time.Parse(time.RFC3339Nano, b)
 		if err != nil {
@@ -129,7 +124,7 @@ func (s *Server) rerunChecks(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		By string `json:"by"`
 	}
-	if !decodeBody(w, r, &body) {
+	if !decode(w, r, 64<<10, &body, bodyOptional) {
 		return
 	}
 	rr, err := s.Store.RequestRerun(r.Context(), r.PathValue("id"), decider(r, body.By))
@@ -141,7 +136,7 @@ func (s *Server) approvePlan(w http.ResponseWriter, r *http.Request) {
 		By              string `json:"by"`
 		ClientRequestID string `json:"client_request_id"`
 	}
-	if !decodeBody(w, r, &body) {
+	if !decode(w, r, 64<<10, &body, bodyOptional) {
 		return
 	}
 	version, err := strconv.Atoi(r.PathValue("version"))
@@ -160,7 +155,7 @@ func (s *Server) ticketMove(to string) http.HandlerFunc {
 			By     string `json:"by"`
 			Reason string `json:"reason"`
 		}
-		if !decodeBody(w, r, &body) {
+		if !decode(w, r, 64<<10, &body, bodyOptional) {
 			return
 		}
 		err := s.Store.TransitionTicket(r.Context(), r.PathValue("id"), to, decider(r, body.By), store.TicketUpdate{Reason: body.Reason})

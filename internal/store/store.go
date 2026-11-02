@@ -530,6 +530,12 @@ func finishRun(ctx context.Context, tx pgx.Tx, runID string, r RunResult) error 
 		runID, r.Attempt, r.Status, r.CostUSD, r.SessionCostUSD, r.SessionID); err != nil {
 		return err
 	}
+	if r.Status == "failed" {
+		// Every way a run fails ends here (the engine, a build, the reaper).
+		if err := newAttention(ctx, tx, AttentionFailure, "failure:"+runID, runID, " run failed", nil, nil, nil, nil); err != nil {
+			return err
+		}
+	}
 	if r.Attempt < 1 {
 		return nil
 	}
@@ -627,18 +633,38 @@ func (s *Store) ListRuns(ctx context.Context, f RunFilter) ([]Run, error) {
 	return out, rows.Err()
 }
 
-// CancelRun cancels a queued run. A running run cannot be cancelled here; the
-// executor owns it until its timeout.
-func (s *Store) CancelRun(ctx context.Context, id string) error {
-	tag, err := s.Pool.Exec(ctx, `UPDATE runs SET status = 'cancelled', finished_at = now()
-		WHERE id = $1 AND status = 'queued'`, id)
+// CancelRun cancels a queued run at once (status cancelled), or asks a
+// running one to stop (status "cancelling"): its executor owns it, and ends
+// it. Any other state is ErrConflict.
+func (s *Store) CancelRun(ctx context.Context, id, by string) (status string, err error) {
+	tag, err := s.Pool.Exec(ctx, `UPDATE runs SET status = 'cancelled', finished_at = now(),
+		cancel_requested_at = now(), cancel_requested_by = NULLIF($2, '')
+		WHERE id = $1 AND status = 'queued'`, id, by)
 	if err != nil {
-		return err
+		return "", err
+	}
+	if tag.RowsAffected() == 1 {
+		return StatusCancelled, nil
+	}
+	// A running run is asked to stop: its attempt sees the request
+	// (CancelRequested), interrupts its backend and ends the run cancelled.
+	tag, err = s.Pool.Exec(ctx, `UPDATE runs SET cancel_requested_at = COALESCE(cancel_requested_at, now()),
+		cancel_requested_by = COALESCE(cancel_requested_by, NULLIF($2, ''))
+		WHERE id = $1 AND status = 'running'`, id, by)
+	if err != nil {
+		return "", err
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrConflict
+		return "", ErrConflict
 	}
-	return nil
+	return "cancelling", nil
+}
+
+// CancelRequested reports whether a person asked the run to stop.
+func (s *Store) CancelRequested(ctx context.Context, id string) (bool, error) {
+	var asked bool
+	err := s.Pool.QueryRow(ctx, `SELECT cancel_requested_at IS NOT NULL FROM runs WHERE id = $1`, id).Scan(&asked)
+	return asked, err
 }
 
 // ---------------------------------------------------------------- events
@@ -941,9 +967,13 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 		// orders them as the run listed them.
 		for _, q := range o.Questions {
 			// A question is asked in the asking run's conversation.
-			if _, err := tx.Exec(ctx, `INSERT INTO messages (agent, direction, body, run_id, conversation_id, created_at)
-				SELECT $1, 'from_agent', $2, $3, conversation_id, clock_timestamp() FROM runs WHERE id = $3`,
-				agent, q, runID); err != nil {
+			var id string
+			if err := tx.QueryRow(ctx, `INSERT INTO messages (agent, direction, body, run_id, conversation_id, created_at)
+				SELECT $1, 'from_agent', $2, $3, conversation_id, clock_timestamp() FROM runs WHERE id = $3
+				RETURNING id::text`, agent, q, runID).Scan(&id); err != nil {
+				return err
+			}
+			if err := newAttention(ctx, tx, AttentionQuestion, "question:"+id, runID, " has a question", nil, &id, nil, nil); err != nil {
 				return err
 			}
 		}
@@ -986,7 +1016,10 @@ func insertAction(ctx context.Context, tx pgx.Tx, runID, agent string, a Propose
 		        NULLIF($8, ''), clock_timestamp())
 		RETURNING id::text`,
 		runID, agent, a.Type, []byte(a.Params), a.Reason, a.Rule, status, a.Error).Scan(&id)
-	return id, err
+	if err != nil || status != "pending" {
+		return id, err
+	}
+	return id, newAttention(ctx, tx, AttentionApproval, "action:"+id, runID, " wants to "+a.Type, &id, nil, nil, nil)
 }
 
 // ---------------------------------------------------------------- actions
@@ -1061,10 +1094,7 @@ const (
 // ListActionsPage returns actions newest first, ordered by (created_at,
 // id), so paging by the cursor never skips or repeats one.
 func (s *Store) ListActionsPage(ctx context.Context, f ActionFilter) (*ActionPage, error) {
-	if f.Limit <= 0 {
-		f.Limit = DefaultActionLimit
-	}
-	f.Limit = min(f.Limit, MaxActionLimit)
+	f.Limit = clampLimit(f.Limit, DefaultActionLimit, MaxActionLimit)
 	var at, runID any
 	id := "ffffffff-ffff-ffff-ffff-ffffffffffff"
 	if f.Before != nil {

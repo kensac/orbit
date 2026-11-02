@@ -136,14 +136,7 @@ func missingEnv(cfg *spec.Config, caps spec.Capabilities, lookup func(string) (s
 			continue
 		}
 		for _, s := range a.Sources {
-			b := s.URL + "\x00" + s.Expr
-			for k, v := range s.Headers {
-				b += "\x00" + k + v
-			}
-			for k, v := range s.Query {
-				b += "\x00" + k + v
-			}
-			for _, r := range spec.EnvRefs(b) {
+			for _, r := range s.EnvRefs() {
 				want[r] = true
 			}
 		}

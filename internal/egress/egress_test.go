@@ -62,6 +62,10 @@ func TestPublic(t *testing.T) {
 // testProxy allows example.org, which resolves to an echo server on
 // loopback; the public check is relaxed only for that server's address.
 func testProxy(t *testing.T, resolveTo string) (*httptest.Server, *lockedBuf) {
+	return testProxyAllowing(t, resolveTo, map[string]bool{"example.org": true})
+}
+
+func testProxyAllowing(t *testing.T, resolveTo string, allow map[string]bool) (*httptest.Server, *lockedBuf) {
 	echo, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +81,7 @@ func testProxy(t *testing.T, resolveTo string) (*httptest.Server, *lockedBuf) {
 		}
 	}()
 	logs := &lockedBuf{}
-	p := New(map[string]bool{"example.org": true}, slog.New(slog.NewTextHandler(logs, nil)))
+	p := New(allow, slog.New(slog.NewTextHandler(logs, nil)))
 	echoAddr := echo.Addr().(*net.TCPAddr).AddrPort()
 	p.lookup = func(context.Context, string) ([]netip.Addr, error) {
 		return []netip.Addr{netip.MustParseAddr(resolveTo)}, nil
@@ -153,6 +157,36 @@ func TestProxyDenies(t *testing.T) {
 	}
 	if n := strings.Count(logs.String(), "egress: denied"); n != 8 {
 		t.Fatalf("%d denials logged:\n%s", n, logs.String())
+	}
+}
+
+// TestAnyPublicHost: "*" tunnels to any public hostname, GitHub included,
+// and still never dials into the host's networks.
+func TestAnyPublicHost(t *testing.T) {
+	allow, err := ParseAllowlist(" * ")
+	if err != nil || !allow[AnyPublic] {
+		t.Fatalf("%v %v", allow, err)
+	}
+	srv, _ := testProxyAllowing(t, "127.0.0.1", allow)
+	for _, target := range []string{"github.com:443", "pypi.org:443"} {
+		code, c, _ := connect(t, srv.URL, target)
+		c.Close()
+		if code != http.StatusOK {
+			t.Errorf("%s: %d", target, code)
+		}
+	}
+	for _, target := range []string{"pypi.org:22", "127.0.0.1:443"} {
+		code, c, _ := connect(t, srv.URL, target)
+		c.Close()
+		if code != http.StatusForbidden {
+			t.Errorf("%s: %d", target, code)
+		}
+	}
+	private, _ := testProxyAllowing(t, "100.79.4.41", allow)
+	if code, c, _ := connect(t, private.URL, "pypi.org:443"); code != http.StatusForbidden {
+		t.Errorf("a tailnet address: %d", code)
+	} else {
+		c.Close()
 	}
 }
 

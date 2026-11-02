@@ -63,8 +63,13 @@ type Deployment struct {
 	// Build is how orbit builds approved tickets (build.go). Without it no
 	// ticket is built.
 	Build *Build `yaml:"build,omitempty" json:"build,omitempty"`
+	// Sandbox is sandboxd for sandboxed chat agents, when it is not the
+	// build section's (SandboxService).
+	Sandbox *SandboxService `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
 	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
+	// Credentials are the variables a source may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
+	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -176,6 +181,8 @@ type Agent struct {
 	Topics []string `yaml:"topics,omitempty" json:"topics,omitempty"`
 	// Skills are skills from orbit's library (docs/api.md, Skills) this agent runs with; the API can attach more.
 	Skills []string `yaml:"skills,omitempty" json:"skills,omitempty"`
+	// Hooks are Claude Code hooks for this agent's runs, beside orbit's own (docs/agents/configuration.md, Hooks).
+	Hooks []Hook `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 	// Learn is how orbit learns from this agent's conversations once they go quiet (engine/learn.go). Absent is on, with the defaults.
 	Learn *LearnSpec `yaml:"learn,omitempty" json:"learn,omitempty"`
 	// Needs names the capabilities a host must have to run this agent
@@ -183,6 +190,17 @@ type Agent struct {
 	// claims a run only when its ORBIT_CAPABILITIES cover every one; an
 	// agent with none runs anywhere (docs/ARCHITECTURE.md, Worker fleet).
 	Needs []string `yaml:"needs,omitempty" json:"needs,omitempty"`
+	// Chat makes the agent a conversation, as a Claude Code session is
+	// (claude-code only): its reply is the session's final message, not a
+	// report schema, and memory, questions and actions are orbit's tools it
+	// may call (docs/ARCHITECTURE.md, Chat agents).
+	Chat bool `yaml:"chat,omitempty" json:"chat,omitempty"`
+	// Sandbox runs a chat agent's CLI in a sandboxd container per
+	// conversation, over a workspace kept between messages, as one of
+	// SandboxProfiles: "workstation" (every Claude Code tool, broad egress,
+	// a home kept in the workspace) or "build" (the tools it names, the
+	// build egress allowlist). Needs sandboxd in orbit.yaml.
+	Sandbox string `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
 	// Delegates names the agents this one may hand tasks to with the
 	// delegate action ("*" is every configured agent, itself included).
 	// The delegate rule still decides whether it may (docs/ARCHITECTURE.md,
@@ -221,6 +239,30 @@ type SessionSpec struct {
 	// starting a process per run. Zero means no live process.
 	Live Duration `yaml:"live,omitempty" json:"live,omitempty"`
 }
+
+// Hook is one Claude Code hook of an agent: at Event (and, for a tool event, a tool Matcher matches), orbit's hook binary does one thing: Say tells the model something (as context; at Stop it sends the model back once with it), Deny refuses the tool with a reason (PreToolUse), or Run runs a command with the event on stdin, in the run's workdir, with an empty environment but PATH, under Timeout.
+type Hook struct {
+	Event   string   `yaml:"event" json:"event"`
+	Matcher string   `yaml:"matcher,omitempty" json:"matcher,omitempty"`
+	Say     string   `yaml:"say,omitempty" json:"say,omitempty"`
+	Deny    string   `yaml:"deny,omitempty" json:"deny,omitempty"`
+	Run     []string `yaml:"run,omitempty" json:"run,omitempty"`
+	Timeout Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+}
+
+// HookEvents are the Claude Code events an agent's hooks may name; ToolHookEvents take a matcher. SessionStart fires once per CLI process, so in a live process it does not fire for every run.
+var (
+	HookEvents     = []string{"PreToolUse", "PostToolUse", "UserPromptSubmit", "SessionStart", "Stop"}
+	ToolHookEvents = []string{"PreToolUse", "PostToolUse"}
+)
+
+// Bounds on an agent's hooks: a hook's text rides in the model's context, and a command holds up the turn it fires in.
+const (
+	MaxHooks           = 20
+	MaxHookText        = 2 << 10
+	DefaultHookTimeout = 10 * time.Second
+	MaxHookTimeout     = time.Minute
+)
 
 // LearnSpec configures an agent's learning runs.
 type LearnSpec struct {
@@ -749,7 +791,11 @@ func (c *Config) Validate() error {
 	for _, n := range names {
 		errs = append(errs, c.validateAgent(c.Agents[n])...)
 	}
+	errs = append(errs, c.validateCredentials()...)
 	errs = append(errs, c.validateBuild()...)
+	if sb := c.Deployment.Sandbox; sb != nil && !strings.HasPrefix(sb.Sandboxd, "unix:/") && !strings.Contains(sb.Sandboxd, ":") {
+		errs = append(errs, fmt.Errorf("sandbox: sandboxd %q is neither host:port nor unix:/path", sb.Sandboxd))
+	}
 	errs = append(errs, c.validateMail()...)
 	return errors.Join(errs...)
 }
@@ -839,7 +885,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 				at("gate %d: unchanged takes no input, items, n, command or timeout", i)
 			}
 		case "precheck":
-			if a.Origin != OriginFile {
+			if a.Restricted() {
 				// The API and agent:define write database agents; a
 				// command on orbit's host is for reviewed files only.
 				at("gate %d: a precheck runs a command on orbit's host, so only an agent in the configuration files may have one", i)
@@ -902,6 +948,41 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("verify: unknown check %q (want one of %v)", v, verifyChecks)
 		}
 	}
+	if len(a.Hooks) > 0 && c.Deployment.Runners[a.Runner].Kind != "claude-code" {
+		at("hooks: need a claude-code runner")
+	}
+	if len(a.Hooks) > MaxHooks {
+		at("hooks: at most %d", MaxHooks)
+	}
+	for i, h := range a.Hooks {
+		if !slices.Contains(HookEvents, h.Event) {
+			at("hooks[%d]: event must be one of %v", i, HookEvents)
+		}
+		if h.Matcher != "" && !slices.Contains(ToolHookEvents, h.Event) {
+			at("hooks[%d]: only %v take a matcher", i, ToolHookEvents)
+		}
+		n := 0
+		for _, set := range []bool{h.Say != "", h.Deny != "", len(h.Run) > 0} {
+			if set {
+				n++
+			}
+		}
+		if n != 1 {
+			at("hooks[%d]: give exactly one of say, deny and run", i)
+		}
+		if h.Deny != "" && h.Event != "PreToolUse" {
+			at("hooks[%d]: deny is for PreToolUse", i)
+		}
+		if len(h.Say) > MaxHookText || len(h.Deny) > MaxHookText {
+			at("hooks[%d]: say and deny are at most %d bytes", i, MaxHookText)
+		}
+		if len(h.Run) > 0 && h.Run[0] == "" {
+			at("hooks[%d]: run names a command", i)
+		}
+		if h.Timeout < 0 || time.Duration(h.Timeout) > MaxHookTimeout || (h.Timeout != 0 && len(h.Run) == 0) {
+			at("hooks[%d]: timeout is for run, at most %s", i, MaxHookTimeout)
+		}
+	}
 	a.delegateTargets = nil
 	for _, d := range a.Delegates {
 		switch {
@@ -957,6 +1038,21 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		seenNeed[n] = true
 	}
+	if a.Chat && c.Deployment.Runners[a.Runner].Kind != "claude-code" {
+		at("chat: needs a claude-code runner (runner %q is %q)", a.Runner, c.Deployment.Runners[a.Runner].Kind)
+	}
+	if a.Sandbox != "" {
+		if !slices.Contains(SandboxProfiles, a.Sandbox) {
+			at("sandbox: %q is not a profile (want one of %v)", a.Sandbox, SandboxProfiles)
+		}
+		if !a.Chat {
+			at("sandbox: needs chat: true")
+		}
+		if addr, _ := c.Deployment.SandboxService(); addr == "" {
+			at("sandbox: needs sandboxd in orbit.yaml (a sandbox: or build: section)")
+		}
+	}
+	errs = append(errs, c.validateTrust(a)...)
 	if ss := a.Session; ss != nil {
 		rs := c.Deployment.Runners[a.Runner]
 		if rs.Kind != "claude-code" {

@@ -93,7 +93,22 @@ func harnessHooks(h *Harness, workdir, home string) map[string]any {
 	if h.Figures {
 		pre = append(pre, map[string]any{"matcher": "StructuredOutput", "hooks": cmd(" --figures")})
 	}
-	return map[string]any{"PreToolUse": pre}
+	out := map[string]any{"PreToolUse": pre}
+	for _, ah := range h.AgentHooks {
+		timeout := hookTimeout
+		if ah.Def.Timeout > 0 {
+			// The CLI's bound sits a little past the command's own, so the command's timeout is the one that reports.
+			timeout = int(ah.Def.Timeout.Seconds()) + 5
+		}
+		entry := map[string]any{"hooks": []any{map[string]any{"type": "command", "timeout": timeout,
+			"command": shellQuote(h.Bin) + " agent-hook --root " + shellQuote(workdir) + " --def " + harness.EncodeAgentHook(ah.Def)}}}
+		if ah.Matcher != "" {
+			entry["matcher"] = ah.Matcher
+		}
+		list, _ := out[ah.Event].([]any)
+		out[ah.Event] = append(list, entry)
+	}
+	return out
 }
 
 // harnessMCP is the --mcp-config that starts `orbit mcp` for the run.
@@ -177,6 +192,9 @@ func (c *claudeCode) env(home string) []string {
 }
 
 func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*Result, error) {
+	if req.Chat != nil {
+		return c.runChat(ctx, req, emit)
+	}
 	sess := req.Session
 	home := filepath.Join(req.Workdir, ".home")
 	keepDays := 1
@@ -262,9 +280,9 @@ func (c *claudeCode) resumed(ctx context.Context, sess *Session, args, env []str
 func (c *claudeCode) oneShot(ctx context.Context, args, env []string, req Request, emit func(Event)) ([]byte, error) {
 	var final []byte
 	stderr, err := runCLI(ctx, c.bin, args, env, req.Workdir, req.Prompt, func(line []byte) {
-		kind := eventKind(line)
-		emit(Event{Kind: kind, Payload: line})
-		if isResult(kind) {
+		l := claudeproto.ParseLine(line)
+		emit(Event{Kind: l.Kind, Payload: line})
+		if l.IsResult() {
 			final = line
 		}
 	})
@@ -276,8 +294,6 @@ func (c *claudeCode) oneShot(ctx context.Context, args, env []string, req Reques
 	}
 	return final, nil
 }
-
-func isResult(kind string) bool { return kind == "result" || strings.HasPrefix(kind, "result.") }
 
 // parseClaudeResult reads the stream's final `result` line. is_error is the field to trust: a failed login reports subtype "success" with is_error (claudeproto.Result.Failure).
 func parseClaudeResult(line []byte) (*Result, error) {
@@ -306,12 +322,9 @@ func attachOnce(emit func(Event), attached func(string)) func(Event) {
 	seen := false
 	return func(ev Event) {
 		if !seen {
-			var h struct {
-				SessionID string `json:"session_id"`
-			}
-			if json.Unmarshal(ev.Payload, &h) == nil && h.SessionID != "" {
+			if id := claudeproto.ParseLine(ev.Payload).SessionID(); id != "" {
 				seen = true
-				attached(h.SessionID)
+				attached(id)
 			}
 		}
 		emit(ev)

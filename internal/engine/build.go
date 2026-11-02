@@ -135,16 +135,30 @@ func (e *Engine) build(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 		return nil, err
 	}
 
-	seq := 0
-	emit := func(kind string, payload []byte) {
-		seq++
-		if err := e.Store.AppendEvent(context.WithoutCancel(ctx), c.ID, c.Attempt, seq, kind, payload); err != nil {
-			log.Warn("append event", "err", err)
+	var review json.RawMessage
+	if b.Purpose != store.BuildPurposeFix {
+		comments, err := e.Store.BuildComments(ctx, c.ID)
+		if err != nil {
+			return nil, err
+		}
+		if len(comments) > 0 {
+			review, err = reviewJSON(comments)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
+
+	stackBranch, stackPR, err := e.stackedOn(ctx, t, b.Purpose)
+	if err != nil {
+		return nil, err
+	}
+
+	emit := e.events(ctx, c, log, false).emit
 	job := build.Job{
 		RunID: c.ID, Attempt: c.Attempt, TicketID: t.ID, Title: t.Title, Repo: *t.Repo,
-		Plan: b.Plan, PlanVersion: b.PlanVersion, Ticket: ticket, Purpose: b.Purpose, Failure: b.Failure,
+		Plan: b.Plan, PlanVersion: b.PlanVersion, Ticket: ticket, Purpose: b.Purpose, Failure: b.Failure, Review: review,
+		StackBranch: stackBranch, StackPR: stackPR,
 		Policy: policy, Model: rs.Model, MaxTurns: rs.MaxTurns, Timeout: time.Duration(a.Timeout),
 		Credential: cred, Author: author,
 	}
@@ -209,4 +223,45 @@ func short(sha string) string {
 		return sha[:12]
 	}
 	return sha
+}
+
+// reviewJSON is the review comments a build is given, as the person wrote
+// them: what to change and where, nothing about their bookkeeping.
+func reviewJSON(comments []store.ReviewComment) (json.RawMessage, error) {
+	type comment struct {
+		Path      string  `json:"path"`
+		StartLine int     `json:"start_line"`
+		EndLine   int     `json:"end_line"`
+		Body      string  `json:"body"`
+		Author    *string `json:"author,omitempty"`
+		HeadSHA   string  `json:"head_sha"`
+	}
+	out := make([]comment, 0, len(comments))
+	for _, c := range comments {
+		out = append(out, comment{c.Path, c.StartLine, c.EndLine, c.Body, c.Author, c.HeadSHA})
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// stackedOn is where a stacked ticket's build starts: the branch and PR of
+// the ticket it stacks on while that PR is open, read when the build runs.
+// Once that ticket merged or was abandoned, and for every other ticket, a
+// build starts from the default branch. A fix or revise starts from the
+// ticket's own PR head and needs neither.
+func (e *Engine) stackedOn(ctx context.Context, t *store.Ticket, purpose string) (string, int, error) {
+	if t.StackOn == nil || purpose != store.BuildPurposeBuild {
+		return "", 0, nil
+	}
+	p, err := e.Store.GetTicket(ctx, *t.StackOn)
+	if err != nil {
+		return "", 0, err
+	}
+	switch p.Status {
+	case store.TicketMerged, store.TicketDone, store.TicketAbandoned:
+		return "", 0, nil
+	}
+	if p.Branch == nil || p.PRNumber == nil {
+		return "", 0, fmt.Errorf("the ticket this one stacks on (%s) has no PR yet", p.ID)
+	}
+	return *p.Branch, *p.PRNumber, nil
 }

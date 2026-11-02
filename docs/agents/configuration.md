@@ -3,7 +3,7 @@
 A deployment is a directory: `orbit.yaml` plus `agents/<name>.yaml`
 (`examples/` is complete and loaded by tests). Unknown fields fail the load;
 so does any invalid cross-reference. `orbit validate <dir>` checks a
-directory and lists the environment variables it references.
+directory and lists the environment variables it references. Every field, its type and default is in [spec-reference.md](spec-reference.md); this file is the rules behind them.
 
 ## Agent names
 
@@ -23,13 +23,25 @@ database agent of their name. Each instance reloads when the directory's
 content or the newest definition changes, so a definition written on one
 instance is in force on all within the 30 s poll.
 
-An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one.
+An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential, delegate target or need it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily) waits for a person's approval whatever the rule.
+
+Database and built-in agents are held to what orbit.yaml offers (`spec.validateTrust`): no `file` source, no `${VAR}` that is not in `credentials:`, without a `sandbox`, only the tools in `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite), no precheck and no `run` hook. A spec breaking one fails validation, naming it.
 
 ## Secrets
 
-Never in YAML. Channels name variables with `*_env`; source headers, query
-values and endpoint headers use `${VAR}`. An unset variable is an error, never
+Never in YAML. Channels name variables with `*_env`; source urls, headers, query
+values, Prometheus expressions and endpoint headers use `${VAR}`. An unset variable is an error, never
 an empty string.
+
+`credentials:` in `orbit.yaml` names the variables sources may send, each bound to the URLs it may go to:
+
+```yaml
+credentials:
+  SURE_API_KEY:
+    url_prefix: https://sure.example.com/api/
+```
+
+`url_prefix` is an http(s) URL with a host and a path ending in `/`, without user, query or fragment. A source sends a credential only in a request whose URL starts with it (redirects included); where the URL has no template, a mismatch fails the load. A database or built-in agent may reference only credentials; a file agent may also name any other variable (docs/agents/security.md, What a model can define).
 
 ## GitHub
 
@@ -40,17 +52,7 @@ it, a request ticket or a `github:merge` rule fails validation.
 
 ## Build
 
-`build:` in `orbit.yaml` turns approved tickets into PRs: `sandboxd` (the
-service's tailnet `host:port` or `unix:/path`), `token_env` (default
-`ORBIT_SANDBOX_TOKEN`), `agent` (whose claude-code runner, timeout and
-`github:merge` rule a build uses; timeout at most `spec.MaxBuildTimeout`),
-`author` (`"Name <email>"`, the App's bot user), and per repository the
-`commands` a build may run (argv prefixes of plain words), `protected`
-globs and `max_diff_lines`. Each repository must be in
-`github.repositories`, and today must be `kensac/orbit` (docs/tickets.md,
-Open decisions). Without the section no ticket is built; approved tickets
-wait. orbit also needs `CLAUDE_CODE_OAUTH_TOKEN`, the one credential the
-sandbox receives. `orbit validate` lists both variables.
+`build:` in `orbit.yaml` turns approved tickets into PRs: `sandboxd` (the service's tailnet `host:port` or `unix:/path`), `token_env` (default `ORBIT_SANDBOX_TOKEN`), `agent` (whose claude-code runner, timeout and `github:merge` rule a build uses; timeout at most `spec.MaxBuildTimeout`), `author` (`"Name <email>"`, the App's bot user), and per repository the `commands` a build may run (argv prefixes of plain words), `protected` globs, `max_diff_lines`, and `trusted_scripts`: the sha256 (lower-case hex) of each setup and cleanup script in the repository's `.orbit/build.yaml` a person reviewed (docs/tickets.md, Setup and cleanup scripts). Each repository must be in `github.repositories`, and today must be `kensac/orbit` (docs/tickets.md, Open decisions). Without the section no ticket is built; approved tickets wait. orbit also needs `CLAUDE_CODE_OAUTH_TOKEN`, the one credential the sandbox receives. `orbit validate` lists both variables.
 
 ## Mail
 
@@ -128,8 +130,12 @@ timezone. An unknown `{{name}}` fails the fetch.
 Each kind is listed once in `internal/spec` (`channelKinds`, `sourceKinds`,
 `runnerKinds`) and implemented once in its package. Add both, plus the
 validation of its required fields, plus a test, plus the table in
-docs/ARCHITECTURE.md. A kind validation accepts that no package implements
+docs/ARCHITECTURE.md and the kind's row in spec-reference.md. A kind validation accepts that no package implements
 fails at runtime, not at load.
+
+## Chat agents
+
+`chat: true` (claude-code runners only) makes an agent a Claude Code session whose reply is its final message, with memory, questions and actions as orbit's tools (docs/ARCHITECTURE.md, Chat agents); each conversation gets its own workspace. `sandbox: workstation` (needs `chat`) runs it in a sandboxd container with Claude Code's full tool set, a kept home and egress to any public host; `sandbox: build` with the tools in its `tools` and the build allowlist; sandboxd is `sandbox: {sandboxd: <host:port | unix:/path>, token_env: ORBIT_SANDBOX_TOKEN}` in orbit.yaml, or the `build:` section's when there is no `sandbox:`. The CLI there needs `CLAUDE_CODE_OAUTH_TOKEN`. Give a sandboxed agent `needs: [sandbox]` so only hosts that reach sandboxd claim it (the built-in has it).
 
 ## Sessions and continuations
 
@@ -166,6 +172,28 @@ the chat. Failures and pending approvals of unattended runs always notify.
 ## Memory topics
 
 `topics: [finance]` names the shared memory topics whose entries every run of the agent reads, beside the profile's and its own (docs/ARCHITECTURE.md, Memory entries). A topic exists as soon as an entry or an agent names it; the API can attach more (`PUT /agents/{name}/topics/{topic}`).
+
+## Hooks
+
+`hooks` adds Claude Code hooks to an agent's runs (claude-code runners only; at most 20), beside orbit's own path guard and figure check. Each names an `event` (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `Stop`), for a tool event optionally a `matcher` (tool names joined by `|`, as Claude Code reads them), and exactly one of:
+
+- `say: <text>` (at most 2 KB): tells the model the text as context at that event; at `Stop`, sends the model back once with it (a second stop in the same turn passes, so it cannot loop).
+- `deny: <reason>` (`PreToolUse` only): refuses the matching tool with the reason, which the model reads.
+- `run: [argv]` with `timeout` (default 10s, at most 1m): runs the command, no shell, with the event's JSON on stdin, in the run's workdir, with an environment of only `PATH`, `HOME` (the workdir) and `LANG`, killed with its process group at the timeout. Its stdout, stderr and exit code go to Claude Code as a command hook's do (exit 2 blocks, with stderr shown to the model).
+
+```yaml
+hooks:
+  - event: UserPromptSubmit
+    say: Lead every report with the total.
+  - event: PreToolUse
+    matcher: WebFetch
+    deny: This agent works from its inputs only.
+  - event: PostToolUse
+    matcher: Write|Edit
+    run: [gofmt, -l, .]
+```
+
+orbit's binary runs each (`orbit agent-hook`, its definition a flag orbit writes), so a hook is in the run's arguments: a changed hook starts a new live process. `SessionStart` fires once per Claude Code process, so in a live process not for every run.
 
 ## Skills
 

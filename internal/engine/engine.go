@@ -63,6 +63,9 @@ type Engine struct {
 	Harness string
 	// HeartbeatEvery overrides heartbeatEvery when set; tests shorten it.
 	HeartbeatEvery time.Duration
+	// NewSandbox is sandboxd's client for sandboxed chats; nil is
+	// sandbox.NewClient (tests replace it).
+	NewSandbox func(addr, token string) (runner.SandboxClient, error)
 	// Builder runs build runs (internal/build); nil fails them.
 	Builder *build.Runner
 	// Drain is this instance's drain; a draining instance starts no build
@@ -154,7 +157,8 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		return e.executeLearn(ctx, actx, snap, a, c, start, log)
 	}
 
-	st := &attemptState{}
+	st := &attemptState{cancel: make(chan struct{})}
+	go e.watchCancel(actx, c, st, a.Chat, lose)
 	out, res, err := e.attempt(actx, snap, a, c, log, st)
 	if errors.Is(context.Cause(actx), errLostClaim) {
 		// The run is another attempt's now; anything written here would be
@@ -176,6 +180,9 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 	if errors.As(err, &sk) {
 		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
 	}
+	if cr := (cancelledRun{}); errors.As(err, &cr) || errors.Is(context.Cause(actx), errCancelled) {
+		return e.cancelled(ctx, snap, a, c, start, cr.out, res)
+	}
 	if err != nil {
 		return e.fail(ctx, snap, a, c, start, err, res)
 	}
@@ -185,6 +192,49 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		e.saveSession(ctx, c, st.home, st.workdir, res.SessionID)
 	}
 	return e.succeed(ctx, snap, a, c, start, out, res)
+}
+
+// cancelPoll is how often a running attempt checks whether its person asked
+// it to stop: the stop button should feel immediate, and the read is one
+// indexed row.
+const cancelPoll = 2 * time.Second
+
+// watchCancel stops the attempt when its person asks: a chat turn is
+// interrupted through the CLI's control channel (it ends with what it has),
+// any other run's backend is cancelled.
+func (e *Engine) watchCancel(ctx context.Context, c *store.ClaimedRun, st *attemptState, chat bool, lose context.CancelCauseFunc) {
+	t := time.NewTicker(cancelPoll)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			asked, err := e.Store.CancelRequested(ctx, c.ID)
+			if err != nil || !asked {
+				continue
+			}
+			st.stop()
+			if !chat {
+				lose(errCancelled)
+			}
+			return
+		}
+	}
+}
+
+// cancelled ends a run its person stopped, with whatever reply it had.
+func (e *Engine) cancelled(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, start time.Time, out *Output, res *runner.Result) error {
+	rr := store.RunResult{Attempt: c.Attempt, Status: store.StatusCancelled, Error: "stopped by its person"}
+	if out != nil {
+		rr.Summary, rr.Report = out.Summary, out.Report
+	}
+	fillResult(&rr, res)
+	if err := e.Store.FinishRun(context.WithoutCancel(ctx), c.ID, rr); err != nil {
+		return err
+	}
+	metrics.RunFinished(c.Agent, store.StatusCancelled, runnerKind(snap, a), time.Since(start), rr.CostUSD)
+	return nil
 }
 
 // heartbeat keeps the attempt's claim alive and cancels the attempt with
@@ -255,9 +305,19 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	inputsDir := "inputs"
 	keepScratch := func() bool { return ctx.Err() != nil }
 	withSession := a.Session != nil && a.Session.Resume && claudeCode
-	if withSession {
+	chat := a.Chat && claudeCode
+	if withSession || chat {
 		base := filepath.Join(e.DataDir, "agents", a.Name)
 		workdir, home = filepath.Join(base, "work"), filepath.Join(base, "home")
+		if chat {
+			// A chat's workspace is its conversation's, kept between
+			// messages and stored after every run.
+			workdir, home = e.chatDirs(c.ConversationID)
+			if err := e.restoreWorkspace(ctx, c.ConversationID, workdir); err != nil {
+				return nil, nil, err
+			}
+			defer e.snapshotWorkspace(ctx, c, workdir)
+		}
 		inputsDir = filepath.Join("inputs", attemptName)
 		// Earlier runs' inputs are in their artifacts; a crashed run's may
 		// still be here.
@@ -321,27 +381,21 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 	}
 
-	seq := 0
 	figures := a.Verifies("figures")
-	var transcript [][]byte // the backend's message lines, for the figure check
+	events := e.events(ctx, c, log, figures)
 	emit := func(kind string, payload any) {
 		b, ok := payload.([]byte)
 		if !ok {
 			b, _ = json.Marshal(payload)
 		}
-		if figures && (kind == "assistant" || kind == "user") {
-			transcript = append(transcript, b)
-		}
-		seq++
-		if err := e.Store.AppendEvent(context.WithoutCancel(ctx), c.ID, c.Attempt, seq, kind, b); err != nil {
-			log.Warn("append event", "err", err)
-		}
+		events.emit(kind, b)
 	}
 
 	if c.Attempt > 1 && claudeCode {
 		emit("orbit.recovery", map[string]any{"recovers_attempt": recFrom(rec), "skipped_because": skipped})
 	}
-	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env}
+	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env,
+		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted()}
 	vars := sources.Vars(now)
 	var inputs []runner.Input
 	if rec != nil {
@@ -492,11 +546,19 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	var hr *runner.Harness
 	if e.Harness != "" && r.Kind() == "claude-code" {
-		hr = &runner.Harness{Bin: e.Harness, Figures: figures, Search: e.searchSocket(a.Name)}
+		hr = &runner.Harness{Bin: e.Harness, Figures: figures && !chat, Search: e.searchSocket(a.Name), AgentHooks: agentHooks(a)}
+	} else if len(a.Hooks) > 0 {
+		emit("orbit.hooks_skipped", map[string]any{"reason": "the agent's hooks need claude-code with orbit's harness binary"})
 	}
-	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, hr != nil, inputs)
+	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, hr != nil && !chat, inputs)
 	if err != nil {
 		return nil, nil, err
+	}
+	if chat {
+		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
+			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
+			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec,
+			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin})
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
 	if tk != nil {
@@ -563,7 +625,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		for _, in := range inputs {
 			backed.AddJSON(in.Content)
 		}
-		for _, t := range harness.OrbitToolResults(transcript) {
+		for _, t := range harness.OrbitToolResults(events.messages()) {
 			backed.AddText(t)
 		}
 		if missing := backed.Unbacked(harness.ReportText(res.Output)); len(missing) > 0 {
@@ -669,6 +731,13 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 		if act.Type == actions.DelegateType && pa.Error == "" && out.task != nil && out.task.Depth >= store.MaxTaskDepth {
 			pa.Rule, pa.Error = string(spec.RuleDeny), fmt.Sprintf("delegation is nested at most %d deep, and this task is at depth %d", store.MaxTaskDepth, out.task.Depth)
+		}
+		if act.Type == actions.DefineType && pa.Error == "" && pa.Rule == string(spec.RuleAuto) {
+			// A change that widens an agent waits for a person, whatever the rule: a model steered by its input must not grant itself reach.
+			if w := e.defineWidening(ctx, act.Params); len(w) > 0 {
+				pa.Rule = string(spec.RuleApprove)
+				e.Log.Info("agent:define widens an agent; held for approval", "run", c.ID, "widens", strings.Join(w, "; "))
+			}
 		}
 		if len(pa.Params) == 0 {
 			pa.Params = json.RawMessage(`{}`)
@@ -951,7 +1020,7 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 			return err
 		}
 		actx, cancel := context.WithTimeout(ctx, ActionTimeout)
-		result, xerr := ex.Execute(actx, actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params})
+		result, xerr := ex.Execute(actx, actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)})
 		cancel()
 		if err := e.Store.FinishAction(context.WithoutCancel(ctx), act.ID, result, xerr); err != nil {
 			return err
