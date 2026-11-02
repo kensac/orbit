@@ -35,7 +35,7 @@ func ValidateDir(dir string) (*Package, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	result := &Package{}
 	hash := sha256.New()
 	entries := 0
@@ -74,7 +74,7 @@ func ValidateDir(dir string) (*Package, error) {
 		}
 		sys, ok := stat.Sys().(*syscall.Stat_t)
 		if stat.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || !stat.Mode().IsRegular() || !os.SameFile(before, stat) || !ok || sys.Nlink != 1 {
-			return fmt.Errorf("%s: changed, special or hardlinked file", name)
+			return fmt.Errorf("%s: changed, special or file with multiple links", name)
 		}
 		result.Files++
 		if result.Files > MaxFiles {
