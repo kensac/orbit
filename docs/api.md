@@ -274,7 +274,10 @@ the concatenated `text`: `text` is what the agent narrated while working.
 
 ## Runs, events, artifacts
 
-- `GET /runs?agent=&status=&before=&limit=`
+- `GET /runs?agent=&status=&before=&limit=`: `{"runs": [...]}`, newest
+  first; `before` is an RFC 3339 time (a run's `created_at`). Each run, and
+  `GET /runs/{id}`'s, carries `steps`, counted as a thread's run item counts
+  it.
 - `GET /runs/{id}`: `{"run": {...}, "attempts": [...]}`. Each attempt
   (oldest first) is `{"attempt", "worker", "runner_kind", "spec_sha",
   "started_at", "ended_at", "outcome", "session_id", "recovered_from",
@@ -295,7 +298,12 @@ the concatenated `text`: `text` is what the agent narrated while working.
 
 ## Actions
 
-- `GET /actions?agent=&status=pending`: `status` as in a thread action
+- `GET /actions?agent=&status=pending&run_id=&before=<cursor>&limit=<n>`:
+  `{"actions": [...], "has_more": false, "next_before": null}`, newest
+  first. `status` is as in a thread action, `run_id` narrows to one run's
+  proposals (400 when it is not a UUID). Paging is as for a thread:
+  `next_before` is an opaque cursor, `null` exactly when `has_more` is
+  false; `limit` defaults to 100, at most 500.
 - `GET /actions/{id}`
 - `POST /actions/{id}/approve`, `POST /actions/{id}/reject`: `200 {"ok":
   true}`; 404 for an unknown action; 409 when it was already decided. With
