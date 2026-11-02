@@ -115,7 +115,7 @@ and push); without them push is off and `serve` logs so.
 
 ## Seeding memory from Claude Code
 
-`orbit import claude-memory <dir> --scope <profile|topic:NAME|agent:NAME>` reads a Claude Code memory directory (`~/.claude/projects/<project>/memory`) and sends it to `POST /api/v1/memory/import`. Entries of the types in `--profile-types` (default `user`) go to the profile whatever `--scope` says. It is a dry run unless `--apply` is given: the server reports what it would create, update or leave alone. `--print` shows what was read from disk without calling a server. A file it cannot map (no frontmatter, an unknown type) is skipped with a warning. Repeating it is safe: it matches by key and changes only what changed.
+`orbit import claude-memory <dir> --scope <profile|topic:NAME|agent:NAME>` reads a Claude Code memory directory (`~/.claude/projects/<project>/memory`) and sends it to `POST /api/v1/memory/import`. Entries of the types in `--profile-types` (default `user`) go to the profile whatever `--scope` says. It is a dry run unless `--apply` is given: the server reports what it would create, update or leave alone. `--print` shows what was read from disk without calling a server. A file it cannot map (no frontmatter, an unknown type) is skipped with a warning; an operating system's droppings (macOS AppleDouble `._*` files, `.DS_Store`, `__MACOSX`, `Thumbs.db` and the like: `claudeimport.Junk`) are left out silently. Repeating it is safe: it matches by key and changes only what changed.
 
 The API is `--api` (default `ORBIT_API_URL`, else the internal listener) with `--token` (default `ORBIT_API_TOKEN`).
 
@@ -131,7 +131,7 @@ The API is `--api` (default `ORBIT_API_URL`, else the internal listener) with `-
 
 ## Seeding skills from Claude Code
 
-`orbit import skills <dir>` reads each directory under `dir` that holds a `SKILL.md` (`~/.claude/skills`, a project's `.claude/skills`) with every file beside it, and sends them to `POST /api/v1/skills/import`: a dry run unless `--apply`, `--only a,b` to pick some, `--attach <agent>` to attach them (with `--apply`), `--print` to list what was read without a server. A directory without a `SKILL.md` (a plugin, a sync bucket) or with a symlink is skipped with a warning. The API and token are as for memory above; on hetzner, `docker cp` the directory into the container and run it there.
+`orbit import skills <dir>` reads each directory under `dir` that holds a `SKILL.md` (`~/.claude/skills`, a project's `.claude/skills`) with every file beside it, and sends them to `POST /api/v1/skills/import`: a dry run unless `--apply`, `--only a,b` to pick some, `--attach <agent>` to attach them (with `--apply`), `--print` to list what was read without a server. A directory without a `SKILL.md` (a plugin, a sync bucket) or with a symlink is skipped with a warning. Operating system droppings are never a skill's files, so a directory unpacked from a tar made on macOS imports cleanly: they are left out as for memory, and importing again over a skill stored with them writes a version without them. The API and token are as for memory above; on hetzner, `docker cp` the directory into the container and run it there.
 
 ## sandboxd and egress on hetzner
 
