@@ -95,30 +95,33 @@ func (p *Process) exitError(what string) error {
 	return err
 }
 
-// Close ends the process: stdin closed, so a CLI between turns exits on its own and one mid-turn finishes that turn; then SIGTERM to the group after grace, and SIGKILL after grace more. A zero grace signals at once.
-func (p *Process) Close(grace time.Duration) {
+// Close ends the process: stdin closed, so a CLI between turns exits on its own and one mid-turn finishes that turn; then, after grace, SIGTERM to the group, and SIGKILL after grace more. Only the first Close or Kill acts; later ones wait for it.
+func (p *Process) Close(grace time.Duration) { p.stop(grace, grace) }
+
+// Kill ends a process whose turn failed and whose session must not be added to: SIGTERM to the group at once, then SIGKILL after CloseGrace. SIGTERM rather than SIGKILL first, because the CLI saves its session's running cost when it exits on one (runner.TranscriptCost).
+func (p *Process) Kill() { p.stop(0, CloseGrace) }
+
+func (p *Process) stop(wait, term time.Duration) {
 	p.once.Do(func() {
 		_ = p.CloseInput()
 		pid := p.cmd.Process.Pid
-		if grace > 0 {
+		if wait > 0 {
 			select {
 			case <-p.exited:
 				return
-			case <-time.After(grace):
+			case <-time.After(wait):
 			}
 		}
 		_ = syscall.Kill(-pid, syscall.SIGTERM)
 		select {
 		case <-p.exited:
-		case <-time.After(max(grace, time.Second)):
+		case <-time.After(term):
 			_ = syscall.Kill(-pid, syscall.SIGKILL)
 			<-p.exited
 		}
 	})
+	<-p.exited
 }
-
-// Kill ends the process group at once (SIGTERM, then SIGKILL after a second): for a turn that failed, whose session must not be added to.
-func (p *Process) Kill() { p.Close(0) }
 
 // Tail keeps the last 8 KB written to it, for an error message. It is written by the process while a turn may read it, hence the lock.
 type Tail struct {

@@ -17,6 +17,7 @@ trigger (schedule | manual | message | continue; a ticket's build runs its own p
   -> executor claims it (FOR UPDATE SKIP LOCKED; at most one running per agent;
      a continuation not before its run_after)
   -> StartRunContext: memory + unread messages (marked consumed) + open questions
+  -> memory entries the agent reads: an index in the prompt, the entries in full as an input
   -> session plan: continue the agent's Claude Code session, or start fresh
   -> a fresh session: the recent thread, packed into a byte budget, as conversation.md
   -> sources fetched by the harness, written to <workdir>/inputs/, stored as artifacts
@@ -34,6 +35,14 @@ schema, every input, the raw output, the backend's full event stream, every
 delivery attempt. The workdir is scratch and is removed after the run, except
 for an agent with a session (below), whose workdir and HOME persist and whose
 inputs go in a per-attempt directory removed after the run.
+
+## Where agents come from
+
+An agent is a file (`agents/<name>.yaml`), a database definition written
+through the API (`agent_definitions`, every version kept), or built in
+(`spec.Builtins`: `orbit`, the general agent). `engine.LoadConfig` merges
+the three and validates them as one configuration; a reload follows any
+change to the files or the definitions.
 
 ## Conversations
 
@@ -113,6 +122,15 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
 - **Agent status** is derived (`status.Derive`): while a run is running, its hooks speak for it wherever they reported for its current attempt (UserPromptSubmit and tool events: working; PermissionRequest, Elicitation, an AskUserQuestion call and permission or elicitation notifications: waiting; Stop: done, shown as working until orbit has recorded the output; StopFailure, or SessionEnd before Stop: errored); the run's row fills in where they have not. A final run decides by its row: failed is errored, a finished run with an open question or a pending action is waiting on its person, otherwise done. A subagent's events change the turn's state only to wait on the person, and only the agent that waits clears its wait. PreCompact and PostCompact change nothing: an automatic compaction is mid-turn.
 - Claude Code runs `statusLine` only in its interactive interface, never under `-p` (checked on 2.1.316 with one-shot and stream-json input), so subscription windows still come from `rate_limit_event` (docs/api.md, Usage).
 
+## Mail
+
+With `mail` configured (configuration.md), a person talks to orbit by mail as well as by the API (`internal/mail`):
+
+- **Out.** Every mail orbit sends for a run carries `Reply-To: local+<token>@domain` and `Message-ID: <orbit.<token>.<random>@domain>`, where the token is the run's conversation id and an HMAC of it under the operator token (`mail.Token`), plus `References: <orbit.<token>@domain>` so a mail client threads a conversation. A report for a run that read a mail is always sent (whatever `notify.when` is, except `never`), as a reply to that mail (`In-Reply-To`, `Re:` its subject).
+- **In.** A poller (every `poll`, on each instance that takes claims) reads the unseen mails of the IMAP mailbox. Each is parsed in code: the sender, the tokens it names (a recipient's plus address, then `In-Reply-To`, then `References`), and its text (plain, or the HTML as text) with the quoted mail and signature cut deterministically (`StripQuoted`). A mail from an allowed sender that names a signed token becomes a message in that conversation; one that names none opens a new conversation with `mail.agent`, titled by its subject. Automatic mail (`Auto-Submitted`, `Precedence: bulk`) and a failed DMARC result in `Authentication-Results` are ignored, so an out-of-office reply cannot start a loop. The author is the sender's address.
+- **Once.** `IngestMail` writes the message, its run and the `mail_in` row in one transaction keyed by Message-ID, and the mail is marked seen only after; a database error leaves it unseen for the next poll.
+- **Attachments** are not uploads yet: the message names each (file, type, size) and the raw mail is kept in `mail_in`.
+
 ## Continuations
 
 An agent with the `continue` action may ask to be woken again
@@ -160,6 +178,7 @@ they wait on.
 
 - **Memory** is one Markdown document per agent, replaced whole by a run that
   sets `memory.update`. Every version is kept (`memory_versions`).
+- **Memory entries** are the durable layer above it (below).
 - **Questions** a run asks become `from_agent` messages and are delivered with
   the report, in the asking run's conversation. A question stays open until
   a reply names it or any later message reaches that conversation; open
@@ -167,6 +186,18 @@ they wait on.
   again.
 - **Messages** to an agent are consumed by the first run of their
   conversation that starts after them. A run that fails or is interrupted hands them back.
+
+## Memory entries
+
+What a person teaches orbit, and what orbit learns about them, outlives any one agent's memory document. Memory entries hold it as one fact each (`memory_entries`, every version in `memory_entry_versions`; nothing is deleted, a retired or superseded entry is a version), with Claude Code's memory types (`user`, `feedback`, `project`, `reference`), a title, a one-line description, a body, why it holds and how to apply it, and where it came from (a person through the API, a learning run, an import). Three scopes decide who reads one:
+
+- **profile**: the person; every agent.
+- **topic**: a domain (`finance`, `homelab`) shared by the agents that read it: the spec's `topics`, plus topics the API attaches (`agent_attachments`).
+- **agent**: one agent's own.
+
+A run that starts fresh (not a recovery) reads every active entry in its scopes (`Store.EntriesFor`) and gets them twice (`internal/engine/known.go`): an index in the prompt (`# What you know`: one line per entry, the profile, then each topic, then the agent's own; within each, feedback first, then user, project, reference, newest first), packed into `knownIndexBudget` (8 KB, each line at most `knownLineMax`), and every entry in full as an input file, `inputs/_memory.md`, within `knownFileMax` (256 KB), stored as an artifact like any input. The system prompt says what the entries are and that they never authorize an action the rules do not. The packing is deterministic, so the same entries give the same prompt.
+
+`orbit import claude-memory` maps a Claude Code memory directory (one file per fact, frontmatter `name`/`description`/`type`, `**Why:**` and `**How to apply:**` paragraphs, the `MEMORY.md` index for titles) onto entries by key, through `POST /memory/import`, so a repeated import changes only what changed (docs/agents/deployment.md).
 
 ## Actions and rules
 
@@ -183,6 +214,10 @@ required check passed; [tickets.md](tickets.md)).
 Approval happens from a signed link (`/ui/actions/{id}?sig=`), the API, or
 `orbit approve`. An action is executed at most once: one interrupted during
 execution is failed for a person to check, never retried.
+
+## The journal
+
+A run's journal (`internal/journal`, `journal_items`) is its transcript in one typed shape for every backend: messages, thinking (with a token estimate), tool calls with their full input and bounded results, diffs, plans, approvals, questions, status, and turns whose state (running, completed, interrupted, unverifiable) is kept apart from the backend's verdict. Code derives it from `run_events` as each event is stored, and backfills older runs with the same code, so the two agree; `run_events` stays the record it is derived from. Items are append-only revisions addressed by (run, epoch, seq): an epoch is a timeline of attempts that continue each other's sessions, so a cursor never mixes a resumed attempt with an abandoned one. Large values are a bounded head with their size and digest, the whole value fetched by digest. Shapes: docs/api.md.
 
 ## The API
 
