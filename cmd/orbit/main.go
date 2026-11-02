@@ -4,6 +4,7 @@
 //	orbit serve              control: API, scheduler, delivery, actions, config sync, and executors
 //	orbit worker             executors only: claim and run what this host's capabilities cover
 //	orbit migrate            apply database migrations and exit
+//	orbit preflight [--config DIR]   check this binary can migrate the database and the running one survives it, changing nothing
 //	orbit validate [dir]     load and check a configuration directory
 //	orbit run <agent> [prompt]   queue a manual run (a running serve picks it up)
 //	orbit approve <action-id> / orbit reject <action-id>
@@ -80,6 +81,8 @@ func main() {
 		err = worker(ctx, log)
 	case "migrate":
 		err = withStore(ctx, func(s *store.Store) error { return s.Migrate(ctx) })
+	case "preflight":
+		err = preflightCmd(ctx, os.Args[2:])
 	case "validate":
 		err = validate(os.Args[2:])
 	case "run":
@@ -157,7 +160,7 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
 	os.Exit(2)
 }
 

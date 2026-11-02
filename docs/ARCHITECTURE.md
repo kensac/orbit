@@ -370,6 +370,7 @@ for twice. The rollout contract is in docs/agents/deployment.md.
   action is failed as orphaned only after `engine.OrphanAfter` executing, so
   neither instance fails the other's. Metrics are per instance except
   `orbit_queued` and `orbit_pending`, read from the shared database.
+- **Schema in the overlap.** The new instance migrates at start while the old one keeps running, so every migration is expand-only (store.md). `orbit preflight` checks that against the live database before a rollout starts the new image, and CI runs the previous release on each change's schema (`deploy/compat.sh`).
 - **Readiness.** `/readyz` is 200 while the instance takes new work, 503
   while it drains or cannot reach the database; `/healthz` stays liveness
   (the image's HEALTHCHECK). traefik routes by `/readyz`.
