@@ -64,7 +64,7 @@ type Server struct {
 	// nil is no boxes, and every workspace has no terminals.
 	Boxes func() (*sandbox.Client, error)
 	// WorkspaceOrigins are the Origins a terminal socket accepts
-	// (ORBIT_WORKSPACE_ORIGINS); empty is DefaultWorkspaceOrigin.
+	// (ORBIT_WORKSPACE_ORIGINS); empty is DefaultWorkspaceOrigins.
 	WorkspaceOrigins []string
 	// TerminalPing overrides terminalPing when set; tests shorten it.
 	TerminalPing time.Duration
