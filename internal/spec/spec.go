@@ -6,6 +6,7 @@
 package spec
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -60,6 +61,8 @@ type Deployment struct {
 	// Build is how orbit builds approved tickets (build.go). Without it no
 	// ticket is built.
 	Build *Build `yaml:"build,omitempty" json:"build,omitempty"`
+	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
+	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -165,6 +168,12 @@ type Agent struct {
 	// money amount in the summary and report must be in the inputs or in a
 	// result of orbit's query or calc tool.
 	Verify []string `yaml:"verify,omitempty" json:"verify,omitempty"`
+	// Topics are the shared memory topics (finance, homelab) whose entries
+	// every run of this agent is shown, beside the profile's and its own.
+	// The API can attach more (docs/api.md, Memory entries).
+	Topics []string `yaml:"topics,omitempty" json:"topics,omitempty"`
+	// Learn is how orbit learns from this agent's conversations once they go quiet (engine/learn.go). Absent is on, with the defaults.
+	Learn *LearnSpec `yaml:"learn,omitempty" json:"learn,omitempty"`
 	// Needs names the capabilities a host must have to run this agent
 	// ("docker-network:hetzner", "sure", "browser", "sandbox"). A worker
 	// claims a run only when its ORBIT_CAPABILITIES cover every one; an
@@ -173,7 +182,19 @@ type Agent struct {
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
+	// Origin is where the agent is defined: OriginFile, OriginDatabase or
+	// OriginBuiltin. Only database agents are changed through the API.
+	Origin string `yaml:"-" json:"-"`
+	// Version is a database agent's definition version (agent_definitions).
+	Version int `yaml:"-" json:"-"`
 }
+
+// Where an agent is defined.
+const (
+	OriginFile     = "file"
+	OriginDatabase = "database"
+	OriginBuiltin  = "builtin"
+)
 
 // SessionSpec is an agent's opt-in to continuing its Claude Code session.
 type SessionSpec struct {
@@ -187,6 +208,25 @@ type SessionSpec struct {
 	// starting a process per run. Zero means no live process.
 	Live Duration `yaml:"live,omitempty" json:"live,omitempty"`
 }
+
+// LearnSpec configures an agent's learning runs.
+type LearnSpec struct {
+	// Enabled false turns learning off for the agent.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Idle is how long a conversation must be quiet before it is learned from.
+	Idle Duration `yaml:"idle,omitempty" json:"idle,omitempty"`
+	// Runner runs learning runs instead of the agent's own (a cheaper model).
+	Runner string `yaml:"runner,omitempty" json:"runner,omitempty"`
+}
+
+// DefaultLearnIdle is the quiet a conversation needs before it is learned from: long enough that the person has moved on, short enough that what they said is kept the same day.
+const DefaultLearnIdle = 30 * time.Minute
+
+// MinLearnIdle and MaxLearnIdle bound learn.idle: under five minutes a learning run would interrupt a conversation still going (and each one is a backend call); past a day, what was said waits too long to be kept.
+const (
+	MinLearnIdle = 5 * time.Minute
+	MaxLearnIdle = 24 * time.Hour
+)
 
 // DefaultSessionIdle is the resume window when a spec names none: a
 // working day's conversation, short enough that a stale session does not
@@ -380,7 +420,41 @@ func ParseSchedule(expr string) (cron.Schedule, error) { return cronParse.Parse(
 // Load reads orbit.yaml and every agents/*.yaml under dir, then validates the
 // whole configuration. An invalid file fails the load: a deployment never
 // runs with part of its configuration silently skipped.
-func Load(dir string) (*Config, error) {
+func Load(dir string) (*Config, error) { return load(dir, nil, false) }
+
+// Definition is an agent defined in the database (agent_definitions): its
+// newest version, which LoadAll merges with the files.
+type Definition struct {
+	Name    string
+	Version int
+	Enabled bool
+	// Spec is the agent as JSON, the same fields as an agents/*.yaml file.
+	Spec json.RawMessage
+}
+
+// LoadAll is the configuration orbit runs: the files under dir, the
+// database's agent definitions, and the built-in agents (builtin.go). A
+// database agent named like a file agent is a configuration error; a
+// built-in agent yields to a file or database agent of its name, so a
+// deployment can replace it.
+func LoadAll(dir string, defs []Definition) (*Config, error) { return load(dir, defs, true) }
+
+// DecodeAgent reads one agent's JSON as strictly as a file is read: an
+// unknown field is an error.
+func DecodeAgent(b []byte) (*Agent, error) {
+	a := &Agent{}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(a); err != nil {
+		return nil, err
+	}
+	if dec.More() {
+		return nil, errors.New("more than one JSON value")
+	}
+	return a, nil
+}
+
+func load(dir string, defs []Definition, all bool) (*Config, error) {
 	cfg := &Config{Agents: map[string]*Agent{}}
 	if err := decodeFile(filepath.Join(dir, "orbit.yaml"), &cfg.Deployment); err != nil {
 		return nil, err
@@ -401,7 +475,30 @@ func Load(dir string) (*Config, error) {
 		if _, dup := cfg.Agents[a.Name]; dup {
 			return nil, fmt.Errorf("%s: duplicate agent %q", f, a.Name)
 		}
+		a.Origin = OriginFile
 		cfg.Agents[a.Name] = a
+	}
+	for _, d := range defs {
+		a, err := DecodeAgent(d.Spec)
+		if err != nil {
+			return nil, fmt.Errorf("database agent %q version %d: %w", d.Name, d.Version, err)
+		}
+		if a.Name != d.Name {
+			return nil, fmt.Errorf("database agent %q version %d: its spec names %q", d.Name, d.Version, a.Name)
+		}
+		if _, dup := cfg.Agents[a.Name]; dup {
+			return nil, fmt.Errorf("agent %q is defined twice: in agents/%s.yaml and in the database", a.Name, a.Name)
+		}
+		enabled := d.Enabled
+		a.Enabled, a.Origin, a.Version = &enabled, OriginDatabase, d.Version
+		cfg.Agents[a.Name] = a
+	}
+	if all {
+		for _, a := range Builtins(cfg.Deployment) {
+			if _, taken := cfg.Agents[a.Name]; !taken {
+				cfg.Agents[a.Name] = a
+			}
+		}
 	}
 	cfg.applyDefaults()
 	cfg.applyBuildDefaults()
@@ -443,6 +540,7 @@ func (c *Config) applyDefaults() {
 		// needs more names its own.
 		d.Defaults.Timeout = Duration(15 * time.Minute)
 	}
+	c.applyMailDefaults()
 	if d.Defaults.MemoryMaxBytes == 0 {
 		// About 4k tokens: memory rides in every prompt, so it must stay a
 		// small fraction of the context the run needs for its inputs.
@@ -559,6 +657,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, c.validateAgent(c.Agents[n])...)
 	}
 	errs = append(errs, c.validateBuild()...)
+	errs = append(errs, c.validateMail()...)
 	return errors.Join(errs...)
 }
 
@@ -686,6 +785,26 @@ func (c *Config) validateAgent(a *Agent) []error {
 	for _, v := range a.Verify {
 		if !slices.Contains(verifyChecks, v) {
 			at("verify: unknown check %q (want one of %v)", v, verifyChecks)
+		}
+	}
+	seenTopic := map[string]bool{}
+	for _, t := range a.Topics {
+		if !nameRE.MatchString(t) {
+			at("topics: %q must match %s", t, nameRE)
+		}
+		if seenTopic[t] {
+			at("topics: %q is listed twice", t)
+		}
+		seenTopic[t] = true
+	}
+	if l := a.Learn; l != nil {
+		if l.Idle != 0 && (time.Duration(l.Idle) < MinLearnIdle || time.Duration(l.Idle) > MaxLearnIdle) {
+			at("learn.idle must be between %s and %s", MinLearnIdle, MaxLearnIdle)
+		}
+		if l.Runner != "" {
+			if _, ok := c.Deployment.Runners[l.Runner]; !ok {
+				at("learn.runner: unknown runner %q", l.Runner)
+			}
 		}
 	}
 	seenNeed := map[string]bool{}

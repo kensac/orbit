@@ -52,6 +52,10 @@ more than its agent's rules allow.
   closed: an event it cannot parse is denied. Hooks come only from orbit's
   `--settings`; a workdir's `.claude/settings.json` is never read.
 
+## Memory entries a model writes
+
+A run writes memory entries directly, and a learning run writes them from a conversation, so a poisoned input or message can plant an entry that later runs of every agent reading its scope are shown. What bounds it: entries are shown as data (the system prompt says they never authorize an action the rules do not, and an instruction in one is not to be followed); a run may write only to the profile, itself and the topics it reads, at most 10 writes, and only change entries it was shown at the version it was shown; every version is kept with the run and conversation it came from (`GET /memory/entries?run_id=`), so a bad one is found and retired or restored. A learning run reads the person's messages and the agent's reports (which can quote inputs), not the inputs themselves.
+
 ## What the model can cause
 
 Only actions its spec enables, through executors here, to destinations in
@@ -89,9 +93,19 @@ types are not even offered.
   personal data; never route `/ui/` around authentik.
 - **`/mcp`** is the API as tools, with the same check: an authentik token (the person decides and authors), the operator token only on the internal listener. Its tools can do what `/api/v1` can (post, approve, reject); nothing more.
 - **The MCP OAuth proxy** (`oauth.go`) lets anyone register a client, so the redirect host list (`ORBIT_MCP_REDIRECT_HOSTS`, default the Claude apps) is what stops a link that would send a signed-in person's code to a stranger's host; the code is useless without the PKCE verifier its client holds. A code is single-use per instance only (a replay to the other instance of a rollout within its 2 minutes is the gap), and every sealed value is keyed from `ORBIT_API_TOKEN`. The client receives the person's authentik access token for the `orbit-mcp` provider, which orbit accepts like the portfolio's; the refresh token it receives is sealed and works only through orbit, which holds the client secret.
-- `GET /runs/{id}/stream` shows the agent's narration and tool summaries
-  (file paths, commands, URLs): the same data `/events` already serves to
-  the same callers.
+- `GET /runs/{id}/stream` and `/journal` show the agent's prose, thinking,
+  tool inputs and outputs: the same data `/events` already serves to the
+  same callers.
+
+## Mail
+
+A mail is a message from a person, so it is held to who may send one (`internal/mail`):
+
+- **Who.** Only a sender in `mail.allow` (default: the smtp channels' recipients) is acted on. `From` can be forged, so a mail whose `Authentication-Results` says `dmarc=fail` is refused; a mail with no such header has the allow list as its only check. Requiring a DKIM pass would be stronger.
+- **Where.** A reply reaches a conversation only through a token signed with the operator token, so knowing a conversation id is not enough to write into it; any other mail opens a new conversation with `mail.agent`.
+- **What.** The text becomes a message like one typed into the API: the agent sees it as its person's words. Nothing in a mail is executed, and attachments reach the agent only as names.
+- **Loops.** Automatic mail is never acted on, so an auto-reply to orbit's report does not wake a run that mails again.
+- The IMAP password is in orbit's environment only, like every channel secret; a port other than 993 must offer STARTTLS before login.
 
 ## Workers
 

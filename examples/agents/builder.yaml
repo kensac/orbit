@@ -1,4 +1,4 @@
-name: orbit
+name: builder
 description: Discusses and builds tickets for orbit itself.
 charter: |
   You maintain orbit, this service. People file tickets with you: answer

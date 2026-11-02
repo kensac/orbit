@@ -108,6 +108,6 @@ func TestRealCLIPermissionProtocol(t *testing.T) {
 		}
 	}
 	if res.IsError || len(res.StructuredOutput) == 0 {
-		t.Errorf("result: %s", res.raw)
+		t.Errorf("result: %s", res.Raw)
 	}
 }

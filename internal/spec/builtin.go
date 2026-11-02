@@ -1,0 +1,68 @@
+package spec
+
+import (
+	"sort"
+	"time"
+)
+
+// BuiltinName is the agent every deployment has: a plain Claude Code
+// session a person reaches from anywhere, and the one a new chat opens with
+// when no agent is named.
+const BuiltinName = "orbit"
+
+// builtinCharter is deliberately short: the general agent is a Claude Code
+// session, not a role, so it is told where it is and nothing about what to
+// care about.
+const builtinCharter = `You are orbit, a general assistant your person reaches from anywhere, in the
+way they would use Claude Code. Do what they ask in this conversation. Reply
+as you would in a terminal session: direct, in Markdown, with what you did
+and what you found.`
+
+// builtinIdle keeps a conversation's session for a day: a person comes
+// back to a chat the next morning (MaxSessionIdle).
+const builtinIdle = MaxSessionIdle
+
+// builtinLive keeps the process open between messages that come in a
+// burst, as in a terminal.
+const builtinLive = 10 * time.Minute
+
+// Builtins are the agents orbit defines in code, given a deployment. The
+// general agent needs a claude-code runner: the default one if it is, else
+// the first by name; without any it is not defined.
+func Builtins(d Deployment) []*Agent {
+	runner := ""
+	if r, ok := d.Runners[d.Defaults.Runner]; ok && r.Kind == "claude-code" {
+		runner = d.Defaults.Runner
+	} else {
+		names := make([]string, 0, len(d.Runners))
+		for n, r := range d.Runners {
+			if r.Kind == "claude-code" {
+				names = append(names, n)
+			}
+		}
+		sort.Strings(names)
+		if len(names) > 0 {
+			runner = names[0]
+		}
+	}
+	if runner == "" {
+		return nil
+	}
+	sess := &SessionSpec{Resume: true, Idle: Duration(builtinIdle), Live: Duration(builtinLive)}
+	if d.Runners[runner].MaxBudgetUSD > 0 {
+		// A live process's budget would cover every run fed into it.
+		sess.Live = 0
+	}
+	return []*Agent{{
+		Name:            BuiltinName,
+		Description:     "A Claude Code session you can reach from anywhere.",
+		Charter:         builtinCharter,
+		Runner:          runner,
+		Tools:           []string{"WebSearch", "WebFetch"},
+		MessagesTrigger: true,
+		Session:         sess,
+		// Replies stay in orbit; failures and approvals still notify.
+		Notify: NotifySpec{When: "never"},
+		Origin: OriginBuiltin,
+	}}
+}

@@ -27,6 +27,7 @@ import (
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/harness"
+	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/notify"
 	"github.com/kensac/orbit/internal/runner"
@@ -40,8 +41,11 @@ import (
 type Engine struct {
 	Store   *store.Store
 	DataDir string
-	Env     func(string) (string, bool)
-	Client  *http.Client
+	// ConfigDir is the configuration directory (orbit.yaml, agents/),
+	// loaded with the database's agent definitions (config.go).
+	ConfigDir string
+	Env       func(string) (string, bool)
+	Client    *http.Client
 	// Secret signs approval links (see ApprovalSig).
 	Secret []byte
 	// NewRunner is runner.New, replaceable in tests.
@@ -135,6 +139,9 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 	go e.heartbeat(actx, c, lose, log)
 	if c.Trigger == store.TriggerBuild {
 		return e.executeBuild(ctx, actx, snap, a, c, start, log)
+	}
+	if c.Trigger == store.TriggerLearn {
+		return e.executeLearn(ctx, actx, snap, a, c, start, log)
 	}
 
 	st := &attemptState{}
@@ -429,6 +436,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	types := actions.Catalog(a, snap.Config.Deployment)
 	schema := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, true)
 	envelope := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, false)
+	schema, envelope = withEntries(schema, true), withEntries(envelope, false)
 	tk, err := e.Store.TicketForConversation(ctx, c.ConversationID)
 	if err != nil {
 		return nil, nil, err
@@ -442,6 +450,21 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			return nil, nil, err
 		}
 	}
+	topics, err := e.agentTopics(ctx, a)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The entries a run reads are also the ones its entry writes may name (entries.go), so a recovered attempt reads them too.
+	knownEntries, err := e.Store.EntriesFor(ctx, a.Name, topics)
+	if err != nil {
+		return nil, nil, err
+	}
+	var known string
+	if rec == nil {
+		if known, inputs, err = e.knownInput(ctx, c, knownEntries, workdir, inputsDir, inputs); err != nil {
+			return nil, nil, err
+		}
+	}
 	var hr *runner.Harness
 	if e.Harness != "" && r.Kind() == "claude-code" {
 		hr = &runner.Harness{Bin: e.Harness, Figures: figures}
@@ -450,8 +473,12 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if tk != nil {
 		system += ticketContract(tk, planning)
 	}
+	if known != "" {
+		system += knownContract
+	}
+	system += entriesContract(topics)
 	trigger := c.Trigger
-	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing},
+	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known},
 		rc, convo, inputs)
 	if rec != nil {
 		prompt = recoveryPrompt(rec, rc, now.Location())
@@ -488,6 +515,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if planning {
 		out.planTicket = tk.ID
 	}
+	out.known, out.topics = knownEntries, topics
 	if figures {
 		// The hook already sent the output back for these, up to
 		// MaxFigureDenials times (claude-code); this is the same check on
@@ -509,30 +537,38 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	return out, res, nil
 }
 
-// validate checks output against the schema the backend was given. Backends
-// enforce it too, but not all of them, and not identically.
-func validate(schema, output json.RawMessage) (*Output, error) {
+// validateAgainst checks output against a JSON Schema, naming every failing location.
+func validateAgainst(schema, output json.RawMessage) error {
 	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schema))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	c := jsonschema.NewCompiler()
 	if err := c.AddResource("contract.json", doc); err != nil {
-		return nil, err
+		return err
 	}
 	sch, err := c.Compile("contract.json")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(output))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if err := sch.Validate(inst); err != nil {
 		var ve *jsonschema.ValidationError
 		if errors.As(err, &ve) {
-			return nil, errors.New(leafErrors(ve.BasicOutput()))
+			return errors.New(leafErrors(ve.BasicOutput()))
 		}
+		return err
+	}
+	return nil
+}
+
+// validate checks output against the schema the backend was given. Backends
+// enforce it too, but not all of them, and not identically.
+func validate(schema, output json.RawMessage) (*Output, error) {
+	if err := validateAgainst(schema, output); err != nil {
 		return nil, err
 	}
 	var out Output
@@ -598,12 +634,15 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 		o.Actions = append(o.Actions, pa)
 	}
+	writes, refused := resolveEntryWrites(a.Name, out.topics, out.known, out.Entries)
+	o.Entries = writes
 	rr := store.RunResult{Attempt: c.Attempt, Status: "succeeded", Summary: out.Summary, Report: out.Report}
 	fillResult(&rr, res)
 	ids, err := e.Store.RecordOutcome(ctx, c.ID, a.Name, rr, o)
 	if err != nil {
 		return err
 	}
+	e.recordEntryWrites(ctx, c, out.Entries, writes, refused)
 	metrics.RunFinished(a.Name, "succeeded", runnerKind(snap, a), time.Since(start), rr.CostUSD)
 
 	// Delivery: the report, then each pending approval.
@@ -618,6 +657,15 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return nil
 	}
 	send := a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send)
+	// A person who wrote by mail is answered by mail, as a reply to theirs.
+	var inReplyTo, mailSubject string
+	if snap.Config.Deployment.Mail != nil {
+		var merr error
+		if inReplyTo, mailSubject, merr = e.Store.MailForRun(ctx, c.ID); merr != nil {
+			e.Log.Warn("mail for run", "run", c.ID, "err", merr)
+		}
+		send = send || inReplyTo != ""
+	}
 	if send || len(out.Questions) > 0 {
 		title := out.Notify.Title
 		if title == "" {
@@ -634,10 +682,18 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 				body += "\n- " + q
 			}
 		}
-		e.deliver(ctx, snap, a, &c.ID, nil, "report", notify.Message{
+		m := notify.Message{
 			Title: a.Name + ": " + title, Body: strings.TrimSpace(body), Priority: pr,
 			Tags: []string{"orbit", a.Name}, Link: link,
-		})
+		}
+		if inReplyTo != "" {
+			m.InReplyTo = inReplyTo
+			if mailSubject != "" && !strings.HasPrefix(strings.ToLower(mailSubject), "re:") {
+				mailSubject = "Re: " + mailSubject
+			}
+			m.Subject = mailSubject
+		}
+		e.deliver(ctx, snap, a, &c.ID, nil, "report", m)
 	}
 	for i, pa := range o.Actions {
 		if pa.Rule != string(spec.RuleApprove) {
@@ -714,6 +770,8 @@ func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, run
 		}
 		return
 	}
+	// On control only: the token is signed with the secret a worker does not hold.
+	e.mailHeaders(ctx, snap, runID, &m)
 	for _, name := range a.Notify.Channels {
 		ch := snap.Channels[name]
 		sendCtx, cancel := context.WithTimeout(ctx, time.Minute)
@@ -727,6 +785,27 @@ func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, run
 			e.Log.Error("record delivery", "err", rerr)
 		}
 	}
+}
+
+// mailHeaders names the run's conversation in m's reply address and Message-ID when orbit has a mailbox, so a reply to the mail continues that conversation (internal/mail).
+func (e *Engine) mailHeaders(ctx context.Context, snap *Snapshot, runID *string, m *notify.Message) {
+	mc := snap.Config.Deployment.Mail
+	if mc == nil || runID == nil {
+		return
+	}
+	conv, err := e.Store.RunConversation(ctx, *runID)
+	if err != nil {
+		e.Log.Warn("mail headers", "run", *runID, "err", err)
+		return
+	}
+	tok := mail.Token(e.Secret, conv)
+	m.ReplyTo = mail.ReplyAddress(mc.Address, tok)
+	m.MessageID = mail.MessageID(mc.Address, tok)
+	ref := mail.ThreadRef(mc.Address, tok)
+	if m.InReplyTo != "" {
+		ref += " " + m.InReplyTo
+	}
+	m.References = ref
 }
 
 func (e *Engine) runLink(snap *Snapshot, runID string) string {
