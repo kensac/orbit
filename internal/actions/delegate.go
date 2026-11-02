@@ -87,7 +87,7 @@ func delegateType(targets []string) Type {
 		Name: DelegateType,
 		Description: fmt.Sprintf("Hand tasks to other agents (%s). Each task runs in its own conversation of its agent, "+
 			"which gets the brief and reports back to you; tasks of different agents run in parallel, an agent's own tasks one at a time. "+
-			"after lists keys of tasks in this same action that must be done first; a dependent task is given their reports. "+
+			"after lists keys of tasks that must be done first, in this same action or (a key it does not have) the newest earlier task of that key you delegated from this conversation; a dependent task is given their reports. "+
 			"fresh starts the agent without its memory (a worker from its template). "+
 			"decision is a question a person must approve before the task starts. "+
 			"You are woken with every report once all tasks are over, and as soon as one fails or asks you something; do not wait or poll. "+

@@ -77,7 +77,8 @@ type Task struct {
 	Fresh                bool   `json:"fresh"`
 	Depth                int    `json:"depth"`
 	Status               string `json:"status"`
-	// DependsOn is the keys of the tasks in its batch it waits for.
+	// DependsOn is the keys of the tasks it waits for: of its batch, or
+	// earlier tasks of its parent conversation.
 	DependsOn []string      `json:"depends_on"`
 	Decision  *TaskDecision `json:"decision"`
 	Report    *TaskReport   `json:"report"`
@@ -276,7 +277,9 @@ type NewTask struct {
 	Key   string
 	Agent string
 	Brief string
-	// After is the keys of tasks in the same batch it waits for.
+	// After is the keys of the tasks it waits for: in the same batch, or
+	// (a key the batch does not have) the newest earlier task of that key
+	// the conversation delegated.
 	After []string
 	Fresh bool
 	// Decision, when set, is a question a person must approve before the
@@ -381,7 +384,21 @@ func (s *Store) Delegate(ctx context.Context, d Delegation) ([]Delegated, error)
 		}
 		for _, nt := range d.Tasks {
 			for _, dep := range nt.After {
-				if _, err := tx.Exec(ctx, `INSERT INTO task_deps (task_id, depends_on) VALUES ($1, $2)`, ids[nt.Key], ids[dep]); err != nil {
+				on, ok := ids[dep]
+				if !ok {
+					// An earlier batch's task: it exists already and cannot
+					// gain dependencies, so no cycle runs through it.
+					err := tx.QueryRow(ctx, `SELECT id::text FROM tasks WHERE parent_conversation_id = $1 AND key = $2
+						ORDER BY created_at DESC LIMIT 1`, convo, dep).Scan(&on)
+					if errors.Is(err, pgx.ErrNoRows) {
+						return fmt.Errorf("%w: task %q depends on %q, which is neither in this delegation nor a task this conversation delegated before",
+							ErrInvalid, nt.Key, dep)
+					}
+					if err != nil {
+						return err
+					}
+				}
+				if _, err := tx.Exec(ctx, `INSERT INTO task_deps (task_id, depends_on) VALUES ($1, $2)`, ids[nt.Key], on); err != nil {
 					return err
 				}
 			}
@@ -394,7 +411,9 @@ func (s *Store) Delegate(ctx context.Context, d Delegation) ([]Delegated, error)
 	return out, err
 }
 
-// checkDAG holds a batch's dependencies to a DAG over its own keys.
+// checkDAG holds a batch's dependencies to a DAG over its own keys. A key
+// the batch does not have names an earlier task (Delegate resolves it),
+// which no task of this batch can be upstream of.
 func checkDAG(tasks []NewTask) error {
 	byKey := map[string]*NewTask{}
 	for i := range tasks {
@@ -409,9 +428,6 @@ func checkDAG(tasks []NewTask) error {
 			if dep == t.Key {
 				return fmt.Errorf("%w: task %q depends on itself", ErrInvalid, t.Key)
 			}
-			if byKey[dep] == nil {
-				return fmt.Errorf("%w: task %q depends on %q, which is not in this delegation", ErrInvalid, t.Key, dep)
-			}
 		}
 	}
 	// Kahn's algorithm: a cycle leaves tasks that never reach zero.
@@ -420,6 +436,9 @@ func checkDAG(tasks []NewTask) error {
 	for _, t := range tasks {
 		indeg[t.Key] += 0
 		for _, dep := range t.After {
+			if byKey[dep] == nil {
+				continue
+			}
 			indeg[t.Key]++
 			next[dep] = append(next[dep], t.Key)
 		}
