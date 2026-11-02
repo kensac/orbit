@@ -190,6 +190,9 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 	if err != nil {
 		return e.fail(ctx, snap, a, c, start, err, res)
 	}
+	if st.remembered != "" && out != nil {
+		out.Report = strings.TrimRight(out.Report, "\n") + "\n\n" + st.remembered
+	}
 	if st.keeps && res != nil {
 		// Stored before the run is recorded as succeeded, so the
 		// conversation's next run, claimed on any host, finds it.
@@ -381,6 +384,24 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		b, _ := json.Marshal(rc.Messages)
 		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "messages.json", "application/json", b); err != nil {
 			return nil, nil, err
+		}
+	}
+	// A person's /remember is code's to do (remember.go): written now, confirmed in the reply. A run their message woke that has nothing else to answer ends here.
+	if task == nil && len(rc.Messages) > 0 {
+		rm, err := e.remember(ctx, a, c, rc.Messages)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(rm.lines) > 0 {
+			report := rememberReport(rm.lines)
+			if len(rm.rest) == 0 && Attended(c.Trigger) {
+				return &Output{Summary: chatSummary(report), Report: report}, nil, nil
+			}
+			st.remembered = report
+			rc.Messages = rm.rest
+			if len(rc.Messages) > 0 {
+				rc.Messages[0].Body = "(orbit has saved to memory what you asked with /remember; your reply is followed by:\n" + report + ")\n\n" + rc.Messages[0].Body
+			}
 		}
 	}
 

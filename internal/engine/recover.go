@@ -35,6 +35,8 @@ type attemptState struct {
 	cancelOnce sync.Once
 	// task is the task whose conversation the run is in, nil for none.
 	task *store.Task
+	// remembered is what /remember saved for a run that also answers other messages: it follows the reply.
+	remembered string
 }
 
 // stop closes cancel once.

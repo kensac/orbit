@@ -38,6 +38,8 @@ Send `POST /api/v1/agents/daily-review/conversations` with a first message:
 
 The response includes `conversation_id`, `message_id` and, when a run was queued, `run_id`. Read the reply with `GET /api/v1/conversations/{conversation_id}/thread`; continue with `POST /api/v1/conversations/{conversation_id}/messages` and `{"body":"My proposal is due tomorrow.","wake":true}`. If the agent asks a question, include its message ID as `reply_to`. A queued run is not a completed answer: inspect its status, report and any error in the thread.
 
+To teach orbit something for good, write `/remember <what to remember>` in any conversation: it is saved at once (for every agent; `--agent` for this one only, `--topic <name>` for a topic) and the reply says what was saved. See [remembering](../api.md#remembering-from-a-conversation).
+
 Use separate conversations for separate topics. Each has its own messages and session; memory, schedules and action rules belong to the agent and are shared across its conversations. Scheduled and manual runs use its default conversation, named `General`. Archiving keeps the conversation readable; a new message brings it back. See [conversations](../api.md#conversations) for paging, attachments and retry identifiers.
 
 ## Review actions and approvals
