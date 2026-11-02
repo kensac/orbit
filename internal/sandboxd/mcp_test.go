@@ -64,12 +64,12 @@ func mcpHarness(t *testing.T) (*harness, string) {
 	return h, dir
 }
 
-const mcpListOut = "Checking MCP server health…\n\n" +
-	"claude.ai Gmail: https://gmailmcp.googleapis.com/mcp/v1 - ✔ Connected\n" +
+const mcpListOut = "Checking MCP server health\u2026\n\n" +
+	"claude.ai Gmail: https://gmailmcp.googleapis.com/mcp/v1 - \u2714 Connected\n" +
 	"claude.ai Google Sheets: https://gws-mcp.kanishksachdev.com/mcp - ! Needs authentication\n" +
-	"plugin:github:github: https://api.githubcopilot.com/mcp/ (HTTP) - ✘ Failed to connect — HTTP 400: bad request\n" +
-	"owl: uv run --project /x - y serve - ✔ Connected\n" +
-	"proj: https://p (SSE) - ⏸ Pending approval\n" +
+	"plugin:github:github: https://api.githubcopilot.com/mcp/ (HTTP) - \u2718 Failed to connect \u2014 HTTP 400: bad request\n" +
+	"owl: uv run --project /x - y serve - \u2714 Connected\n" +
+	"proj: https://p (SSE) - \u23f8 Pending approval\n" +
 	"odd: https://o - ? Something new\n"
 
 func TestAccountMCPList(t *testing.T) {

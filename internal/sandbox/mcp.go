@@ -108,12 +108,12 @@ type MCPServer struct {
 // The marks and the dash between a status and its detail, as the CLI
 // prints them.
 const (
-	markOK      = "✔"
-	markOKAlt   = "✓"
-	markFail    = "✘"
-	markFailAlt = "✗"
-	markPause   = "⏸"
-	detailDash  = " — "
+	markOK      = "\u2714"
+	markOKAlt   = "\u2713"
+	markFail    = "\u2718"
+	markFailAlt = "\u2717"
+	markPause   = "\u23f8"
+	detailDash  = " \u2014 "
 )
 
 var transportRE = regexp.MustCompile(` \((HTTP|SSE|stdio|WS|WebSocket)\)$`)
