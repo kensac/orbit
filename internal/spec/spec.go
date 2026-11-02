@@ -79,6 +79,8 @@ type Deployment struct {
 	DeferLowPriority bool `yaml:"defer_low_priority,omitempty" json:"defer_low_priority,omitempty"`
 	// Credentials are the variables a source or an endpoint's headers may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
 	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
+	// Connectors are MCP servers agents may be given (connectors.go); orbit calls them on the agents' behalf.
+	Connectors map[string]Connector `yaml:"connectors,omitempty" json:"connectors,omitempty"`
 	// Expires records when a credential orbit cannot inspect stops working (the Claude Code subscription token lasts a year), keyed by its variable, as YYYY-MM-DD (expires.go). It only feeds orbit_credential_expiry_timestamp_seconds, so an alert fires before the date.
 	Expires map[string]string `yaml:"expires,omitempty" json:"expires,omitempty"`
 	// WebhookSecrets are the signing secrets inbound webhooks are verified with, keyed by variable, each bound to the agents that may use it (webhook.go).
@@ -238,8 +240,10 @@ type Agent struct {
 	Transforms []Transform `yaml:"transforms,omitempty" json:"transforms,omitempty"`
 	// Gates end a scheduled run without a backend call when code finds
 	// nothing to judge; the run is skipped, naming the gate.
-	Gates   []Gate     `yaml:"gates,omitempty" json:"gates,omitempty"`
-	Tools   []string   `yaml:"tools,omitempty" json:"tools,omitempty"`
+	Gates []Gate   `yaml:"gates,omitempty" json:"gates,omitempty"`
+	Tools []string `yaml:"tools,omitempty" json:"tools,omitempty"`
+	// Web limits WebFetch to named domains on orbit's host (web.go).
+	Web     *WebSpec   `yaml:"web,omitempty" json:"web,omitempty"`
 	Actions ActionSet  `yaml:"actions,omitempty" json:"actions,omitempty"`
 	Notify  NotifySpec `yaml:"notify,omitempty" json:"notify,omitempty"`
 	// MessagesTrigger starts a run when a person sends the agent a message.
@@ -288,6 +292,8 @@ type Agent struct {
 	// The delegate rule still decides whether it may (docs/ARCHITECTURE.md,
 	// Delegation).
 	Delegates []string `yaml:"delegates,omitempty" json:"delegates,omitempty"`
+	// Connectors names orbit.yaml's connectors whose tools this agent's runs may call (claude-code only); each tool's rule is in actions as mcp:<connector>:<tool> (connectors.go).
+	Connectors []string `yaml:"connectors,omitempty" json:"connectors,omitempty"`
 	// Repos are git repositories every run reads: orbit fetches each into
 	// its mirror and gives the run the tree at Ref, without .git, under
 	// inputs/repos/<name>, with read-only history and GitHub tools
@@ -1008,6 +1014,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, c.validateAgent(c.Agents[n])...)
 	}
 	errs = append(errs, c.validateCredentials()...)
+	errs = append(errs, c.validateConnectors()...)
 	errs = append(errs, c.validateExpires()...)
 	errs = append(errs, c.validateWebhookSecrets()...)
 	errs = append(errs, c.validateBuild()...)
@@ -1192,8 +1199,12 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if c.Deployment.GitHub == nil || len(c.Deployment.GitHub.CommentRepositories) == 0 {
 				at("action %q: needs github.comment_repositories in orbit.yaml", typ)
 			}
+		case strings.HasPrefix(typ, ConnectorRulePrefix):
+			// validateAgentConnectors
+		case strings.HasPrefix(typ, ConnectorActionPrefix):
+			at("action %q: a connector tool's rule is named mcp:<connector>:<tool>", typ)
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr or github:comment)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr, github:comment or mcp:<connector>:<tool>)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
@@ -1351,7 +1362,9 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("sandbox: needs sandboxd in orbit.yaml (a sandbox: or build: section)")
 		}
 	}
+	errs = append(errs, a.validateWeb()...)
 	errs = append(errs, c.validateTrust(a)...)
+	errs = append(errs, c.validateAgentConnectors(a)...)
 	if ss := a.Session; ss != nil {
 		rs := c.Deployment.Runners[a.Runner]
 		if rs.Kind != "claude-code" {

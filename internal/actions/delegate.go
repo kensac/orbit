@@ -166,8 +166,9 @@ func (p DelegateParams) NewTasks() []store.NewTask {
 func taskMessageType() Type {
 	return Type{
 		Name: TaskMessageType,
-		Description: "Write to one of your delegated tasks by its task_id: answer its question (reply_to is the question's id) or add to its brief. " +
-			"Its agent is woken to read it; a done task reopens. You hear back as for delegate.",
+		Description: "Write to one of your delegated tasks by its task_id: answer its question (reply_to is the question's id), correct it, or add to its brief. " +
+			"While its agent is working on it in a chat turn, the message goes into that turn and the result says delivered: steered (it reads it at its next tool call); " +
+			"otherwise delivered: queued, and its agent is woken to read it (a done task reopens). You hear back as for delegate.",
 		ParamsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

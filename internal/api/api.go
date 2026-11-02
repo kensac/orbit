@@ -166,6 +166,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/retry", s.ticketMove(store.TicketApproved))
 	api("POST /api/v1/tickets/{id}/reopen", s.ticketMove(store.TicketOpen))
 	api("POST /api/v1/tickets/{id}/checks/rerun", s.rerunChecks)
+	api("POST /api/v1/tickets/{id}/pick", s.pickLane)
 	api("GET /api/v1/tickets/{id}/comments", s.listComments)
 	api("POST /api/v1/tickets/{id}/comments", s.addComment)
 	api("POST /api/v1/tickets/{id}/comments/{comment}/edit", s.editComment)
@@ -183,6 +184,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	s.workspaceRoutes(api)
 	s.workspaceWriteRoutes(api, mux)
 	s.skillsRoutes(api)
+	s.connectorRoutes(api, mux)
 	s.sessionRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
@@ -319,7 +321,7 @@ func (s *Server) thread(w http.ResponseWriter, r *http.Request) {
 	s.serveThread(w, r, id)
 }
 
-// threadPage reads a thread page for HTTP and MCP alike: the before cursor and limit in, items, has_more and next_before out (listPage).
+// threadPage reads a thread page for HTTP and MCP alike: the before cursor and limit in, items, has_more and next_before out (listPage), with the conversation's meter.
 func threadPage(before string, limit int, fold bool, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) (map[string]any, error) {
 	var c *store.ThreadCursor
 	if before != "" {
@@ -337,7 +339,9 @@ func threadPage(before string, limit int, fold bool, fetch func(before *store.Th
 		// limit and the cursor count every run, so paging is unchanged; a fold never crosses a page.
 		items = store.FoldSkips(items)
 	}
-	return listPage("items", items, page.HasMore, page.NextBefore), nil
+	out := listPage("items", items, page.HasMore, page.NextBefore)
+	out["meter"] = page.Meter
+	return out, nil
 }
 
 // listPage is a page as every paged list is served, over HTTP and MCP alike: the items under key (always an array), has_more, and next_before, null exactly when has_more is false.

@@ -152,7 +152,7 @@ func ruleRank(r Rule) int {
 	return 0
 }
 
-// Widening lists how next reaches further than cur (nil: an agent that does not exist yet): a tool, source, credential, delegate target or need it adds, a source it changes, a sandbox profile it moves to, or an action type it allows more readily. agent:define applies such a change only with a person's approval, whatever its rule.
+// Widening lists how next reaches further than cur (nil: an agent that does not exist yet): a tool, source, credential, delegate target, need or connector it adds, a source it changes, a sandbox profile it moves to, an action type it allows more readily, or a WebFetch domain it adds (or the allowlist it drops). agent:define applies such a change only with a person's approval, whatever its rule.
 func Widening(cur, next *Agent) []string {
 	if cur == nil {
 		cur = &Agent{}
@@ -193,6 +193,7 @@ func Widening(cur, next *Agent) []string {
 		// A profile's tools and egress are its own (SandboxProfiles), wider than orbit's container allows.
 		out = append(out, "sandbox "+next.Sandbox)
 	}
+	out = append(out, webWidening(cur, next)...)
 	for _, d := range next.Delegates {
 		if !slices.Contains(cur.Delegates, d) && !slices.Contains(cur.Delegates, "*") {
 			out = append(out, "delegate to "+d)
@@ -201,6 +202,12 @@ func Widening(cur, next *Agent) []string {
 	for _, n := range next.Needs {
 		if !slices.Contains(cur.Needs, n) {
 			out = append(out, "need "+n)
+		}
+	}
+	for _, n := range next.Connectors {
+		if !slices.Contains(cur.Connectors, n) {
+			// Its tools run as the agent's, on the person's account at that server.
+			out = append(out, "connector "+n)
 		}
 	}
 	for _, t := range next.Triggers {

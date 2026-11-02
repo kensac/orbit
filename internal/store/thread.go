@@ -320,6 +320,8 @@ type ThreadPage struct {
 	Items      []ThreadItem
 	HasMore    bool
 	NextBefore string
+	// Meter is the conversation's context and cost now, whatever the page.
+	Meter *Meter
 }
 
 // Thread returns an agent's default conversation (see ConversationThread).
@@ -453,9 +455,12 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 				}
 				page.Items = append(page.Items, ThreadItem{Run: r})
 			}
-			return rows.Err()
+			if err := rows.Err(); err != nil {
+				return err
+			}
 		}
-		return nil
+		page.Meter, err = conversationMeter(ctx, tx, conversationID)
+		return err
 	})
 	if err != nil {
 		return nil, err

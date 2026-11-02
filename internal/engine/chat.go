@@ -428,11 +428,15 @@ type chatTurn struct {
 	extra string
 	// plugin is the skills plugin directory, when the run has skills.
 	plugin string
+	// connectors are the run's connectors (connectors.go).
+	connectors *runner.Connectors
 	// fresh is a workspace the person changed since the last turn
 	// (runner.Chat.Fresh).
 	fresh bool
 	// instructor is the person the run answers (runInstructor).
 	instructor string
+	// pinned leads the prompt where no orbit hook adds the pinned entries (pinnedTurn).
+	pinned string
 	// repos is what the agent's repositories add (repos.go), or nil.
 	repos *repoRun
 }
@@ -462,6 +466,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	if t.rec != nil {
 		prompt = recoveryPrompt(t.rec, t.rc, t.now.Location())
 	}
+	prompt = t.pinned + prompt
 	for name, b := range map[string]string{"system.md": system, "prompt.md": prompt} {
 		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", name, "text/markdown", []byte(b)); err != nil {
 			return nil, nil, err
@@ -500,7 +505,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	}
 	req := runner.Request{
 		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
-		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin,
+		Tools: a.Tools, WebAllow: webAllow(a), Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin, Connectors: t.connectors,
 	}
 	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
 		return nil, nil, err
@@ -645,4 +650,12 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		result = json.RawMessage(`{}`)
 	}
 	return fmt.Sprintf("%s executed (action %s): %s", v.Type, id, result), false
+}
+
+// webAllow is the agent's WebFetch allowlist for a run on orbit's host; a sandboxed run's network is its egress.
+func webAllow(a *spec.Agent) []string {
+	if a.Web == nil || a.Sandbox != "" {
+		return nil
+	}
+	return a.Web.Allow
 }

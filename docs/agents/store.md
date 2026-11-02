@@ -45,6 +45,7 @@ an agent's beliefs changed.
   docs/tickets.md); into `planned` and `approved` only through
   `ProposePlan`/`ApprovePlan`, which carry the plan version. Each transition
   writes its `ticket_events` row in the same transaction.
+- race (`ticket_lanes`, `tickets.race`, `tickets.picked_lane`): `StartRace` enqueues every lane's build and moves its ticket to `building` in one transaction; the last lane to end moves it on in its own transaction (`settleRace`); `PickLane` writes the executed `ticket:pick` action and gives the ticket the lane's branch, PR and head in one transaction, only while it is a race in review with no pick. `picked_lane` is set once and never cleared.
 - build: `StartBuild` enqueues a build run and moves its ticket to
   `building` in one transaction; `FinishBuild` and `FailBuild` finish the
   run and move the ticket together. `build_decisions` and `build_sandboxes`
