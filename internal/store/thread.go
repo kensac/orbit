@@ -324,11 +324,7 @@ type ThreadPage struct {
 
 // Thread returns an agent's default conversation (see ConversationThread).
 func (s *Store) Thread(ctx context.Context, agent string, before *ThreadCursor, limit int) (*ThreadPage, error) {
-	var id string
-	err := s.Pool.QueryRow(ctx, `SELECT id::text FROM conversations WHERE agent = $1 AND is_default`, agent).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
-	}
+	id, err := s.DefaultConversationID(ctx, agent)
 	if err != nil {
 		return nil, err
 	}

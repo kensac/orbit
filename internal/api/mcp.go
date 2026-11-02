@@ -264,20 +264,21 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 			if limit <= 0 {
 				limit = mcpThreadLimit
 			}
-			var fetch func(*store.ThreadCursor, int) (*store.ThreadPage, error)
+			id := in.ConversationID
 			switch {
-			case in.ConversationID != "":
-				fetch = func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
-					return s.Store.ConversationThread(ctx, in.ConversationID, before, limit)
+			case id != "":
+				if !store.IsUUID(id) {
+					return nil, nil, mcpErr(requestError("not a valid id"))
 				}
 			case in.Agent != "":
-				fetch = func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
-					return s.Store.Thread(ctx, in.Agent, before, limit)
+				var err error
+				if id, err = s.Store.DefaultConversationID(ctx, in.Agent); err != nil {
+					return nil, nil, mcpErr(err)
 				}
 			default:
 				return nil, nil, errors.New("give agent or conversation_id")
 			}
-			out, err := threadPage(in.Before, limit, !in.Unfold, fetch)
+			out, err := s.readThread(ctx, id, in.Before, limit, !in.Unfold, false)
 			if err != nil {
 				return nil, nil, mcpErr(err)
 			}
