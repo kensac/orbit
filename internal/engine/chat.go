@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/actions"
+	"github.com/kensac/orbit/internal/build"
+	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/spec"
@@ -105,9 +107,9 @@ func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.Claimed
 	if err != nil {
 		return nil, fmt.Errorf("sandboxd: %w (%s)", err, tokenEnv)
 	}
-	cred, _ := e.Env(buildCredential)
-	if cred == "" {
-		return nil, errors.New("a sandboxed chat needs " + buildCredential + " for the CLI in the sandbox")
+	cred := build.SandboxEnv(e.Env)
+	if len(cred) == 0 {
+		return nil, fmt.Errorf("a sandboxed chat needs %s or %s for the CLI in the sandbox", claudeproto.OAuthToken, claudeproto.APIKey)
 	}
 	path, _ := runner.SessionFile(home, workdir, "x")
 	project := filepath.Dir(path)
@@ -115,7 +117,7 @@ func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.Claimed
 	// model's, unlike HOME, which holds orbit's session state).
 	boxHome := filepath.Join(filepath.Dir(workdir), "box-home")
 	return &runner.Sandbox{
-		Client: client, Label: c.ID, Credential: cred, Profile: profile,
+		Client: client, Label: c.ID, Env: cred, Profile: profile,
 		Pack: func() ([]byte, error) {
 			tree, _, err := workspace.Pack(
 				workspace.Tree{Dir: workdir, Skip: func(rel string) bool { return rel == ".orbit" || strings.HasPrefix(rel, ".orbit/") }},
