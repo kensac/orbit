@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,7 +22,11 @@ func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
 		before = c
 	}
 	archived := r.URL.Query().Get("archived") == "true"
-	page, err := s.Store.ListConversations(r.Context(), r.PathValue("name"), archived, before, intParam(r, "limit"))
+	var limit int
+	if !queryInt(w, r, "limit", &limit) {
+		return
+	}
+	page, err := s.Store.ListConversations(r.Context(), r.PathValue("name"), archived, before, limit)
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -45,11 +48,8 @@ func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
 		Wake            *bool  `json:"wake"`
 		ClientRequestID string `json:"client_request_id"`
 	}
-	if r.ContentLength != 0 {
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
+	if !decode(w, r, 64<<10, &body, bodyOptional) {
+		return
 	}
 	a, ok := s.Engine.Current().Config.Agents[r.PathValue("name")]
 	if !ok {
@@ -80,8 +80,7 @@ func (s *Server) updateConversation(w http.ResponseWriter, r *http.Request) {
 		Title    *string `json:"title"`
 		Archived *bool   `json:"archived"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if !decode(w, r, 4<<10, &body, bodyRequired) {
 		return
 	}
 	id := r.PathValue("id")

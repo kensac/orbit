@@ -1061,10 +1061,7 @@ const (
 // ListActionsPage returns actions newest first, ordered by (created_at,
 // id), so paging by the cursor never skips or repeats one.
 func (s *Store) ListActionsPage(ctx context.Context, f ActionFilter) (*ActionPage, error) {
-	if f.Limit <= 0 {
-		f.Limit = DefaultActionLimit
-	}
-	f.Limit = min(f.Limit, MaxActionLimit)
+	f.Limit = clampLimit(f.Limit, DefaultActionLimit, MaxActionLimit)
 	var at, runID any
 	id := "ffffffff-ffff-ffff-ffff-ffffffffffff"
 	if f.Before != nil {
