@@ -562,3 +562,68 @@ func TestATaskThatSaysItCouldNotDoTheWorkFailsAndOneBlockedAsksItsParent(t *test
 		}
 	}
 }
+
+func TestAFailedTaskWakesItsParentAtOnceWhileItsSiblingRuns(t *testing.T) {
+	fr := &scriptRunner{scripts: map[string]func(runner.Request) string{
+		"planner": func(req runner.Request) string {
+			if strings.Contains(req.Prompt, "Trigger: delegation") {
+				return output("Integrated", "ok", nil)
+			}
+			return output("Delegated", "on it", nil, delegateAction(`[
+				{"key": "facts", "agent": "researcher", "brief": "Find the facts."},
+				{"key": "outline", "agent": "writer", "brief": "Draft an outline."}]`))
+		},
+		"researcher": func(runner.Request) string { return outcome("No facts", "R", "failed", "the source is gone") },
+		"writer":     func(runner.Request) string { return output("Outline drafted", "OUTLINE-REPORT", nil) },
+	}}
+	d := newDelegation(t, fr)
+	first := d.message(t, "go")
+	run := func(want string) {
+		t.Helper()
+		c, err := d.s.ClaimRun(ctx, "test")
+		if err != nil || c == nil || c.Agent != want {
+			t.Fatalf("claimed %+v (%v), want a run of %s", c, err, want)
+		}
+		if err := d.e.Execute(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.e.ExecuteActions(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.e.ReconcileTasks(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waiting := func() (n int) {
+		t.Helper()
+		if err := d.s.Pool.QueryRow(ctx, `SELECT count(*) FROM runs WHERE agent = 'planner' AND trigger = 'delegation' AND status = 'queued'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	run("planner")
+	run("researcher")
+	ts := d.tasks(t, first)
+	if ts[0].Status != store.TaskFailed || ts[1].Status != store.TaskWorking {
+		t.Fatalf("after the failure: %+v", ts)
+	}
+	if waiting() != 1 {
+		t.Fatal("the parent was not woken at the failure")
+	}
+	// The sibling settles the batch while that wake still waits: one
+	// waiting wake, which reads both.
+	run("writer")
+	if n := waiting(); n != 1 {
+		t.Fatalf("waiting wakes = %d, want 1", n)
+	}
+	run("planner")
+	p := fr.last("planner").Prompt
+	for _, want := range []string{"## facts: failed", "the source is gone", "## outline: done", "OUTLINE-REPORT"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("parent prompt lacks %q:\n%s", want, p)
+		}
+	}
+	if ran := d.step(t); len(ran) != 0 {
+		t.Fatalf("woken again: %+v", ran)
+	}
+}

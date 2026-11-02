@@ -248,7 +248,7 @@ func userPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 		b.WriteString("Session: continued. Your earlier runs in this session are above; this message starts a new run. Inputs listed below are this run's, freshly fetched: read them rather than relying on earlier reads.\n")
 	}
 	if run.Trigger == store.TriggerDelegation {
-		b.WriteString("\nYou were woken because tasks you delegated settled: every one is over, or one asks you something. They are below.\n")
+		b.WriteString("\nYou were woken because tasks you delegated settled: every one is over, one failed, or one asks you something. They are below.\n")
 	}
 	if run.Trigger == "continue" {
 		fmt.Fprintf(&b, "\nYou asked to be woken again (continuation %d of at most %d). Your note to yourself:\n\n%s\n",

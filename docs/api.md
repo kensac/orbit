@@ -310,7 +310,7 @@ conversation:
   `reply_to`, when set, is the message it answers. `attachments` are the uploads it carries (Uploads, above), in order; always an array. `run_id` is the run that
   holds a person's message (`null` while it waits for a run: none has read it, or every attempt that did handed it back) or the run that asked a
   question. `reads` (a person's message, once a run has read it) is every attempt that read it, oldest first: `{"run_id", "attempt", "read_at", "released_at"}`, where `released_at` is when a failed or interrupted attempt handed it back, `null` for the one holding it.
-- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again), `build` (a ticket's build run, docs/tickets.md), `learn` (a learning run, below; only in an agent's learning conversation), `task` (in a delegated task's conversation: the task starting, or its parent writing to it) or `delegation` (the agent woken because tasks it delegated settled; below). `status` is
+- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again), `build` (a ticket's build run, docs/tickets.md), `learn` (a learning run, below; only in an agent's learning conversation), `task` (in a delegated task's conversation: the task starting, or its parent writing to it) or `delegation` (the agent woken because tasks it delegated settled, one failed or one asks it something; below). `status` is
   `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
   ended without a backend call because a gate, code, found nothing to judge;
   `gate` names it, and is `null` for every other status). `attempt` counts
