@@ -1,7 +1,8 @@
 // Command orbit is the whole service: the scheduler, the executors, the API,
 // and the operator commands.
 //
-//	orbit serve              run everything (the container's command)
+//	orbit serve              control: API, scheduler, delivery, actions, config sync, and executors
+//	orbit worker             executors only: claim and run what this host's capabilities cover
 //	orbit migrate            apply database migrations and exit
 //	orbit validate [dir]     load and check a configuration directory
 //	orbit run <agent> [prompt]   queue a manual run (a running serve picks it up)
@@ -10,6 +11,7 @@
 //	orbit drain              tell the local server to drain (a deploy replacing it)
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
 //	orbit hook --root <dir> --state <dir> [--figures]   orbit's hook, run by Claude Code
+//	orbit tls-cert --dir <d> [--owner uid:gid]   orbit-db's self-signed TLS certificate
 //	orbit sandboxd           the build sandbox service (holds the docker socket)
 //	orbit egress             the allowlisting proxy, a sandbox's only route out
 package main
@@ -29,6 +31,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,6 +67,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		err = serve(ctx, log)
+	case "worker":
+		err = worker(ctx, log)
 	case "migrate":
 		err = withStore(ctx, func(s *store.Store) error { return s.Migrate(ctx) })
 	case "validate":
@@ -78,6 +83,8 @@ func main() {
 		err = drainCmd()
 	case "mcp", "hook":
 		err = harnessCmd(os.Args[1], os.Args[2:])
+	case "tls-cert":
+		err = tlsCertCmd(os.Args[2:])
 	case "sandboxd":
 		err = sandboxdCmd(ctx, log)
 	case "egress":
@@ -114,7 +121,7 @@ func harnessCmd(name string, args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | version | mcp | hook | sandboxd | egress")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | version | mcp | hook | tls-cert | sandboxd | egress")
 	os.Exit(2)
 }
 
@@ -292,6 +299,15 @@ func syncAgents(ctx context.Context, s *store.Store, cfg *spec.Config) error {
 		}
 		specs[name] = store.AgentSpec{SHA: a.SHA, JSON: b, Enabled: a.IsEnabled()}
 	}
+	// The deployment first: a worker that sees the new agents builds them
+	// against the deployment they were loaded with.
+	sha, doc, err := cfg.DeploymentJSON()
+	if err != nil {
+		return err
+	}
+	if err := s.SyncDeployment(ctx, sha, doc); err != nil {
+		return err
+	}
 	return s.SyncAgents(ctx, specs)
 }
 
@@ -304,8 +320,13 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		return errors.New("ORBIT_API_TOKEN must be set, at least 32 characters (openssl rand -hex 32)")
 	}
 	workers, err := strconv.Atoi(env("ORBIT_WORKERS", "2"))
-	if err != nil || workers < 1 {
-		return fmt.Errorf("ORBIT_WORKERS: want a positive integer")
+	if err != nil || workers < 0 {
+		return fmt.Errorf("ORBIT_WORKERS: want 0 (control only) or a positive integer")
+	}
+	// Control runs every agent unless told what this host has.
+	caps, err := spec.ParseCapabilities(env("ORBIT_CAPABILITIES", "*"))
+	if err != nil {
+		return fmt.Errorf("ORBIT_CAPABILITIES: %w", err)
 	}
 	verifier, err := oidcVerifier()
 	if err != nil {
@@ -313,6 +334,10 @@ func serve(ctx context.Context, log *slog.Logger) error {
 	}
 	if verifier == nil {
 		log.Warn("ORBIT_OIDC_ISSUER is not set: the public /api/v1 refuses every request")
+	}
+	oauth, err := mcpOAuth(token)
+	if err != nil {
+		return err
 	}
 	dir := configDir(nil)
 	cfg, err := spec.Load(dir)
@@ -333,12 +358,9 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			Store: s, DataDir: env("ORBIT_DATA_DIR", "/data"), Env: os.LookupEnv,
 			Client: &http.Client{Timeout: 2 * time.Minute}, Secret: []byte(token),
 			NewRunner: runner.New, Log: log, Live: runner.NewLive(runner.MaxLive),
+			Worker: workerName, SessionStore: true,
 		}
-		if bin, err := os.Executable(); err == nil {
-			eng.Harness = bin
-		} else {
-			log.Warn("orbit's tools and hooks are off: cannot find this binary", "err", err)
-		}
+		setHarness(eng, log)
 		if err := eng.SetConfig(cfg); err != nil {
 			return err
 		}
@@ -392,7 +414,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
-			ConfigState: configState, Drain: drain}
+			ConfigState: configState, Drain: drain, OAuth: oauth}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		// Bind before any executor starts: an instance that cannot serve
@@ -441,38 +463,44 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			}
 		}()
 
-		var executors sync.WaitGroup
-		for i := 0; i < workers; i++ {
-			executors.Add(1)
-			go func(i int) {
-				defer executors.Done()
-				name := fmt.Sprintf("%s/%d", workerName, i)
-				for claimCtx.Err() == nil {
-					c, err := s.ClaimRun(claimCtx, name)
-					if err != nil {
-						if claimCtx.Err() == nil {
-							log.Error("claim", "err", err)
-						}
-						sleep(claimCtx, 5*time.Second)
-						continue
+		executors := (&pool{
+			Store: s, Engine: eng, Log: log, N: workers, Name: workerName, Wake: wakeRuns,
+			Claim: store.Claim{Any: caps.Any, Capabilities: caps.List, Builds: true},
+			// Its actions are ready the moment it finishes; a draining
+			// instance leaves them to the ready one.
+			After: func() {
+				if !drain.Draining() {
+					if err := eng.ExecuteActions(claimCtx); err != nil && claimCtx.Err() == nil {
+						log.Error("actions", "err", err)
 					}
-					if c == nil {
-						waitFor(claimCtx, wakeRuns, 5*time.Second)
-						continue
-					}
-					if err := eng.Execute(runCtx, c); err != nil {
-						log.Error("execute", "run", c.ID, "err", err)
-					}
-					// Its actions are ready the moment it finishes; a
-					// draining instance leaves them to the ready one.
-					if !drain.Draining() {
-						if err := eng.ExecuteActions(claimCtx); err != nil && claimCtx.Err() == nil {
-							log.Error("actions", "err", err)
-						}
-					}
+					deliverOutbox(claimCtx, eng, log)
 				}
-			}(i)
-		}
+			},
+		}).start(claimCtx, runCtx)
+
+		// Workers' notifications and the actions their runs proposed are
+		// this instance's to send and execute; a short poll keeps their
+		// latency close to a run executed here.
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			t := time.NewTicker(outboxEvery)
+			defer t.Stop()
+			for {
+				select {
+				case <-claimCtx.Done():
+					return
+				case <-t.C:
+				}
+				if drain.Draining() {
+					continue
+				}
+				deliverOutbox(claimCtx, eng, log)
+				if err := eng.ExecuteActions(claimCtx); err != nil && claimCtx.Err() == nil {
+					log.Error("actions", "err", err)
+				}
+			}
+		}()
 
 		loops.Add(1)
 		go func() {
@@ -519,28 +547,9 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		}()
 
 		log.Info("orbit serving", "addr", srv.Addr, "internal_addr", internal.Addr, "workers", workers,
-			"agents", len(cfg.Agents), "oidc", verifier != nil)
+			"capabilities", caps.String(), "agents", len(cfg.Agents), "oidc", verifier != nil)
 		<-drain.Done()
-		capAfter := drainMax(eng.Current().Config, log)
-		log.Info("draining: waiting for the runs held here", "cap", capAfter.String())
-
-		// A second signal is an operator who will not wait: hand back now.
-		again := make(chan os.Signal, 1)
-		signal.Notify(again, syscall.SIGINT, syscall.SIGTERM)
-		defer signal.Stop(again)
-		drained := make(chan struct{})
-		go func() { executors.Wait(); close(drained) }()
-		select {
-		case <-drained:
-		case <-time.After(capAfter):
-			log.Warn("draining: cap reached; handing the remaining runs back")
-			cancelRuns()
-			<-drained
-		case <-again:
-			log.Warn("draining: second signal; handing the remaining runs back")
-			cancelRuns()
-			<-drained
-		}
+		awaitDrain(executors, drainMax(eng.Current().Config, log), cancelRuns, log)
 		// No run is in progress here now, so no live process is mid-turn:
 		// each is closed between turns, and the next run of its
 		// conversation, on whichever instance, resumes its session from
@@ -602,6 +611,15 @@ func oidcVerifier() (*auth.Verifier, error) {
 	issuers := auth.SplitList(os.Getenv("ORBIT_OIDC_ISSUER"))
 	clients := auth.SplitList(os.Getenv("ORBIT_OIDC_CLIENT_IDS"))
 	group := strings.TrimSpace(os.Getenv("ORBIT_OIDC_GROUP"))
+	// The MCP sign-in's provider issues the tokens /mcp is called with, so they are accepted wherever an authentik token is.
+	if is, id := mcpOAuthEnv(); is != "" && id != "" {
+		if !slices.Contains(issuers, is) {
+			issuers = append(issuers, is)
+		}
+		if !slices.Contains(clients, id) {
+			clients = append(clients, id)
+		}
+	}
 	if len(issuers) == 0 {
 		if len(clients) > 0 || group != "" {
 			return nil, errors.New("ORBIT_OIDC_CLIENT_IDS or ORBIT_OIDC_GROUP is set without ORBIT_OIDC_ISSUER")
@@ -612,6 +630,36 @@ func oidcVerifier() (*auth.Verifier, error) {
 		return nil, errors.New("ORBIT_OIDC_ISSUER needs ORBIT_OIDC_CLIENT_IDS and ORBIT_OIDC_GROUP")
 	}
 	return auth.New(auth.Config{Issuers: issuers, ClientIDs: clients, Group: group})
+}
+
+func mcpOAuthEnv() (issuer, clientID string) {
+	issuer = strings.TrimSpace(os.Getenv("ORBIT_MCP_OAUTH_ISSUER"))
+	if issuer != "" && !strings.HasSuffix(issuer, "/") {
+		issuer += "/"
+	}
+	return issuer, strings.TrimSpace(os.Getenv("ORBIT_MCP_OAUTH_CLIENT_ID"))
+}
+
+// mcpOAuth builds the MCP sign-in proxy from the environment, or nil when ORBIT_MCP_OAUTH_ISSUER is unset.
+func mcpOAuth(token string) (*api.OAuthProxy, error) {
+	issuer, id := mcpOAuthEnv()
+	secret := os.Getenv("ORBIT_MCP_OAUTH_CLIENT_SECRET")
+	if issuer == "" {
+		if id != "" || secret != "" {
+			return nil, errors.New("ORBIT_MCP_OAUTH_CLIENT_ID or _SECRET is set without ORBIT_MCP_OAUTH_ISSUER")
+		}
+		return nil, nil
+	}
+	if id == "" || secret == "" {
+		return nil, errors.New("ORBIT_MCP_OAUTH_ISSUER needs ORBIT_MCP_OAUTH_CLIENT_ID and ORBIT_MCP_OAUTH_CLIENT_SECRET")
+	}
+	if os.Getenv("ORBIT_OIDC_GROUP") == "" {
+		return nil, errors.New("ORBIT_MCP_OAUTH_ISSUER needs ORBIT_OIDC_GROUP, the group a person must be in")
+	}
+	o := &api.OAuthProxy{Issuer: issuer, ClientID: id, ClientSecret: secret,
+		RedirectHosts: auth.SplitList(os.Getenv("ORBIT_MCP_REDIRECT_HOSTS")), Client: &http.Client{Timeout: 30 * time.Second}}
+	o.SetKey([]byte(token))
+	return o, nil
 }
 
 func reloadConfig(ctx context.Context, s *store.Store, eng *engine.Engine, dir string) error {
