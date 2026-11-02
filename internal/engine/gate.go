@@ -113,10 +113,7 @@ func missed(a *spec.Agent, c *store.ClaimedRun, now time.Time) *gateSkip {
 		// The trigger changed since the fire; its grace is unknown, so the run goes ahead.
 		return nil
 	}
-	loc, err := time.LoadLocation(a.Timezone)
-	if err != nil {
-		loc = time.UTC
-	}
+	loc := a.Location()
 	grace := spec.MissedGraceFor(a.Triggers[i], loc, *c.ScheduledFor)
 	late := now.Sub(*c.ScheduledFor)
 	if late <= grace {

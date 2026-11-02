@@ -10,6 +10,10 @@ the engine never write SQL.
 change that drops or renames is expand, then contract, across two releases,
 because the previous image may still be running during a deploy.
 
+## Stored files
+
+`uploads.content` and `artifacts.content` are bytea, never updated. A reader serves one through `store.Blob`, a slice of `blobSlice` bytes per query (`substring`), so a GET holds a slice in memory, not the file, and a `Range` reads only its slices; `uploads.content` is stored uncompressed (`STORAGE EXTERNAL`), because a compressed value is decompressed from its start for every slice. `CreateUpload` finds a free name under a per-conversation advisory lock before its one INSERT, so the content crosses the wire once.
+
 ## Retention
 
 Nothing ages out. Rows that look disposable are the record: `run_events` is
