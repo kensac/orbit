@@ -265,8 +265,11 @@ const MaxAttempts = 3
 
 // ClaimRun moves the oldest queued run whose agent has nothing running to
 // running, owned by worker, and records the claim as a new attempt. It
-// returns nil when there is nothing to claim. FOR UPDATE SKIP LOCKED gives
-// one row to one claimer across processes; runs_one_running is what makes
+// returns nil when there is nothing to claim. FOR NO KEY UPDATE SKIP
+// LOCKED gives one row to one claimer across processes, and does not skip
+// a run another transaction only references (an event or journal row of a
+// superseded attempt being written holds a KEY SHARE lock on it, which FOR
+// UPDATE would skip); runs_one_running is what makes
 // "nothing running" true under concurrency: a second claimer for the same
 // agent fails the index and tries the next row.
 func (s *Store) ClaimRun(ctx context.Context, worker string) (*ClaimedRun, error) {
@@ -290,7 +293,7 @@ func (s *Store) claim(ctx context.Context, worker, filter string, args ...any) (
 				      `+filter+`
 				    ORDER BY q.created_at
 				    LIMIT 1
-				    FOR UPDATE SKIP LOCKED
+				    FOR NO KEY UPDATE SKIP LOCKED
 				)
 				RETURNING id::text, attempt, agent, spec_sha, trigger, prompt, chain, conversation_id::text`, append([]any{worker}, args...)...).
 				Scan(&c.ID, &c.Attempt, &c.Agent, &c.SpecSHA, &c.Trigger, &c.Prompt, &c.Chain, &c.ConversationID); err != nil {
@@ -574,8 +577,8 @@ type Run struct {
 	RunAfter      *time.Time `json:"run_after,omitempty"`
 	Continues     *string    `json:"continues,omitempty"`
 	Chain         int        `json:"chain,omitempty"`
-	// Steps is the number of tool calls in the latest attempt, as a
-	// thread's run item counts them (stepsCount).
+	// Steps is the number of tool calls in the latest attempt's
+	// timeline, as a thread's run item counts them (stepsCount).
 	Steps int `json:"steps"`
 	// Gate names what ended a skipped run.
 	Gate *string `json:"gate,omitempty"`
@@ -767,17 +770,40 @@ type MemoryVersion struct {
 	RunID     *string   `json:"run_id,omitempty"`
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
+	// Author is the person who wrote or restored it through the API; RestoredFrom the version a restore copied.
+	Author       *string `json:"author"`
+	RestoredFrom *int64  `json:"restored_from"`
 }
 
 // MemoryHistory returns an agent's memory versions, newest first.
 func (s *Store) MemoryHistory(ctx context.Context, agent string, limit int) ([]MemoryVersion, error) {
 	limit = clampLimit(limit, 20, 200)
-	rows, err := s.Pool.Query(ctx, `SELECT id, run_id::text, content, created_at FROM memory_versions
+	rows, err := s.Pool.Query(ctx, `SELECT id, run_id::text, content, created_at, author, restored_from FROM memory_versions
 		WHERE agent = $1 ORDER BY id DESC LIMIT $2`, agent, limit)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[MemoryVersion])
+}
+
+// WriteMemory writes the next version of an agent's memory document: content as given, or, with restore above 0, a copy of that earlier version of the same agent's (ErrNotFound for another's). Nothing is replaced; the new version is the newest.
+func (s *Store) WriteMemory(ctx context.Context, agent, content string, restore int64, author string) (*MemoryVersion, error) {
+	var v MemoryVersion
+	var err error
+	if restore > 0 {
+		err = s.Pool.QueryRow(ctx, `INSERT INTO memory_versions (agent, content, author, restored_from)
+			SELECT agent, content, NULLIF($3, ''), id FROM memory_versions WHERE id = $2 AND agent = $1
+			RETURNING id, run_id::text, content, created_at, author, restored_from`, agent, restore, author).
+			Scan(&v.ID, &v.RunID, &v.Content, &v.CreatedAt, &v.Author, &v.RestoredFrom)
+	} else {
+		err = s.Pool.QueryRow(ctx, `INSERT INTO memory_versions (agent, content, author) VALUES ($1, $2, NULLIF($3, ''))
+			RETURNING id, run_id::text, content, created_at, author, restored_from`, agent, content, author).
+			Scan(&v.ID, &v.RunID, &v.Content, &v.CreatedAt, &v.Author, &v.RestoredFrom)
+	}
+	if errors.Is(err, pgx.ErrNoRows) || isForeignKeyViolation(err) {
+		return nil, ErrNotFound
+	}
+	return &v, err
 }
 
 // ---------------------------------------------------------------- messages
@@ -892,6 +918,8 @@ type Outcome struct {
 	Actions   []ProposedAction
 	// Plan is a plan the run proposed for its ticket (tickets.go).
 	Plan *PlanProposal
+	// Entries are the memory entry writes the run made, applied in order; each one's Result is set (entry_writes.go).
+	Entries []*EntryWrite
 }
 
 // PlanProposal is a ticket plan a run proposed. RecordOutcome sets Version
@@ -935,6 +963,9 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 				return err
 			}
 			p.Version = v
+		}
+		if err := applyEntryWrites(ctx, tx, runID, o.Entries); err != nil {
+			return err
 		}
 		for _, a := range o.Actions {
 			id, err := insertAction(ctx, tx, runID, agent, a)

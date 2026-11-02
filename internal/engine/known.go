@@ -41,20 +41,12 @@ func (e *Engine) agentTopics(ctx context.Context, a *spec.Agent) ([]string, erro
 }
 
 // knownInput reads the entries the agent reads, writes them in full as an input, and returns the index for the prompt ("" when there are none). A recovered attempt has the file already, restored with its inputs, and its session holds the index.
-func (e *Engine) knownInput(ctx context.Context, c *store.ClaimedRun, a *spec.Agent, workdir, inputsDir string, inputs []runner.Input) (string, []runner.Input, error) {
+func (e *Engine) knownInput(ctx context.Context, c *store.ClaimedRun, entries []store.Entry, workdir, inputsDir string, inputs []runner.Input) (string, []runner.Input, error) {
 	rel := filepath.Join(inputsDir, knownFile)
 	for _, in := range inputs {
 		if in.Path == rel {
 			return "", inputs, nil
 		}
-	}
-	topics, err := e.agentTopics(ctx, a)
-	if err != nil {
-		return "", nil, err
-	}
-	entries, err := e.Store.EntriesFor(ctx, a.Name, topics)
-	if err != nil {
-		return "", nil, err
 	}
 	if len(entries) == 0 {
 		return "", inputs, nil

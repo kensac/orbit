@@ -56,6 +56,10 @@ more than its agent's rules allow.
   CLI process, on its command line.
 - **The status channel** is a unix socket, mode 0600, and a spool file in the run's state directory under the CLI's HOME (which the CLI denies reading): local to the host, never a network listener. What arrives on it is the model's process tree reporting on itself, so it is data, never trusted for a decision: it sets the status a person sees and the run's `orbit.hook` events, and nothing else. A forged event can misreport a running run's status at most; the run's row decides once it is final.
 
+## Memory entries a model writes
+
+A run writes memory entries directly, and a learning run writes them from a conversation, so a poisoned input or message can plant an entry that later runs of every agent reading its scope are shown. What bounds it: entries are shown as data (the system prompt says they never authorize an action the rules do not, and an instruction in one is not to be followed); a run may write only to the profile, itself and the topics it reads, at most 10 writes, and only change entries it was shown at the version it was shown; every version is kept with the run and conversation it came from (`GET /memory/entries?run_id=`), so a bad one is found and retired or restored. A learning run reads the person's messages and the agent's reports (which can quote inputs), not the inputs themselves.
+
 ## What the model can cause
 
 Only actions its spec enables, through executors here, to destinations in
@@ -93,9 +97,9 @@ types are not even offered.
   personal data; never route `/ui/` around authentik.
 - **`/mcp`** is the API as tools, with the same check: an authentik token (the person decides and authors), the operator token only on the internal listener. Its tools can do what `/api/v1` can (post, approve, reject); nothing more.
 - **The MCP OAuth proxy** (`oauth.go`) lets anyone register a client, so the redirect host list (`ORBIT_MCP_REDIRECT_HOSTS`, default the Claude apps) is what stops a link that would send a signed-in person's code to a stranger's host; the code is useless without the PKCE verifier its client holds. A code is single-use per instance only (a replay to the other instance of a rollout within its 2 minutes is the gap), and every sealed value is keyed from `ORBIT_API_TOKEN`. The client receives the person's authentik access token for the `orbit-mcp` provider, which orbit accepts like the portfolio's; the refresh token it receives is sealed and works only through orbit, which holds the client secret.
-- `GET /runs/{id}/stream` shows the agent's narration and tool summaries
-  (file paths, commands, URLs): the same data `/events` already serves to
-  the same callers.
+- `GET /runs/{id}/stream` and `/journal` show the agent's prose, thinking,
+  tool inputs and outputs: the same data `/events` already serves to the
+  same callers.
 
 ## Mail
 
