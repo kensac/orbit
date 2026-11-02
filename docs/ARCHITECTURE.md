@@ -263,8 +263,8 @@ to the agent, a validator, and an executor. An agent's spec maps types to
 `auto`, `approve` or `deny`; unnamed types are denied and not offered.
 Today: `notify` (an extra message to one of the agent's channels),
 `continue` (wake this agent again later, above), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; a change that widens it waits for a person; docs/api.md, Defining agents), `webhook:<endpoint>` (a
-JSON body to an endpoint whose URL and credentials are configuration, never
-chosen by the model), and `github:merge` (squash one of orbit's own
+JSON body to an endpoint whose URL, method and credentials are configuration, never
+chosen by the model; an endpoint's `path` may have `{name}` placeholders the action fills from params checked against the endpoint's declared types, and a `body_schema` the body must match, so a write like Sure's `PUT /transactions/{id}` is expressible without the model choosing a route; configuration.md, Endpoints), and `github:merge` (squash one of orbit's own
 `orbit/*` PRs, only if its head is still the approved commit and every
 required check passed; [tickets.md](tickets.md)).
 
