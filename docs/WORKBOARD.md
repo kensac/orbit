@@ -14,7 +14,8 @@ A self-hosted Go service on Kanishk's server (hetzner) that runs Claude Code on 
 | Claude Code | `internal/claudeproto`: the CLI's stream-json protocol in Go (turns, control requests, interrupt, permission prompts, credential scrubbing); session resume with fork; a live process per conversation | #33 #35 #36 #39 #6 |
 | Journal | typed run journal (messages, thinking estimates, tool calls with inputs and bounded results, diffs, plans, approvals, questions, turn state vs outcome), read by the thread, the SSE stream, the run page and MCP | #34 #38 |
 | Determinism | orbit's MCP tools (exact `query`, `calc`), hooks (path guard, figures check), transforms (`sure-monthly`, JSON reducers), gates that skip a scheduled run with no model call, the `skipped` status | #8 #20 #23 #27 |
-| Memory | typed memory entries at profile, topic and agent scope with every version kept; agents write their own; a learning pass over quiet conversations; `orbit import claude-memory` | #28 #44 |
+| Memory | typed memory entries at profile, topic and agent scope with every version kept; agents write their own; a learning pass over quiet conversations; memory document write and restore; `orbit import claude-memory` | #28 #44 |
+| Skills and hooks | a versioned skills library given to each Claude Code run as real skills (stubs plus `mcp__orbit__skill`), agents writing and retiring their own, `orbit import skills`; per-agent hooks (`say`, `deny`, `run` at a Claude Code event) | #49 #55 |
 | Tickets and builds | tickets on conversations, GitHub App tokens (App `orbit-kensac`, id 5571920), the build runner (sandboxed Claude Code, orbit commits and pushes), the ticket loop, `github:merge` gated on green checks | #9 #14 #17 |
 | Sandbox | `orbit sandboxd` (one locked-down container per build or workspace), `orbit egress` (allowlist proxy, never GitHub), the build image | #15 |
 | Operations | seamless upgrades (readiness, drain, resuming interrupted attempts), the worker fleet (capabilities, control vs worker, sessions across hosts), usage and health APIs | #11 #16 #25 |
@@ -31,7 +32,6 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | Orchestration: `delegate`, task DAGs, mailboxes, decision gates, wakeups | #46 delegation | |
 | Search across everything stored, plus a live usage poller and deferring low-priority runs | #42 search | |
 | Attention events, inbox API, Web Push (portfolio PWA) | #41 orbit-push-attention | the portfolio is already a PWA |
-| Skills library (versioned, real Claude Code skills per run, agents writing their own), memory restore endpoint, per-agent hooks | #49 context-skills | |
 | Hook-driven live agent status | #37 agent-status | |
 | Worktrees, review comments on PR diffs, stacked PRs, check reruns, RRULE schedules with a precheck | #32 #43 | |
 | Migration fix (duplicate version 14) | #50 | |

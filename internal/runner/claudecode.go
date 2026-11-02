@@ -93,7 +93,22 @@ func harnessHooks(h *Harness, workdir, home string) map[string]any {
 	if h.Figures {
 		pre = append(pre, map[string]any{"matcher": "StructuredOutput", "hooks": cmd(" --figures")})
 	}
-	return map[string]any{"PreToolUse": pre}
+	out := map[string]any{"PreToolUse": pre}
+	for _, ah := range h.AgentHooks {
+		timeout := hookTimeout
+		if ah.Def.Timeout > 0 {
+			// The CLI's bound sits a little past the command's own, so the command's timeout is the one that reports.
+			timeout = int(ah.Def.Timeout.Seconds()) + 5
+		}
+		entry := map[string]any{"hooks": []any{map[string]any{"type": "command", "timeout": timeout,
+			"command": shellQuote(h.Bin) + " agent-hook --root " + shellQuote(workdir) + " --def " + harness.EncodeAgentHook(ah.Def)}}}
+		if ah.Matcher != "" {
+			entry["matcher"] = ah.Matcher
+		}
+		list, _ := out[ah.Event].([]any)
+		out[ah.Event] = append(list, entry)
+	}
+	return out
 }
 
 // harnessMCP is the --mcp-config that starts `orbit mcp` for the run.
