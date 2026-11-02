@@ -524,19 +524,23 @@ type Run struct {
 	RunAfter      *time.Time `json:"run_after,omitempty"`
 	Continues     *string    `json:"continues,omitempty"`
 	Chain         int        `json:"chain,omitempty"`
+	// Steps is the number of tool calls in the latest attempt, as a
+	// thread's run item counts them (stepsCount).
+	Steps int `json:"steps"`
 }
 
-const runCols = `id::text, attempt, agent, spec_sha, trigger, trigger_index, scheduled_for, prompt, status,
-	runner_kind, model, worker, created_at, started_at, finished_at, error, summary, report,
-	output, usage, cost_usd::float8, session_id, session_mode, session_parent, session_depth,
-	run_after, continues::text, chain`
+// runCols reads a run aliased r: stepsCount names it.
+const runCols = `r.id::text, r.attempt, r.agent, r.spec_sha, r.trigger, r.trigger_index, r.scheduled_for, r.prompt, r.status,
+	r.runner_kind, r.model, r.worker, r.created_at, r.started_at, r.finished_at, r.error, r.summary, r.report,
+	r.output, r.usage, r.cost_usd::float8, r.session_id, r.session_mode, r.session_parent, r.session_depth,
+	r.run_after, r.continues::text, r.chain, ` + stepsCount
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.Attempt, &r.Agent, &r.SpecSHA, &r.Trigger, &r.TriggerIndex, &r.ScheduledFor, &r.Prompt,
 		&r.Status, &r.RunnerKind, &r.Model, &r.Worker, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.Error,
 		&r.Summary, &r.Report, &r.Output, &r.Usage, &r.CostUSD, &r.SessionID, &r.SessionMode, &r.SessionParent,
-		&r.SessionDepth, &r.RunAfter, &r.Continues, &r.Chain)
+		&r.SessionDepth, &r.RunAfter, &r.Continues, &r.Chain, &r.Steps)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -545,7 +549,7 @@ func scanRun(row pgx.Row) (*Run, error) {
 
 // GetRun returns one run.
 func (s *Store) GetRun(ctx context.Context, id string) (*Run, error) {
-	return scanRun(s.Pool.QueryRow(ctx, `SELECT `+runCols+` FROM runs WHERE id = $1`, id))
+	return scanRun(s.Pool.QueryRow(ctx, `SELECT `+runCols+` FROM runs r WHERE r.id = $1`, id))
 }
 
 // RunFilter narrows ListRuns. Before pages backwards through created_at.
@@ -561,10 +565,10 @@ func (s *Store) ListRuns(ctx context.Context, f RunFilter) ([]Run, error) {
 	if f.Limit <= 0 || f.Limit > 500 {
 		f.Limit = 50
 	}
-	rows, err := s.Pool.Query(ctx, `SELECT `+runCols+` FROM runs
-		WHERE ($1 = '' OR agent = $1) AND ($2 = '' OR status = $2)
-		  AND ($3::timestamptz IS NULL OR created_at < $3)
-		ORDER BY created_at DESC LIMIT $4`, f.Agent, f.Status, f.Before, f.Limit)
+	rows, err := s.Pool.Query(ctx, `SELECT `+runCols+` FROM runs r
+		WHERE ($1 = '' OR r.agent = $1) AND ($2 = '' OR r.status = $2)
+		  AND ($3::timestamptz IS NULL OR r.created_at < $3)
+		ORDER BY r.created_at DESC LIMIT $4`, f.Agent, f.Status, f.Before, f.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -938,16 +942,70 @@ func (s *Store) GetAction(ctx context.Context, id string) (*Action, error) {
 
 // ListActions returns actions newest first, optionally by agent and status.
 func (s *Store) ListActions(ctx context.Context, agent, status string, limit int) ([]Action, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
-	rows, err := s.Pool.Query(ctx, `SELECT `+actionCols+` FROM actions
-		WHERE ($1 = '' OR agent = $1) AND ($2 = '' OR status = $2)
-		ORDER BY created_at DESC LIMIT $3`, agent, status, limit)
+	page, err := s.ListActionsPage(ctx, ActionFilter{Agent: agent, Status: status, Limit: limit})
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByPos[Action])
+	return page.Actions, nil
+}
+
+// ActionFilter narrows ListActionsPage. Empty fields do not filter; Before
+// is a cursor from a previous page's NextBefore.
+type ActionFilter struct {
+	Agent  string
+	Status string
+	RunID  string
+	Before *ConversationCursor
+	Limit  int
+}
+
+// ActionPage is a page of actions, newest first. HasMore says older ones
+// exist; NextBefore is the cursor that fetches them.
+type ActionPage struct {
+	Actions    []Action
+	HasMore    bool
+	NextBefore string
+}
+
+// DefaultActionLimit and MaxActionLimit are an action page's size.
+const (
+	DefaultActionLimit = 100
+	MaxActionLimit     = 500
+)
+
+// ListActionsPage returns actions newest first, ordered by (created_at,
+// id), so paging by the cursor never skips or repeats one.
+func (s *Store) ListActionsPage(ctx context.Context, f ActionFilter) (*ActionPage, error) {
+	if f.Limit <= 0 {
+		f.Limit = DefaultActionLimit
+	}
+	f.Limit = min(f.Limit, MaxActionLimit)
+	var at, runID any
+	id := "ffffffff-ffff-ffff-ffff-ffffffffffff"
+	if f.Before != nil {
+		at, id = f.Before.At, f.Before.ID
+	}
+	if f.RunID != "" {
+		runID = f.RunID
+	}
+	rows, err := s.Pool.Query(ctx, `SELECT `+actionCols+` FROM actions
+		WHERE ($1 = '' OR agent = $1) AND ($2 = '' OR status = $2) AND ($3::uuid IS NULL OR run_id = $3::uuid)
+		  AND (created_at, id) < (COALESCE($4::timestamptz, 'infinity'), $5::uuid)
+		ORDER BY created_at DESC, id DESC LIMIT $6`, f.Agent, f.Status, runID, at, id, f.Limit+1)
+	if err != nil {
+		return nil, err
+	}
+	list, err := pgx.CollectRows(rows, pgx.RowToStructByPos[Action])
+	if err != nil {
+		return nil, err
+	}
+	page := &ActionPage{Actions: list}
+	if len(list) > f.Limit {
+		page.Actions, page.HasMore = list[:f.Limit], true
+		last := list[f.Limit-1]
+		page.NextBefore = ConversationCursor{At: last.CreatedAt, ID: last.ID}.String()
+	}
+	return page, nil
 }
 
 // DecideAction approves or rejects a pending action.
