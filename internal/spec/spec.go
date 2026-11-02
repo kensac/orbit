@@ -60,6 +60,8 @@ type Deployment struct {
 	// Build is how orbit builds approved tickets (build.go). Without it no
 	// ticket is built.
 	Build *Build `yaml:"build,omitempty" json:"build,omitempty"`
+	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
+	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -447,6 +449,7 @@ func (c *Config) applyDefaults() {
 		// needs more names its own.
 		d.Defaults.Timeout = Duration(15 * time.Minute)
 	}
+	c.applyMailDefaults()
 	if d.Defaults.MemoryMaxBytes == 0 {
 		// About 4k tokens: memory rides in every prompt, so it must stay a
 		// small fraction of the context the run needs for its inputs.
@@ -563,6 +566,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, c.validateAgent(c.Agents[n])...)
 	}
 	errs = append(errs, c.validateBuild()...)
+	errs = append(errs, c.validateMail()...)
 	return errors.Join(errs...)
 }
 

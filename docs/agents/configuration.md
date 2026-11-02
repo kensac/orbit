@@ -39,6 +39,21 @@ Open decisions). Without the section no ticket is built; approved tickets
 wait. orbit also needs `CLAUDE_CODE_OAUTH_TOKEN`, the one credential the
 sandbox receives. `orbit validate` lists both variables.
 
+## Mail
+
+`mail:` in `orbit.yaml` gives orbit a mailbox, so a person can answer its mails and write to it (`internal/mail`, docs/ARCHITECTURE.md, Mail):
+
+```yaml
+mail:
+  address: orbit@example.com      # bare, no plus part; replies go to its plus form
+  imap: {host: mail.example.com, port: 993, username_env: SMTP_USER, password_env: SMTP_PASS, mailbox: INBOX}
+  allow: [me@example.com]         # default: every smtp channel's `to`
+  agent: assistant                # a mail that is not a reply opens a conversation here
+  poll: 1m
+```
+
+`port` defaults to 993 (implicit TLS); any other port must offer STARTTLS. `mailbox` defaults to `INBOX` and must be orbit's own: every unseen mail in it is read and marked seen. The server must deliver `local+anything@domain` to the mailbox (Postfix's `recipient_delimiter`). Without `agent`, a mail that is not a reply is recorded and ignored. `poll` is at least 10s. With the section, every mail orbit sends carries a reply address and Message-ID naming its run's conversation.
+
 ## Capabilities
 
 `needs: [<capability>, ...]` on an agent says what a host must have to run it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated; `*` alone is every agent, control's default when unset; a worker's default is none). A capability is `name` or `name:qualifier`, lower case (`spec.CapabilityRE`). An agent with no needs runs on any host. Give an agent a need for anything only some hosts have: a network its sources are on (`docker-network:hetzner`), a source credential that lives only on some hosts (`sure`), a tool (`browser`). The table of capabilities and the hosts that have them is docs/agents/deployment.md, Worker fleet. A run whose agent needs what no host has waits queued; nothing fails it.
