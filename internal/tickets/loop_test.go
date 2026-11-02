@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/kensac/orbit/internal/build"
+	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/github/githubtest"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -599,3 +601,229 @@ func (orphanErr) Error() string {
 }
 
 var errOrphan = orphanErr{}
+
+func TestASubmittedReviewIsBuiltBeforeTheMerge(t *testing.T) {
+	e := newEnv(t, "approve")
+	id := e.approvedTicket()
+	e.tick()
+	e.finishBuild(id, githubtest.Head)
+	if _, err := e.s.AddReviewComment(ctx, store.NewComment{TicketID: id, Path: "main.go", StartLine: 3, EndLine: 3, Body: "use a constant", Author: "kanishk"}); err != nil {
+		t.Fatal(err)
+	}
+	// The checks are green, but a submitted review comes first: a revise,
+	// not a merge.
+	if _, _, err := e.s.SubmitReview(ctx, id, "kanishk", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	e.tick()
+	tk := e.ticket(id)
+	b, _ := e.s.LatestBuild(ctx, id)
+	if tk.Status != store.TicketBuilding || tk.MergeActionID != nil || b.Purpose != store.BuildPurposeRevise {
+		t.Fatalf("after the review: %+v, build %+v", tk, b)
+	}
+	const revised = "6666666666666666666666666666666666666666"
+	e.gh.Mu.Lock()
+	e.gh.PR["head"].(map[string]any)["sha"] = revised
+	e.gh.Mu.Unlock()
+	run := e.finishBuild(id, revised)
+	cs, _ := e.s.ReviewComments(ctx, id)
+	if len(cs) != 1 || cs[0].Status != store.CommentDelivered || *cs[0].DeliveredBy != run {
+		t.Fatalf("comments = %+v", cs)
+	}
+	e.tick()
+	if tk := e.ticket(id); tk.Status != store.TicketMerging {
+		t.Fatalf("after the revise: %s", tk.Status)
+	}
+}
+
+const childHead = "7777777777777777777777777777777777777777"
+
+// stackedChild files a request stacked on parent and approves its plan.
+func (e *env) stackedChild(parent string) string {
+	e.t.Helper()
+	a := e.cfg.Agents["orbit"]
+	r, _, err := e.s.CreateTicket(ctx, store.NewTicket{Kind: "request", Title: "On top", Body: "after that", Agent: "orbit",
+		SpecSHA: a.SHA, Repo: "kensac/orbit", Author: "kanishk", StackOn: parent})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if _, err := e.s.ProposePlan(ctx, r.TicketID, "", "the next plan"); err != nil {
+		e.t.Fatal(err)
+	}
+	if _, err := e.s.ApprovePlan(ctx, r.TicketID, 1, "kanishk", ""); err != nil {
+		e.t.Fatal(err)
+	}
+	return r.TicketID
+}
+
+// finishChild plays the stacked ticket's build: PR 8 on the parent's
+// branch, its base the parent's head.
+func (e *env) finishChild(id, base string) {
+	e.t.Helper()
+	b, _ := e.s.LatestBuild(ctx, id)
+	c, err := e.s.ClaimRun(ctx, "w")
+	if err != nil || c == nil || b == nil || c.ID != b.RunID {
+		e.t.Fatalf("claim = %+v %v, build %+v", c, err, b)
+	}
+	pr := 8
+	if err := e.s.FinishBuild(ctx, c.ID, store.RunResult{Attempt: c.Attempt, Summary: "built"},
+		store.TicketUpdate{BaseSHA: base, Branch: "orbit/child", PRNumber: &pr, HeadSHA: childHead}); err != nil {
+		e.t.Fatal(err)
+	}
+	e.gh.Mu.Lock()
+	defer e.gh.Mu.Unlock()
+	e.gh.Others = map[int]map[string]any{8: {
+		"number": 8, "state": "open", "draft": false, "merged": false, "mergeable_state": "clean", "title": "On top",
+		"head": map[string]any{"ref": "orbit/child", "sha": childHead, "repo": map[string]any{"full_name": "kensac/orbit"}},
+		"base": map[string]any{"ref": "orbit/3f2a9c1e", "repo": map[string]any{"full_name": "kensac/orbit", "default_branch": "main"}},
+	}}
+	green := []map[string]any{{"name": "check", "status": "completed", "conclusion": "success", "app": map[string]any{"id": 15368}}}
+	e.gh.CommitChecks = map[string][]map[string]any{childHead: green, "8888888888888888888888888888888888888888": green}
+}
+
+// restacks records the loop's restacks and plays them: the branch moves
+// to 8888..., as a push would move PR 8's head.
+func (e *env) restacks() *[]build.Restack {
+	var got []build.Restack
+	e.loop.Restack = func(_ context.Context, _ *github.App, r build.Restack) (*build.Restacked, error) {
+		got = append(got, r)
+		const head = "8888888888888888888888888888888888888888"
+		e.gh.Mu.Lock()
+		e.gh.Others[8]["head"].(map[string]any)["sha"] = head
+		e.gh.Mu.Unlock()
+		onto := r.Onto
+		if onto == "" {
+			onto = "main"
+		}
+		return &build.Restacked{Base: "9999999999999999999999999999999999999999", Head: head, Branch: onto}, nil
+	}
+	return &got
+}
+
+func TestAStackedTicketBuildsOnItsParentAndMergesAfterIt(t *testing.T) {
+	e := newEnv(t, "approve")
+	e.loop.Revision = mergeSHA
+	got := e.restacks()
+	parent := e.approvedTicket()
+	child := e.stackedChild(parent)
+	e.tick()
+	if p, c := e.ticket(parent).Status, e.ticket(child).Status; p != store.TicketBuilding || c != store.TicketApproved {
+		t.Fatalf("parent %s, child %s", p, c)
+	}
+	e.finishBuild(parent, githubtest.Head)
+	e.tick() // the parent's checks are green: its merge waits for a person; the child builds on it
+	if p, c := e.ticket(parent).Status, e.ticket(child).Status; p != store.TicketMerging || c != store.TicketBuilding {
+		t.Fatalf("parent %s, child %s", p, c)
+	}
+	e.finishChild(child, githubtest.Head)
+	e.tick()
+	if tk := e.ticket(child); tk.Status != store.TicketReview || tk.MergeActionID != nil || len(*got) != 0 {
+		t.Fatalf("a stacked child with green checks merges before its parent: %+v, restacks %v", tk, *got)
+	}
+
+	// The parent merges: the child moves onto main, its PR is retargeted,
+	// and then it merges like any other.
+	act := *e.ticket(parent).MergeActionID
+	_ = e.s.DecideAction(ctx, act, true, "kanishk")
+	claimed, _ := e.s.ClaimApprovedAction(ctx)
+	_ = e.s.FinishAction(ctx, claimed.ID, json.RawMessage(`{"merged":true,"merge_sha":"`+mergeSHA+`"}`), nil)
+	e.tick()
+	if p := e.ticket(parent).Status; p != store.TicketDone {
+		t.Fatalf("parent %s", p)
+	}
+	tk := e.ticket(child)
+	if len(*got) != 1 || (*got)[0].Onto != "" || (*got)[0].From != githubtest.Head || (*got)[0].Head != childHead ||
+		*tk.HeadSHA != "8888888888888888888888888888888888888888" || *tk.BaseSHA != "9999999999999999999999999999999999999999" {
+		t.Fatalf("restacks %+v, child %+v", *got, tk)
+	}
+	e.gh.Mu.Lock()
+	base := e.gh.Others[8]["base"].(map[string]any)["ref"]
+	e.gh.Mu.Unlock()
+	if base != "main" {
+		t.Fatalf("PR 8's base = %v", base)
+	}
+	e.tick()
+	if tk := e.ticket(child); tk.Status != store.TicketMerging || len(*got) != 1 {
+		t.Fatalf("after the restack: %+v, restacks %d", tk, len(*got))
+	}
+	evs, _ := e.s.TicketEvents(ctx, child)
+	found := false
+	for _, ev := range evs {
+		found = found || strings.Contains(string(ev.Detail), "restacked")
+	}
+	if !found {
+		t.Fatal("the restack is not in the child's events")
+	}
+}
+
+func TestAStackedTicketFollowsItsParentsNewHead(t *testing.T) {
+	e := newEnv(t, "deny")
+	got := e.restacks()
+	parent := e.approvedTicket()
+	child := e.stackedChild(parent)
+	e.tick()
+	e.finishBuild(parent, githubtest.Head)
+	e.tick()
+	e.finishChild(child, githubtest.Head)
+	// The parent gets a fix: its head moves.
+	const fixed = "6666666666666666666666666666666666666666"
+	a := e.cfg.Agents["orbit"]
+	if _, err := e.s.StartBuild(ctx, store.StartBuild{TicketID: parent, Agent: "orbit", SpecSHA: a.SHA, Purpose: store.BuildPurposeFix, Failure: json.RawMessage(`[]`)}); err != nil {
+		t.Fatal(err)
+	}
+	e.finishBuild(parent, fixed)
+	e.gh.Mu.Lock()
+	e.gh.PR["head"].(map[string]any)["sha"] = fixed
+	e.gh.Mu.Unlock()
+	e.tick()
+	if len(*got) != 1 || (*got)[0].Onto != "orbit/3f2a9c1e" || (*got)[0].From != githubtest.Head {
+		t.Fatalf("restacks = %+v", *got)
+	}
+	if tk := e.ticket(child); tk.Status != store.TicketReview {
+		t.Fatalf("child = %+v", tk)
+	}
+}
+
+func TestAStackedTicketWaitsForItsParentsPR(t *testing.T) {
+	e := newEnv(t, "approve")
+	a := e.cfg.Agents["orbit"]
+	p, _, _ := e.s.CreateTicket(ctx, store.NewTicket{Kind: "request", Title: "base", Body: "b", Agent: "orbit", SpecSHA: a.SHA, Repo: "kensac/orbit"})
+	child := e.stackedChild(p.TicketID)
+	e.tick()
+	e.tick()
+	if st := e.ticket(child).Status; st != store.TicketApproved {
+		t.Fatalf("a child of an open ticket: %s", st)
+	}
+	// Abandoned below it: the child builds from the default branch.
+	_ = e.s.TransitionTicket(ctx, p.TicketID, store.TicketAbandoned, "kanishk", store.TicketUpdate{})
+	e.tick()
+	if st := e.ticket(child).Status; st != store.TicketBuilding {
+		t.Fatalf("a child of an abandoned ticket: %s", st)
+	}
+	for _, bad := range []store.NewTicket{
+		{Kind: "request", Title: "x", Body: "b", Agent: "orbit", SpecSHA: a.SHA, Repo: "kensac/orbit", StackOn: p.TicketID},
+		{Kind: "question", Title: "x", Body: "b", Agent: "orbit", SpecSHA: a.SHA, StackOn: child},
+		{Kind: "request", Title: "x", Body: "b", Agent: "orbit", SpecSHA: a.SHA, Repo: "kensac/orbit", StackOn: "00000000-0000-0000-0000-000000000000"},
+	} {
+		if _, _, err := e.s.CreateTicket(ctx, bad); !errors.Is(err, store.ErrInvalid) {
+			t.Errorf("stack on %s (%s) = %v", bad.StackOn, bad.Kind, err)
+		}
+	}
+}
+
+func TestAFinishedTicketsCloneIsReleased(t *testing.T) {
+	e := newEnv(t, "approve")
+	e.loop.Checkouts = &build.Pool{Root: t.TempDir()}
+	id := e.approvedTicket()
+	e.tick()
+	e.finishBuild(id, githubtest.Head)
+	dir, _ := e.loop.Checkouts.Dir(build.TicketKey(id))
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = e.s.TransitionTicket(ctx, id, store.TicketAbandoned, "kanishk", store.TicketUpdate{})
+	e.tick()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("the abandoned ticket's clone: %v", err)
+	}
+}
