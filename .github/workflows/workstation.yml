@@ -97,6 +97,10 @@ jobs:
             sudo install -d -m 0755 /run/orbit && echo smoke-token | sudo tee /run/orbit/gh-token >/dev/null
             printf "protocol=https\nhost=github.com\n\n" | git credential fill | grep -qx "password=smoke-token"
             out=$(gh auth status 2>&1 || true); grep -q GH_TOKEN <<<"$out" || { echo "$out"; exit 1; }
+            test "$(jq -r .statusLine.command /etc/claude-code/managed-settings.json)" = /usr/local/bin/orbit-statusline
+            line=$(echo "{\"model\":{\"display_name\":\"Opus\"},\"rate_limits\":{\"five_hour\":{\"used_percentage\":12.5,\"resets_at\":1793000000}}}" | CLAUDE_CONFIG_DIR=/tmp/acct orbit-statusline)
+            test "$line" = "Opus  5h 12.5%"
+            jq -e ".observed_at > 0 and .rate_limits.five_hour.used_percentage == 12.5" /tmp/acct/.orbit/usage.json
           '
       - name: Size
         run: docker image inspect orbit-workstation:ci --format '{{.Size}}' | awk '{printf "linux/${{ matrix.arch }} %.0f MiB uncompressed\n", $1/1048576}' | tee -a "$GITHUB_STEP_SUMMARY"

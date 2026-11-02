@@ -50,6 +50,7 @@ type fakeSandboxd struct {
 	recreates int
 	prepared  []string
 	logins    map[string]sandbox.AccountStatus
+	usage     map[string]sandbox.AccountUsage
 }
 
 func (f *fakeSandboxd) handler(t *testing.T) http.Handler {
@@ -108,6 +109,15 @@ func (f *fakeSandboxd) handler(t *testing.T) http.Handler {
 		}
 		f.prepared = append(f.prepared, r.PathValue("slot"))
 		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /v1/boxes/{name}/accounts/{slot}/usage", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		u, ok := f.usage[r.PathValue("slot")]
+		if !ok {
+			u = sandbox.AccountUsage{Source: sandbox.UsageStatusline}
+		}
+		_ = json.NewEncoder(w).Encode(u)
 	})
 	mux.HandleFunc("GET /v1/boxes/{name}/accounts/{slot}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -188,7 +198,8 @@ type boxEnv struct {
 
 func newBoxEnv(t *testing.T) *boxEnv {
 	t.Helper()
-	fake := &fakeSandboxd{running: map[string]bool{}, sessions: map[string]bool{}, mounts: map[string][]string{}, logins: map[string]sandbox.AccountStatus{}}
+	fake := &fakeSandboxd{running: map[string]bool{}, sessions: map[string]bool{}, mounts: map[string][]string{}, logins: map[string]sandbox.AccountStatus{},
+		usage: map[string]sandbox.AccountUsage{}}
 	sb := httptest.NewServer(fake.handler(t))
 	t.Cleanup(sb.Close)
 	addr := strings.TrimPrefix(sb.URL, "http://")

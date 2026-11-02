@@ -89,6 +89,10 @@ RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY --chmod=0755 deploy/workstation/gh /usr/local/bin/gh
 COPY --chmod=0755 deploy/workstation/git-credential-orbit /usr/local/bin/git-credential-orbit
 COPY --chmod=0644 deploy/workstation/tmux.conf /etc/tmux.conf
+# Claude Code's status line records each account's rate limits where orbit
+# reads them; managed settings, so every account and profile has it.
+COPY --chmod=0755 deploy/workstation/orbit-statusline /usr/local/bin/orbit-statusline
+COPY --chmod=0644 deploy/workstation/managed-settings.json /etc/claude-code/managed-settings.json
 RUN git config --system credential.https://github.com.helper orbit
 
 # uid 10001, the uid sandboxd runs every process as (sandboxd.UID). sudo is

@@ -250,3 +250,79 @@ func TestAccountScripts(t *testing.T) {
 		t.Fatal("an unknown field in the status was passed on")
 	}
 }
+
+// TestAccountUsage runs the image's status line script as the CLI would,
+// under an account, then reads its record through sandboxd; and polls with
+// a fake curl that records how it was called.
+func TestAccountUsage(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is not installed")
+	}
+	h := newHarness(t)
+	h.srv.cfg = boxConfig()
+	h.srv.cfg.Docker = h.srv.d.sock
+	home := t.TempDir()
+	h.fd.home = home
+	ctx := context.Background()
+	if _, err := h.client.EnsureBox(ctx, "orbit", []string{slotA}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, ".claude-accounts", slotA)
+	_ = os.MkdirAll(dir, 0o700)
+	if u, err := h.client.AccountUsage(ctx, "orbit", slotA); err != nil || u.ObservedAt != nil || u.Source != sandbox.UsageStatusline {
+		t.Fatalf("before the status line ran: %+v %v", u, err)
+	}
+
+	script, _ := filepath.Abs("../../deploy/workstation/orbit-statusline")
+	line := exec.Command("sh", script)
+	line.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "CLAUDE_CONFIG_DIR=" + dir}
+	line.Stdin = strings.NewReader(`{"model": {"display_name": "Opus"}, "rate_limits": {"five_hour": {"used_percentage": 12.5, "resets_at": 1793000000}, "seven_day": {"used_percentage": 40, "resets_at": 1793500000}}}`)
+	out, err := line.Output()
+	if err != nil || strings.TrimSpace(string(out)) != "Opus  5h 12.5%  7d 40%" {
+		t.Fatalf("status line %q %v", out, err)
+	}
+	u, err := h.client.AccountUsage(ctx, "orbit", slotA)
+	if err != nil || u.ObservedAt == nil || len(u.Windows) != 2 || u.Windows[0].Window != "five_hour" || *u.Windows[0].UsedPercentage != 12.5 {
+		t.Fatalf("usage %+v %v", u, err)
+	}
+	// The person's own line, given the same input, replaces the default.
+	_ = os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
+	_ = os.WriteFile(filepath.Join(home, ".claude", "statusline-command"), []byte("#!/bin/sh\njq -r .model.display_name\n"), 0o755)
+	line = exec.Command("sh", script)
+	line.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "CLAUDE_CONFIG_DIR=" + dir}
+	line.Stdin = strings.NewReader(`{"model": {"display_name": "Mine"}}`)
+	if out, err := line.Output(); err != nil || strings.TrimSpace(string(out)) != "Mine" {
+		t.Fatalf("own status line %q %v", out, err)
+	}
+
+	// Not logged in: the poll refuses before calling anything.
+	bin := t.TempDir()
+	h.fd.bin = bin
+	argsFile := filepath.Join(bin, "args")
+	_ = os.WriteFile(filepath.Join(bin, "curl"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+argsFile+"\ncat >> "+argsFile+"\n"+
+		"printf '%s' '{\"five_hour\": {\"utilization\": 7, \"resets_at\": \"2026-11-02T09:00:00Z\"}}'\n"), 0o755)
+	var se *sandbox.Error
+	if _, err := h.client.PollAccountUsage(ctx, "orbit", slotA); !errors.As(err, &se) || se.Status != http.StatusConflict {
+		t.Fatalf("a poll without a login: %v", err)
+	}
+	_ = os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte(`{"claudeAiOauth": {"accessToken": "sk-ant-oat01-TOKEN_x", "refreshToken": "r"}}`), 0o600)
+	u, err = h.client.PollAccountUsage(ctx, "orbit", slotA)
+	if err != nil || u.Source != sandbox.UsagePoll || len(u.Windows) != 1 || *u.Windows[0].UsedPercentage != 7 {
+		t.Fatalf("poll %+v %v", u, err)
+	}
+	b, _ := os.ReadFile(argsFile)
+	args, cfg, _ := strings.Cut(string(b), "https://api.anthropic.com/api/oauth/usage\n")
+	if strings.Contains(args, "TOKEN") || !strings.Contains(args, "anthropic-beta: oauth-2025-04-20") || strings.TrimSpace(cfg) != `header = "Authorization: Bearer sk-ant-oat01-TOKEN_x"` {
+		t.Fatalf("curl was called with\n%s", b)
+	}
+	// curl failing (a 401 for an expired access token) is sandboxd's 502.
+	_ = os.WriteFile(filepath.Join(bin, "curl"), []byte("#!/bin/sh\necho 'curl: (22) The requested URL returned error: 401' >&2\nexit 22\n"), 0o755)
+	if _, err := h.client.PollAccountUsage(ctx, "orbit", slotA); !errors.As(err, &se) || se.Status != http.StatusBadGateway || !strings.Contains(se.Message, "401") {
+		t.Fatalf("a failed poll: %v", err)
+	}
+	// A token of an unexpected shape never reaches a curl config line.
+	_ = os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte(`{"claudeAiOauth": {"accessToken": "a\"\nurl = \"http://evil"}}`), 0o600)
+	if _, err := h.client.PollAccountUsage(ctx, "orbit", slotA); !errors.As(err, &se) || se.Status != http.StatusConflict {
+		t.Fatalf("an odd token: %v", err)
+	}
+}
