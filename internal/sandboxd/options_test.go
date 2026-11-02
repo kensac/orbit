@@ -20,6 +20,9 @@ func testConfig() Config {
 		Network: "orbit-sandbox",
 		Proxy:   "orbit-egress:3128",
 		Docker:  "/var/run/docker.sock",
+
+		CredProxy:    "orbit-credproxy:3129",
+		CredProxyKey: strings.Repeat("k", 40),
 	}
 }
 
@@ -45,7 +48,7 @@ func TestContainerSpecDocument(t *testing.T) {
 			"HOME=/tmp", "TMPDIR=/tmp", "LANG=C.UTF-8",
 			"HTTPS_PROXY=http://orbit-egress:3128", "HTTP_PROXY=http://orbit-egress:3128",
 			"https_proxy=http://orbit-egress:3128", "http_proxy=http://orbit-egress:3128",
-			"NO_PROXY=", "no_proxy=",
+			"ANTHROPIC_BASE_URL=http://orbit-credproxy:3129", "NO_PROXY=orbit-credproxy", "no_proxy=orbit-credproxy",
 			"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "DISABLE_AUTOUPDATER=1", "GIT_TERMINAL_PROMPT=0",
 		},
 		"WorkingDir": "/work",
@@ -208,20 +211,25 @@ func TestConfigValidate(t *testing.T) {
 		}
 	}
 	for name, m := range map[string]func(*Config){
-		"short token":      func(c *Config) { c.Token = "short" },
-		"every interface":  func(c *Config) { c.Listen = ":8091" },
-		"unspecified ipv4": func(c *Config) { c.Listen = "0.0.0.0:8091" },
-		"unspecified ipv6": func(c *Config) { c.Listen = "[::]:8091" },
-		"hostname listen":  func(c *Config) { c.Listen = "oci:8091" },
-		"relative socket":  func(c *Config) { c.Listen = "unix:sandboxd.sock" },
-		"tag image":        func(c *Config) { c.Image = "ghcr.io/kensac/orbit-build:latest" },
-		"no image":         func(c *Config) { c.Image = "" },
-		"host network":     func(c *Config) { c.Network = "host" },
-		"bridge network":   func(c *Config) { c.Network = "bridge" },
-		"container net":    func(c *Config) { c.Network = "container:abc" },
-		"proxy no port":    func(c *Config) { c.Proxy = "orbit-egress" },
-		"other runtime":    func(c *Config) { c.Runtime = "kata" },
-		"relative docker":  func(c *Config) { c.Docker = "docker.sock" },
+		"short token":                   func(c *Config) { c.Token = "short" },
+		"every interface":               func(c *Config) { c.Listen = ":8091" },
+		"unspecified ipv4":              func(c *Config) { c.Listen = "0.0.0.0:8091" },
+		"unspecified ipv6":              func(c *Config) { c.Listen = "[::]:8091" },
+		"hostname listen":               func(c *Config) { c.Listen = "oci:8091" },
+		"relative socket":               func(c *Config) { c.Listen = "unix:sandboxd.sock" },
+		"tag image":                     func(c *Config) { c.Image = "ghcr.io/kensac/orbit-build:latest" },
+		"no image":                      func(c *Config) { c.Image = "" },
+		"host network":                  func(c *Config) { c.Network = "host" },
+		"bridge network":                func(c *Config) { c.Network = "bridge" },
+		"container net":                 func(c *Config) { c.Network = "container:abc" },
+		"proxy no port":                 func(c *Config) { c.Proxy = "orbit-egress" },
+		"other runtime":                 func(c *Config) { c.Runtime = "kata" },
+		"relative docker":               func(c *Config) { c.Docker = "docker.sock" },
+		"no credproxy":                  func(c *Config) { c.CredProxy = "" },
+		"credproxy a URL":               func(c *Config) { c.CredProxy = "http://orbit-credproxy:3129" },
+		"no credproxy key":              func(c *Config) { c.CredProxyKey = "" },
+		"short key":                     func(c *Config) { c.CredProxyKey = "short" },
+		"workstation credproxy no port": func(c *Config) { c.WorkstationCredProxy = "10.251.1.3" },
 		"workstation beside builds": func(c *Config) {
 			c.WorkstationProxy, c.WorkstationNetwork = "orbit-egress-open:3128", c.Network
 		},
