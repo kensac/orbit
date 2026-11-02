@@ -8,6 +8,7 @@ Codex, the Anthropic API), and every run's inputs, transcript and outputs are
 kept in Postgres.
 
 - Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- User guide: [docs/guide/](docs/guide/)
 - Working here: [AGENTS.md](AGENTS.md)
 - Example configuration: [examples/](examples/)
 
