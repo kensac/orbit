@@ -21,6 +21,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `webhook_secrets` | map of variable to webhook secret | none | The signing secrets inbound webhooks are verified with, each bound to the agents whose webhook triggers may name it (below). |
 | `usage_poll` | map: `every` (default 5m, at least 1m), `token_env` (default `CLAUDE_CODE_OAUTH_TOKEN`) | absent | Poll the subscription's usage windows (configuration.md, Subscription usage and low-priority agents). |
 | `defer_low_priority` | bool | `false` | Hold `priority: low` agents' scheduled runs while a usage window is above `usage.DeferLowAbove`. |
+| `board` | map | absent | Tunes `GET /board` (below). |
 
 ### `defaults`
 
@@ -154,6 +155,12 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `username_env` | env var | required | IMAP user. |
 | `password_env` | env var | required | IMAP password. |
 | `mailbox` | string | `INBOX` | Folder read. Every unseen mail in it is read and marked seen, so it must be orbit's own. |
+
+### `board`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `idle` | duration | `30m` | How long a conversation with nothing waiting stays on the board after its last activity; after it the row is `idle`, left out unless asked for (docs/api.md, The board). |
 
 ## Agent
 
