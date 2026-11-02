@@ -106,7 +106,9 @@ type hostConfig struct {
 }
 
 type mount struct {
-	Type          string        `json:"Type"`
+	Type string `json:"Type"`
+	// Source names a box's volume; a build's is anonymous.
+	Source        string        `json:"Source,omitempty"`
 	Target        string        `json:"Target"`
 	ReadOnly      bool          `json:"ReadOnly"`
 	VolumeOptions volumeOptions `json:"VolumeOptions"`
@@ -141,6 +143,8 @@ type execCreate struct {
 	WorkingDir   string   `json:"WorkingDir"`
 	Cmd          []string `json:"Cmd"`
 	Env          []string `json:"Env"`
+	// ConsoleSize is a TTY's [rows, cols] at start.
+	ConsoleSize []int `json:"ConsoleSize,omitempty"`
 }
 
 // user is the uid:gid every process runs as.
@@ -256,8 +260,11 @@ func execSpec(ar sandbox.AttachRequest) execCreate {
 
 // containerState is the part of a container inspect sandboxd checks.
 type containerState struct {
-	ID     string `json:"Id"`
-	Config struct {
+	ID      string `json:"Id"`
+	Name    string `json:"Name"`
+	Created string `json:"Created"`
+	Config  struct {
+		Image  string            `json:"Image"`
 		User   string            `json:"User"`
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
@@ -275,11 +282,8 @@ type containerState struct {
 		Memory         int64    `json:"Memory"`
 		PidsLimit      *int64   `json:"PidsLimit"`
 	} `json:"HostConfig"`
-	Mounts []struct {
-		Type        string `json:"Type"`
-		Destination string `json:"Destination"`
-	} `json:"Mounts"`
-	State struct {
+	Mounts []mountState `json:"Mounts"`
+	State  struct {
 		Running bool `json:"Running"`
 	} `json:"State"`
 	NetworkSettings struct {
@@ -287,6 +291,13 @@ type containerState struct {
 			IPAddress string `json:"IPAddress"`
 		} `json:"Networks"`
 	} `json:"NetworkSettings"`
+}
+
+// mountState is one mount of an inspected container; Name is a volume's.
+type mountState struct {
+	Type        string `json:"Type"`
+	Name        string `json:"Name"`
+	Destination string `json:"Destination"`
 }
 
 // verifyCreated checks that the container the daemon made is the one

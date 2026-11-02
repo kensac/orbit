@@ -1,6 +1,7 @@
 // Package sandboxd is `orbit sandboxd`: the one process that holds a docker
-// socket, and turns four narrow operations (internal/sandbox) into build
-// containers whose every security option is fixed here, in code.
+// socket, and turns narrow operations (internal/sandbox) into build
+// containers and agents' boxes whose every security option is fixed here,
+// in code.
 package sandboxd
 
 import (
@@ -46,6 +47,13 @@ type Config struct {
 	WorkstationCredProxy string
 	// CredProxyKey seals the token a sandbox gets in place of the backend credential (ORBIT_CREDPROXY_KEY, shared with `orbit credproxy`, never given to a sandbox).
 	CredProxyKey string
+	// BoxImage is the workstation image agents' boxes run, pinned by
+	// digest (ORBIT_SANDBOX_BOX_IMAGE). Unset refuses boxes.
+	BoxImage string
+	// BoxRuntime is the boxes' runtime: "" (runc) or "runsc"
+	// (ORBIT_SANDBOX_BOX_RUNTIME), apart from Runtime so builds and boxes
+	// move to gVisor separately.
+	BoxRuntime string
 }
 
 // MinTokenLen matches ORBIT_API_TOKEN's floor.
@@ -78,6 +86,8 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		Docker:           def("ORBIT_SANDBOX_DOCKER_SOCKET", "/var/run/docker.sock"),
 		CredProxy:        def("ORBIT_SANDBOX_CREDPROXY", "orbit-credproxy:3129"),
 		CredProxyKey:     getenv("ORBIT_CREDPROXY_KEY"),
+		BoxImage:         getenv("ORBIT_SANDBOX_BOX_IMAGE"),
+		BoxRuntime:       getenv("ORBIT_SANDBOX_BOX_RUNTIME"),
 	}
 	c.WorkstationCredProxy = def("ORBIT_SANDBOX_WORKSTATION_CREDPROXY", c.CredProxy)
 	return c, c.Validate()
@@ -119,6 +129,17 @@ func (c Config) Validate() error {
 	}
 	if c.Runtime != "" && c.Runtime != "runsc" {
 		errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_RUNTIME %q: only runsc may replace the default runtime", c.Runtime))
+	}
+	if c.BoxImage != "" {
+		if !imageRE.MatchString(c.BoxImage) {
+			errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_BOX_IMAGE %q must be pinned by digest (name@sha256:...)", c.BoxImage))
+		}
+		if c.WorkstationProxy == "" {
+			errs = append(errs, errors.New("ORBIT_SANDBOX_BOX_IMAGE needs ORBIT_SANDBOX_WORKSTATION_PROXY: a box's egress is the workstation proxy"))
+		}
+	}
+	if c.BoxRuntime != "" && c.BoxRuntime != "runsc" {
+		errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_BOX_RUNTIME %q: only runsc may replace the default runtime", c.BoxRuntime))
 	}
 	if !strings.HasPrefix(c.Docker, "/") {
 		errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_DOCKER_SOCKET %q must be an absolute path", c.Docker))
