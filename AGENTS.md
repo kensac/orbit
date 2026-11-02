@@ -69,7 +69,7 @@ is the design; the topic documents below are the rules for changing it.
   sandbox service (the only holder of a docker socket), its egress proxy,
   and orbit's client for it.
 - `deploy/`: the image (`Dockerfile`), the build sandbox's image
-  (`build.Dockerfile`) and the pinned agent CLIs (`cli/`).
+  (`build.Dockerfile`), an agent's workstation box image (`workstation.Dockerfile`, its files in `workstation/`) and the pinned agent CLIs (`cli/`).
 
 ## Commands
 
