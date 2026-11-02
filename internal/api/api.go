@@ -68,9 +68,15 @@ type Server struct {
 	WorkspaceOrigins []string
 	// TerminalPing overrides terminalPing when set; tests shorten it.
 	TerminalPing time.Duration
+	// WorkspaceGroup is ORBIT_WORKSPACE_GROUP: the group a person must be
+	// in to change a workspace. Empty is ORBIT_OIDC_GROUP's, which every
+	// verified person is in.
+	WorkspaceGroup string
 
 	termMu      sync.Mutex
 	termClients map[string]int
+	wsOnce      sync.Once
+	ws          *workspaceState
 }
 
 // Handler returns the public listener's routes, the ones traefik serves.
@@ -167,6 +173,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	// The ticket in Sec-WebSocket-Protocol is the credential (terminals.go).
 	mux.HandleFunc("GET /api/v1/terminals/{tid}/ws", s.terminalSocket)
 	s.memoryRoutes(api)
+	s.workspaceRoutes(api)
 	s.skillsRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))

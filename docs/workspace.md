@@ -1,6 +1,6 @@
 # The workspace
 
-**Status: partly built.** Built: an agent's box (sandboxd's `box` profile) and terminals in it over a direct WebSocket (shell and Claude Code (direct)). Everything else here is planned. The contract is in [api.md](api.md), Workspace, which marks what is built; the implementation items and their owners are in [WORKBOARD.md](WORKBOARD.md).
+**Status: partly built.** Built: finding a workspace (one route over both backends), the snapshot backend's file reads and the audit (W1), and an agent's box (sandboxd's `box` profile) with terminals in it over a direct WebSocket (shell and Claude Code (direct)). The rest is planned. The contract is in [api.md](api.md), Workspace, with every unbuilt part marked; the implementation items and their owners are in [WORKBOARD.md](WORKBOARD.md). The code is `internal/api/workspace.go` (routes, limits, the snapshot cache), `internal/api/terminals.go` (the box workspace and its terminals) and `internal/workspace` (`tree.go` indexes a stored snapshot, `gitignore.go` decides `ignored`).
 
 The workspace is an IDE inside the orbit chat at `kanishksachdev.com/orbit` (kensac/personal-portfolio, `app/orbit`): a file explorer, an editor, several terminals (one of them can be Claude Code's own interactive TUI, "Claude Code (direct)"), and a diff view whose line comments go to the agent. orbit serves only the API. The portfolio is the only surface: no subdomain, no orbit-hosted page, no desktop or editor integration.
 

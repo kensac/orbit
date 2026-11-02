@@ -29,7 +29,11 @@ type Workspace struct {
 func (s *Store) PutWorkspace(ctx context.Context, conversationID, runID string, attempt, files int, archive []byte) (stored bool, err error) {
 	sum := sha256.Sum256(archive)
 	sha := hex.EncodeToString(sum[:])
-	tag, err := s.Pool.Exec(ctx, `INSERT INTO workspaces (conversation_id, run_id, attempt, sha256, bytes, files, archive)
+	// The conversation's workspace is created with its first snapshot.
+	tag, err := s.Pool.Exec(ctx, `WITH t AS (INSERT INTO workspace_trees (scope, agent, conversation_id)
+		    SELECT 'conversation', c.agent, c.id FROM conversations c WHERE c.id = $1
+		    ON CONFLICT (conversation_id) DO NOTHING)
+		INSERT INTO workspaces (conversation_id, run_id, attempt, sha256, bytes, files, archive)
 		SELECT $1, $2, $3, $4, $5, $6, $7
 		WHERE NOT EXISTS (SELECT 1 FROM (SELECT sha256 FROM workspaces WHERE conversation_id = $1 ORDER BY id DESC LIMIT 1) w
 		                  WHERE w.sha256 = $4)`,
