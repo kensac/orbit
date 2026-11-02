@@ -29,6 +29,8 @@ type attemptState struct {
 	keeps       bool
 	sessionID   string
 	baseCostUSD float64
+	// task is the task whose conversation the run is in, nil for none.
+	task *store.Task
 }
 
 // spent reads what the attempt's session had cost when it stopped, from
