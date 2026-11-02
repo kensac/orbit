@@ -139,19 +139,19 @@ type Agent struct {
 	Name        string `yaml:"name" json:"name"`
 	Description string `yaml:"description" json:"description"`
 	// Charter is the standing instruction every run starts from.
-	Charter  string     `yaml:"charter" json:"charter"`
-	Enabled  *bool      `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	Timezone string     `yaml:"timezone,omitempty" json:"timezone,omitempty"`
-	Runner   string     `yaml:"runner,omitempty" json:"runner,omitempty"`
-	Timeout  Duration   `yaml:"timeout,omitempty" json:"timeout,omitempty"`
-	Triggers []Trigger  `yaml:"triggers" json:"triggers"`
-	Sources  []Source   `yaml:"sources,omitempty" json:"sources,omitempty"`
+	Charter  string    `yaml:"charter" json:"charter"`
+	Enabled  *bool     `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Timezone string    `yaml:"timezone,omitempty" json:"timezone,omitempty"`
+	Runner   string    `yaml:"runner,omitempty" json:"runner,omitempty"`
+	Timeout  Duration  `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	Triggers []Trigger `yaml:"triggers" json:"triggers"`
+	Sources  []Source  `yaml:"sources,omitempty" json:"sources,omitempty"`
 	// Transforms run over sources before the model sees them; each output
 	// is an input of its own (internal/transforms).
 	Transforms []Transform `yaml:"transforms,omitempty" json:"transforms,omitempty"`
-	Tools    []string   `yaml:"tools,omitempty" json:"tools,omitempty"`
-	Actions  ActionSet  `yaml:"actions,omitempty" json:"actions,omitempty"`
-	Notify   NotifySpec `yaml:"notify,omitempty" json:"notify,omitempty"`
+	Tools      []string    `yaml:"tools,omitempty" json:"tools,omitempty"`
+	Actions    ActionSet   `yaml:"actions,omitempty" json:"actions,omitempty"`
+	Notify     NotifySpec  `yaml:"notify,omitempty" json:"notify,omitempty"`
 	// MessagesTrigger starts a run when a person sends the agent a message.
 	MessagesTrigger bool `yaml:"wake_on_message,omitempty" json:"wake_on_message,omitempty"`
 	// Session keeps the backend's conversation between runs (claude-code
