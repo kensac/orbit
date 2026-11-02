@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/client"
+	"github.com/kensac/orbit/internal/jsonstrict"
 )
 
 // ErrIncomplete means the published archive records an incomplete resource.
@@ -446,6 +447,19 @@ func (e *exporter) pages(ctx context.Context, endpoint, key string, visit func([
 
 // Verify checks the exact member set, bounded metadata, sizes and SHA256 without extracting files.
 func Verify(filename string) error {
+	_, err := Inspect(filename)
+	return err
+}
+
+// Inspect returns the manifest only after all Verify integrity checks succeed.
+// Resource coverage describes bounded API reads, not completeness or restorability.
+func Inspect(filename string) (Manifest, error) {
+	var m Manifest
+	err := verify(filename, &m)
+	return m, err
+}
+
+func verify(filename string, validated *Manifest) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
@@ -494,8 +508,16 @@ func Verify(filename string) error {
 	if err != nil {
 		return err
 	}
+	data, err := io.ReadAll(io.LimitReader(r, maxResponseBytes+1))
+	_ = r.Close()
+	if err != nil {
+		return err
+	}
+	if err := jsonstrict.ValidateJSON(data, maxResponseBytes); err != nil {
+		return fmt.Errorf("manifest: %w", err)
+	}
 	var m Manifest
-	dec := json.NewDecoder(io.LimitReader(r, maxResponseBytes+1))
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	err = dec.Decode(&m)
 	if err == nil {
@@ -504,7 +526,6 @@ func Verify(filename string) error {
 			err = errors.New("trailing manifest data")
 		}
 	}
-	_ = r.Close()
 	if err != nil {
 		return err
 	}
@@ -565,6 +586,7 @@ func Verify(filename string) error {
 	if len(used) != len(files) {
 		return errors.New("unlisted archive member")
 	}
+	*validated = m
 	return nil
 }
 

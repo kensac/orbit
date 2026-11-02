@@ -30,10 +30,14 @@ func get(t *testing.T, sock, path string) (int, string) {
 	return resp.StatusCode, string(b)
 }
 
-// The probes answer without the token; readiness names each check, reports each proxy container by its name, and is cached so probes do not each reach docker.
+// The probes answer without the token; readiness names each check, reports each egress and credential proxy container by its name, and is cached so probes do not each reach docker.
 func TestReadiness(t *testing.T) {
 	h := newHarness(t)
 	h.srv.cfg.WorkstationProxy = "orbit-egress-open:3128"
+	h.srv.cfg.WorkstationNetwork = "orbit-workstation"
+	// One credential proxy, by name on one network and by IP on the other.
+	h.srv.cfg.WorkstationCredProxy = "10.250.252.3:3129"
+	h.fd.containers["orbit-credproxy"] = &fakeContainer{running: true}
 	now := time.Unix(1_800_000_000, 0)
 	h.srv.now = func() time.Time { return now }
 	h.fd.containers["orbit-egress"] = &fakeContainer{running: true, health: "healthy"}
@@ -46,7 +50,8 @@ func TestReadiness(t *testing.T) {
 		t.Fatalf("readyz = %d %s", code, body)
 	}
 	rd, err := h.client.Ready(context.Background())
-	if err != nil || rd.Ready || rd.Checks["docker"] != "ok" || rd.Checks["network"] != "ok" {
+	if err != nil || rd.Ready || rd.Checks["docker"] != "ok" || rd.Checks["network"] != "ok" || rd.Checks["workstation_network"] != "ok" ||
+		rd.Checks["credproxy:orbit-credproxy"] != "ok" || rd.Checks["credproxy:10.250.252.3"] != "unchecked: addressed by IP" {
 		t.Fatalf("ready = %+v %v", rd, err)
 	}
 	if p := rd.Proxies(); len(p) != 2 || !p["orbit-egress"] || p["orbit-egress-open"] {
@@ -63,12 +68,15 @@ func TestReadiness(t *testing.T) {
 		t.Fatalf("after the TTL: %+v", rd)
 	}
 
-	// An unhealthy proxy, or a network that stopped being internal, is not ready.
+	// An unhealthy proxy, a stopped credential proxy, or a network that stopped being internal, is not ready.
 	h.fd.containers["orbit-egress"].health = "unhealthy"
+	h.fd.containers["orbit-credproxy"].running = false
 	h.srv.cfg.Network = "bridge-ish"
+	h.srv.cfg.WorkstationNetwork = "open-ish"
 	now = now.Add(readyTTL)
 	rd, _ = h.client.Ready(context.Background())
-	if rd.Ready || rd.Checks["proxy:orbit-egress"] != "orbit-egress is unhealthy" || rd.Checks["network"] != "bridge-ish is not internal" {
+	if rd.Ready || rd.Checks["proxy:orbit-egress"] != "orbit-egress is unhealthy" || rd.Checks["network"] != "bridge-ish is not internal" ||
+		rd.Checks["workstation_network"] != "open-ish is not internal" || rd.Checks["credproxy:orbit-credproxy"] != "orbit-credproxy is not running" {
 		t.Fatalf("ready = %+v", rd)
 	}
 

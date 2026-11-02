@@ -2,7 +2,8 @@
 // service that alone holds a docker socket and runs build containers. It
 // holds the wire protocol both sides share and the client orbit uses.
 //
-// sandboxd exposes exactly four operations, and none takes a docker option:
+// sandboxd exposes four operations on build sandboxes, and none takes a
+// docker option (agents' boxes are box.go's):
 //
 //	POST   /v1/sandboxes?run_id=<id>   body: the workdir as a tar; creates and starts a container
 //	POST   /v1/sandboxes/{id}/attach   body: AttachRequest; upgrades to a framed stdio stream
@@ -55,7 +56,7 @@ const (
 	frameChunk = 32 << 10
 )
 
-// AllowedEnv is every variable a caller may set for an attached process: the backend credentials the CLI can reach its own backend with (AGENTS.md rule 2), and nothing else. A caller sends at most one of them (build.SandboxEnv); sandboxd sets the rest of the environment itself.
+// AllowedEnv is every variable a caller may send for an attached process: the backend credentials the CLI can reach its own backend with (AGENTS.md rule 2), and nothing else. A caller sends at most one of them (build.SandboxEnv); sandboxd sets the rest of the environment itself. A sandbox's process never receives the value: sandboxd puts a credential proxy token in its place (internal/credproxy).
 var AllowedEnv = map[string]bool{claudeproto.OAuthToken: true, claudeproto.APIKey: true}
 
 // CreateResponse is the answer to a create.

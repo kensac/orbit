@@ -124,12 +124,13 @@ func TestProxyTunnelsAllowedHost(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("CONNECT: %d", code)
 	}
-	if _, err := io.WriteString(c, "hello"); err != nil {
+	hello := clientHello(t, "example.org")
+	if _, err := c.Write(hello); err != nil {
 		t.Fatal(err)
 	}
-	buf := make([]byte, 5)
-	if _, err := io.ReadFull(br, buf); err != nil || string(buf) != "hello" {
-		t.Fatalf("tunnel: %q %v", buf, err)
+	buf := make([]byte, len(hello))
+	if _, err := io.ReadFull(br, buf); err != nil || !bytes.Equal(buf, hello) {
+		t.Fatalf("tunnel: %d bytes, %v", len(buf), err)
 	}
 	if !strings.Contains(logs.String(), "egress: allowed") {
 		t.Fatalf("decision not logged: %s", logs.String())
