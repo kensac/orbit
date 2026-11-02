@@ -2,12 +2,15 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestEndpointValidation(t *testing.T) {
@@ -96,11 +99,81 @@ func TestDeviceLogin(t *testing.T) {
 	hc := HTTPClient()
 	hc.Transport = srv.Client().Transport
 	var notice strings.Builder
-	token, err := Login(context.Background(), hc, srv.URL, "public-client", &notice)
+	token, err := login(context.Background(), hc, srv.URL, "public-client", &notice, func(context.Context, time.Duration) error { return nil })
 	if err != nil || token != "private-access-token" {
 		t.Fatalf("login %q %v", token, err)
 	}
 	if strings.Contains(notice.String(), "private-") || !strings.Contains(notice.String(), "ABC-123") {
 		t.Fatalf("unsafe notice %q", notice.String())
+	}
+}
+
+func TestOAuthHTTPStatus(t *testing.T) {
+	for _, tc := range []struct {
+		body     string
+		poll, ok bool
+	}{
+		{`{"access_token":"secret","token_type":"Bearer"}`, true, false},
+		{`{"device_code":"secret"}`, false, false},
+		{`{"error":"authorization_pending"}`, true, true},
+		{`{"error":"authorization_pending","access_token":"secret"}`, true, false},
+		{`{"error":"authorization_pending"}`, false, false},
+	} {
+		t.Run(tc.body, func(t *testing.T) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer srv.Close()
+			hc := HTTPClient()
+			hc.Transport = srv.Client().Transport
+			var out map[string]any
+			err := form(context.Background(), hc, srv.URL, url.Values{}, &out, tc.poll)
+			if (err == nil) != tc.ok {
+				t.Fatalf("error %v, want success %v", err, tc.ok)
+			}
+		})
+	}
+}
+
+func TestDevicePolling(t *testing.T) {
+	for _, cancel := range []bool{false, true} {
+		t.Run(fmt.Sprint(cancel), func(t *testing.T) {
+			var srv *httptest.Server
+			polls := 0
+			srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/.well-known/openid-configuration":
+					fmt.Fprintf(w, `{"issuer":%q,"device_authorization_endpoint":%q,"token_endpoint":%q}`, srv.URL, srv.URL+"/device", srv.URL+"/token")
+				case "/device":
+					fmt.Fprintf(w, `{"device_code":"private","user_code":"ABC","verification_uri":%q,"expires_in":60}`, srv.URL+"/verify")
+				case "/token":
+					polls++
+					w.WriteHeader(http.StatusBadRequest)
+					e := []string{"authorization_pending", "slow_down", "access_denied"}[polls-1]
+					fmt.Fprintf(w, `{"error":%q}`, e)
+				}
+			}))
+			defer srv.Close()
+			hc := HTTPClient()
+			hc.Transport = srv.Client().Transport
+			var waits []time.Duration
+			token, err := login(context.Background(), hc, srv.URL, "public", io.Discard, func(ctx context.Context, d time.Duration) error {
+				waits = append(waits, d)
+				if cancel && len(waits) == 3 {
+					return context.Canceled
+				}
+				return nil
+			})
+			if token != "" || err == nil {
+				t.Fatalf("token %q error %v", token, err)
+			}
+			if len(waits) != 3 || waits[0] != 5*time.Second || waits[1] != 5*time.Second || waits[2] != 10*time.Second {
+				t.Fatalf("waits %v", waits)
+			}
+			if cancel && !errors.Is(err, context.Canceled) {
+				t.Fatalf("error %v", err)
+			}
+		})
 	}
 }

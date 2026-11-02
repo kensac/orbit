@@ -32,7 +32,7 @@ func run(ctx context.Context, args []string) error {
 	issuer := fs.String("issuer", os.Getenv("ORBIT_OIDC_ISSUER"), "authentik device provider issuer")
 	id := fs.String("client-id", os.Getenv("ORBIT_OIDC_CLIENT_ID"), "public device provider client ID")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: orbitctl [flags] agents | conversations AGENT | thread CONVERSATION | send CONVERSATION TEXT | send-agent AGENT TEXT | stream RUN | approve ACTION | reject ACTION\nEach invocation signs in through authentik; tokens are never saved.")
+		_, _ = fmt.Fprintln(fs.Output(), "Usage: orbitctl [flags] agents | conversations AGENT | thread CONVERSATION | send CONVERSATION TEXT | send-agent AGENT TEXT | stream RUN | approve ACTION | reject ACTION\nEach invocation signs in through authentik; tokens are never saved.")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -63,7 +63,9 @@ func run(ctx context.Context, args []string) error {
 	if err := c.Request(ctx, method, path, strings.NewReader(body), &reply); err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stdout, reply.String())
+	if _, err := fmt.Fprintln(os.Stdout, reply.String()); err != nil {
+		return err
+	}
 	var posted struct {
 		Run string `json:"run_id"`
 	}

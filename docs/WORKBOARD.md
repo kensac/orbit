@@ -44,7 +44,7 @@ Pick one, put your name and branch in the Owner column in your first PR, keep ea
 
 | # | Item | Owner | Notes |
 |---|---|---|---|
-| 1 | `orbit` CLI client for the laptop: chat with any agent, stream replies, list conversations, approve actions, from the terminal like Claude Code; sign-in with authentik's device-code flow (no orbit-local tokens) | | new `cmd/orbit` subcommands or a separate `cmd/orbitctl`; uses /api/v1 exactly as docs/api.md says |
+| 1 | `orbit` CLI client for the laptop: chat with any agent, stream replies, list conversations, approve actions, from the terminal like Claude Code; sign-in with authentik's device-code flow (no orbit-local tokens) | `codex/terminal-client`, #53 | `cmd/orbitctl` implemented and unit-tested against local TLS endpoints; real provider sign-in smoke remains |
 | 2 | Natural-language schedules ("every weekday at 8", "the 1st at 9am") parsed by code into cron/RRULE, quiet hours per agent, calendar-aware skipping | | coordinate with #43 (RRULE) once it merges |
 | 3 | Per-agent budgets: API-equivalent cost and run counts per period, a gate that defers or refuses scheduled runs past a budget, alerts | | builds on /usage (#11) |
 | 4 | Agent evaluations: saved reference runs (inputs + expected properties), a command that replays them against the current charter/skills and reports regressions and cost | | deterministic checks first, model-graded only where needed |

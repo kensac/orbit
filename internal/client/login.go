@@ -15,6 +15,21 @@ import (
 // Login signs in with a public authentik device client and returns only its access token.
 // The caller must configure this issuer and client ID in Orbit's accepted audience list.
 func Login(ctx context.Context, hc *http.Client, issuer, clientID string, notice io.Writer) (string, error) {
+	return login(ctx, hc, issuer, clientID, notice, waitPoll)
+}
+
+func waitPoll(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func login(ctx context.Context, hc *http.Client, issuer, clientID string, notice io.Writer, wait func(context.Context, time.Duration) error) (string, error) {
 	if err := ValidateURL(issuer); err != nil {
 		return "", err
 	}
@@ -54,13 +69,15 @@ func Login(ctx context.Context, hc *http.Client, issuer, clientID string, notice
 		Expires  int    `json:"expires_in"`
 		Interval int    `json:"interval"`
 	}
-	if err := form(ctx, hc, doc.Device, url.Values{"client_id": {clientID}, "scope": {"openid profile email"}}, &device); err != nil {
+	if err := form(ctx, hc, doc.Device, url.Values{"client_id": {clientID}, "scope": {"openid profile email"}}, &device, false); err != nil {
 		return "", err
 	}
-	if device.Code == "" || device.User == "" || device.Expires <= 0 || ValidateURL(device.URI) != nil {
+	if device.Code == "" || device.User == "" || device.Expires <= 0 || device.Expires > int(maxOAuthSeconds) || device.Interval < 0 || device.Interval > int(maxOAuthSeconds) || ValidateURL(device.URI) != nil {
 		return "", errors.New("invalid device authorization response")
 	}
-	fmt.Fprintf(notice, "Open %s and enter code %s\n", device.URI, device.User)
+	if _, err := fmt.Fprintf(notice, "Open %s and enter code %s\n", device.URI, device.User); err != nil {
+		return "", err
+	}
 	interval := time.Duration(device.Interval) * time.Second
 	if interval < 5*time.Second {
 		interval = 5 * time.Second
@@ -68,19 +85,15 @@ func Login(ctx context.Context, hc *http.Client, issuer, clientID string, notice
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(device.Expires)*time.Second)
 	defer cancel()
 	for {
-		timer := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return "", ctx.Err()
-		case <-timer.C:
+		if err := wait(ctx, interval); err != nil {
+			return "", err
 		}
 		var token struct {
 			Access string `json:"access_token"`
 			Type   string `json:"token_type"`
 			Error  string `json:"error"`
 		}
-		if err := form(ctx, hc, doc.Token, url.Values{"client_id": {clientID}, "device_code": {device.Code}, "grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}}, &token); err != nil {
+		if err := form(ctx, hc, doc.Token, url.Values{"client_id": {clientID}, "device_code": {device.Code}, "grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}}, &token, true); err != nil {
 			return "", err
 		}
 		switch token.Error {
@@ -100,7 +113,10 @@ func Login(ctx context.Context, hc *http.Client, issuer, clientID string, notice
 	}
 }
 
-func form(ctx context.Context, hc *http.Client, endpoint string, values url.Values, out any) error {
+// maxOAuthSeconds leaves room for RFC 8628 slow-down increments without duration overflow.
+const maxOAuthSeconds = int64((1<<63-1)/int64(time.Second)) / 2
+
+func form(ctx context.Context, hc *http.Client, endpoint string, values url.Values, out any, allowOAuthError bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(values.Encode()))
@@ -113,7 +129,21 @@ func form(ctx context.Context, hc *http.Client, endpoint string, values url.Valu
 	if resp.StatusCode != 200 && resp.StatusCode != 400 {
 		return fmt.Errorf("authorization returned HTTP %d", resp.StatusCode)
 	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out) != nil {
+	var payload json.RawMessage
+	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload) != nil {
+		return errors.New("invalid authorization response")
+	}
+	if resp.StatusCode != http.StatusOK {
+		var envelope struct {
+			Error  string `json:"error"`
+			Access string `json:"access_token"`
+			Device string `json:"device_code"`
+		}
+		if !allowOAuthError || json.Unmarshal(payload, &envelope) != nil || envelope.Error == "" || envelope.Access != "" || envelope.Device != "" {
+			return errors.New("invalid OAuth error response")
+		}
+	}
+	if json.Unmarshal(payload, out) != nil {
 		return errors.New("invalid authorization response")
 	}
 	return nil
