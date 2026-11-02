@@ -330,7 +330,7 @@ conversation:
   `reply_to`, when set, is the message it answers. `attachments` are the uploads it carries (Uploads, above), in order; always an array. `run_id` is the run that
   holds a person's message (`null` while it waits for a run: none has read it, or every attempt that did handed it back) or the run that asked a
   question. `reads` (a person's message, once a run has read it) is every attempt that read it, oldest first: `{"run_id", "attempt", "read_at", "released_at"}`, where `released_at` is when a failed or interrupted attempt handed it back, `null` for the one holding it.
-- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again), `build` (a ticket's build run, docs/tickets.md), `learn` (a learning run, below; only in an agent's learning conversation), `task` (in a delegated task's conversation: the task starting, or its parent writing to it) or `delegation` (the agent woken because tasks it delegated settled; below). `status` is
+- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again), `build` (a ticket's build run, docs/tickets.md), `learn` (a learning run, below; only in an agent's learning conversation), `task` (in a delegated task's conversation: the task starting, or its parent writing to it) or `delegation` (the agent woken because tasks it delegated settled, one failed or one asks it something; below). `status` is
   `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
   ended without a backend call because a gate, code, found nothing to judge;
   `gate` names it, and is `null` for every other status). `attempt` counts
@@ -650,12 +650,23 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
  "decision": {"action_id": "uuid", "question": "Spend $20?", "status": "executed", "decided_by": "kanishk"},
  "report": {"run_id": "uuid", "summary": "...", "report": "<markdown>"},
  "error": null, "run_id": "uuid", "run_status": "succeeded",
+ "outcome": "succeeded", "outcome_reason": null,
+ "attempt": 2, "failures": 1, "stalled_at": null,
+ "attempts": [{"attempt": 1, "agent": "researcher", "conversation_id": "uuid", "brief": "Find the facts.",
+               "error": "the agent could not do the work: ...", "finished_at": "...", "retry_action_id": "uuid"}],
+ "attempt": 2, "failures": 1,
+ "attempts": [{"attempt": 1, "agent": "researcher", "conversation_id": "uuid", "brief": "Find the facts.",
+               "error": "the agent could not do the work: ...", "finished_at": "...", "retry_action_id": "uuid"}],
  "questions": [{"id": "uuid", "body": "Which year?", "open": true}],
  "created_at": "...", "updated_at": "...", "finished_at": "..."}
 ```
 
-- `status`: `waiting` (a dependency is not done), `blocked` (its decision is pending), `working` (a run in its conversation is queued or running), `needs_input` (its agent asked the delegating agent something; `questions`), `done` (`report` is the reply of the run that finished it), `failed` or `cancelled` (`error` says why). A message from the delegating agent moves a `done` task back to `working`; `report` keeps the previous reply until the next.
-- `depends_on` is the keys of tasks in the same batch (`action_id`) it waits for. `decision` is `null` without one; otherwise approve or reject its `action_id` like any action (`POST /actions/{id}/approve`), and the task starts or is cancelled within seconds.
+- `status`: `waiting` (a dependency is not done; a failed dependency holds it until that one is retried or this one cancelled), `blocked` (its decision is pending), `working` (a run in its conversation is queued or running), `needs_input` (its agent asked the delegating agent something, `questions`, or said it is blocked, `outcome`), `done` (`report` is the reply of the run that finished it), `failed` or `cancelled` (`error` says why; a task whose run said it could not do the work keeps that run's reply in `report`). A message from the delegating agent moves a `done` task back to `working`; `report` keeps the previous reply until the next.
+- `depends_on` is the keys of the tasks it waits for: of its batch (`action_id`), or of an earlier task its conversation delegated (the newest of that key when the task was created). `decision` is `null` without one; otherwise approve or reject its `action_id` like any action (`POST /actions/{id}/approve`), and the task starts or is cancelled within seconds.
+- `outcome` and `outcome_reason` are what the newest run in its conversation said of its work: `outcome` is `succeeded`, `failed` (it could not do the work; the task fails) or `blocked` (it cannot go on until something outside its reach changes; the task needs input), `outcome_reason` why, or `null` when it gave none. Both are `null` while that run has not finished, and for a run that gave no outcome (a chat turn, which counts as succeeded).
+- `attempt` is its current attempt: 1, and one more for each `task:retry` of the delegating agent, which reopens a failed task on the same row, with a new brief or another agent (`agent` and `conversation_id` are then the current attempt's). `attempts` are the attempts a retry ended, oldest first, as they were then. `failures` counts attempts that failed by the agent's work (not a run lost with its worker); from 3 a retry waits for a person's approval, which shows as a pending `task:retry` action.
+- `stalled_at` is set while the task is open in a batch none of whose open tasks can move (each waits only on a failed dependency, or on a decision pending longer than `defaults.decision_stall`) and the delegating agent was woken for it, once; `null` otherwise.
+- `attempt` is its current attempt: 1, and one more for each `task:retry` of the delegating agent, which reopens a failed task on the same row, with a new brief or another agent (`agent` and `conversation_id` are then the current attempt's). `attempts` are the attempts a retry ended, oldest first, as they were then. `failures` counts attempts that failed by the agent's work (not a run lost with its worker); from 3 a retry waits for a person's approval, which shows as a pending `task:retry` action.
 - `run_id` and `run_status` are the newest run in its conversation; stream it with `/runs/{id}/stream` to show the task's work as it happens. `fresh` is a worker started from its agent's spec without its memory. `depth` is 1 for a task a top-level conversation delegated.
 
 `POST /tasks/{id}/cancel` `{"reason": "optional"}`: `200 {"cancelled": true}`, `409` when the task is already over. Its queued runs are cancelled (a running one finishes, unheeded) and its dependents with it. The canceller is the token's person (with the operator token, `"by"` names it).

@@ -220,8 +220,9 @@ type Health struct {
 	LastSuccess    map[string]*LastSuccess `json:"-"`
 }
 
-// maxRunning bounds the running list. runs_one_running allows one per
-// agent, so this is only reached by a deployment with that many agents.
+// maxRunning bounds the running list. runs_one_running_lane allows one per
+// agent (per conversation for a chat agent), so this is only reached by a
+// deployment that busy.
 const maxRunning = 200
 
 // Health reads the queue, the running runs, pending actions and each

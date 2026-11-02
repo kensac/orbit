@@ -134,6 +134,9 @@ type Defaults struct {
 	Channels []string `yaml:"channels" json:"channels"`
 	// MemoryMaxBytes bounds the memory document an agent may write back.
 	MemoryMaxBytes int `yaml:"memory_max_bytes" json:"memory_max_bytes"`
+	// DecisionStall is how long a delegated task's decision may wait for a
+	// person before its batch counts as stalled and its parent is woken.
+	DecisionStall Duration `yaml:"decision_stall" json:"decision_stall"`
 }
 
 // Channel is a notification destination. Kind selects the adapter; the
@@ -571,7 +574,7 @@ func (a *Agent) Verifies(check string) bool { return slices.Contains(a.Verify, c
 func (a *Agent) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
 
 // RuleFor returns the rule for an action type, deny if unnamed. The task
-// types (task:message, task:cancel) manage tasks the agent delegated, so
+// types (task:message, task:cancel, task:retry) manage tasks the agent delegated, so
 // unnamed they follow the delegate rule.
 func (a *Agent) RuleFor(actionType string) Rule {
 	if r, ok := a.Actions[actionType]; ok {
@@ -766,6 +769,10 @@ func (c *Config) applyDefaults() {
 		d.Defaults.Timeout = Duration(15 * time.Minute)
 	}
 	c.applyMailDefaults()
+	if d.Defaults.DecisionStall == 0 {
+		// A person answers within a day, or the parent should hear about it.
+		d.Defaults.DecisionStall = Duration(24 * time.Hour)
+	}
 	c.applyUsageDefaults()
 	if d.Defaults.MemoryMaxBytes == 0 {
 		// About 4k tokens: memory rides in every prompt, so it must stay a
@@ -1017,7 +1024,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		switch {
 		case typ == "notify", typ == "continue", typ == "agent:define":
-		case typ == "delegate", typ == "task:message", typ == "task:cancel":
+		case typ == "delegate", typ == "task:message", typ == "task:cancel", typ == "task:retry":
 			if len(a.Delegates) == 0 {
 				at("action %q: needs delegates, the agents this one may hand tasks to", typ)
 			}
@@ -1030,7 +1037,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 				at("action %q: needs a github block in orbit.yaml", typ)
 			}
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, delegate, task:message, task:cancel, webhook:<endpoint>, github:merge, github:clone or github:pr)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone or github:pr)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
