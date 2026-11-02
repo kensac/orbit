@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -63,6 +64,21 @@ func main() {
 	}
 	out["proxy"] = proxy
 
+	// The credential proxy, reached directly (NO_PROXY) with the token this process was given: what each request was answered, and whether the proxy itself answered (its refusals start with "credproxy:") or forwarded it.
+	cred := map[string]any{}
+	if base := os.Getenv("ANTHROPIC_BASE_URL"); base != "" {
+		tok := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")
+		cred["token_prefix"] = strings.SplitN(tok, ".", 2)[0]
+		for name, req := range map[string][2]string{
+			"messages": {"/v1/messages?beta=true", tok},
+			"models":   {"/v1/models", tok},
+			"forged":   {"/v1/messages", "orbit-cp1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+		} {
+			cred[name] = credRequest(base+req[0], req[1])
+		}
+	}
+	out["credproxy"] = cred
+
 	_, err = os.Stat("/var/run/docker.sock")
 	out["docker_sock"] = errString(err)
 
@@ -90,6 +106,23 @@ func connect(proxy, target string) any {
 		return "read: " + err.Error()
 	}
 	return resp.StatusCode
+}
+
+func credRequest(u, tok string) any {
+	req, err := http.NewRequest(http.MethodPost, u, strings.NewReader(`{}`))
+	if err != nil {
+		return err.Error()
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	if err != nil {
+		return "request: " + err.Error()
+	}
+	defer resp.Body.Close()
+	b := make([]byte, 10)
+	n, _ := io.ReadFull(resp.Body, b)
+	return map[string]any{"status": resp.StatusCode, "by_proxy": string(b[:n]) == "credproxy:"}
 }
 
 func errString(err error) string {
