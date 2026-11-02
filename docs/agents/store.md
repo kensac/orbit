@@ -6,7 +6,7 @@ the engine never write SQL.
 ## Migrations
 
 `internal/store/migrations/` is the schema, applied by `orbit serve` at start
-(goose, embedded). A migration is additive and never edited once merged. A
+(goose, embedded). A migration is additive and never edited once merged. Name a new migration by UTC timestamp, `YYYYMMDDHHMMSS_name.sql` (`date -u +%Y%m%d%H%M%S`), never the next small number: agents merge in parallel and two of them picking the same number made every orbit start fail. Out-of-order apply is on, and `TestMigrationVersionsAreUnique` fails on a duplicate. A
 change that drops or renames is expand, then contract, across two releases,
 because the previous image may still be running during a deploy.
 
@@ -44,6 +44,8 @@ an agent's beliefs changed.
 - workspaces (`workspaces`): a chat conversation's snapshot after each run that changed it, never updated; the newest is the workspace.
 - session transcripts (`session_transcripts`): written once per session id (`ON CONFLICT DO NOTHING`; a resume forks to a new id), never updated.
 - deployment (`deployment_specs`, `deployment_current`): every version kept, as `agent_specs`; `SyncDeployment` moves the pointer before `SyncAgents` records the agents loaded with it.
+
+- search (`search_docs`): derived, not written by any store method. Triggers on `messages`, `runs` (summary, report, error), `run_events` (the backends' prose and tool calls), `memory_versions` and `memory_entry_versions` insert one document per searchable piece, keyed by the row it came from (`ref`), so every writer indexes alike; a document that cannot be built raises a warning and never fails the write. A new searchable table gets its trigger and its backfill in one migration.
 
 A client request id (`receipts`) is written in the same transaction as the
 message or decision it records, so a retry returns the first result and a

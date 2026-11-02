@@ -60,6 +60,9 @@ type Harness struct {
 	// Figures sends an output back when its money amounts cannot be traced
 	// to the inputs or orbit's tool results (spec verify: [figures]).
 	Figures bool
+	// Search is the engine's search socket for the run's agent; empty
+	// offers no search tool.
+	Search string
 }
 
 // Session is how one run uses a persistent Claude Code session. The engine

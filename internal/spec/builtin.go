@@ -75,6 +75,9 @@ func Builtins(d Deployment) []*Agent {
 		Needs:           needs,
 		MessagesTrigger: true,
 		Session:         sess,
+		// It may define agents, itself included (docs/api.md, Defining
+		// agents): each change is a new, revertible version.
+		Actions: map[string]Rule{"agent:define": RuleAuto},
 		// Replies stay in orbit; failures and approvals still notify.
 		Notify: NotifySpec{When: "never"},
 		Origin: OriginBuiltin,

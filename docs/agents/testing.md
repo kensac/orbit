@@ -29,7 +29,7 @@ orbit any placeholder token so the runner builds.
 
 After changing `internal/harness` or its wiring, run an agent with
 `verify: [figures]` and a JSON `file` source: the init event lists
-`mcp__orbit__query` and `mcp__orbit__calc`, the totals come from query calls,
+`mcp__orbit__query`, `mcp__orbit__calc` and `mcp__orbit__search`, a search for a word of an earlier run's report finds it, the totals come from query calls,
 a Read of `../x` is denied with orbit's message, and a figure asked for "in
 your head" is sent back and recomputed with a tool.
 

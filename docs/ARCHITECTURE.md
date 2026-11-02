@@ -118,6 +118,10 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
   The system prompt tells the model to compute every figure with them. Both
   read only under the workdir, and append each result to a ledger in the run's
   state directory.
+  `mcp__orbit__search` is full-text search over the agent's own history
+  (below): the tool server asks the engine over a per-agent unix socket
+  (`engine/search.go`), the engine fills in the agent, and its results are
+  not ledgered, since an earlier run's words back no figure.
 - **Hooks** (`orbit hook`, from `--settings`; with `--setting-sources ""` no
   other hook is loaded, so `disableAllHooks` is on whenever orbit has none):
   PreToolUse on Read, Glob and Grep denies a path that leaves the workdir after
@@ -220,7 +224,7 @@ An action type is code (`internal/actions`): a name, a parameter schema shown
 to the agent, a validator, and an executor. An agent's spec maps types to
 `auto`, `approve` or `deny`; unnamed types are denied and not offered.
 Today: `notify` (an extra message to one of the agent's channels),
-`continue` (wake this agent again later, above), `webhook:<endpoint>` (a
+`continue` (wake this agent again later, above), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; docs/api.md, Defining agents), `webhook:<endpoint>` (a
 JSON body to an endpoint whose URL and credentials are configuration, never
 chosen by the model), and `github:merge` (squash one of orbit's own
 `orbit/*` PRs, only if its head is still the approved commit and every
@@ -249,6 +253,10 @@ the admin read side, computed from stored rows and the configuration in
 force: subscription windows from the newest `rate_limit_event` Claude Code
 wrote into a run's stream (what it last reported, not a live query), exact
 cost sums, the queue, running runs and next fires. `/mcp` serves the same reads and writes as MCP tools (`internal/api/mcp.go`, stateless Streamable HTTP), with an OAuth proxy in front of authentik for clients that need dynamic registration (`oauth.go`). Contract: docs/api.md.
+
+## Search
+
+Everything a person or an agent wrote is searchable (`Store.Search`, `GET /search`, the `search` MCP tool, and in a run `mcp__orbit__search`): people's messages, agents' questions, run reports and errors, the prose a backend narrated, each tool call's input, memory versions and memory entries (a run's in-run search covers its own agent's, without profile and topic entries, which its `_memory.md` input already holds in full). `search_docs` holds one document per piece with a stored `tsvector` (English, a GIN index), derived by triggers on the source tables (the `search` migration, which also backfills), so a worker or the previous release indexes what it writes without knowing search exists. Queries are `websearch_to_tsquery`, ranked by `ts_rank_cd` normalised by length, with `ts_headline` snippets whose matches are split out in code, never as markup in the text. Tool results are not indexed: they are inputs, already in artifacts, and would drown every query.
 
 ## Reliability
 
