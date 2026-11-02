@@ -12,6 +12,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/kensac/orbit/internal/status"
 )
 
 // ErrInvalid is a request the store refuses on its content (a 400).
@@ -57,7 +59,7 @@ type Conversation struct {
 	LastActivityAt time.Time `json:"last_activity_at"`
 	// NeedsInput is true while one of its questions is open or one of its
 	// runs' actions awaits approval.
-	NeedsInput bool `json:"needs_input"`
+	NeedsInput bool `json:"needs_input" db:"-"`
 	// TicketID is set when the conversation is a ticket's.
 	TicketID *string `json:"ticket_id"`
 	// Purpose is learning for the agent's learning conversation, where its learning runs are (archived); null for a person's.
@@ -66,15 +68,41 @@ type Conversation struct {
 	// questions are to the delegating agent, so they do not count as
 	// waiting on the person.
 	TaskID *string `json:"task_id"`
+	// WorkspaceID is its workspace's id (docs/api.md, Workspace), null
+	// until it has one.
+	WorkspaceID *string `json:"workspace_id"`
+	// AgentStatus is the agent's status in this conversation
+	// (status.Aggregate over its current run).
+	AgentStatus status.Status `json:"agent_status" db:"-"`
+
+	OpenQuestion  bool      `json:"-"`
+	PendingAction bool      `json:"-"`
+	CurrentRun    *RunFacts `json:"-"`
+	// LastRun is the conversation's newest run, null before its first.
+	LastRun *RunSummary `json:"last_run"`
+	// ReadThrough is how far the person has read it (MarkRead); null
+	// before they first did.
+	ReadThrough *time.Time `json:"read_through"`
 }
 
-const conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived, c.created_at, c.last_activity_at,
-	(EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND ` + openQuestion + `)
-	 AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.conversation_id = c.id))
-	OR EXISTS (SELECT 1 FROM actions x JOIN runs xr ON xr.id = x.run_id
-	           WHERE xr.conversation_id = c.id AND x.status = 'pending'),
+// derive fills the fields computed from the scanned ones.
+func (c *Conversation) derive() {
+	c.NeedsInput = c.OpenQuestion || c.PendingAction
+	c.AgentStatus = StatusFacts{Run: c.CurrentRun, OpenQuestion: c.OpenQuestion, PendingAction: c.PendingAction}.Status()
+}
+
+var conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived, c.created_at, c.last_activity_at,
 	(SELECT t.id::text FROM tickets t WHERE t.conversation_id = c.id), c.purpose,
-	(SELECT k.id::text FROM tasks k WHERE k.conversation_id = c.id)`
+	(SELECT k.id::text FROM tasks k WHERE k.conversation_id = c.id),
+	(SELECT wt.id::text FROM workspace_trees wt WHERE wt.conversation_id = c.id),
+	EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND ` + personQuestion + `),
+	EXISTS (SELECT 1 FROM actions x JOIN runs xr ON xr.id = x.run_id
+	        WHERE xr.conversation_id = c.id AND x.status = 'pending'),
+	` + currentRun("c.agent", "sr.conversation_id = c.id") + `,
+	(SELECT json_build_object('id', r.id, 'status', r.status, 'trigger', r.trigger, 'created_at', r.created_at,
+	                          'finished_at', r.finished_at, 'summary', r.summary)
+	 FROM runs r WHERE r.conversation_id = c.id ORDER BY r.created_at DESC, r.id DESC LIMIT 1),
+	c.read_through`
 
 // GetConversation returns one conversation.
 func (s *Store) GetConversation(ctx context.Context, id string) (*Conversation, error) {
@@ -86,6 +114,7 @@ func (s *Store) GetConversation(ctx context.Context, id string) (*Conversation, 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
+	c.derive()
 	return &c, err
 }
 
@@ -152,6 +181,9 @@ func (s *Store) ListConversations(ctx context.Context, agent string, archived bo
 	list, err := pgx.CollectRows(rows, pgx.RowToStructByPos[Conversation])
 	if err != nil {
 		return nil, err
+	}
+	for i := range list {
+		list[i].derive()
 	}
 	page := &ConversationPage{Conversations: list}
 	if len(list) > limit {

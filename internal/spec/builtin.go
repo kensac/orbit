@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"slices"
 	"sort"
 	"time"
 )
@@ -9,6 +10,14 @@ import (
 // session a person reaches from anywhere, and the one a new chat opens with
 // when no agent is named.
 const BuiltinName = "orbit"
+
+// AllTopics in an agent's topics is every memory topic there is, now and
+// later: the general agent is the person's own session, so what any agent
+// was taught is in reach of it.
+const AllTopics = "*"
+
+// ReadsAllTopics reports whether the agent reads every topic.
+func (a *Agent) ReadsAllTopics() bool { return slices.Contains(a.Topics, AllTopics) }
 
 // builtinCharter is deliberately short: the general agent is a Claude Code
 // session, not a role, so it is told where it is and nothing about what to
@@ -74,16 +83,35 @@ func Builtins(d Deployment) []*Agent {
 		// The general agent coordinates the others: in its person's chat a
 		// delegation applies directly, unattended it waits for approval
 		// (docs/ARCHITECTURE.md, Delegation).
-		Delegates:       []string{"*"},
+		Delegates: []string{"*"},
+		// It is the person's general session: every topic's entries,
+		// within the index budget (engine/known.go).
+		Topics:          []string{AllTopics},
 		MessagesTrigger: true,
 		Session:         sess,
 		// It may define agents, itself included (docs/api.md, Defining
-		// agents): each change is a new, revertible version. It delegates
-		// under approve: directly in its person's chat, after approval
-		// when unattended.
-		Actions: map[string]Rule{"agent:define": RuleAuto, "delegate": RuleApprove},
+		// agents): each change is a new, revertible version.
+		// GitHub writes wait for approval unless the person asked for them
+		// in the conversation, which approves them (docs/api.md, Chat
+		// agents); unattended runs always wait.
+		Actions: builtinActions(d),
 		// Replies stay in orbit; failures and approvals still notify.
 		Notify: NotifySpec{When: "never"},
 		Origin: OriginBuiltin,
 	}}
+}
+
+func builtinActions(d Deployment) ActionSet {
+	// It delegates, changes schedules and starts runs under approve:
+	// directly in its person's chat, after approval when unattended.
+	// agent:save is always proposed for approval (engine/save.go).
+	rules := ActionSet{"agent:define": RuleAuto, "agent:save": RuleApprove, "continue": RuleAuto, "delegate": RuleApprove,
+		"schedule:add": RuleApprove, "schedule:pause": RuleApprove, "schedule:resume": RuleApprove,
+		"schedule:remove": RuleApprove, "run:now": RuleApprove}
+	if d.GitHub != nil {
+		rules["github:clone"] = RuleAuto
+		rules["github:pr"] = RuleApprove
+		rules["github:merge"] = RuleApprove
+	}
+	return rules
 }
