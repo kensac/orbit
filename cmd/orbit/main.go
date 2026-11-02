@@ -4,10 +4,11 @@
 //	orbit serve              control: API, scheduler, delivery, actions, config sync, and executors
 //	orbit worker             executors only: claim and run what this host's capabilities cover
 //	orbit migrate            apply database migrations and exit
+//	orbit preflight [--config DIR]   check this binary can migrate the database and the running one survives it, changing nothing
 //	orbit validate [dir]     load and check a configuration directory
 //	orbit run <agent> [prompt]   queue a manual run (a running serve picks it up)
 //	orbit approve <action-id> / orbit reject <action-id>
-//	orbit healthcheck [--ready]  exit 0 if the local server answers /healthz (/readyz)
+//	orbit healthcheck [--ready | --url <url>]  exit 0 if the local server answers /healthz (/readyz), or url answers 200
 //	orbit drain              tell the local server to drain (a deploy replacing it)
 //	orbit import claude-memory <dir> --scope <s> [--apply]   seed memory entries through the API
 //	orbit import skills <dir> [--attach <agent>] [--apply]   seed the skills library through the API
@@ -80,6 +81,8 @@ func main() {
 		err = worker(ctx, log)
 	case "migrate":
 		err = withStore(ctx, func(s *store.Store) error { return s.Migrate(ctx) })
+	case "preflight":
+		err = preflightCmd(ctx, os.Args[2:])
 	case "validate":
 		err = validate(os.Args[2:])
 	case "run":
@@ -87,7 +90,7 @@ func main() {
 	case "approve", "reject":
 		err = decide(ctx, os.Args[1] == "approve", os.Args[2:])
 	case "healthcheck":
-		err = healthcheck(len(os.Args) > 2 && os.Args[2] == "--ready")
+		err = healthcheckCmd(os.Args[2:])
 	case "drain":
 		err = drainCmd()
 	case "import":
@@ -157,25 +160,42 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
 	os.Exit(2)
 }
 
-// healthcheck is the image's HEALTHCHECK (liveness, /healthz), and with
-// --ready the rollout's readiness wait (/readyz): the image has no curl.
-func healthcheck(ready bool) error {
-	path := "/healthz"
-	if ready {
-		path = "/readyz"
+// healthcheckCmd is the image's HEALTHCHECK (liveness, /healthz), with --ready the rollout's readiness wait (/readyz), and with --url the healthcheck compose gives sandboxd and egress: the image has no curl.
+func healthcheckCmd(args []string) error {
+	fs := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
+	ready := fs.Bool("ready", false, "probe /readyz instead of /healthz")
+	url := fs.String("url", "", "probe this URL instead (sandboxd's and egress's healthchecks)")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
+	if *url != "" && *ready {
+		return errors.New("healthcheck: --url and --ready are exclusive")
+	}
+	target := *url
+	if target == "" {
+		path := "/healthz"
+		if *ready {
+			path = "/readyz"
+		}
+		target = "http://" + local(env("ORBIT_LISTEN", ":8080")) + path
+	}
+	return probe(target)
+}
+
+// probe is one healthcheck request: 200 within the timeout, or an error naming the answer.
+func probe(target string) error {
 	c := &http.Client{Timeout: 4 * time.Second}
-	resp, err := c.Get("http://" + local(env("ORBIT_LISTEN", ":8080")) + path)
+	resp, err := c.Get(target) //nolint:gosec // the operator's own probe target, from the command line
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: %s", path, resp.Status)
+		return fmt.Errorf("%s: %s", target, resp.Status)
 	}
 	return nil
 }
@@ -502,6 +522,11 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		}
 
 		var loops sync.WaitGroup
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			watchSandboxd(life, func() *spec.Config { return eng.Current().Config }, log.With("component", "sandboxd-probe"))
+		}()
 		// The ticket loop starts builds and proposes merges, so it stops
 		// with claims: a draining instance leaves both to the ready one.
 		loops.Add(1)
@@ -880,6 +905,13 @@ func refreshGauges(ctx context.Context, s *store.Store, log *slog.Logger) {
 	}
 	metrics.Pending.Set(float64(pending))
 	metrics.Queued.Set(float64(queued))
+	if age, err := s.OldestQueuedAge(ctx); err != nil {
+		if ctx.Err() == nil {
+			log.Warn("gauges", "err", err)
+		}
+	} else {
+		metrics.QueuedOldest.Set(age.Seconds())
+	}
 }
 
 func sleep(ctx context.Context, d time.Duration) {

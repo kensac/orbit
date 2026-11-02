@@ -136,6 +136,7 @@ func (e *Engine) SetConfig(cfg *spec.Config) error {
 	e.mu.Lock()
 	e.cfg = &Snapshot{Config: cfg, Channels: chans}
 	e.mu.Unlock()
+	metrics.SetExpiries(cfg.Deployment.Expiries())
 	return nil
 }
 
