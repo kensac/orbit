@@ -18,7 +18,7 @@ This document is the design. What exists today:
 | the `github:` block in `orbit.yaml` | **Built** | `internal/spec` |
 | the `plan` output field and `ticket.json` input; a plan stored with its run's outcome | **Built**, unit-tested | `internal/engine/ticket.go`, `store.RecordOutcome` |
 | the `build:` section of `orbit.yaml` | **Built**, unit-tested | `internal/spec/build.go` |
-| the build runner: clone, sandbox, the CLI under orbit's permission handler, readback, diff policy, commit, push, PR; decisions and sandboxes recorded per attempt | **Built**; tested against a fake sandboxd and a fake GitHub, with a real git remote; the permission protocol **seen** against the real CLI 2.1.316 (`TestRealCLIPermissionProtocol`); the whole run against a real sandboxd and docker in CI (`TestIntegrationBuild`) | `internal/build`, `internal/engine/build.go`, `internal/store/builds.go`, `migrations/00007_builds.sql` |
+| the build runner: clone (from the checkout pool), trusted setup and cleanup scripts, sandbox, the CLI under orbit's permission handler, readback, diff policy, commit, push, PR; decisions and sandboxes recorded per attempt | **Built**; tested against a fake sandboxd and a fake GitHub, with a real git remote; the permission protocol **seen** against the real CLI 2.1.316 (`TestRealCLIPermissionProtocol`); the whole run against a real sandboxd and docker in CI (`TestIntegrationBuild`) | `internal/build`, `internal/engine/build.go`, `internal/store/builds.go`, `migrations/00007_builds.sql` |
 | the ticket loop: build enqueue, PR and checks polling, proposing the merge, reruns of failed jobs (its own and a person's), fix attempts with the failure report, done on deploy, reconciliation, closing an abandoned ticket's PR, the self-hosting rules | **Built**, tested against a fake GitHub and real Postgres | `internal/tickets` |
 | review comments: drafts, edits as new versions, one structured message per review, the revise build that applies them, delivered when it succeeds | **Built**, tested against real Postgres and a fake GitHub | `internal/store/reviews.go`, `internal/api/reviews.go`, `migrations/20261102032212_review_comments.sql` |
 | stacked tickets: built on the ticket below, merge held, restacked by code onto its new head and onto the default branch once it merges | **Built**; the restack against a real git remote, the loop against a fake GitHub and real Postgres | `internal/tickets/stack.go`, `internal/build/restack.go` |
@@ -356,14 +356,16 @@ ticket approved
      approved -> building, in one transaction (one building ticket per
      repository: tickets_one_building)
   -> an executor claims it like any run; the engine hands it to internal/build
-  -> orbit: mint contents:read token, clone the repo at the default branch's
-     head (base_sha), revoke the token
+  -> orbit: mint contents:read token, take the ticket's kept clone (or a spare
+     one) and fetch the default branch's head (base_sha) into it, revoke the
+     token; read .orbit/build.yaml and refuse a script it does not trust
   -> orbit: tar the checkout (without credentials), ask the sandbox launcher
-     for a container with that tar at /work
+     for a container with that tar at /work; run the trusted setup script
   -> orbit: start the CLI inside it, speak its stream-json protocol over the
      container's stdio, answer every permission request with code (below)
   -> model finishes with its build output (summary, PR title, PR body, notes)
-  -> orbit: fetch /work back as a tar, destroy the container
+  -> orbit: run the trusted cleanup script, fetch /work back as a tar,
+     destroy the container
   -> orbit: in its own clone, replace the tree with the fetched files, compute
      the diff against base_sha, enforce the diff policy, store the diff as an
      artifact
@@ -391,6 +393,23 @@ by an earlier attempt that died after the push) does not call the model:
 it reopens the PR from that commit's message (a gate, recorded as the
 `orbit.gate` event; until runs have a `skipped` status the run is
 `succeeded` with the gate in its report).
+
+### The checkout pool
+
+orbit keeps its own clones in `build.Pool` (`<data>/checkouts`): one per ticket, reused by every build of the ticket (the build, its fixes and revisions) and removed when the ticket is done or abandoned, and one spare per build repository at the default branch's head, which the ticket loop tops up each tick and a ticket's first build takes. A clone is self-contained (its own `.git`, never a git worktree pointing at a shared store), because the sandbox gets the whole tree with `.git`. Before each use it is checked out with `--force` and cleaned with `clean -ffdx`, so nothing an earlier attempt left carries over; only orbit's git writes its `.git`, since the readback drops every `.git`. Tokens stay in git's environment, never on disk. `build.ConversationKey` names a clone per conversation for an agent that reads a repository across one conversation's runs.
+
+### Setup and cleanup scripts
+
+A repository may name two scripts in `.orbit/build.yaml` (`build.Scripts`, strict YAML, at most 64 KB):
+
+```yaml
+setup: |          # after the checkout is unpacked, before the CLI starts
+  go mod download
+cleanup: |        # after the CLI finished, before orbit reads the tree back
+  rm -f coverage.out
+```
+
+Each runs in the sandbox with `sh -c`, with sandboxd's fixed environment and not even the backend credential, at most 10 minutes; its exit status, duration and the end of its output are an `orbit.build` event, and a non-zero exit fails the build. **A script runs only when its exact text is trusted**: its sha256 (`build.ScriptHash`) is in the repository's `trusted_scripts` in `orbit.yaml`. Code reads the file from the commit the build starts at; any script whose hash is not listed fails the build before a sandbox exists, naming the hash, so a script a person changed, or one an earlier build changed on the PR's branch, waits for a person to read it and add its hash. `.orbit/` is not protected by default: the trust list, not the path, is what stops a changed script from running.
 
 ### Isolation: one container per build run, started by a launcher
 
@@ -724,6 +743,7 @@ build:
                  git status, git diff, git log, git show, ls, rg]
       protected: ["deploy/**"]         # .github/** and .gitmodules always are
       max_diff_lines: 2000             # the default
+      trusted_scripts: []              # sha256 of each reviewed .orbit/build.yaml script
 ```
 
 Validated at load (`internal/spec/build.go`): the github block exists,
