@@ -121,13 +121,14 @@ A worker rebuilds agents from the database without their origin and does not rep
   request arrived on is a property of the socket; a header saying a request
   is internal could be sent by anyone, so none is trusted. Never give the
   internal port a traefik router or a public port mapping.
+- **Every key orbit signs or seals with is derived from the operator token** by `secret.Key.Derive(purpose)` (`internal/secret`): HMAC-SHA256 of a purpose label under the token, one label per use, so no two uses share a key and rotating the token voids all of them together. The purposes are `secret.Approval(id)` (`action:<id>`, whose output is the approval link's signature), `secret.Mail(id)` (`mail:<id>`, whose first 12 hex digits sign a mail token), `secret.UploadURL` (`orbit upload url`, the key of signed upload URLs) and `secret.MCPOAuth` (`orbit mcp oauth`, the OAuth proxy's sealing key). Each is byte-identical to what orbit signed before the package existed, and golden tests (`internal/secret`, `internal/mail`, `internal/engine`, `internal/api` `derive_test.go`) hold them there: changing a label voids every approval link, reply address, upload URL and in-flight OAuth sign-in already sent. A new use gets a new label; an existing label never changes.
 - `POST /api/v1/drain` takes an instance out of service; it exists only on
   the internal listener, so nobody on the public one can, whatever their
   token.
 - Only asymmetric signatures are accepted. An `HS*` token would be verified
   with the client secret, which every client holds, so any client could mint
   any person.
-- `/ui/actions/{id}` accepts `sig`, an HMAC of the action id under the
+- `/ui/actions/{id}` accepts `sig`, the action's approval purpose derived from the
   operator token, so a phone can approve from a notification without a
   login. The GET only shows; deciding is a POST from the page, so a link
   preview cannot approve anything. Rotating the token invalidates every

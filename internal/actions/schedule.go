@@ -144,13 +144,9 @@ type ScheduleResult struct {
 	Version int `json:"version,omitempty"`
 }
 
-// ApplySchedule changes a's triggers in place for a schedule action (not run:now) at now, read in tz (the agent's timezone as it loads: a spec may leave it to orbit.yaml's), and says what it did.
-func ApplySchedule(a *spec.Agent, tz, typ string, p ScheduleParams, now time.Time) (*ScheduleResult, error) {
-	loc, err := time.LoadLocation(tz)
-	if err != nil {
-		return nil, fmt.Errorf("agent %q: timezone %q: %w", a.Name, tz, err)
-	}
-	res := &ScheduleResult{Agent: a.Name, Timezone: tz, Triggers: []int{}}
+// ApplySchedule changes a's triggers in place for a schedule action (not run:now) at now, read in loc (the agent's timezone as it loads: a spec may leave it to orbit.yaml's), and says what it did.
+func ApplySchedule(a *spec.Agent, loc *time.Location, typ string, p ScheduleParams, now time.Time) (*ScheduleResult, error) {
+	res := &ScheduleResult{Agent: a.Name, Timezone: loc.String(), Triggers: []int{}}
 	pick := func() ([]int, error) {
 		if p.Trigger == nil {
 			if len(a.Triggers) == 0 {
