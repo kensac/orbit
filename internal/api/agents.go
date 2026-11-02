@@ -30,8 +30,7 @@ type agentChange struct {
 
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	var body agentChange
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSpecBytes)).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if !decode(w, r, maxSpecBytes, &body, bodyRequired) {
 		return
 	}
 	res, err := s.defineAgent(r.Context(), engine.DefineRequest{Spec: body.Spec, DryRun: body.DryRun, Author: actor(r, "")})
@@ -40,8 +39,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 	var body agentChange
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSpecBytes)).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if !decode(w, r, maxSpecBytes, &body, bodyRequired) {
 		return
 	}
 	res, err := s.defineAgent(r.Context(), engine.DefineRequest{Name: r.PathValue("name"), Spec: body.Spec, DryRun: body.DryRun,
