@@ -753,6 +753,9 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 				e.Log.Info("agent:define widens an agent; held for approval", "run", c.ID, "widens", strings.Join(w, "; "))
 			}
 		}
+		if act.Type == actions.TemplateCreateType && pa.Error == "" {
+			e.templateOutcome(ctx, c.ConversationID, &pa, &o.Questions)
+		}
 		if len(pa.Params) == 0 {
 			pa.Params = json.RawMessage(`{}`)
 		}

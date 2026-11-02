@@ -232,10 +232,12 @@ func chatPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 // chatState collects what a chat run's tools asked for: its outcome
 // beside the reply.
 type chatState struct {
-	mu        sync.Mutex
-	memory    *string
-	questions []OutputQuestion
-	actions   []chatAction
+	// conversation is the run's, whose uploads and answers a template:create reads.
+	conversation string
+	mu           sync.Mutex
+	memory       *string
+	questions    []OutputQuestion
+	actions      []chatAction
 }
 
 type chatAction struct {
@@ -270,7 +272,7 @@ func (e *Engine) chatTools(a *spec.Agent, types []actions.Type, memoryMax int, s
 				"type": map[string]any{"type": "string", "enum": names}, "params": map[string]any{"type": "object"},
 				"reason": map[string]any{"type": "string"}}, "required": []string{"type", "params", "reason"}}})
 	}
-	call := func(_ context.Context, name string, args json.RawMessage) (string, bool) {
+	call := func(ctx context.Context, name string, args json.RawMessage) (string, bool) {
 		st.mu.Lock()
 		defer st.mu.Unlock()
 		switch name {
@@ -322,6 +324,24 @@ func (e *Engine) chatTools(a *spec.Agent, types []actions.Type, memoryMax int, s
 			}
 			if len(st.actions) >= maxActions {
 				return fmt.Sprintf("at most %d actions per reply", maxActions), true
+			}
+			if v.Type == actions.TemplateCreateType {
+				// What it becomes is code's to say now: the model hears it before the reply ends.
+				define, ask, err := e.templateProposal(ctx, st.conversation, v.Params)
+				if err != nil {
+					return "refused: " + err.Error(), true
+				}
+				st.actions = append(st.actions, v)
+				if ask != nil {
+					return fmt.Sprintf("orbit will ask the person, with a form, for %d value(s) only they give; when their answers arrive, propose this again.", len(ask.Fields)), false
+				}
+				var d struct {
+					Spec struct {
+						Name string `json:"name"`
+					} `json:"spec"`
+				}
+				_ = json.Unmarshal(define, &d)
+				return fmt.Sprintf("Rendered and checked: creating agent %q waits for the person's approval.", d.Spec.Name), false
 			}
 			st.actions = append(st.actions, v)
 			if a.RuleFor(v.Type) == spec.RuleAuto {
@@ -426,7 +446,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 			return nil, nil, err
 		}
 	}
-	st := &chatState{}
+	st := &chatState{conversation: c.ConversationID}
 	chat := e.chatTools(a, t.types, d.Defaults.MemoryMaxBytes, st)
 	e.repoChatTools(a, chat)
 	chat.Interrupt = t.cancel

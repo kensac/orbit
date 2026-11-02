@@ -249,6 +249,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint; never a URL or header of the model's. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
 | `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |
+| `template:create` | Creates an agent from a template in the library: code renders and dry-runs it and records an `agent:define` that waits for a person whatever the rule; a `user_prompt` parameter is asked of the person with a form. | |
 
 ### `notify`
 

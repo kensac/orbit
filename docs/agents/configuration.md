@@ -27,6 +27,11 @@ An agent changes agents with the `agent:define` action (`internal/engine/define.
 
 Database and built-in agents are held to what orbit.yaml offers (`spec.validateTrust`): no `file` source, no `${VAR}` that is not in `credentials:`, without a `sandbox`, only the tools in `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite), no precheck and no `run` hook. A spec breaking one fails validation, naming it.
 
+
+## Agents from templates
+
+A template is an agent spec with `{{ name }}` slots and typed parameters, kept in a versioned library (docs/api.md, Templates). `POST /templates/{name}/agents` renders one with a person's values, dry-runs it and defines the agent. An agent with `actions: {template:create: approve}` (the built-in `orbit` has it) proposes the same in a conversation: code renders it, asks the person with a form for any `user_prompt` parameter, and records the result as an `agent:define` a person approves whatever the rule (`auto` and `approve` both only offer the type). The agent it creates is a database agent, held to the same limits as any (above).
+
 ## Secrets
 
 Never in YAML. Channels name variables with `*_env`; source urls, headers, query

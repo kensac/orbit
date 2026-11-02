@@ -83,8 +83,9 @@ func Builtins(d Deployment) []*Agent {
 		// It may define agents, itself included (docs/api.md, Defining
 		// agents): each change is a new, revertible version. It delegates
 		// under approve: directly in its person's chat, after approval
-		// when unattended.
-		Actions: map[string]Rule{"agent:define": RuleAuto, "delegate": RuleApprove},
+		// when unattended. It creates agents from templates, each one an
+		// agent:define a person approves.
+		Actions: map[string]Rule{"agent:define": RuleAuto, "delegate": RuleApprove, "template:create": RuleApprove},
 		// Replies stay in orbit; failures and approvals still notify.
 		Notify: NotifySpec{When: "never"},
 		Origin: OriginBuiltin,

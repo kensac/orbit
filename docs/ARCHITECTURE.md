@@ -41,7 +41,7 @@ inputs go in a per-attempt directory removed after the run.
 
 An agent is a file (`agents/<name>.yaml`), a database definition written
 through the API (`agent_definitions`, every version kept), or built in
-(`spec.Builtins`: `orbit`, the general agent). `engine.LoadConfig` merges
+(`spec.Builtins`: `orbit`, the general agent). A database agent may be rendered from a template (`templates`, `template_versions`: a spec with `{{ }}` slots and typed parameters, `internal/templates`) by code, then defined through the same path (`engine/templates.go`; docs/api.md, Templates). `engine.LoadConfig` merges
 the three and validates them as one configuration; a reload follows any
 change to the files or the definitions.
 
@@ -262,7 +262,7 @@ An action type is code (`internal/actions`): a name, a parameter schema shown
 to the agent, a validator, and an executor. An agent's spec maps types to
 `auto`, `approve` or `deny`; unnamed types are denied and not offered.
 Today: `notify` (an extra message to one of the agent's channels),
-`continue` (wake this agent again later, above), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; a change that widens it waits for a person; docs/api.md, Defining agents), `webhook:<endpoint>` (a
+`continue` (wake this agent again later, above), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; a change that widens it waits for a person; docs/api.md, Defining agents), `template:create` (an agent from a template: rendered by code when proposed and recorded as an `agent:define` that waits for a person, or a question with a form for what only the person gives), `webhook:<endpoint>` (a
 JSON body to an endpoint whose URL and credentials are configuration, never
 chosen by the model), and `github:merge` (squash one of orbit's own
 `orbit/*` PRs, only if its head is still the approved commit and every

@@ -89,6 +89,8 @@ A database agent is written through the API or by `agent:define`, and the built-
 - **No precheck and no `run` hook** (Prechecks and Agent hooks, below): either would run a command on orbit's host as orbit's user. `say` and `deny` hooks are allowed.
 - **A change that widens an agent waits for a person.** `spec.Widening` compares the change, loaded as it would run, with the agent's current version (nothing, for a new agent): a tool, a source added or changed, a credential, a delegate target, a need, a move to a sandbox profile, or an action type allowed more readily (deny, approve, auto). An `agent:define` that widens is recorded as `approve` whatever its rule says. One executing by rule alone is compared again against the agent as it is then, and fails if it widens, so a person's narrowing between proposal and execution holds.
 
+- **A template is a spec a person wrote, filled by code.** `template:create` gives a model no reach `agent:define` does not: what it renders is an `agent:define` of a new agent, always waiting for a person, held to everything above. Values are data in JSON strings, never scanned for slots, so a value cannot add a field or a slot. A `user_prompt` value is taken only from the person's own answers to orbit's question (store.FormAnswers), never from the proposal, and a `file` value only from the conversation's uploads.
+
 What is left: an agent with `WebFetch` can send what its run read to any host, and a change within the agent's current reach (its charter, its triggers, narrowing) applies without a person.
 
 A worker rebuilds agents from the database without their origin and does not repeat these checks: control validated every spec it recorded, and the credential binding is checked on every fetch.

@@ -1001,7 +1001,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("action %q: rule must be auto, approve or deny", typ)
 		}
 		switch {
-		case typ == "notify", typ == "continue", typ == "agent:define":
+		case typ == "notify", typ == "continue", typ == "agent:define", typ == "template:create":
 		case typ == "delegate", typ == "task:message", typ == "task:cancel":
 			if len(a.Delegates) == 0 {
 				at("action %q: needs delegates, the agents this one may hand tasks to", typ)
@@ -1015,7 +1015,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 				at("action %q: needs a github block in orbit.yaml", typ)
 			}
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, delegate, task:message, task:cancel, webhook:<endpoint> or github:merge)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, template:create, delegate, task:message, task:cancel, webhook:<endpoint> or github:merge)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
