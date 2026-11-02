@@ -49,6 +49,7 @@ import (
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
+	"github.com/kensac/orbit/internal/push"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
@@ -97,6 +98,8 @@ func main() {
 		err = sandboxdCmd(ctx, log)
 	case "egress":
 		err = egressCmd(ctx, log)
+	case "vapid":
+		err = vapid()
 	case "version":
 		fmt.Println(revision)
 	default:
@@ -146,7 +149,7 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress")
 	os.Exit(2)
 }
 
@@ -417,6 +420,13 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			metrics.Draining.Set(1)
 		}()
 
+		pusher, err := push.FromEnv(s, log.With("component", "push"))
+		if err != nil {
+			return err
+		}
+		if pusher == nil {
+			log.Info("ORBIT_VAPID_* not set: Web Push is off (the inbox still lists what needs attention)")
+		}
 		// reloadNow puts the files and the database's definitions in force,
 		// for the poll below and for the API after it writes a definition.
 		var reloadMu sync.Mutex
@@ -441,7 +451,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
-			ConfigState: configState, Drain: drain, OAuth: oauth}
+			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		// Bind before any executor starts: an instance that cannot serve
@@ -535,6 +545,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 					}
 					reconcileTasks(claimCtx, eng, log)
 					deliverOutbox(claimCtx, eng, log)
+					deliverPush(claimCtx, pusher, log)
 				}
 			},
 		}).start(claimCtx, runCtx)
@@ -557,6 +568,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 					continue
 				}
 				deliverOutbox(claimCtx, eng, log)
+				deliverPush(claimCtx, pusher, log)
 				if err := eng.ExecuteActions(claimCtx); err != nil && claimCtx.Err() == nil {
 					log.Error("actions", "err", err)
 				}
