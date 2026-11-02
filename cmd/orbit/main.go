@@ -52,6 +52,7 @@ import (
 	"github.com/kensac/orbit/internal/push"
 	"github.com/kensac/orbit/internal/repos"
 	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -463,7 +464,8 @@ func serve(ctx context.Context, log *slog.Logger) error {
 
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
-			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher}
+			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher,
+			Boxes: boxClient(func() spec.Deployment { return eng.Current().Config.Deployment }), WorkspaceOrigins: auth.SplitList(os.Getenv("ORBIT_WORKSPACE_ORIGINS"))}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		// Bind before any executor starts: an instance that cannot serve
@@ -733,6 +735,33 @@ const journalSyncEvery = 30 * time.Second
 // a minute of the first message, while the first reply is still being
 // written, is soon enough.
 const titlesEvery = 30 * time.Second
+
+// boxClient is sandboxd's client for agents' boxes: the sandboxd chats use
+// (spec.Deployment.SandboxService) with its token, made again only when
+// either changes.
+func boxClient(deployment func() spec.Deployment) func() (*sandbox.Client, error) {
+	var mu sync.Mutex
+	var key string
+	var c *sandbox.Client
+	return func() (*sandbox.Client, error) {
+		addr, tokenEnv := deployment().SandboxService()
+		if addr == "" {
+			return nil, errors.New("orbit.yaml names no sandboxd (a sandbox: or build: section)")
+		}
+		token := os.Getenv(tokenEnv)
+		mu.Lock()
+		defer mu.Unlock()
+		if c != nil && key == addr+"\x00"+token {
+			return c, nil
+		}
+		nc, err := sandbox.NewClient(addr, token)
+		if err != nil {
+			return nil, fmt.Errorf("%w (%s)", err, tokenEnv)
+		}
+		c, key = nc, addr+"\x00"+token
+		return c, nil
+	}
+}
 
 func httpServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: writeTimeout}
