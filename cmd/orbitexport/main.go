@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -32,13 +33,31 @@ func run(ctx context.Context, args []string, out, notice io.Writer) error {
 	timeout := fs.Duration("timeout", 10*time.Minute, "overall sign-in and export timeout")
 	id := fs.String("client-id", os.Getenv("ORBIT_OIDC_CLIENT_ID"), "public device provider client ID")
 	fs.Usage = func() {
-		_, _ = fmt.Fprintln(notice, "Usage: orbitexport [flags] export AGENT NEW_OUTPUT.zip\n       orbitexport verify OUTPUT.zip")
+		_, _ = fmt.Fprintln(notice, "Usage: orbitexport [flags] export AGENT NEW_OUTPUT.zip\n       orbitexport verify OUTPUT.zip\n       orbitexport inspect BUNDLE.zip")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	a := fs.Args()
+	if len(a) == 2 && a[0] == "inspect" {
+		m, err := bundle.Inspect(a[1])
+		if err != nil {
+			return err
+		}
+		// Match the verifier's 16 MiB manifest member bound even after JSON escaping.
+		const maxInspectionJSONBytes = 16 << 20
+		data, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		if len(data)+1 > maxInspectionJSONBytes {
+			return errors.New("inspection JSON exceeds 16 MiB output bound")
+		}
+		data = append(data, '\n')
+		_, err = out.Write(data)
+		return err
+	}
 	if len(a) == 2 && a[0] == "verify" {
 		if err := bundle.Verify(a[1]); err != nil {
 			return err
@@ -48,7 +67,7 @@ func run(ctx context.Context, args []string, out, notice io.Writer) error {
 	}
 	if len(a) != 3 || a[0] != "export" {
 		fs.Usage()
-		return errors.New("expected export AGENT NEW_OUTPUT.zip or verify OUTPUT.zip")
+		return errors.New("expected export AGENT NEW_OUTPUT.zip or verify OUTPUT.zip or inspect BUNDLE.zip")
 	}
 	if err := client.ValidateURL(*endpoint); err != nil {
 		return err

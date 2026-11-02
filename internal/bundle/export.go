@@ -446,6 +446,19 @@ func (e *exporter) pages(ctx context.Context, endpoint, key string, visit func([
 
 // Verify checks the exact member set, bounded metadata, sizes and SHA256 without extracting files.
 func Verify(filename string) error {
+	_, err := Inspect(filename)
+	return err
+}
+
+// Inspect returns the manifest only after all Verify integrity checks succeed.
+// Resource coverage describes bounded API reads, not completeness or restorability.
+func Inspect(filename string) (Manifest, error) {
+	var m Manifest
+	err := verify(filename, &m)
+	return m, err
+}
+
+func verify(filename string, validated *Manifest) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
@@ -565,6 +578,7 @@ func Verify(filename string) error {
 	if len(used) != len(files) {
 		return errors.New("unlisted archive member")
 	}
+	*validated = m
 	return nil
 }
 
