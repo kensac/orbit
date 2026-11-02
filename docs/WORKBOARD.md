@@ -11,6 +11,7 @@ A self-hosted Go service on Kanishk's server (hetzner) that runs Claude Code on 
 | Area | What | PRs |
 |---|---|---|
 | Core | agents from YAML and the database (versioned), conversations (many per agent), runs as a queue, memory, questions, rule-gated actions, notifications (only for unattended runs) | #4 #6 #12 #22 #24 |
+| Message reads | every attempt's read of a person's message kept across hand-backs and failures (`message_reads`); the next-run selection and the thread read from it | #75 |
 | Claude Code | `internal/claudeproto`: the CLI's stream-json protocol in Go (turns, control requests, interrupt, permission prompts, credential scrubbing); session resume with fork; a live process per conversation | #33 #35 #36 #39 #6 |
 | Journal | typed run journal (messages, thinking estimates, tool calls with inputs and bounded results, diffs, plans, approvals, questions, turn state vs outcome), read by the thread, the SSE stream, the run page and MCP | #34 #38 |
 | Determinism | orbit's MCP tools (exact `query`, `calc`), hooks (path guard, figures check), transforms (`sure-monthly`, JSON reducers), gates that skip a scheduled run with no model call, the `skipped` status | #8 #20 #23 #27 |
