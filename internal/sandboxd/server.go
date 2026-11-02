@@ -29,6 +29,10 @@ type Server struct {
 	// mu serializes creates, so MaxSandboxes holds between the count and
 	// the create.
 	mu sync.Mutex
+	// ready caches the last readiness answer (health.go).
+	readyMu sync.Mutex
+	ready   sandbox.Readiness
+	readyAt time.Time
 }
 
 // New returns a server for cfg, which must have passed Validate.
@@ -81,14 +85,28 @@ func (s *Server) Check(ctx context.Context) error {
 	return nil
 }
 
-// Handler serves the four operations, each behind the token.
+// Handler serves the four operations, each behind the token, and the two probes without it (health.go).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+sandbox.PathSandboxes, s.create)
 	mux.HandleFunc("POST "+sandbox.PathSandboxes+"/{id}/attach", s.attach)
 	mux.HandleFunc("GET "+sandbox.PathSandboxes+"/{id}/archive", s.archive)
 	mux.HandleFunc("DELETE "+sandbox.PathSandboxes+"/{id}", s.destroy)
-	return s.auth(mux)
+	authed := s.auth(mux)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			switch r.URL.Path {
+			case sandbox.PathHealthz:
+				w.Header().Set("Content-Type", "text/plain")
+				_, _ = io.WriteString(w, "ok\n")
+				return
+			case sandbox.PathReadyz:
+				s.readyz(w, r)
+				return
+			}
+		}
+		authed.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) auth(next http.Handler) http.Handler {

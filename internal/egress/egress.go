@@ -77,6 +77,9 @@ func ParseAllowlist(s string) (map[string]bool, error) {
 	return allow, nil
 }
 
+// HealthPath is egress's own liveness probe.
+const HealthPath = "/healthz"
+
 // Proxy is the allowlisting CONNECT proxy.
 type Proxy struct {
 	allow map[string]bool
@@ -145,6 +148,12 @@ func Public(a netip.Addr) bool {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	client := r.RemoteAddr
+	// The liveness probe (a docker healthcheck): an origin-form GET for egress itself, never a proxy request, which is absolute-form and names a host.
+	if r.Method == http.MethodGet && r.RequestURI == HealthPath {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "ok\n")
+		return
+	}
 	if r.Method != http.MethodConnect {
 		p.log.Info("egress: denied", "client", client, "method", r.Method, "target", r.URL.String(), "reason", "only CONNECT is proxied")
 		http.Error(w, "only HTTPS (CONNECT) is proxied", http.StatusMethodNotAllowed)

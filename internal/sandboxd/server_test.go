@@ -43,7 +43,9 @@ type fakeContainer struct {
 	spec    containerCreate
 	labels  map[string]string
 	running bool
-	files   []entry
+	// health is the healthcheck status; "" is a container without one.
+	health string
+	files  []entry
 }
 
 func newID() string {
@@ -127,6 +129,11 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 			}{m.Type, m.Target})
 		}
 		st.State.Running = c.running
+		if c.health != "" {
+			st.State.Health = &struct {
+				Status string `json:"Status"`
+			}{c.health}
+		}
 		if f.tamper != nil {
 			f.tamper(&st)
 		}

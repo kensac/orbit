@@ -78,6 +78,7 @@ container's own layer every restart starts those sessions fresh.
 Rendered from Infisical (`HETZNER_ORBIT_*`). The Claude Code subscription
 token comes from `claude setup-token` and lasts a year; when it expires every
 run fails with `Not logged in`, which pages through the failure notification.
+Record the day it lapses in orbit.yaml's `expires:` (configuration.md, Secrets) whenever it is set, so `orbit_credential_expiry_timestamp_seconds` warns two weeks ahead (Alerts, below).
 
 Web Push needs `ORBIT_VAPID_PUBLIC_KEY`, `ORBIT_VAPID_PRIVATE_KEY` (from
 `orbit vapid`) and `ORBIT_VAPID_SUBJECT` on control (docs/api.md, Attention
@@ -111,9 +112,23 @@ The build sandbox runs on hetzner today, beside orbit, in `hetzner-vps-config` a
 - **orbit-egress** joins `orbit-sandbox` (internal: the build containers' only way out is this proxy) and `orbit-egress`, with `ORBIT_EGRESS_ALLOW=api.anthropic.com,proxy.golang.org,sum.golang.org,registry.npmjs.org`.
 - **Token:** `ORBIT_SANDBOX_TOKEN`, at least 32 characters, `HETZNER_ORBIT_SANDBOX_TOKEN` in Infisical, read by both sandboxd and orbit (`build.token_env`).
 - **Images:** `ghcr.io/kensac/orbit-build` is pushed by `build-push-ghcr.yml` beside the orbit image. sandboxd pulls it through the Engine API without credentials, so the package must be public (it is built from this public repository and holds nothing private) or pulled on the host before sandboxd starts.
+- **Health:** sandboxd answers `GET /healthz` (up) and `GET /readyz` without the token: 200 or 503 with `{"ready", "checks"}`, where `checks` names `docker` (the daemon answers), `network` (still internal) and `proxy:<host>` for `ORBIT_SANDBOX_PROXY` and `ORBIT_SANDBOX_WORKSTATION_PROXY` (the container named as the host is running, and healthy when it has a healthcheck), each `ok` or the failure; answers are cached for 10 s. egress answers an origin-form `GET /healthz` on its listener (a proxied request is never answered by it). Neither image healthcheck fits them (it probes `ORBIT_LISTEN`), so compose gives each `test: ["CMD", "orbit", "healthcheck", "--url", "<its /healthz>"]`. orbit control asks the configured sandboxd's `/readyz` every 30 s (Alerts, below).
 - **Claiming it is deployed:** `docker logs orbit-sandboxd` shows `sandboxd: serving` (it exits on a failed host check: no seccomp, a network that is not internal, an image it cannot get), and `docker logs orbit-egress` shows `egress: serving` with the allowlist.
 
 **Workstation profile** (sandboxed chats, `sandbox: workstation`): a second `orbit egress` with `ORBIT_EGRESS_ALLOW=*` (any public host on 443, never a private or tailnet address) on the `orbit-sandbox` and `orbit-egress` networks, named for example `orbit-egress-open`, and sandboxd's environment gains `ORBIT_SANDBOX_WORKSTATION_PROXY=orbit-egress-open:3128`. Without it sandboxd refuses that profile (400), and the built-in agent's runs fail naming the variable.
+
+## Alerts
+
+Prometheus rules for these live in the homelab repository (`hetzner-vps-config/prometheus/rules/orbit.yml`); orbit exports what they need:
+
+| metric | means | alert on |
+|---|---|---|
+| `orbit_runs_queued_oldest_age_seconds` | seconds the oldest due queued run has waited since it became due (0 when none) | a queue no executor drains (no worker with the capability, every executor wedged) |
+| `orbit_runs_total{agent,status}` | finished runs, per instance | an agent failing with no success or skip in hours |
+| `orbit_config_valid` | 0 while the files on disk do not load | a change that is not in force |
+| `orbit_sandboxd_ready` | control's probe of the configured sandboxd's `/readyz`; absent without one | builds and sandboxed chats cannot start |
+| `orbit_egress_ready{proxy}` | each egress proxy's container, as sandboxd reported it; absent when sandboxd did not answer | sandboxes cannot reach the model or package registries |
+| `orbit_credential_expiry_timestamp_seconds{credential}` | `expires:` in orbit.yaml, midnight UTC | the Claude Code token lapsing within 14 days |
 
 ## Building tickets: what hetzner needs
 
