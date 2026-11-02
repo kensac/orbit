@@ -30,6 +30,14 @@ sources:
     url: https://sure.example.com/api/v1/accounts
     headers:
       X-Api-Key: ${SURE_API_KEY}
+# Code sums the month before the model looks: per month and category,
+# transfers left out. The model explains these totals; it keeps the raw
+# transactions to name one-off charges.
+transforms:
+  - name: monthly
+    source: transactions
+    kind: sure-monthly
+    keep_source: true
 actions:
   notify: auto
   webhook:home-assistant: approve

@@ -21,6 +21,8 @@ import (
 
 	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
+
+	"github.com/kensac/orbit/internal/transforms"
 )
 
 // Rule is what the harness does with an action an agent proposes.
@@ -144,6 +146,9 @@ type Agent struct {
 	Timeout  Duration   `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 	Triggers []Trigger  `yaml:"triggers" json:"triggers"`
 	Sources  []Source   `yaml:"sources,omitempty" json:"sources,omitempty"`
+	// Transforms run over sources before the model sees them; each output
+	// is an input of its own (internal/transforms).
+	Transforms []Transform `yaml:"transforms,omitempty" json:"transforms,omitempty"`
 	Tools    []string   `yaml:"tools,omitempty" json:"tools,omitempty"`
 	Actions  ActionSet  `yaml:"actions,omitempty" json:"actions,omitempty"`
 	Notify   NotifySpec `yaml:"notify,omitempty" json:"notify,omitempty"`
@@ -215,6 +220,34 @@ type Source struct {
 	Path string `yaml:"path,omitempty" json:"path,omitempty"`
 	// MaxBytes bounds one source's fetched size.
 	MaxBytes int64 `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
+}
+
+// Transform is code run over one source's bytes before the run: its output
+// is the input named Name. A source a transform reads is withheld from the
+// model (stored under sources/, not inputs/) unless one of its transforms
+// keeps it.
+type Transform struct {
+	Name   string         `yaml:"name" json:"name"`
+	Source string         `yaml:"source" json:"source"`
+	Kind   string         `yaml:"kind" json:"kind"`
+	Params map[string]any `yaml:"params,omitempty" json:"params,omitempty"`
+	// KeepSource hands the source to the model as well.
+	KeepSource bool `yaml:"keep_source,omitempty" json:"keep_source,omitempty"`
+}
+
+// Withheld reports whether the model is not shown source: a transform reads
+// it and none keeps it.
+func (a *Agent) Withheld(source string) bool {
+	read := false
+	for _, t := range a.Transforms {
+		if t.Source == source {
+			if t.KeepSource {
+				return false
+			}
+			read = true
+		}
+	}
+	return read
 }
 
 // Paginate describes page-numbered pagination: the harness requests
@@ -560,6 +593,25 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if s.Path == "" {
 				at("source %q: path is required", s.Name)
 			}
+		}
+	}
+	for _, t := range a.Transforms {
+		if !nameRE.MatchString(t.Name) {
+			at("transform %q: invalid name", t.Name)
+		}
+		if seen[t.Name] {
+			at("transform %q: name is taken by another source or transform", t.Name)
+		}
+		seen[t.Name] = true
+		if !slices.ContainsFunc(a.Sources, func(s Source) bool { return s.Name == t.Source }) {
+			at("transform %q: unknown source %q", t.Name, t.Source)
+		}
+		params, err := json.Marshal(t.Params)
+		if err == nil {
+			err = transforms.Validate(t.Kind, params)
+		}
+		if err != nil {
+			at("transform %q: %v", t.Name, err)
 		}
 	}
 	for typ, rule := range a.Actions {
