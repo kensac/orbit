@@ -14,7 +14,7 @@ import (
 	"github.com/kensac/orbit/internal/testdb"
 )
 
-// steerCLI is a live Claude Code that speaks the CLI's queued-message protocol as 2.1.316 does (claudeproto.TestRealCLISteer). A turn whose prompt ends in WAIT calls a tool that runs until a message arrives on stdin, then: "fold" folds it into the turn (started, one result answering both); "late" queues it past the result and confirms its withdrawal; "unknown" answers the withdrawal with cancelled false; "hold" queues it and waits for an interrupt, which withdraws it (cancel_queued) and ends the turn. Any other turn answers at once.
+// steerCLI is a live Claude Code that speaks the CLI's queued-message protocol as 2.1.316 does (claudeproto.TestRealCLISteer). A turn whose prompt ends in WAIT calls a tool that runs until a message arrives on stdin, then: a message naming "fold:" folds it into the turn (started, one result answering both); "late:" queues it past the result and confirms its withdrawal; "hold:" queues it and waits for an interrupt, which withdraws it (cancel_queued) and ends the turn; any other is queued past the result and its withdrawal answered with cancelled false. Any other turn answers at once.
 const steerCLI = `#!/bin/bash
 field() { sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p' <<<"$2"; }
 say() { printf '%s\n' "$1"; }
@@ -33,7 +33,7 @@ while IFS= read -r line; do
   su=$(field uuid "$s"); st=$(field content "$s")
   say '{"type":"command_lifecycle","command_uuid":"'$su'","state":"queued"}'
   case "$st" in
-  hold*)
+  *hold:*)
     IFS= read -r c; id=$(field request_id "$c")
     say '{"type":"command_lifecycle","command_uuid":"'$su'","state":"cancelled"}'
     say '{"type":"control_response","response":{"subtype":"success","request_id":"'$id'","response":{"still_queued":[],"cancelled":["'$su'"]}}}'
@@ -42,14 +42,14 @@ while IFS= read -r line; do
   esac
   say '{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"t'$n'","content":"ok"}]}}'
   case "$st" in
-  fold*)
+  *fold:*)
     say '{"type":"command_lifecycle","command_uuid":"'$su'","state":"started"}'
     say '{"type":"command_lifecycle","command_uuid":"'$su'","state":"completed"}'
     say '{"type":"result","subtype":"success","is_error":false,"result":"answered and '"$st"'","session_id":"s-1"}' ;;
   *)
     say '{"type":"result","subtype":"success","is_error":false,"result":"answered","session_id":"s-1"}'
     IFS= read -r c; id=$(field request_id "$c")
-    if [ "${st#late}" != "$st" ]; then
+    if [[ "$st" == *late:* ]]; then
       say '{"type":"command_lifecycle","command_uuid":"'$su'","state":"cancelled"}'
       say '{"type":"control_response","response":{"subtype":"success","request_id":"'$id'","response":{"cancelled":true}}}'
     else
