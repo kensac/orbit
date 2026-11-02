@@ -47,7 +47,31 @@ func (f *scriptRunner) Run(ctx context.Context, req runner.Request, emit func(ru
 	f.got[name] = append(f.got[name], req)
 	emit(runner.Event{Kind: "assistant", Payload: []byte(`{"type":"assistant"}`)})
 	cost := 0.01
-	return &runner.Result{Output: json.RawMessage(f.scripts[name](req)), CostUSD: &cost, SessionID: "s"}, nil
+	return &runner.Result{Output: withTaskOutcome(req, f.scripts[name](req)), CostUSD: &cost, SessionID: "s"}, nil
+}
+
+// withTaskOutcome gives a task run's output the outcome fields its schema
+// requires, succeeded unless the script set them.
+func withTaskOutcome(req runner.Request, out string) json.RawMessage {
+	if !strings.Contains(string(req.OutputSchema), `"outcome"`) || strings.Contains(out, `"outcome"`) {
+		return json.RawMessage(out)
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(out), &m) != nil {
+		return json.RawMessage(out)
+	}
+	m["outcome"], m["outcome_reason"] = "succeeded", ""
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// outcome is output with a task run's outcome.
+func outcome(summary, report, result, reason string) string {
+	var m map[string]any
+	_ = json.Unmarshal([]byte(output(summary, report, nil)), &m)
+	m["outcome"], m["outcome_reason"] = result, reason
+	b, _ := json.Marshal(m)
+	return string(b)
 }
 
 func (f *scriptRunner) last(name string) runner.Request {
@@ -491,5 +515,50 @@ func TestATaskCannotDelegateDeeperThanTheBound(t *testing.T) {
 	var denied int
 	if err := d.s.Pool.QueryRow(ctx, `SELECT count(*) FROM actions WHERE type = 'delegate' AND status = 'denied' AND error LIKE 'delegation is nested%'`).Scan(&denied); err != nil || denied != 1 {
 		t.Fatalf("denied at the bound = %d %v", denied, err)
+	}
+}
+
+func TestATaskThatSaysItCouldNotDoTheWorkFailsAndOneBlockedAsksItsParent(t *testing.T) {
+	fr := &scriptRunner{scripts: map[string]func(runner.Request) string{
+		"planner": func(req runner.Request) string {
+			if strings.Contains(req.Prompt, "Trigger: delegation") {
+				return output("Integrated", "ok", nil)
+			}
+			return output("Delegated", "on it", nil, delegateAction(`[
+				{"key": "facts", "agent": "researcher", "brief": "Find the facts."},
+				{"key": "outline", "agent": "writer", "brief": "Draft an outline."}]`))
+		},
+		"researcher": func(runner.Request) string {
+			return outcome("No facts", "TRIED-THREE-SOURCES", "failed", "every source was down")
+		},
+		"writer": func(runner.Request) string { return outcome("Waiting", "W", "blocked", "needs the style guide") },
+	}}
+	d := newDelegation(t, fr)
+	first := d.message(t, "go")
+	ran := d.step(t)
+	if !strings.Contains(string(fr.last("researcher").OutputSchema), `"outcome_reason"`) {
+		t.Fatal("a task run's schema lacks the outcome")
+	}
+	if strings.Contains(string(fr.got["planner"][0].OutputSchema), `"outcome"`) {
+		t.Fatal("a run outside a task was offered the outcome")
+	}
+	ts := d.tasks(t, first)
+	facts, outline := ts[0], ts[1]
+	if facts.Status != store.TaskFailed || facts.Error == nil || *facts.Error != "the agent could not do the work: every source was down" ||
+		facts.Report == nil || facts.Report.Report != "TRIED-THREE-SOURCES" || facts.Outcome == nil || *facts.Outcome != "failed" {
+		t.Fatalf("failed outcome = %+v", facts)
+	}
+	if outline.Status != store.TaskNeedsInput || outline.OutcomeReason == nil || *outline.OutcomeReason != "needs the style guide" {
+		t.Fatalf("blocked outcome = %+v", outline)
+	}
+	// Blocked is due to the parent at once, and its prompt says why.
+	if len(ran["planner"]) != 2 || ran["planner"][1].Trigger != store.TriggerDelegation {
+		t.Fatalf("parent wakes = %+v", ran["planner"])
+	}
+	p := fr.last("planner").Prompt
+	for _, want := range []string{"## facts: failed", "outcome: failed: every source was down", "TRIED-THREE-SOURCES", "## outline: needs_input", "outcome: blocked: needs the style guide"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("parent prompt lacks %q:\n%s", want, p)
+		}
 	}
 }

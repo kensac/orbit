@@ -548,6 +548,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if planning {
 		schema, envelope = withPlan(schema), withPlan(envelope)
 	}
+	if task != nil {
+		schema, envelope = withOutcome(schema), withOutcome(envelope)
+	}
 	if tk != nil {
 		if inputs, err = e.ticketInput(ctx, c, tk, workdir, inputsDir, inputs); err != nil {
 			return nil, nil, err

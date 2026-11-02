@@ -19,8 +19,8 @@ import (
 
 // Task statuses. waiting: a dependency is not done. blocked: a person's
 // decision is pending. working: a run in its conversation is queued or
-// running. needs_input: its agent asked its parent something. done, failed,
-// cancelled end it; a message reopens a done task.
+// running. needs_input: its agent asked its parent something, or said it is
+// blocked. done, failed, cancelled end it; a message reopens a done task.
 const (
 	TaskWaiting    = "waiting"
 	TaskBlocked    = "blocked"
@@ -29,6 +29,16 @@ const (
 	TaskDone       = "done"
 	TaskFailed     = "failed"
 	TaskCancelled  = "cancelled"
+)
+
+// A task run's outcome (its output's outcome field): it did the work, it
+// could not (the task fails), or it cannot go on until something outside
+// its reach changes (the task needs its parent's input). A run without the
+// field succeeded.
+const (
+	OutcomeSucceeded = "succeeded"
+	OutcomeFailed    = "failed"
+	OutcomeBlocked   = "blocked"
 )
 
 // Run triggers of delegation: a run in a task's conversation that starts
@@ -75,6 +85,10 @@ type Task struct {
 	// RunID and RunStatus are the newest run in its conversation.
 	RunID     *string `json:"run_id"`
 	RunStatus *string `json:"run_status"`
+	// Outcome and OutcomeReason are what the newest run in its
+	// conversation said of its work; nil until a run finishes with them.
+	Outcome       *string `json:"outcome"`
+	OutcomeReason *string `json:"outcome_reason"`
 	// Questions are its agent's open questions, to the parent.
 	Questions  []ThreadQuestion `json:"questions"`
 	CreatedAt  time.Time        `json:"created_at"`
@@ -83,6 +97,14 @@ type Task struct {
 	// New is set for a parent run's prompt: the task finished or asked
 	// since the parent's previous run started.
 	New bool `json:"-"`
+}
+
+// OutcomeReasonText is OutcomeReason, or "" without one.
+func (t *Task) OutcomeReasonText() string {
+	if t.OutcomeReason == nil {
+		return ""
+	}
+	return *t.OutcomeReason
 }
 
 // TaskDecision is a person's decision a task waits on.
@@ -110,13 +132,14 @@ const taskSelect = `
 	       COALESCE((SELECT array_agg(d.key ORDER BY d.key) FROM task_deps x JOIN tasks d ON d.id = x.depends_on
 	                 WHERE x.task_id = t.id), '{}'),
 	       da.id::text, da.reason, da.status, da.decided_by,
-	       t.report, t.error, lr.id, lr.status,
+	       t.report, t.error, lr.id, lr.status, lr.outcome, NULLIF(lr.outcome_reason, ''),
 	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', true) ORDER BY m.created_at, m.id)
 	                 FROM messages m WHERE m.conversation_id = t.conversation_id AND ` + openQuestion + `), '[]'),
 	       t.created_at, t.updated_at, t.finished_at
 	FROM tasks t
 	LEFT JOIN actions da ON da.id = t.decision_action_id
-	LEFT JOIN LATERAL (SELECT r.id::text, r.status FROM runs r WHERE r.conversation_id = t.conversation_id
+	LEFT JOIN LATERAL (SELECT r.id::text, r.status, r.output->>'outcome' AS outcome, r.output->>'outcome_reason' AS outcome_reason
+	                   FROM runs r WHERE r.conversation_id = t.conversation_id
 	                   ORDER BY r.created_at DESC LIMIT 1) lr ON true`
 
 func scanTask(row pgx.Row) (*Task, error) {
@@ -125,7 +148,7 @@ func scanTask(row pgx.Row) (*Task, error) {
 	var report, questions []byte
 	if err := row.Scan(&t.ID, &t.Key, &t.Agent, &t.ConversationID, &t.ParentAgent, &t.ParentConversationID,
 		&t.ParentRunID, &t.ActionID, &t.Brief, &t.Fresh, &t.Depth, &t.Status, &t.DependsOn,
-		&decID, &decQ, &decStatus, &decBy, &report, &t.Error, &t.RunID, &t.RunStatus, &questions,
+		&decID, &decQ, &decStatus, &decBy, &report, &t.Error, &t.RunID, &t.RunStatus, &t.Outcome, &t.OutcomeReason, &questions,
 		&t.CreatedAt, &t.UpdatedAt, &t.FinishedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -560,8 +583,9 @@ const briefDepMax = 8 << 10
 //   - working or needs_input: from its conversation. A queued or running
 //     run, or an approved action not yet executed (a continuation about to
 //     queue), is working; else the newest run decides: failed or cancelled
-//     ends it so; succeeded with an open question is needs_input; else done,
-//     with that run's report.
+//     ends it so; succeeded with outcome failed fails it, keeping its
+//     report; succeeded with an open question or outcome blocked is
+//     needs_input; else done, with that run's report.
 //
 // A task needing input is due to its parent at once; a finished one when
 // its whole batch is over. A parent conversation with a due task and no
@@ -754,9 +778,10 @@ func reconcileOne(ctx context.Context, tx pgx.Tx, id, status, conv string, decis
 		return TaskWorking, nil, "", "", nil
 	}
 	var runID, st string
-	var summary, rep, rerr *string
-	err = tx.QueryRow(ctx, `SELECT id::text, status, summary, report, error FROM runs WHERE conversation_id = $1
-		ORDER BY created_at DESC LIMIT 1`, conv).Scan(&runID, &st, &summary, &rep, &rerr)
+	var summary, rep, rerr, outcome, why *string
+	err = tx.QueryRow(ctx, `SELECT id::text, status, summary, report, error, output->>'outcome', output->>'outcome_reason'
+		FROM runs WHERE conversation_id = $1
+		ORDER BY created_at DESC LIMIT 1`, conv).Scan(&runID, &st, &summary, &rep, &rerr, &outcome, &why)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Started with no run (its first one was cancelled by a person):
 		// nothing will move it, so it is over.
@@ -771,10 +796,20 @@ func reconcileOne(ctx context.Context, tx pgx.Tx, id, status, conv string, decis
 	case StatusCancelled:
 		return TaskCancelled, nil, "its run was cancelled", "", nil
 	}
-	if asked {
+	report = &TaskReport{RunID: runID, Summary: deref(summary), Report: deref(rep)}
+	reason := strings.TrimSpace(deref(why))
+	if reason == "" {
+		reason = report.Summary
+	}
+	switch {
+	case deref(outcome) == OutcomeFailed:
+		// The run finished, but says it could not do the work: the task
+		// failed, with what the run reported kept for its parent.
+		return TaskFailed, report, "the agent could not do the work: " + reason, "", nil
+	case asked, deref(outcome) == OutcomeBlocked:
 		return TaskNeedsInput, nil, "", "", nil
 	}
-	return TaskDone, &TaskReport{RunID: runID, Summary: deref(summary), Report: deref(rep)}, "", "", nil
+	return TaskDone, report, "", "", nil
 }
 
 // clipText cuts s to at most n bytes on a rune boundary and says so.

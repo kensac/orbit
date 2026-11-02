@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -103,13 +104,39 @@ func taskContract(t *store.Task) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\nThis conversation is a task (key %q) that agent %s delegated to you. %s is an agent, not a person: your result goes back to it, and it integrates your report with its other tasks' and answers its own person.\n", t.Key, t.ParentAgent, t.ParentAgent)
 	b.WriteString("- Its brief is the first message from " + t.ParentAgent + " below; later messages from it add to the brief or answer you.\n")
-	b.WriteString("- report: your complete answer to the brief, self-contained (it is all " + t.ParentAgent + " reads of your work). Lead with the outcome. The task is done when a run of yours ends without an open question.\n")
+	b.WriteString("- report: your complete answer to the brief, self-contained (it is all " + t.ParentAgent + " reads of your work). Lead with the outcome. The task is done when a run of yours ends succeeded without an open question.\n")
+	b.WriteString("- outcome: succeeded when you did the work the brief asks for; failed when you could not do it and trying again as briefed would not help (the task fails, and " + t.ParentAgent + " may retry or reroute it); blocked when you cannot go on until something outside your reach changes (" + t.ParentAgent + " is told at once and may unblock you with a message). outcome_reason says why in one or two sentences; leave it empty only when you succeeded. Never report succeeded for work you did not do.\n")
 	b.WriteString("- questions: only what you cannot proceed without. They go to " + t.ParentAgent + ", which answers or asks its person; your next run gets the answer.\n")
 	b.WriteString("- notify: nothing you send here reaches a person directly; leave notify.send false.\n")
 	if t.Fresh {
 		b.WriteString("- You are a fresh worker for this task: you start with no memory, and nothing you put in memory is kept.\n")
 	}
 	return b.String()
+}
+
+// withOutcome adds outcome and outcome_reason to a task run's output
+// schema. Both are required, as withPlan's field is, so a backend whose
+// structured output needs every property listed (Codex) accepts them.
+func withOutcome(schema json.RawMessage) json.RawMessage {
+	var s map[string]any
+	if json.Unmarshal(schema, &s) != nil {
+		return schema
+	}
+	props, _ := s["properties"].(map[string]any)
+	if props == nil {
+		return schema
+	}
+	props["outcome"] = map[string]any{"type": "string", "enum": []string{store.OutcomeSucceeded, store.OutcomeFailed, store.OutcomeBlocked}}
+	props["outcome_reason"] = map[string]any{"type": "string", "maxLength": 2000}
+	req, _ := s["required"].([]any)
+	for _, f := range []string{"outcome", "outcome_reason"} {
+		if !slices.Contains(req, any(f)) {
+			req = append(req, f)
+		}
+	}
+	s["required"] = req
+	b, _ := json.Marshal(s)
+	return b
 }
 
 // tasksBudget bounds the delegated tasks a parent's prompt shows, and
@@ -140,6 +167,9 @@ func tasksSection(tasks []store.Task, loc *time.Location) string {
 		}
 		if t.Decision != nil {
 			fmt.Fprintf(&b, "decision: %q, %s\n", t.Decision.Question, t.Decision.Status)
+		}
+		if t.Outcome != nil && *t.Outcome != store.OutcomeSucceeded {
+			fmt.Fprintf(&b, "outcome: %s: %s\n", *t.Outcome, t.OutcomeReasonText())
 		}
 		if t.Error != nil {
 			fmt.Fprintf(&b, "error: %s\n", *t.Error)

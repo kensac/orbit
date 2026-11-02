@@ -38,6 +38,11 @@ type Output struct {
 	// planTicket is the ticket a non-empty Plan is for, set by the engine,
 	// never read from the output.
 	planTicket string
+	// Outcome and OutcomeReason are a task's run saying whether it did the
+	// work (delegation.go); only a run in a task's conversation is offered
+	// the fields.
+	Outcome       string `json:"outcome"`
+	OutcomeReason string `json:"outcome_reason"`
 	// instructedBy is the person the run answered, set by the engine: an
 	// approve-rule action they asked for is approved by them.
 	instructedBy string
