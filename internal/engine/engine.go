@@ -78,6 +78,9 @@ type Engine struct {
 	Outbox bool
 	// Worker names this instance in the outbox and session rows it writes.
 	Worker string
+	// Wake nudges this instance's executors when it queued runs itself
+	// (delegation's reconcile); nil leaves them to their poll.
+	Wake func()
 	// SessionStore keeps Claude Code transcripts in the database as well
 	// as on this host's volume, so a session continues on whichever host
 	// claims its next run (sessionstore.go).
@@ -354,6 +357,16 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err != nil {
 		return nil, nil, err
 	}
+	// A task's run reports to the agent that delegated it; a fresh
+	// worker's has no memory of its agent's.
+	task, err := e.Store.TaskForConversation(ctx, c.ConversationID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if task != nil && task.Fresh {
+		rc.Memory = ""
+	}
+	st.task = task
 	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "memory.md", "text/markdown", []byte(rc.Memory)); err != nil {
 		return nil, nil, err
 	}
@@ -555,13 +568,20 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if tk != nil {
 		system += ticketContract(tk, planning)
 	}
+	if task != nil {
+		system += taskContract(task)
+	}
 	if known != "" {
 		system += knownContract
 	}
 	system += entriesContract(topics)
 	system += skillsContract(skills, skillsPlugin != "")
+	delegated, err := e.Store.ConversationTasks(ctx, c.ConversationID, c.ID)
+	if err != nil {
+		return nil, nil, err
+	}
 	trigger := c.Trigger
-	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
+	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached, Tasks: delegated},
 		rc, convo, inputs)
 	if rec != nil {
 		prompt = recoveryPrompt(rec, rc, now.Location())
@@ -599,6 +619,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		out.planTicket = tk.ID
 	}
 	out.known, out.topics, out.skills = knownEntries, topics, skills
+	out.task = task
 	if figures {
 		// The hook already sent the output back for these, up to
 		// MaxFigureDenials times (claude-code); this is the same check on
@@ -696,12 +717,12 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if out.planTicket != "" && strings.TrimSpace(out.Plan) != "" {
 		o.Plan = &store.PlanProposal{TicketID: out.planTicket, Body: strings.TrimSpace(out.Plan)}
 	}
-	if out.Memory.Update {
+	if out.Memory.Update && (out.task == nil || !out.task.Fresh) {
 		m := out.Memory.Content
 		o.Memory = &m
 	}
 	for _, act := range out.Actions {
-		pa := store.ProposedAction{Type: act.Type, Params: act.Params, Reason: act.Reason, Rule: string(a.RuleFor(act.Type))}
+		pa := store.ProposedAction{Type: act.Type, Params: act.Params, Reason: act.Reason, Rule: string(ruleFor(a, act.Type, c.Trigger))}
 		if t, ok := types[act.Type]; !ok {
 			pa.Rule, pa.Error = string(spec.RuleDeny), "action type not enabled for this agent"
 		} else if err := t.Validate(act.Params); err != nil {
@@ -711,6 +732,9 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			// Refused here so the run says why; EnqueueContinuation holds the
 			// same bound for an action that reaches it anyway.
 			pa.Rule, pa.Error = string(spec.RuleDeny), fmt.Sprintf("continuation limit reached: this run is continuation %d of at most %d", c.Chain, actions.MaxContinueChain)
+		}
+		if act.Type == actions.DelegateType && pa.Error == "" && out.task != nil && out.task.Depth >= store.MaxTaskDepth {
+			pa.Rule, pa.Error = string(spec.RuleDeny), fmt.Sprintf("delegation is nested at most %d deep, and this task is at depth %d", store.MaxTaskDepth, out.task.Depth)
 		}
 		if len(pa.Params) == 0 {
 			pa.Params = json.RawMessage(`{}`)
@@ -752,7 +776,10 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 		send = send || inReplyTo != ""
 	}
-	if send || len(out.Questions) > 0 {
+	// A task's report and questions go to the agent that delegated it,
+	// which is woken with them; only its approvals are a person's.
+	routed := out.task != nil
+	if !routed && (send || len(out.Questions) > 0) {
 		title := out.Notify.Title
 		if title == "" {
 			title = out.Summary
@@ -806,7 +833,12 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 		return err
 	}
 	metrics.RunFinished(c.Agent, "failed", runnerKind(snap, a), time.Since(start), rr.CostUSD)
-	if a != nil && !Attended(c.Trigger) {
+	routed, terr := e.Store.TaskForConversation(context.WithoutCancel(ctx), c.ConversationID)
+	if terr != nil {
+		e.Log.Warn("task lookup", "run", c.ID, "err", terr)
+	}
+	// A task's failure goes to the agent that delegated it.
+	if a != nil && !Attended(c.Trigger) && routed == nil {
 		e.deliver(ctx, snap, a, &c.ID, nil, "failure", notify.Message{
 			Title: a.Name + " run failed", Body: runErr.Error(), Priority: notify.High,
 			Tags: []string{"orbit", "warning"}, Link: e.runLink(snap, c.ID),
@@ -820,6 +852,18 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 // notifies nothing (its reply, questions, approvals and failure are in the
 // thread); channels are for unattended runs (schedule, continue, build).
 func Attended(trigger string) bool { return trigger == "message" }
+
+// ruleFor is the rule a run's proposal of typ gets. Delegation's types
+// under an approve rule apply directly in a run answering the person's
+// own message: they are reading the conversation and asked for the work.
+// Unattended runs follow the agent's rules as written.
+func ruleFor(a *spec.Agent, typ, trigger string) spec.Rule {
+	r := a.RuleFor(typ)
+	if r == spec.RuleApprove && actions.IsTaskType(typ) && Attended(trigger) {
+		return spec.RuleAuto
+	}
+	return r
+}
 
 func runnerKind(snap *Snapshot, a *spec.Agent) string {
 	if a == nil {
@@ -961,6 +1005,7 @@ func (e *Engine) DeliverOutbox(ctx context.Context) error {
 func (e *Engine) ExecuteActions(ctx context.Context) error {
 	snap := e.Current()
 	ex := &actions.Executor{Deployment: snap.Config.Deployment, Channels: snap.Channels, Client: e.Client, Env: e.Env,
+		Tasks: &taskOps{e: e, snap: snap},
 		Continue: func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (string, bool, error) {
 			return e.Store.EnqueueContinuation(ctx, store.Continuation{
 				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
@@ -972,7 +1017,7 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 			return err
 		}
 		actx, cancel := context.WithTimeout(ctx, ActionTimeout)
-		result, xerr := ex.Execute(actx, actions.Call{Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params})
+		result, xerr := ex.Execute(actx, actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params})
 		cancel()
 		if err := e.Store.FinishAction(context.WithoutCancel(ctx), act.ID, result, xerr); err != nil {
 			return err

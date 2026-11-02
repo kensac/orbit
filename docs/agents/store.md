@@ -40,6 +40,8 @@ an agent's beliefs changed.
   run and move the ticket together. `build_decisions` and `build_sandboxes`
   rows are written only by the attempt holding the run's claim.
 
+- task (`tasks`, `tasks.go`): `waiting | blocked -> working -> needs_input | done | failed | cancelled`, `needs_input -> working`, `done -> working` (a parent's message reopens it), and `cancelled` from any open state. `Delegate` creates a batch; `ReconcileTasks` (one instance at a time, by advisory lock) makes every other move but `MessageTask` and `CancelTask`, each in one transaction. `report` is kept when a task reopens.
+
 - outbox (`outbox`, written by a worker's engine): unsent, claimed by one control instance (`ClaimOutbox`, reclaimed after `OutboxReclaimAfter`), then `sent_at` set once its deliveries are recorded. Rows are kept.
 - workspaces (`workspaces`): a chat conversation's snapshot after each run that changed it, never updated; the newest is the workspace.
 - session transcripts (`session_transcripts`): written once per session id (`ON CONFLICT DO NOTHING`; a resume forks to a new id), never updated.

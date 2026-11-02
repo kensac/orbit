@@ -170,7 +170,8 @@ func (s *Store) ListAgents(ctx context.Context) ([]AgentRow, error) {
 		SELECT a.name, a.spec_sha, sp.spec, a.present, a.enabled, a.first_seen, a.updated_at,
 		       lr.id, lr.status, lr.trigger, lr.created_at, lr.finished_at, lr.summary,
 		       (SELECT count(*) FROM messages m
-		         WHERE m.agent = a.name AND `+openQuestion+`),
+		         WHERE m.agent = a.name AND `+openQuestion+`
+			           AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.conversation_id = m.conversation_id)),
 		       (SELECT count(*) FROM actions x WHERE x.agent = a.name AND x.status = 'pending')
 		FROM agents a
 		JOIN agent_specs sp ON sp.sha = a.spec_sha
