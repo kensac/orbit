@@ -87,6 +87,9 @@ type Server struct {
 	// CommitChecks are the check runs of commits other than the checked
 	// one (a build's base), by sha.
 	CommitChecks map[string][]map[string]any
+	// Others are pull requests besides PR (7), by number: read and
+	// patched, nothing else.
+	Others map[int]map[string]any
 }
 
 // New starts a fake, stopped when the test ends.
@@ -211,6 +214,15 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			"base": map[string]any{"ref": b["base"], "repo": map[string]any{"full_name": "kensac/orbit", "default_branch": "main"}},
 		}
 		f.write(w, 201, f.PR)
+	case (r.Method == "GET" || r.Method == "PATCH") && f.other(r.URL.Path) != nil:
+		pr := f.other(r.URL.Path)
+		if r.Method == "PATCH" {
+			var b map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			f.Patched = append(f.Patched, b)
+			patch(pr, b)
+		}
+		f.write(w, 200, pr)
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls/7" && f.PR == nil:
 		f.write(w, 404, map[string]string{"message": "Not Found"})
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls/7":
@@ -231,9 +243,7 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		var b map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		f.Patched = append(f.Patched, b)
-		for k, v := range b {
-			f.PR[k] = v
-		}
+		patch(f.PR, b)
 		f.write(w, 200, f.PR)
 	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/compare/"):
 		bh := strings.TrimPrefix(r.URL.Path, "/repos/kensac/orbit/compare/")
@@ -274,10 +284,16 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		f.write(w, 200, map[string]any{"name": "main", "protected": f.Protection != nil, "protection": f.Protection})
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/rules/branches/main":
 		f.write(w, 200, f.Rules)
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/branches/"):
+		f.write(w, 200, map[string]any{"name": strings.TrimPrefix(r.URL.Path, "/repos/kensac/orbit/branches/"), "protected": false})
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/rules/branches/"):
+		f.write(w, 200, []any{})
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/commits/"+f.checkedSHA()+"/check-runs":
 		f.write(w, 200, map[string]any{"total_count": len(f.CheckRuns), "check_runs": f.CheckRuns})
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/commits/"+f.checkedSHA()+"/status":
 		f.write(w, 200, map[string]any{"statuses": f.Statuses})
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/commits/") && strings.HasSuffix(r.URL.Path, "/status"):
+		f.write(w, 200, map[string]any{"statuses": []any{}})
 	case r.Method == "PUT" && r.URL.Path == "/repos/kensac/orbit/pulls/7/merge":
 		_ = json.NewDecoder(r.Body).Decode(&f.Merged)
 		if f.Merged["sha"] != f.PR["head"].(map[string]any)["sha"] {
@@ -288,6 +304,28 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		f.write(w, 200, map[string]any{"sha": f.MergeSHA, "merged": true})
 	default:
 		f.write(w, 404, map[string]string{"message": "Not Found"})
+	}
+}
+
+// other is the PR of Others a path names, or nil.
+func (f *Server) other(path string) map[string]any {
+	var n int
+	if _, err := fmt.Sscanf(path, "/repos/kensac/orbit/pulls/%d", &n); err != nil || n == 7 ||
+		path != fmt.Sprintf("/repos/kensac/orbit/pulls/%d", n) {
+		return nil
+	}
+	return f.Others[n]
+}
+
+// patch applies a PATCH body to a PR as GitHub does: base names the base
+// branch, every other field replaces its value.
+func patch(pr map[string]any, b map[string]string) {
+	for k, v := range b {
+		if k == "base" {
+			pr["base"].(map[string]any)["ref"] = v
+			continue
+		}
+		pr[k] = v
 	}
 }
 
