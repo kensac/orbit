@@ -148,6 +148,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `transforms` | list | none | Code over a source before the model sees it (below). |
 | `gates` | list | none | Checks that skip a scheduled run before any backend call (below). |
 | `tools` | list of tool names | none | Extra Claude Code tools (below). |
+| `web` | map (below) | absent | Limits `WebFetch` to named domains on orbit's host. |
 | `actions` | map of type to rule | every type `deny` | The writes the agent may propose and what happens to each (below). |
 | `notify` | map | | Where unattended runs report (below). |
 | `wake_on_message` | bool | `false` | A person's message starts a run (the API's `wake` overrides it per message). |
@@ -238,6 +239,17 @@ Every claude-code run has `Read`, `Glob` and `Grep`, confined to the run's workd
 | `Bash` | any command as orbit's user, with the run's allowlisted environment | Reads and writes anywhere that user can and reaches the network; outside every read rule and the path guard. Against AGENTS.md rule 3: do not grant. |
 | `Write`, `Edit`, `NotebookEdit` | writing files | Not confined to the workdir by orbit. Against AGENTS.md rule 3: do not grant. |
 | others (`Task`, `TodoWrite`, ...) | the CLI tool of that name | Judge each by what it reaches; a new grant is a security change (security.md). |
+
+
+### `web`
+
+For an agent that runs on orbit's host (no `sandbox`; a sandboxed one's network is its egress profile). Needs `WebFetch` in `tools`.
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `allow` | list of domains, at most 50 | required | The hosts WebFetch may fetch: `example.com`, or `*.example.com` for its subdomains. Each is a `WebFetch(domain:...)` allow rule in place of the bare tool, so any other host is denied (or asked, at a level that asks). Lowercase names only: an address, a URL or a private name (`localhost`, `*.local`, `*.internal`, `*.lan`, `*.home.arpa`, `*.ts.net`) fails the load. |
+
+With `web`, the private names (`spec.PrivateWebNames`: those suffixes, loopback, `169.254.169.254`, `metadata.google.internal`) are also denied with `--disallowedTools`, which beats any allow, a person's included. Rules match the URL's host, not the address it resolves to (security.md, What the model's process can reach).
 
 ### `actions`
 

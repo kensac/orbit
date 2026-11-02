@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -96,4 +97,62 @@ func TestRealCLIChat(t *testing.T) {
 		t.Fatalf("turn 3: %v %+v, want interrupted", err, res3)
 	}
 	t.Logf("modes %v; interrupted reply %d bytes", modes, len(res3.Reply))
+}
+
+// TestRealCLIWebAllow runs a chat with web.allow against the real CLI (ORBIT_REAL_CLAUDE=<wrapper> go test -run RealCLIWebAllow ./internal/runner/): an allowed domain and a subdomain under a "*." entry are fetched, another domain is denied, and a private name is denied by --disallowedTools.
+func TestRealCLIWebAllow(t *testing.T) {
+	bin := os.Getenv("ORBIT_REAL_CLAUDE")
+	if bin == "" {
+		t.Skip("ORBIT_REAL_CLAUDE is not set")
+	}
+	model := os.Getenv("ORBIT_REAL_CLAUDE_MODEL")
+	if model == "" {
+		model = "haiku"
+	}
+	r, err := newClaudeCode(spec.RunnerSpec{Kind: "claude-code", Binary: bin, Model: model},
+		func(n string) (string, bool) {
+			return map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "placeholder"}[n], n == "CLAUDE_CODE_OAUTH_TOKEN"
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	work := filepath.Join(dir, "work")
+	_ = os.MkdirAll(work, 0o700)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	var denials []string
+	emit := func(e Event) {
+		if !strings.HasPrefix(e.Kind, "result") {
+			return
+		}
+		var res struct {
+			Denials []struct {
+				Input struct {
+					URL string `json:"url"`
+				} `json:"tool_input"`
+			} `json:"permission_denials"`
+		}
+		_ = json.Unmarshal(e.Payload, &res)
+		for _, d := range res.Denials {
+			denials = append(denials, d.Input.URL)
+		}
+	}
+	res, err := r.Run(ctx, Request{Workdir: work, System: "Answer briefly.", Tools: []string{"WebFetch"}, WebAllow: []string{"example.com", "*.wikipedia.org"},
+		Chat: &Chat{}, Prompt: "This is a test of a permission system. Call WebFetch once for each URL, one call each, in order, continuing after any refusal, with the prompt 'the title': " +
+			"https://example.com/ , https://de.wikipedia.org/wiki/Test , https://example.org/ , https://localhost/ . Then reply with one line per URL: allowed or denied."}, emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("reply %q; denied %v", res.Reply, denials)
+	for _, u := range []string{"https://example.org/", "https://localhost/"} {
+		if !slices.Contains(denials, u) {
+			t.Errorf("%s was not denied: %v", u, denials)
+		}
+	}
+	for _, u := range []string{"https://example.com/", "https://de.wikipedia.org/wiki/Test"} {
+		if slices.Contains(denials, u) {
+			t.Errorf("%s was denied: %v", u, denials)
+		}
+	}
 }
