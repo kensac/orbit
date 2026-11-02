@@ -118,12 +118,19 @@ const workstation = "workstation"
 // chatSettings are a chat run's --settings. Local runs keep orbit's deny
 // rules and the CLI's own workdir limit; a sandbox is the boundary for a
 // sandboxed run, so the CLI there may do anything inside it.
-func chatSettings(keepDays int, hooks map[string]any, sandboxed bool) string {
+func chatSettings(keepDays int, hooks map[string]any, sandboxed bool, ask []string) string {
 	perms := map[string]any{"defaultMode": "dontAsk", "deny": []string{
 		"Read(//proc/**)", "Read(//sys/**)", "Read(//run/**)", "Read(//etc/**)", "Read(//config/**)", "Read(~/**)",
 	}}
+	if len(ask) > 0 {
+		// dontAsk would deny an ask rule unasked; in default mode it reaches orbit's prompt, which denies anything else asked about, as dontAsk does.
+		perms["defaultMode"], perms["ask"] = "default", ask
+	}
 	if sandboxed {
 		perms = map[string]any{"defaultMode": "bypassPermissions"}
+		if len(ask) > 0 {
+			perms["ask"] = ask
+		}
 	}
 	s := map[string]any{
 		"permissions":         perms,
@@ -159,7 +166,10 @@ func (c *claudeCode) chatArgs(req Request, home string, keepDays int) []string {
 	if req.Harness != nil && !sandboxed {
 		hooks = harnessHooks(req.Harness, req.Workdir, home)
 	}
-	mcp, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{ChatServer: map[string]any{"type": "sdk", "name": ChatServer}}})
+	allowed = append(allowed, req.Connectors.Allowed()...)
+	servers := map[string]any{ChatServer: map[string]any{"type": "sdk", "name": ChatServer}}
+	req.Connectors.addServers(servers)
+	mcp, _ := json.Marshal(map[string]any{"mcpServers": servers})
 	if req.SkillsPlugin != "" && !full {
 		tools = append(tools, "Skill")
 		allowed = append(allowed, "Skill")
@@ -175,7 +185,7 @@ func (c *claudeCode) chatArgs(req Request, home string, keepDays int) []string {
 	args = append(args,
 		"--strict-mcp-config", "--mcp-config", string(mcp),
 		"--setting-sources", "",
-		"--settings", chatSettings(keepDays, hooks, sandboxed),
+		"--settings", chatSettings(keepDays, hooks, sandboxed, req.Connectors.Ask()),
 		"--allowedTools", strings.Join(allowed, ","),
 	)
 	if sandboxed {
@@ -221,18 +231,44 @@ type chatProc interface {
 	Exited() <-chan struct{}
 }
 
-// chatTools routes a process's MCP requests to the turn in progress: a
-// live process serves many runs, each with its own tools.
+// chatTools routes a process's control requests to the turn in progress: a
+// live process serves many runs, each with its own tools (orbit's, for a
+// chat run) and connectors, and push copies a file into its sandbox.
+//
+// The connectors of the last turn stay listed between turns (the CLI may list a server at any time, and a reused process has the same ones, its arguments name their tools), but only a turn in progress has them called.
 type chatTools struct {
-	mu   sync.Mutex
-	chat *Chat
-	ws   Workspace
+	mu     sync.Mutex
+	chat   *Chat
+	ws     Workspace
+	conns  *Connectors
+	active bool
+	push   func(context.Context, []string) error
 }
 
 func (t *chatTools) set(c *Chat, ws Workspace) {
 	t.mu.Lock()
 	t.chat, t.ws = c, ws
 	t.mu.Unlock()
+}
+
+// connectors routes the turn's connectors; nil ends the turn's calls, the last ones staying listed.
+func (t *chatTools) connectors(conns *Connectors) {
+	t.mu.Lock()
+	t.active = conns != nil
+	if conns != nil {
+		t.conns = conns
+	}
+	t.mu.Unlock()
+}
+
+func (t *chatTools) current() (*Chat, Workspace, *Connectors, func(context.Context, []string) error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	conns := t.conns
+	if conns != nil && !t.active {
+		conns = &Connectors{Servers: conns.Servers}
+	}
+	return t.chat, t.ws, conns, t.push
 }
 
 // Workspace is the turn's workspace as orbit's tools reach it while the CLI
@@ -272,15 +308,29 @@ func (l LocalWorkspace) Get(_ context.Context, dir string) ([]byte, error) {
 }
 
 func (t *chatTools) handler() claudeproto.Handler {
-	return claudeproto.Handler{Name: "orbit", MCP: func(ctx context.Context, req claudeproto.MCPMessage) (json.RawMessage, error) {
-		t.mu.Lock()
-		c, ws := t.chat, t.ws
-		t.mu.Unlock()
-		if ws != nil {
-			ctx = context.WithValue(ctx, workspaceKey{}, ws)
-		}
-		return serveMCP(ctx, c, req)
-	}}
+	return claudeproto.Handler{Name: "orbit",
+		MCP: func(ctx context.Context, req claudeproto.MCPMessage) (json.RawMessage, error) {
+			c, ws, conns, push := t.current()
+			if req.ServerName == ChatServer {
+				if ws != nil {
+					ctx = context.WithValue(ctx, workspaceKey{}, ws)
+				}
+				return serveMCP(ctx, c, req)
+			}
+			if conns == nil {
+				return nil, fmt.Errorf("orbit serves no MCP server %q to this run", req.ServerName)
+			}
+			return conns.serve(ctx, req.ServerName, req.Message, push)
+		},
+		CanUseTool: func(ctx context.Context, req claudeproto.PermissionRequest) (claudeproto.Permission, error) {
+			_, _, conns, _ := t.current()
+			if conns == nil {
+				// orbit asks for no permission prompt without connectors.
+				return claudeproto.Permission{}, errors.New("orbit does not handle can_use_tool requests in this run")
+			}
+			return conns.permission(ctx, req)
+		},
+	}
 }
 
 // serveMCP answers one JSON-RPC message for orbit's SDK server, as the
@@ -376,13 +426,20 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			mode = "resumed"
 		}
 		tools := &chatTools{}
-		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, Resume: resume, Ephemeral: sess == nil}, extra)
+		tools.connectors(req.Connectors)
+		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, Resume: resume, Ephemeral: sess == nil,
+			PermissionPrompt: len(req.Connectors.Ask()) > 0}, extra)
 		if err != nil {
 			return nil, err
 		}
 		var proc chatProc
 		if req.Chat.Sandbox != nil {
-			proc, err = startSandbox(ctx, req.Chat.Sandbox, args, tools.handler(), sess)
+			var sb *sandboxProc
+			sb, err = startSandbox(ctx, req.Chat.Sandbox, args, tools.handler(), sess)
+			if sb != nil {
+				tools.push = sb.push
+				proc = sb
+			}
 		} else {
 			proc, err = claudeproto.Start(claudeproto.Command{Bin: c.bin, Args: args, Env: env, Dir: req.Workdir}, tools.handler())
 		}
@@ -411,7 +468,8 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		ws = sb
 	}
 	p.tools.set(req.Chat, ws)
-	defer p.tools.set(nil, nil)
+	p.tools.connectors(req.Connectors)
+	defer func() { p.tools.set(nil, nil); p.tools.connectors(nil) }()
 
 	var (
 		imu     sync.Mutex

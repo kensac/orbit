@@ -26,6 +26,7 @@ import (
 
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/build"
+	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
@@ -455,7 +456,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		emit("orbit.recovery", map[string]any{"recovers_attempt": recFrom(rec), "skipped_because": skipped})
 	}
 	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env,
-		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted()}
+		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted(),
+		GitHub: func(ctx context.Context, repo string, perms github.Permissions) (*github.Token, error) {
+			return e.readToken(ctx, snap.Config.Deployment, repo, perms)
+		}}
 	if c.Trigger == store.TriggerWebhook {
 		d, err := e.Store.WebhookForRun(ctx, c.ID)
 		if err != nil {
@@ -631,7 +635,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	var hr *runner.Harness
 	if e.Harness != "" && r.Kind() == "claude-code" {
-		hr = &runner.Harness{Bin: e.Harness, Figures: figures && !chat, Search: e.searchSocket(a.Name), Repos: e.repoSocket(a), AgentHooks: agentHooks(a)}
+		hr = &runner.Harness{Bin: e.Harness, Figures: figures && !chat, Search: e.searchSocket(a.Name), Repos: e.repoSocket(a), Prometheus: e.promSocket(a), AgentHooks: agentHooks(a)}
 	} else if len(a.Hooks) > 0 {
 		emit("orbit.hooks_skipped", map[string]any{"reason": "the agent's hooks need claude-code with orbit's harness binary"})
 	}
@@ -644,17 +648,26 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err != nil {
 		return nil, nil, err
 	}
+	gw, conns, connSection := e.prepareConnectors(ctx, snap, a, c, workdir, inputsDir, emit, func(kind string, v any) error {
+		b, _ := json.Marshal(v)
+		return events.write(kind, b)
+	})
+	defer gw.close()
 	var hooks *status.Listener
 	if hr != nil {
 		hooks, hr.Status = e.listenHooks(ctx, c, home, emit, log)
 		defer hooks.Close()
 	}
 	if chat {
-		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
+		out, res, err := e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached,
 				WorkspaceChanges: wsNote}, fresh: wsFresh,
 			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, steer: &st.steer, rec: rec, instructor: st.instructor,
-			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun, pinned: pinned})
+			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun, connectors: conns, pinned: pinned})
+		if out != nil {
+			out.connectorCalls = gw.pendingCalls()
+		}
+		return out, res, err
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
 	if tk != nil {
@@ -668,6 +681,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	system += entriesContract(topics)
 	system += skillsContract(skills, skillsPlugin != "")
+	system += connSection
 	delegated, err := e.Store.ConversationTasks(ctx, c.ConversationID, c.ID)
 	if err != nil {
 		return nil, nil, err
@@ -694,7 +708,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 
 	req := runner.Request{
 		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
-		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin,
+		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin, Connectors: conns,
 	}
 	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
 		return nil, nil, err
@@ -723,6 +737,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	out.known, out.topics, out.skills = knownEntries, topics, skills
 	out.task = task
+	out.connectorCalls = gw.pendingCalls()
 	prose := fullReport(out, events.prose())
 	if figures {
 		// The hook already sent the output back for these, up to
@@ -940,6 +955,17 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			Tags:     []string{"orbit", "approval"},
 			Link:     e.ApprovalLink(snap, id),
 			Buttons:  []notify.Button{{Label: "Review", URL: e.ApprovalLink(snap, id)}},
+		})
+	}
+	// Connector calls recorded for approval during the run (connectors.go).
+	for _, pc := range out.connectorCalls {
+		e.deliver(ctx, snap, a, &c.ID, &pc.id, "approval", notify.Message{
+			Title:    fmt.Sprintf("%s wants to %s", a.Name, pc.typ),
+			Body:     "```json\n" + string(pc.params) + "\n```",
+			Priority: notify.High,
+			Tags:     []string{"orbit", "approval"},
+			Link:     e.ApprovalLink(snap, pc.id),
+			Buttons:  []notify.Button{{Label: "Review", URL: e.ApprovalLink(snap, pc.id)}},
 		})
 	}
 	return nil
@@ -1247,7 +1273,10 @@ func (e *Engine) executor(snap *Snapshot) *actions.Executor {
 			return e.Store.EnqueueContinuation(ctx, store.Continuation{
 				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
 		},
-		Define: e.defineAction, Schedule: e.scheduleAction}
+		Define: e.defineAction, Schedule: e.scheduleAction,
+		Connector: func(ctx context.Context, c actions.Call) (json.RawMessage, error) {
+			return e.executeConnector(ctx, snap, c)
+		}}
 }
 
 // finishAction records an execution and tells the person of a failure.

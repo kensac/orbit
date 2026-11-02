@@ -23,7 +23,7 @@ database agent of their name. Each instance reloads when the directory's
 content or the newest definition changes, so a definition written on one
 instance is in force on all within the 30 s poll.
 
-An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential, delegate target, need or webhook trigger it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily) waits for a person's approval whatever the rule.
+An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential, delegate target, need, connector or webhook trigger it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily) waits for a person's approval whatever the rule.
 
 Database and built-in agents are held to what orbit.yaml offers (`spec.validateTrust`): no `file` source, no `${VAR}` that is not in `credentials:`, without a `sandbox`, only the tools in `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite), no precheck and no `run` hook. A spec breaking one fails validation, naming it.
 
@@ -49,7 +49,7 @@ Never in YAML. Channels name variables with `*_env`; source urls, headers, query
 values, Prometheus expressions and endpoint headers use `${VAR}`. An unset variable is an error, never
 an empty string.
 
-`credentials:` in `orbit.yaml` names the variables sources may send, each bound to the URLs it may go to:
+`credentials:` in `orbit.yaml` names the variables sources and endpoint headers may send, each bound to the URLs it may go to:
 
 ```yaml
 credentials:
@@ -57,7 +57,43 @@ credentials:
     url_prefix: https://sure.example.com/api/
 ```
 
-`url_prefix` is an http(s) URL with a host and a path ending in `/`, without user, query or fragment. A source sends a credential only in a request whose URL starts with it (redirects included); where the URL has no template, a mismatch fails the load. A database or built-in agent may reference only credentials; a file agent may also name any other variable (docs/agents/security.md, What a model can define).
+`url_prefix` is an http(s) URL with a host and a path ending in `/`, without user, query or fragment. A source sends a credential only in a request whose URL starts with it (redirects included), and an endpoint only to a rendered URL that does; where the URL has no template or placeholder, a mismatch fails the load. A database or built-in agent may reference only credentials; a file agent may also name any other variable (docs/agents/security.md, What a model can define).
+
+## Endpoints
+
+`endpoints:` in `orbit.yaml` are the HTTP targets of `webhook:<name>` actions. The model writes the action's `body` and, when the endpoint has a `path`, the values of its `{name}` placeholders (`path` in the params); the URL, method and headers are the configuration's. Each placeholder is declared in `params` with a `type` (`string` or `integer`); a string also needs a `pattern` (RE2, matching the whole value) or an `enum`, since that is what keeps the path the configuration's, and is at most `max_length` (default and limit 200). Values are checked before the action is stored and again when it is sent, then escaped as one path segment (`/` becomes `%2F`; `.` and `..` are refused). `body_schema` (a JSON Schema) is what the body must satisfy, checked the same two times and shown to the model. A credential in a header is sent only to a rendered URL under its `url_prefix`, and no redirect is followed: a 3xx is the result and fails the action.
+
+Sure (the finance app) categorizes a transaction with `PUT /api/v1/transactions/{id}` and `{"transaction": {"category_id": "<uuid>"}}`, with an API key of read-write scope in `X-Api-Key` (Sure's `Api::V1::TransactionsController#update`); `user_modified: true` keeps the next bank sync from overwriting the category. On hetzner orbit reaches it as `http://plaid:3000` on the docker network:
+
+```yaml
+credentials:
+  ORBIT_SURE_API_KEY:
+    url_prefix: http://plaid:3000/api/
+endpoints:
+  sure-categorize:
+    url: http://plaid:3000/api/v1
+    method: PUT
+    path: /transactions/{id}
+    description: Set one Sure transaction's category. id is the transaction's id, category_id one of the categories in inputs/categories.json.
+    params:
+      id: {type: string, pattern: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", description: the transaction's id}
+    headers:
+      X-Api-Key: ${ORBIT_SURE_API_KEY}
+    body_schema:
+      type: object
+      additionalProperties: false
+      required: [transaction]
+      properties:
+        transaction:
+          type: object
+          additionalProperties: false
+          required: [category_id, user_modified]
+          properties:
+            category_id: {type: string, pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"}
+            user_modified: {const: true}
+```
+
+An agent gives it a rule (`actions: {webhook:sure-categorize: approve}`) and reads the categories as a source (`GET http://plaid:3000/api/v1/categories`, with the same header), and proposes `{"type": "webhook:sure-categorize", "params": {"path": {"id": "<transaction id>"}, "body": {"transaction": {"category_id": "<category id>", "user_modified": true}}}}`. The key must have Sure's read-write scope; a read-only key answers 403 and the action fails.
 
 `expires:` records when a credential orbit cannot inspect stops working, so an alert fires before it does. The Claude Code subscription token (`claude setup-token`) lasts a year and gives no warning; record the day it lapses when you set it:
 
@@ -120,7 +156,7 @@ defer_low_priority: true             # hold priority: low agents' scheduled runs
 
 ## Capabilities
 
-`needs: [<capability>, ...]` on an agent says what a host must have to run it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated; `*` alone is every agent, control's default when unset; a worker's default is none). A capability is `name` or `name:qualifier`, lower case (`spec.CapabilityRE`). An agent with no needs runs on any host. Give an agent a need for anything only some hosts have: a network its sources are on (`docker-network:hetzner`), a source credential that lives only on some hosts (`sure`), the GitHub App's key (`github`, required with `repos`), a tool (`browser`). The table of capabilities and the hosts that have them is docs/agents/deployment.md, Worker fleet. A run whose agent needs what no host has waits queued; nothing fails it.
+`needs: [<capability>, ...]` on an agent says what a host must have to run it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated; `*` alone is every agent, control's default when unset; a worker's default is none). A capability is `name` or `name:qualifier`, lower case (`spec.CapabilityRE`). An agent with no needs runs on any host. Give an agent a need for anything only some hosts have: a network its sources are on (`docker-network:hetzner`), a source credential that lives only on some hosts (`sure`), the GitHub App's key (`github`, required with `repos` or a `github` source), a tool (`browser`). The table of capabilities and the hosts that have them is docs/agents/deployment.md, Worker fleet. A run whose agent needs what no host has waits queued; nothing fails it.
 
 ## Transforms
 
@@ -144,6 +180,10 @@ as a paginated `http` source is; `.`: the document itself is the one record, as 
 (`field`, `op`, `value`). Sums are exact decimals. A transform that fails
 fails the run, naming it. A new kind is a function in
 `internal/transforms`, its parameters in `parse`, and a test.
+
+## Prometheus queries
+
+An agent with a `prometheus` source can also query that Prometheus while it works: `prometheus_query` (docs/api.md, Prometheus), instant or range, read-only, bounded (at most 31 days, 1000 points and 500 series per query, 256 KiB per answer), sent to the source's URL with its credentials. The source's own `expr` is still fetched before the run, so a gate or a transform can decide on it with no model call; the tool is for what the run finds it needs to look at. Only `/api/v1/query` and `/api/v1/query_range` are ever requested.
 
 ## Gates
 
@@ -214,6 +254,20 @@ The actions `schedule:add`, `schedule:pause`, `schedule:resume` and `schedule:re
 
 The model never computes a time. Each proposal is compiled when it is made: a phrase code cannot read, or a trigger that is not there, is denied at once with the reason, and a chat agent's `act` call answers with the compiled rule and the next three fires for it to tell the person (the action's result, when it executes during the turn). The executed action's `result` echoes the same (`rule`, `timezone`, `triggers`, `paused_until`, `next_fires` as local times, `version`), and a pending one shows it as `preview` (docs/api.md, Actions). In a run answering the person's message an `approve` rule on these applies directly, as delegation's does; unattended runs follow the rules as written. The built-in `orbit` has all five under `approve`.
 
+## GitHub and Loki sources
+
+A `github` source reads one repository of `github.read_repositories` as the App: `resource: issues | pulls | checks | releases`, with `state` for issues and pulls, `ref` for checks, `limit` for lists. orbit mints a token of only that resource's permissions for the one fetch and revokes it after (docs/tickets.md, GitHub access), so the model never holds one; the agent needs `github` in `needs`. Lists are projected to the fields a review uses (number, title, state, author, labels, dates, URL, body cut at 4000 bytes), so a quiet repository is a small input and the `unchanged` gate sees only what changed.
+
+A `loki` source runs one LogQL `query_range` (`expr`) ending at the fetch, `since` back (default 1h, at most 24h), at most `limit` lines (default 1000, at most 5000), newest first. Count with a metric query (`sum by (container) (count_over_time({...} |= "error" [1h]))`) rather than reading lines when a number is the answer. Headers render like an http source's, under the credential binding.
+
+```yaml
+needs: [github, docker-network:hetzner]
+sources:
+  - {name: issues, kind: github, repo: kensac/orbit, resource: issues, state: open, limit: 50}
+  - {name: main-checks, kind: github, repo: kensac/orbit, resource: checks, ref: main}
+  - {name: errors, kind: loki, url: "http://loki:3100", expr: '{container=~"orbit|traefik"} |= "error"', since: 6h, limit: 500}
+```
+
 ## Templates in sources
 
 URLs and query values may use `{{today}}`, `{{now}}`, `{{month_start}}`,
@@ -231,6 +285,30 @@ fails at runtime, not at load.
 ## Chat agents
 
 `chat: true` (claude-code runners only) makes an agent a Claude Code session whose reply is its final message, with memory, questions and actions as orbit's tools (docs/ARCHITECTURE.md, Chat agents); each conversation gets its own workspace. `sandbox: workstation` (needs `chat`) runs it in a sandboxd container with Claude Code's full tool set, a kept home and egress to any public host; `sandbox: build` with the tools in its `tools` and the build allowlist; sandboxd is `sandbox: {sandboxd: <host:port | unix:/path>, token_env: ORBIT_SANDBOX_TOKEN}` in orbit.yaml, or the `build:` section's when there is no `sandbox:`. The CLI there needs `CLAUDE_CODE_OAUTH_TOKEN`. Give a sandboxed agent `needs: [sandbox]` so only hosts that reach sandboxd claim it (the built-in has it).
+
+## Connectors
+
+`connectors:` in `orbit.yaml` names MCP servers; an agent's `connectors: [<name>, ...]` gives its runs their tools, as `mcp__<name>__<tool>` (claude-code runners only; docs/ARCHITECTURE.md, Connectors). orbit is the gateway: it lists the tools before each run and makes every call itself with the connector's credential, so neither the CLI nor a sandbox ever holds one.
+
+```yaml
+credentials:
+  HOUSING_MCP_TOKEN: {url_prefix: https://housing.example.com/}
+connectors:
+  housing:
+    url: https://housing.example.com/mcp
+    description: NYC affordable-housing listings.
+    auth: {kind: header, header: Authorization, value: "Bearer ${HOUSING_MCP_TOKEN}"}
+    write_tools: [create_view, delete_view]
+  sheets:
+    url: https://sheets.example.com/mcp
+    auth: {kind: oauth}
+```
+
+- **Auth.** `none`; `header`, whose value may carry only `credentials:` variables bound to a prefix the connector's URL starts with (the same binding as a source's, checked at load and on every call; orbit follows no redirect); or `oauth`, where a person signs in once through `POST /api/v1/connectors/{name}/authorize` (docs/api.md, Connectors) and orbit keeps the token, sealed under `ORBIT_CONNECTOR_KEY` (at least 32 characters, on every host that calls the connector), a new version per sign-in and per refresh, none deleted. An oauth connector nobody has signed in is left out of runs, and the run's prompt says so.
+- **Rules.** A tool in `write_tools` waits for a person (`approve`); any other runs when called (`auto`), the server's `readOnlyHint` notwithstanding, since the deployment says what changes the world. An agent overrides one tool with `mcp:<connector>:<tool>: auto | approve | deny` in `actions`; `deny` is not offered at all. An `approve` call in a run answering its person's message is asked for in the chat: it becomes a pending action `connector:<connector>/<tool>` the person approves or rejects (`POST /actions/{id}/approve`), and the call runs once they approve, its result going back to the model in the same turn. In any other run it is recorded as that pending action and the model is told it waits; orbit executes it at most once after approval, from the action loop, with the result on the action. An `auto` call to a `write_tools` tool also leaves an executed action as its record. Unlike an `act` action in a chat, which a run answering its person executes on their message, a connector call waits for the person to approve its exact arguments even then: they never saw them. Approving with `always` (docs/api.md, Actions) sets that tool's `mcp:<connector>:<tool>` to `auto`.
+- **Results.** A result over 32 KiB is written into the attempt's inputs (`inputs/.../connectors/<connector>-<tool>-<n>.json`) and stored as an artifact; the model is given its path. Every call is an `orbit.connector` event with its bounded result.
+- **Hosts.** A worker that runs an agent with connectors needs their credentials (`ORBIT_CONNECTOR_KEY`, the header variables, a `client_secret_env`); give such an agent a capability only those hosts advertise (docs/agents/deployment.md, Capabilities). `orbit validate` lists the variables.
+- `transport: stdio` is refused: a local server would run in sandboxd, which is not built.
 
 ## Sessions and continuations
 

@@ -114,6 +114,9 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/conversations/{id}", s.getConversation)
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
+	api("POST /api/v1/conversations/{id}/read", s.markRead)
+	api("GET /api/v1/board", s.board)
+	api("GET /api/v1/events", s.events)
 	api("POST /api/v1/conversations/{id}/messages", s.conversationMessage)
 	api("GET /api/v1/conversations/{id}/tasks", s.conversationTasks)
 	api("GET /api/v1/conversations/{id}/tasks/stream", s.streamTasks)
@@ -180,6 +183,8 @@ func (s *Server) routes(internal bool) http.Handler {
 	s.workspaceRoutes(api)
 	s.workspaceWriteRoutes(api, mux)
 	s.skillsRoutes(api)
+	s.connectorRoutes(api, mux)
+	s.sessionRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
 	// The signature is the credential (hooks.go); traefik routes /hooks/ past forward-auth.
@@ -307,28 +312,12 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 // thread serves an agent's default conversation, a page at a time
 // (store.Thread).
 func (s *Server) thread(w http.ResponseWriter, r *http.Request) {
-	servePage(w, r, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
-		return s.Store.Thread(r.Context(), r.PathValue("name"), before, limit)
-	})
-}
-
-// servePage is the one way a thread page is served over HTTP, whichever conversation (threadPage).
-func servePage(w http.ResponseWriter, r *http.Request, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) {
-	var limit int
-	if !queryInt(w, r, "limit", &limit) {
+	id, err := s.Store.DefaultConversationID(r.Context(), r.PathValue("name"))
+	if err != nil {
+		respond(w, nil, err)
 		return
 	}
-	fold := true
-	switch r.URL.Query().Get("fold") {
-	case "", "true":
-	case "false":
-		fold = false
-	default:
-		writeErr(w, http.StatusBadRequest, "fold: want true or false")
-		return
-	}
-	resp, err := threadPage(r.URL.Query().Get("before"), limit, fold, fetch)
-	respond(w, resp, err)
+	s.serveThread(w, r, id)
 }
 
 // threadPage reads a thread page for HTTP and MCP alike: the before cursor and limit in, items, has_more and next_before out (listPage).
