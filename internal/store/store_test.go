@@ -319,3 +319,47 @@ func defaultConv(t *testing.T, s *store.Store, agent string) string {
 	}
 	return id
 }
+
+func TestAChatAgentRunsOnePerConversation(t *testing.T) {
+	s := testdb.New(t)
+	if err := s.SyncAgents(ctx, map[string]store.AgentSpec{
+		"orbit": {SHA: "sha-orbit", JSON: []byte(`{"name":"orbit","chat":true}`), Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var convs []string
+	for i := 0; i < 2; i++ {
+		r, _, err := s.CreateConversation(ctx, store.NewConversation{Agent: "orbit", SpecSHA: "sha-orbit", Body: "hi", Wake: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		convs = append(convs, r.ConversationID)
+	}
+	// A second message in the first conversation queues behind its run.
+	if _, _, err := s.PostMessageOnce(ctx, store.PostMessage{Agent: "orbit", SpecSHA: "sha-orbit", Body: "more", Wake: true, ConversationID: convs[0]}); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	per := map[string]int{}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, err := s.ClaimRun(ctx, "w")
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if c != nil {
+				mu.Lock()
+				per[c.ConversationID]++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if per[convs[0]] != 1 || per[convs[1]] != 1 {
+		t.Fatalf("claimed per conversation = %v, want one in each", per)
+	}
+}

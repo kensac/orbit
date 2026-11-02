@@ -53,7 +53,10 @@ log "migrated forward"
 # variable its examples reference gets a dummy: nothing it reaches exists.
 vars=$("$work/old" validate "$work/base/examples" | sed -n 's/^environment referenced: //p' | tr -d ',')
 envs=()
-for v in $vars; do envs+=("$v=compat"); done
+for v in $vars; do
+  # Only variable names: an entry can read "A or B".
+  [[ $v =~ ^[A-Z_][A-Z0-9_]*$ ]] && envs+=("$v=compat")
+done
 token=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 mkdir -p "$work/data"
 env "${envs[@]}" ORBIT_API_TOKEN="$token" ORBIT_CONFIG_DIR="$work/base/examples" ORBIT_DATA_DIR="$work/data" \
