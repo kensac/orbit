@@ -111,21 +111,50 @@ func (c *Client) Compare(ctx context.Context, repo, base, head string) (string, 
 }
 
 // JobLogTail returns the last max bytes of an Actions job's log. GitHub
-// answers with a redirect to the log's storage, which the client follows
-// without the token; the whole log is streamed and only its tail kept,
-// because the failure is at the end.
+// answers with a redirect to the log's storage (a presigned URL), which is
+// followed here by hand, with no credential: the token never leaves for
+// another host, whatever the HTTP client's redirect rules. The whole log is
+// streamed and only its tail kept, because the failure is at the end.
 func (c *Client) JobLogTail(ctx context.Context, repo string, jobID int64, max int) (string, error) {
 	p, err := repoPath(repo)
 	if err != nil {
 		return "", err
 	}
-	resp, err := c.open(ctx, http.MethodGet, fmt.Sprintf("%s/actions/jobs/%d/logs", p, jobID), nil)
+	noFollow := *c.http
+	noFollow.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	nc := &Client{base: c.base, auth: c.auth, http: &noFollow}
+	path := fmt.Sprintf("%s/actions/jobs/%d/logs", p, jobID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nc.base+path, nil)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	req.Header.Set("Authorization", nc.auth)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", apiVersion)
+	req.Header.Set("User-Agent", "orbit")
+	resp, err := nc.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	resp.Body.Close()
+	loc := resp.Header.Get("Location")
+	if resp.StatusCode != http.StatusFound || loc == "" {
+		return "", &APIError{Method: http.MethodGet, Path: path, Status: resp.StatusCode, Message: "no redirect to the log"}
+	}
+	lreq, err := http.NewRequestWithContext(ctx, http.MethodGet, loc, nil)
+	if err != nil {
+		return "", err
+	}
+	lresp, err := noFollow.Do(lreq)
+	if err != nil {
+		return "", err
+	}
+	defer lresp.Body.Close()
+	if lresp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("job log: %s", lresp.Status)
+	}
 	t := &tail{max: max}
-	if _, err := io.Copy(t, io.LimitReader(resp.Body, maxJobLog)); err != nil {
+	if _, err := io.Copy(t, io.LimitReader(lresp.Body, maxJobLog)); err != nil {
 		return "", err
 	}
 	return string(t.b), nil

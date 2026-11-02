@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/mail"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,11 +30,8 @@ type Identity struct{ Name, Email string }
 
 // ParseIdentity reads "Name <email>".
 func ParseIdentity(s string) (Identity, error) {
-	a, err := mail.ParseAddress(s)
-	if err != nil {
-		return Identity{}, fmt.Errorf("author %q: %w", s, err)
-	}
-	return Identity{Name: a.Name, Email: a.Address}, nil
+	name, email, err := spec.ParseAuthor(s)
+	return Identity{Name: name, Email: email}, err
 }
 
 // Job is one build run, fully resolved: nothing in it is chosen by a model.

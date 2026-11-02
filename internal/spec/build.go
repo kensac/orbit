@@ -2,8 +2,8 @@ package spec
 
 import (
 	"fmt"
-	"net/mail"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -128,7 +128,7 @@ func (c *Config) validateBuild() []error {
 	if b.TokenEnv == "" {
 		at("token_env is required")
 	}
-	if a, err := mail.ParseAddress(b.Author); err != nil || a.Name == "" {
+	if _, _, err := ParseAuthor(b.Author); err != nil {
 		at("author %q must be \"Name <email>\" (the App's bot user)", b.Author)
 	}
 	a, ok := c.Agents[b.Agent]
@@ -206,4 +206,17 @@ func (c *Config) applyBuildDefaults() {
 			b.Repositories[name] = r
 		}
 	}
+}
+
+// authorRE is "Name <email>". net/mail refuses a bot's name ("[bot]" is
+// special in RFC 5322), so the commit identity has its own small grammar.
+var authorRE = regexp.MustCompile(`^([^<>\n]*[^<>\s])\s*<([^<>\s@]+@[^<>\s@]+)>$`)
+
+// ParseAuthor reads a commit identity, "Name <email>".
+func ParseAuthor(s string) (name, email string, err error) {
+	m := authorRE.FindStringSubmatch(strings.TrimSpace(s))
+	if m == nil {
+		return "", "", fmt.Errorf("author %q is not \"Name <email>\"", s)
+	}
+	return m[1], m[2], nil
 }
