@@ -433,8 +433,8 @@ func releaseMessages(ctx context.Context, db execer, runID string) error {
 	if _, err := db.Exec(ctx, `UPDATE message_reads SET released_at = now() WHERE run_id = $1 AND released_at IS NULL`, runID); err != nil {
 		return err
 	}
-	// A read by an image older than message_reads has no row; record it
-	// as handed back, or the message would stay held (waitingMessage).
+	// A read without a row (giveComments, an older image) is recorded as
+	// handed back here, or the message would stay held (waitingMessage).
 	_, err := db.Exec(ctx, `INSERT INTO message_reads (message_id, run_id, attempt, read_at, released_at)
 		SELECT m.id, r.id, r.attempt, COALESCE(r.started_at, m.created_at), now()
 		FROM messages m JOIN runs r ON r.id = m.run_id
@@ -446,8 +446,9 @@ func releaseMessages(ctx context.Context, db execer, runID string) error {
 // waitingMessage is true of a person's message (alias m) that no attempt
 // holds, so the next run of its conversation reads it: never read, or
 // handed back by every attempt that read it (message_reads). A message
-// with run_id set and no read row was read by an image older than
-// message_reads, which may still run during a deploy; it is held.
+// with run_id set and no read row was marked read without an attempt (a
+// build given review comments when enqueued, giveComments) or by an image
+// older than message_reads, which may still run during a deploy; it is held.
 const waitingMessage = `m.direction = 'to_agent' AND (m.run_id IS NULL OR (
 	NOT EXISTS (SELECT 1 FROM message_reads x WHERE x.message_id = m.id AND x.released_at IS NULL)
 	AND EXISTS (SELECT 1 FROM message_reads x WHERE x.message_id = m.id)))`
