@@ -240,6 +240,7 @@ run; `internal/build`):
   cannot build for any other ref. Neither has `workflows`, so GitHub
   refuses a workflow change too. An Actions log is fetched by following
   its storage redirect by hand, with no credential.
+- **A restack is code**: a stacked ticket's branch moved onto a new base is `git rebase --onto` in orbit's clone, pushed with the same one refspec; the read and delivery tokens are minted for it and revoked after, and no model runs.
 - **The PR is orbit's**: title and body from the model's result, scrubbed
   of attribution, with the ticket and plan version and, for orbit itself,
   a trust boundary line. A compromised model can therefore at most open a
