@@ -13,16 +13,14 @@ import (
 const searchMigration = 20261102032149
 
 // searchedRun runs one claimed run of agent to success with a transcript of
-// events, a report and a memory document.
+// events, a report and a memory document. It reads no context, so it also
+// runs on the schema before search (TestSearchBackfillsRowsWrittenBeforeIt).
 func searchedRun(t *testing.T, s *store.Store, agent string, events []string, summary, report, memory string) string {
 	t.Helper()
 	id := manual(t, s, agent)
 	c, err := s.ClaimRun(ctx, "w")
 	if err != nil || c == nil || c.ID != id {
 		t.Fatalf("claim: %v %v", c, err)
-	}
-	if _, err := s.StartRunContext(ctx, id, agent); err != nil {
-		t.Fatal(err)
 	}
 	for i, ev := range events {
 		if err := s.AppendEvent(ctx, id, c.Attempt, i+1, "assistant", []byte(ev)); err != nil {

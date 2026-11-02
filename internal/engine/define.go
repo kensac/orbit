@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/spec"
@@ -180,9 +181,30 @@ func errOr(err error, s string) string {
 	return s
 }
 
+// defineWidening is how an agent:define with params would widen the agent it names past its current version (spec.Widening), from a dry run of the change. A change that does not load widens nothing here; executing it fails the same way.
+func (e *Engine) defineWidening(ctx context.Context, params json.RawMessage) []string {
+	sp, err := actions.DecodeDefine(params)
+	if err != nil {
+		return nil
+	}
+	d, err := e.DefineAgent(ctx, DefineRequest{Spec: sp, Upsert: true, DryRun: true})
+	if err != nil {
+		return nil
+	}
+	return spec.Widening(e.Current().Config.Agents[d.Agent.Name], d.Agent)
+}
+
 // defineAction executes agent:define: the change is the run's, made for the
-// person whose message the run answered.
+// person whose message the run answered. An action executing by rule alone
+// is checked for widening again against the agent as it is now, since a
+// person may have changed it after the proposal.
 func (e *Engine) defineAction(ctx context.Context, c actions.Call, specJSON json.RawMessage) (json.RawMessage, error) {
+	if c.Rule != spec.RuleApprove {
+		params, _ := json.Marshal(map[string]json.RawMessage{"spec": specJSON})
+		if w := e.defineWidening(ctx, params); len(w) > 0 {
+			return nil, fmt.Errorf("agent:define: the change widens the agent (%s), so it needs a person's approval; propose it again", strings.Join(w, "; "))
+		}
+	}
 	who, err := e.Store.RunInstructor(ctx, c.RunID)
 	if err != nil {
 		return nil, err

@@ -38,7 +38,7 @@ is the design; the topic documents below are the rules for changing it.
 | [working-agreement.md](docs/agents/working-agreement.md) | Take a task, open a PR, or write a doc |
 | [engineering-standards.md](docs/agents/engineering-standards.md) | Write or change any code |
 | [security.md](docs/agents/security.md) | Touch a runner, a tool grant, an action, a channel, or the API |
-| [configuration.md](docs/agents/configuration.md) | Change the spec, add a source, channel, runner or action kind |
+| [configuration.md](docs/agents/configuration.md), [spec-reference.md](docs/agents/spec-reference.md) | Change the spec, add a source, channel, runner or action kind |
 | [store.md](docs/agents/store.md) | Touch `internal/store` or add a migration |
 | [testing.md](docs/agents/testing.md) | Write a test or trust a green run |
 | [deployment.md](docs/agents/deployment.md) | Claim anything is deployed |
@@ -68,7 +68,7 @@ is the design; the topic documents below are the rules for changing it.
   sandbox service (the only holder of a docker socket), its egress proxy,
   and orbit's client for it.
 - `deploy/`: the image (`Dockerfile`), the build sandbox's image
-  (`build.Dockerfile`) and the pinned agent CLIs (`cli/`).
+  (`build.Dockerfile`), an agent's workstation box image (`workstation.Dockerfile`, its files in `workstation/`) and the pinned agent CLIs (`cli/`).
 
 ## Commands
 
