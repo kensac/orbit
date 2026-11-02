@@ -447,10 +447,19 @@ type Source struct {
 	Headers  map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 	Query    map[string]string `yaml:"query,omitempty" json:"query,omitempty"`
 	Paginate *Paginate         `yaml:"paginate,omitempty" json:"paginate,omitempty"`
-	// prometheus
+	// prometheus (PromQL) and loki (LogQL)
 	Expr string `yaml:"expr,omitempty" json:"expr,omitempty"`
 	// file
 	Path string `yaml:"path,omitempty" json:"path,omitempty"`
+	// github: Repo is one of github.read_repositories, Resource one of GitHubResources; Ref is the commit checks reads, State the issues or pulls listed.
+	Repo     string `yaml:"repo,omitempty" json:"repo,omitempty"`
+	Resource string `yaml:"resource,omitempty" json:"resource,omitempty"`
+	Ref      string `yaml:"ref,omitempty" json:"ref,omitempty"`
+	State    string `yaml:"state,omitempty" json:"state,omitempty"`
+	// Limit bounds a github list's items or a loki query's lines.
+	Limit int `yaml:"limit,omitempty" json:"limit,omitempty"`
+	// Since is how far back a loki query reads, ending now.
+	Since Duration `yaml:"since,omitempty" json:"since,omitempty"`
 	// MaxBytes bounds one source's fetched size.
 	MaxBytes int64 `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
 }
@@ -638,7 +647,7 @@ var (
 	// Kinds every adapter registry must cover. Kept here so validation does
 	// not import the adapters (which import spec).
 	channelKinds = []string{"ntfy", "smtp", "webhook", "log"}
-	sourceKinds  = []string{"http", "prometheus", "file"}
+	sourceKinds  = []string{"http", "prometheus", "loki", "github", "file"}
 	runnerKinds  = []string{"claude-code", "codex", "anthropic"}
 	notifyWhen   = []string{"", "always", "agent", "never"}
 	verifyChecks = []string{"figures"}
@@ -948,10 +957,31 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if s.URL == "" || s.Expr == "" {
 				at("source %q: prometheus needs url and expr", s.Name)
 			}
+		case "loki":
+			if s.URL == "" || s.Expr == "" {
+				at("source %q: loki needs url and expr", s.Name)
+			}
+			if s.Since < 0 || time.Duration(s.Since) > MaxLokiSince {
+				at("source %q: since is at most %s", s.Name, MaxLokiSince)
+			}
+			if s.Limit < 0 || s.Limit > MaxLokiLimit {
+				at("source %q: limit is at most %d lines", s.Name, MaxLokiLimit)
+			}
+		case "github":
+			errs = append(errs, c.validateGitHubSource(a, s)...)
 		case "file":
 			if s.Path == "" {
 				at("source %q: path is required", s.Name)
 			}
+		}
+		if s.Kind != "github" && (s.Repo != "" || s.Resource != "" || s.Ref != "" || s.State != "") {
+			at("source %q: repo, resource, ref and state are for a github source", s.Name)
+		}
+		if s.Kind != "github" && s.Kind != "loki" && s.Limit != 0 {
+			at("source %q: limit is for a github or loki source", s.Name)
+		}
+		if s.Kind != "loki" && s.Since != 0 {
+			at("source %q: since is for a loki source", s.Name)
 		}
 	}
 	for _, t := range a.Transforms {

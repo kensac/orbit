@@ -25,6 +25,7 @@ import (
 
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/build"
+	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
@@ -398,7 +399,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		emit("orbit.recovery", map[string]any{"recovers_attempt": recFrom(rec), "skipped_because": skipped})
 	}
 	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env,
-		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted()}
+		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted(),
+		GitHub: func(ctx context.Context, repo string, perms github.Permissions) (*github.Token, error) {
+			return e.readToken(ctx, snap.Config.Deployment, repo, perms)
+		}}
 	vars := sources.Vars(now)
 	var inputs []runner.Input
 	if rec != nil {

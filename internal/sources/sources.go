@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/spec"
 )
 
@@ -89,6 +90,10 @@ type Fetcher struct {
 	Credentials spec.Credentials
 	// Restricted is set for an agent written outside the configuration files (spec.Agent.Restricted): it may read no file and render no variable but a credential.
 	Restricted bool
+	// GitHub mints a token of perms for repo, one of github.read_repositories (refusing any other), for one github source's fetch; nil fails a github source.
+	GitHub func(ctx context.Context, repo string, perms github.Permissions) (*github.Token, error)
+	// Now is time.Now, replaceable in tests: a loki query ends at it.
+	Now func() time.Time
 }
 
 // Fetch fetches one source.
@@ -98,6 +103,10 @@ func (f *Fetcher) Fetch(ctx context.Context, s spec.Source, vars map[string]stri
 		return f.http(ctx, s, vars)
 	case "prometheus":
 		return f.prometheus(ctx, s, vars)
+	case "loki":
+		return f.loki(ctx, s, vars)
+	case "github":
+		return f.github(ctx, s)
 	case "file":
 		return f.file(s)
 	}

@@ -109,8 +109,11 @@ func (c *Config) validateTrust(a *Agent) []error {
 				continue
 			}
 			u := s.URL
-			if s.Kind == "prometheus" {
+			switch s.Kind {
+			case "prometheus":
 				u = strings.TrimRight(u, "/") + "/api/v1/query"
+			case "loki":
+				u = strings.TrimRight(u, "/") + "/loki/api/v1/query_range"
 			}
 			if strings.Contains(u, "{{") || strings.Contains(u, "${") {
 				continue // checked on every request (sources.Fetcher)
