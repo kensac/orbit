@@ -42,6 +42,8 @@ type Config struct {
 	Docker string
 	// CredProxy is `orbit credproxy`'s host:port on Network (ORBIT_SANDBOX_CREDPROXY): every sandbox's ANTHROPIC_BASE_URL, so the CLI reaches its backend only through it.
 	CredProxy string
+	// WorkstationCredProxy is the credential proxy's host:port on the workstation profile's network, when that differs (ORBIT_SANDBOX_WORKSTATION_CREDPROXY, default CredProxy): a proxy addressed by IP has one address per network.
+	WorkstationCredProxy string
 	// CredProxyKey seals the token a sandbox gets in place of the backend credential (ORBIT_CREDPROXY_KEY, shared with `orbit credproxy`, never given to a sandbox).
 	CredProxyKey string
 }
@@ -77,6 +79,7 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		CredProxy:        def("ORBIT_SANDBOX_CREDPROXY", "orbit-credproxy:3129"),
 		CredProxyKey:     getenv("ORBIT_CREDPROXY_KEY"),
 	}
+	c.WorkstationCredProxy = def("ORBIT_SANDBOX_WORKSTATION_CREDPROXY", c.CredProxy)
 	return c, c.Validate()
 }
 
@@ -105,6 +108,11 @@ func (c Config) Validate() error {
 	}
 	if host, port, err := net.SplitHostPort(c.CredProxy); err != nil || host == "" || port == "" || strings.ContainsAny(host, "/@ ,") {
 		errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_CREDPROXY %q must be host:port", c.CredProxy))
+	}
+	if p := c.WorkstationCredProxy; p != "" {
+		if host, port, err := net.SplitHostPort(p); err != nil || host == "" || port == "" || strings.ContainsAny(host, "/@ ,") {
+			errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_WORKSTATION_CREDPROXY %q must be host:port", p))
+		}
 	}
 	if len(c.CredProxyKey) < credproxy.MinKeyLen {
 		errs = append(errs, fmt.Errorf("ORBIT_CREDPROXY_KEY must be at least %d characters: a sandbox never gets the backend credential, only a token sealed with it", credproxy.MinKeyLen))

@@ -159,6 +159,9 @@ func (s *Server) profile(name string) (Config, error) {
 			return cfg, errors.New("the workstation profile is not configured here (ORBIT_SANDBOX_WORKSTATION_PROXY)")
 		}
 		cfg.Proxy = cfg.WorkstationProxy
+		if cfg.WorkstationCredProxy != "" {
+			cfg.CredProxy = cfg.WorkstationCredProxy
+		}
 	default:
 		return cfg, fmt.Errorf("unknown profile %q", name)
 	}

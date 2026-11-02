@@ -600,6 +600,13 @@ func TestProfiles(t *testing.T) {
 			t.Errorf("%q: %q %v, want %q", name, cfg.Proxy, err, want)
 		}
 	}
+	s.cfg.CredProxy, s.cfg.WorkstationCredProxy = "10.251.0.3:3129", "10.251.1.3:3129"
+	if b, _ := s.profile("build"); b.CredProxy != "10.251.0.3:3129" {
+		t.Errorf("build credproxy %q", b.CredProxy)
+	}
+	if w, _ := s.profile("workstation"); w.CredProxy != "10.251.1.3:3129" {
+		t.Errorf("workstation credproxy %q", w.CredProxy)
+	}
 	if _, err := s.profile("root"); err == nil {
 		t.Fatal("an unknown profile was accepted")
 	}
