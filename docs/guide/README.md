@@ -38,6 +38,8 @@ Send `POST /api/v1/agents/daily-review/conversations` with a first message:
 
 The response includes `conversation_id`, `message_id` and, when a run was queued, `run_id`. Read the reply with `GET /api/v1/conversations/{conversation_id}/thread`; continue with `POST /api/v1/conversations/{conversation_id}/messages` and `{"body":"My proposal is due tomorrow.","wake":true}`. If the agent asks a question, include its message ID as `reply_to`. A queued run is not a completed answer: inspect its status, report and any error in the thread.
 
+To teach orbit something for good, write `/remember <what to remember>` in any conversation: it is saved at once (for every agent; `--agent` for this one only, `--topic <name>` for a topic) and the reply says what was saved. See [remembering](../api.md#remembering-from-a-conversation).
+
 Use separate conversations for separate topics. Each has its own messages and session; memory, schedules and action rules belong to the agent and are shared across its conversations. Scheduled and manual runs use its default conversation, named `General`. Archiving keeps the conversation readable; a new message brings it back. See [conversations](../api.md#conversations) for paging, attachments and retry identifiers.
 
 ## Review actions and approvals
@@ -50,7 +52,7 @@ Coding work has a separate [ticket workflow](../tickets.md): discuss a request, 
 
 ## Talk by email
 
-Email is available only when the operator configures both outbound SMTP and orbit's inbound mailbox. The mailbox needs IMAP access, allowed senders and delivery of plus-addressed replies. Replies to orbit's signed reply address continue the same conversation. To start a conversation with a new email, the operator must also set `mail.agent`; without it, mail that is not a reply is recorded and ignored.
+Email is available only when the operator configures both outbound SMTP and orbit's inbound mailbox. The mailbox needs IMAP access, allowed senders and delivery of plus-addressed replies. Replies to orbit's signed reply address continue the same conversation, and orbit answers every mail by mail, as a reply to the sender. To start a conversation with a new email, the operator must also set `mail.agent`; without it, mail that is not a reply is recorded and ignored.
 
 Use the configured orbit address, and reply to the address supplied by its message rather than constructing one. New mail starts a conversation with the configured agent, not an agent chosen from the subject. Incoming automatic mail and failed sender-authentication results can be ignored. The mailbox is dedicated to orbit because polling marks unseen mail as seen. See [mail configuration](../agents/configuration.md#mail) for prerequisites and sender restrictions.
 

@@ -76,13 +76,32 @@ type PostMessage struct {
 	ConversationID string
 	// Attachments are uploads of the conversation the message carries.
 	Attachments []string
+	// Delivery is DeliveryQueue (also when empty) or DeliverySteer.
+	Delivery string
+	// Steerable is true when the agent's runs can take a message mid-turn (a chat agent); a steer to any other is queued, as is one with attachments (their files reach a run's workspace when it starts).
+	Steerable bool
 }
+
+// Deliveries of a person's message (messages.delivery). A queued message waits for the conversation's next run (and wakes one when asked). A steered one goes into the turn the conversation's running run is in (engine, steer.go); with no run running, or for an agent whose runs cannot take one, it is queued instead.
+const (
+	DeliveryQueue = "queue"
+	DeliverySteer = "steer"
+)
 
 // PostResult is what PostMessage did.
 type PostResult struct {
 	MessageID string `json:"message_id"`
-	RunID     string `json:"run_id,omitempty"`
+	// RunID is the run the message woke, or for a steered message the running run it was handed to.
+	RunID string `json:"run_id,omitempty"`
+	// Delivered is how the message was taken: "queued" or "steered".
+	Delivered string `json:"delivered"`
 }
+
+// Delivered values: what a post did with the message.
+const (
+	DeliveredQueued  = "queued"
+	DeliveredSteered = "steered"
+)
 
 // PostMessageOnce stores the message and enqueues its run in one
 // transaction, so a retry with the same ClientID neither duplicates the
@@ -90,6 +109,10 @@ type PostResult struct {
 func (s *Store) PostMessageOnce(ctx context.Context, p PostMessage) (res PostResult, replayed bool, err error) {
 	req := map[string]any{"op": "message", "conversation": p.ConversationID, "body": p.Body, "reply_to": p.ReplyTo,
 		"author": p.Author, "wake": p.Wake, "attachments": p.Attachments}
+	if p.Delivery == DeliverySteer {
+		// Only a steer is named, so a receipt stored before delivery existed still matches its retry.
+		req["delivery"] = p.Delivery
+	}
 	raw, replayed, err := s.withReceipt(ctx, p.Agent, p.ClientID, req, func(tx pgx.Tx) (json.RawMessage, error) {
 		r, err := postMessage(ctx, tx, p)
 		if err != nil {
@@ -100,7 +123,14 @@ func (s *Store) PostMessageOnce(ctx context.Context, p PostMessage) (res PostRes
 	if err != nil {
 		return res, false, err
 	}
-	return res, replayed, json.Unmarshal(raw, &res)
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return res, replayed, err
+	}
+	if res.Delivered == "" {
+		// A receipt stored before deliveries existed: every message then was queued.
+		res.Delivered = DeliveredQueued
+	}
+	return res, replayed, nil
 }
 
 // ErrReplyElsewhere is a reply_to naming a message of another conversation.
@@ -134,10 +164,26 @@ func postMessage(ctx context.Context, tx pgx.Tx, p PostMessage) (PostResult, err
 	if err := ticketOnMessage(ctx, tx, conv, p.Author); err != nil {
 		return r, err
 	}
-	err := tx.QueryRow(ctx, `
-		INSERT INTO messages (agent, direction, body, author, reply_to, conversation_id)
-		VALUES ($1, 'to_agent', $2, NULLIF($3, ''), $4, $5) RETURNING id::text`,
-		p.Agent, p.Body, p.Author, p.ReplyTo, conv).Scan(&r.MessageID)
+	delivery := DeliveryQueue
+	r.Delivered = DeliveredQueued
+	if p.Delivery == DeliverySteer && p.Steerable && len(p.Attachments) == 0 {
+		running, err := steerTarget(ctx, tx, conv)
+		if err != nil {
+			return r, err
+		}
+		if running != "" {
+			r.Delivered, r.RunID, delivery = DeliveredSteered, running, DeliverySteer
+		}
+	}
+	// A queued message is the column's default, so it is written as every message was before deliveries existed.
+	insert := `INSERT INTO messages (agent, direction, body, author, reply_to, conversation_id)
+		VALUES ($1, 'to_agent', $2, NULLIF($3, ''), $4, $5) RETURNING id::text`
+	args := []any{p.Agent, p.Body, p.Author, p.ReplyTo, conv}
+	if delivery == DeliverySteer {
+		insert = `INSERT INTO messages (agent, direction, body, author, reply_to, conversation_id, delivery)
+			VALUES ($1, 'to_agent', $2, NULLIF($3, ''), $4, $5, 'steer') RETURNING id::text`
+	}
+	err := tx.QueryRow(ctx, insert, args...).Scan(&r.MessageID)
 	if isForeignKeyViolation(err) {
 		return r, ErrNotFound
 	}
@@ -151,7 +197,7 @@ func postMessage(ctx context.Context, tx pgx.Tx, p PostMessage) (PostResult, err
 		title = CASE WHEN title = '' THEN $2 ELSE title END WHERE id = $1`, conv, DefaultTitle(p.Body)); err != nil {
 		return r, err
 	}
-	if p.Wake {
+	if p.Wake && delivery == DeliveryQueue {
 		if err := tx.QueryRow(ctx, `INSERT INTO runs (agent, spec_sha, trigger, conversation_id) VALUES ($1, $2, 'message', $3) RETURNING id::text`,
 			p.Agent, p.SpecSHA, conv).Scan(&r.RunID); err != nil {
 			return r, err

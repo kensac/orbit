@@ -12,7 +12,7 @@ import (
 
 // What an agent may reach depends on who wrote it. A file agent is reviewed in git with the deployment, so it may name any source, variable and tool. A database agent is written through the API or by an agent's agent:define, and the built-in one is changed the same way, so a model steered by a poisoned input can write either: they are held to what orbit.yaml offers (docs/agents/security.md, What a model can define).
 
-// Credential is a secret a source may send: the environment variable named by its key in orbit.yaml's credentials, and the only URLs it may be sent to.
+// Credential is a secret a source or an endpoint may send: the environment variable named by its key in orbit.yaml's credentials, and the only URLs it may be sent to.
 type Credential struct {
 	// URLPrefix is where the credential may go: every request it is rendered into must start with it. It is an absolute http(s) URL with a path ending in "/", so the host and the path segment it names are whole.
 	URLPrefix string `yaml:"url_prefix" json:"url_prefix"`
@@ -201,6 +201,12 @@ func Widening(cur, next *Agent) []string {
 	for _, n := range next.Needs {
 		if !slices.Contains(cur.Needs, n) {
 			out = append(out, "need "+n)
+		}
+	}
+	for _, t := range next.Triggers {
+		// A webhook lets an outside sender start unattended runs with a body it wrote.
+		if t.IsWebhook() && !slices.ContainsFunc(cur.Triggers, func(c Trigger) bool { return c.Webhook == t.Webhook && c.Secret == t.Secret }) {
+			out = append(out, "webhook "+t.Webhook)
 		}
 	}
 	return out
