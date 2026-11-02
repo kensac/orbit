@@ -203,3 +203,23 @@ func TestReviewCommentsOverTheAPI(t *testing.T) {
 		t.Fatalf("comments = %v", cs)
 	}
 }
+
+func TestFilingAStackedTicket(t *testing.T) {
+	v := newEnv(t, nil)
+	kanishk := v.person("kanishk")
+	u := v.srv.URL + "/api/v1/tickets"
+	_, r := call(t, "POST", u, kanishk, `{"kind":"request","title":"below","body":"b","agent":"a","repo":"kensac/orbit","wake":false}`)
+	below := r["ticket_id"].(string)
+	code, r := call(t, "POST", u, kanishk, `{"kind":"request","title":"above","body":"b","agent":"a","repo":"kensac/orbit","wake":false,"stack_on":"`+below+`"}`)
+	if code != 201 {
+		t.Fatalf("stacked = %d %v", code, r)
+	}
+	if _, g := call(t, "GET", u+"/"+r["ticket_id"].(string), kanishk, ""); g["ticket"].(map[string]any)["stack_on"] != below {
+		t.Fatalf("get = %v", g)
+	}
+	for _, bad := range []string{"00000000-0000-0000-0000-000000000000", "not-a-uuid"} {
+		if code, r := call(t, "POST", u, kanishk, `{"kind":"request","title":"x","body":"b","agent":"a","repo":"kensac/orbit","stack_on":"`+bad+`"}`); code != 400 {
+			t.Errorf("stack_on %s = %d %v", bad, code, r)
+		}
+	}
+}
