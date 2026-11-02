@@ -9,11 +9,12 @@ alone, what waits for approval, what it may not do at all).
 
 The model is the expensive, slow, non-deterministic part, so it gets only the
 part of a job that needs judgment. Everything else is code that runs before
-it: the harness fetches and paginates sources today; the next pieces are
-transforms (coded reducers over a source: per-category totals, transfers
-removed, a diff against last run) and gates (skip the model when inputs are
-unchanged or a check passes, so a quiet day costs no tokens). A report's
-numbers should come from code, with the model explaining them.
+it: the harness fetches and paginates sources, and runs an agent's
+transforms (`internal/transforms`: coded reducers over a source, such as
+per-category totals with transfers removed, each output an input of its
+own); the next piece is gates (skip the model when inputs are unchanged or
+a check passes, so a quiet day costs no tokens). A report's numbers should
+come from code, with the model explaining them.
 
 ## One run
 
@@ -26,6 +27,7 @@ trigger (schedule | manual | message | continue)
   -> session plan: continue the agent's Claude Code session, or start fresh
   -> a fresh session: the recent thread, packed into a byte budget, as conversation.md
   -> sources fetched by the harness, written to <workdir>/inputs/, stored as artifacts
+  -> transforms run over sources, each output an input (a source only transforms read is withheld)
   -> runner called with: system contract, prompt, workdir, tools, output schema
   -> output validated against the contract
   -> RecordOutcome, one transaction: run succeeded, memory version, questions, actions
@@ -362,9 +364,7 @@ ticket loop, every 30 s: checks green -> github:merge proposed (approve for orbi
 
 The direction, so changes now do not close it off:
 
-- **Transforms and gates** (above). A transform is a named, tested Go
-  function from a source's bytes to smaller bytes, stored as its own
-  artifact; a gate is a predicate over inputs and memory that ends the run
+- **Gates** (above). A gate is a predicate over inputs and memory that ends the run
   without a backend call, recorded as its own status (`skipped`, naming the
   gate in `runs.gate`) so a run that judged nothing is distinguishable from
   one that did. The status exists; today only a build that redelivers an

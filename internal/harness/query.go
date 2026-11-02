@@ -59,6 +59,9 @@ type Agg struct {
 	Field string `json:"field,omitempty"`
 }
 
+// CondOps are the operators a Cond takes.
+var CondOps = []string{"eq", "ne", "lt", "lte", "gt", "gte", "contains", "in", "exists"}
+
 // QuerySchema is the tool's input schema, shown to the model.
 var QuerySchema = map[string]any{
 	"type": "object",
@@ -69,7 +72,7 @@ var QuerySchema = map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"field": map[string]any{"type": "string", "description": "Dot path within a record."},
-				"op":    map[string]any{"type": "string", "enum": []string{"eq", "ne", "lt", "lte", "gt", "gte", "contains", "in", "exists"}},
+				"op":    map[string]any{"type": "string", "enum": CondOps},
 				"value": map[string]any{"description": "A number, a string, or for in a list."},
 			},
 			"required": []string{"field", "op"},
@@ -107,43 +110,76 @@ func RunQuery(root string, q Query) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	doc, err := Decode(b)
+	if err != nil {
+		return nil, fmt.Errorf("%s is not JSON: %w", q.File, err)
+	}
+	return QueryDoc(q.File, doc, q, maxQueryRows)
+}
+
+// Decode reads a JSON document with its numbers kept as the decimal
+// literals they are, as every function here expects.
+func Decode(b []byte) (any, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
 	var doc any
 	if err := dec.Decode(&doc); err != nil {
-		return nil, fmt.Errorf("%s is not JSON: %w", q.File, err)
+		return nil, err
 	}
-	if q.Items != "" {
-		v, ok := lookup(doc, q.Items)
+	return doc, nil
+}
+
+// Records returns the array of records at the dot path items in doc
+// (empty: doc is the array). name says which document an error is about.
+func Records(name string, doc any, items string) ([]any, error) {
+	if items != "" {
+		v, ok := lookup(doc, items)
 		if !ok {
-			return nil, fmt.Errorf("%s has no %q", q.File, q.Items)
+			return nil, fmt.Errorf("%s has no %q", name, items)
 		}
 		doc = v
 	}
 	records, ok := doc.([]any)
 	if !ok {
-		return nil, fmt.Errorf("%s%s is not an array of records; name the array with items", q.File, suffix(q.Items))
+		return nil, fmt.Errorf("%s%s is not an array of records; name the array with items", name, suffix(items))
+	}
+	return records, nil
+}
+
+// Match reports whether a record passes every condition.
+func Match(r any, where []Cond) (bool, error) {
+	for _, c := range where {
+		ok, err := c.match(r)
+		if err != nil || !ok {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// Lookup follows a dot path through objects.
+func Lookup(v any, path string) (any, bool) { return lookup(v, path) }
+
+// QueryDoc answers q over a decoded document, returning at most maxRows
+// rows (q.Limit lowers it). name says which document an error is about.
+func QueryDoc(name string, doc any, q Query, maxRows int) (map[string]any, error) {
+	records, err := Records(name, doc, q.Items)
+	if err != nil {
+		return nil, err
 	}
 	var matched []any
 	for _, r := range records {
-		keep := true
-		for _, c := range q.Where {
-			ok, err := c.match(r)
-			if err != nil {
-				return nil, err
-			}
-			if !ok {
-				keep = false
-				break
-			}
+		keep, err := Match(r, q.Where)
+		if err != nil {
+			return nil, err
 		}
 		if keep {
 			matched = append(matched, r)
 		}
 	}
 	limit := q.Limit
-	if limit <= 0 || limit > maxQueryRows {
-		limit = maxQueryRows
+	if limit <= 0 || limit > maxRows {
+		limit = maxRows
 	}
 	out := map[string]any{"records": len(records), "matched": len(matched)}
 	if len(q.Select) > 0 {
