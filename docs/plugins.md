@@ -36,6 +36,39 @@ The harness validates and copies each declared output from the sandbox: regular 
 
 Given identical package bytes, request and input bytes, an operation must produce identical output bytes. Time is an explicit request field, and randomness, host clocks and environment discovery are outside the contract. Native containment cannot prove determinism; fixture replay detects divergence and disables an operation that fails its conformance checks. Deterministic fetch/filter/join/total/diff decisions remain code, with no model call added by the extension protocol.
 
+## Inert source envelope codec
+
+`internal/extensionproto` implements only bounded encoding and decoding of the ordinary-source envelope below. It reads no descriptor paths, creates no artifacts, validates no schema instances and executes no package. Its successful validation grants no authority. Operation selection and declared input-slot names are explicit decoder arguments; the caller must obtain them from the reviewed source operation. Manifest validation shares its duplicate-key, nesting and exact-number helpers through `internal/extensionjson`.
+
+The request is an object with exactly these required, non-null fields:
+
+```json
+{"protocol":"orbit.extension.v1","invocation_id":"inv_1","operation":"reduce","parameters":{},"inputs":[]}
+```
+
+`invocation_id` is 1 through 128 ASCII letters, digits, underscores or hyphens. `operation` and logical file names use the manifest's lowercase-name syntax. The request operation must equal the selected operation, and its input names must match the declared slots exactly, with no duplicates. `parameters` is any non-null JSON value. Schema-instance validation remains a prerequisite for any future invocation. This slice carries no clock fields; an operation requiring logical time cannot be invoked through this contract yet.
+
+A response echoes the exact protocol and invocation ID and uses one of these exclusive forms:
+
+```json
+{"protocol":"orbit.extension.v1","invocation_id":"inv_1","status":"ok","result":null,"outputs":[]}
+{"protocol":"orbit.extension.v1","invocation_id":"inv_1","status":"error","error":{"code":"bad-input","message":"Invalid data"}}
+```
+
+`ok` requires a present `result` (including null for a future null schema), forbids `error`, and permits optional non-null `outputs`. `error` requires only an `error` object with exactly non-null `code` and `message` fields, forbids `result`, and permits no output files. Its code uses the lowercase-name syntax; its message is nonblank and at most 4096 UTF-8 bytes. Empty `outputs` is permitted on an error response. Diagnostics remain untrusted text.
+
+Each input or output descriptor has exactly these required, non-null fields:
+
+```json
+{"name":"data","path":"inputs/data.json","media_type":"application/json","bytes":3,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+```
+
+Paths are clean relative slash paths of at most 256 UTF-8 bytes, with no absolute path, parent traversal, backslash or NUL. `.` is rejected. Input paths are relative to the invocation's input root; output paths are relative to `/work/out`. Names and paths are unique within each list. `media_type` is nonempty, at most 128 UTF-8 bytes and contains no CR, LF or NUL. It is metadata, not a content-type or filesystem verification. `bytes` is an integer from zero through 16 MiB; each list has at most 32 files and 16 MiB declared total bytes. `sha256` is exactly 64 lowercase hexadecimal characters. Only a future sandbox copy boundary can verify regular-file status, containment, actual size or hash.
+
+Both envelopes are bounded to 1 MiB while reading (the reader consumes at most one extra byte to detect overflow). JSON must be UTF-8, contain one value with only trailing whitespace, use exact case-sensitive field names, and have no duplicate keys, unknown envelope/descriptor/error fields or nesting beyond the shared 64-level JSON limit. Arbitrary parameter/result objects have keys defined by their future schema validator. Decimal literals are retained as raw JSON; numbers use the manifest's bounded exact-rational policy (at most 128 text bytes and exponents from -308 through 308), never binary floating point. Encoding the same struct produces identical bytes; this does not prove a package's determinism.
+
+Run `go test -race ./internal/extensionproto ./internal/extensions ./cmd/orbitextension` for codec adversarial cases and existing manifest/package regression coverage. These checks establish no process, isolation, cancellation, stderr, durable record, grant or external-action behavior.
+
 ## Resource limits and isolation
 
 The following are proposed initial hard ceilings, subject to measurement before implementation is accepted. Deployment and manifest values may lower them; effective limits are their minimum and the remaining run deadline. A limit is enforced while reading or executing, not after buffering unbounded data.

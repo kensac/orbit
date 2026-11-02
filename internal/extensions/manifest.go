@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"path"
 	"regexp"
-	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/kensac/orbit/internal/extensionjson"
 )
 
 // Limits bound validation before an extension can be considered for use.
@@ -65,16 +65,11 @@ func Parse(data []byte) (*Manifest, error) {
 	if len(data) > MaxManifestBytes {
 		return nil, errors.New("manifest exceeds 256 KiB")
 	}
-	d := json.NewDecoder(bytes.NewReader(data))
-	d.UseNumber()
-	if err := uniqueValue(d, 0); err != nil {
+	if err := extensionjson.Validate(data, MaxManifestBytes); err != nil {
 		return nil, fmt.Errorf("manifest: %w", err)
 	}
-	if _, err := d.Token(); err != io.EOF {
-		return nil, errors.New("manifest: trailing JSON")
-	}
 	var raw map[string]any
-	d = json.NewDecoder(bytes.NewReader(data))
+	d := json.NewDecoder(bytes.NewReader(data))
 	d.UseNumber()
 	if err := d.Decode(&raw); err != nil {
 		return nil, err
@@ -144,48 +139,6 @@ func Parse(data []byte) (*Manifest, error) {
 
 func safePath(s string) bool {
 	return s != "" && len(s) <= 256 && !path.IsAbs(s) && s != ".." && !strings.HasPrefix(s, "../") && path.Clean(s) == s && !strings.ContainsAny(s, "\\\x00")
-}
-
-func uniqueValue(d *json.Decoder, depth int) error {
-	if depth > 64 {
-		return errors.New("JSON nesting exceeds 64")
-	}
-	t, err := d.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := t.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delim {
-	case '{':
-		keys := map[string]bool{}
-		for d.More() {
-			t, e := d.Token()
-			if e != nil {
-				return e
-			}
-			k, ok := t.(string)
-			if !ok || keys[k] {
-				return fmt.Errorf("duplicate or invalid key %q", k)
-			}
-			keys[k] = true
-			if e = uniqueValue(d, depth+1); e != nil {
-				return e
-			}
-		}
-	case '[':
-		for d.More() {
-			if e := uniqueValue(d, depth+1); e != nil {
-				return e
-			}
-		}
-	default:
-		return errors.New("unexpected delimiter")
-	}
-	_, err = d.Token()
-	return err
 }
 
 func schema(s map[string]any, depth int) error {
@@ -288,7 +241,7 @@ func schema(s map[string]any, depth int) error {
 			}
 			b, _ := json.Marshal(v)
 			if n, ok := v.(json.Number); ok {
-				r, _ := number(n)
+				r, _ := extensionjson.Number(n)
 				b = []byte(r.RatString())
 			}
 			if seen[string(b)] {
@@ -315,7 +268,7 @@ func scalarMatches(v any, t string) bool {
 		if !ok {
 			return false
 		}
-		r, ok := number(n)
+		r, ok := extensionjson.Number(n)
 		return ok && (t != "integer" || r.IsInt())
 	}
 	return false
@@ -327,7 +280,7 @@ func bounds(s map[string]any, lo, hi string, integer bool, ceiling int64) error 
 		if !ok {
 			return nil, fmt.Errorf("%s must be a number", k)
 		}
-		r, ok := number(n)
+		r, ok := extensionjson.Number(n)
 		if !ok || (integer && !r.IsInt()) {
 			return nil, fmt.Errorf("invalid %s", k)
 		}
@@ -355,26 +308,13 @@ func bounds(s map[string]any, lo, hi string, integer bool, ceiling int64) error 
 	return nil
 }
 
-func number(n json.Number) (*big.Rat, bool) {
-	if len(n) > 128 {
-		return nil, false
-	}
-	if i := strings.IndexAny(string(n), "eE"); i >= 0 {
-		e, err := strconv.Atoi(string(n)[i+1:])
-		if err != nil || e > 308 || e < -308 {
-			return nil, false
-		}
-	}
-	return new(big.Rat).SetString(string(n))
-}
-
 func enumBounds(v any, typ string, s map[string]any) error {
 	switch typ {
 	case "string":
 		n := int64(utf8.RuneCountInString(v.(string)))
 		for _, k := range []string{"minLength", "maxLength"} {
 			if b, ok := s[k].(json.Number); ok {
-				r, _ := number(b)
+				r, _ := extensionjson.Number(b)
 				cmp := new(big.Rat).SetInt64(n).Cmp(r)
 				if (k == "minLength" && cmp < 0) || (k == "maxLength" && cmp > 0) {
 					return errors.New("enum string violates length bounds")
@@ -382,9 +322,9 @@ func enumBounds(v any, typ string, s map[string]any) error {
 			}
 		}
 	case "integer", "number":
-		r, _ := number(v.(json.Number))
-		lo, _ := number(s["minimum"].(json.Number))
-		hi, _ := number(s["maximum"].(json.Number))
+		r, _ := extensionjson.Number(v.(json.Number))
+		lo, _ := extensionjson.Number(s["minimum"].(json.Number))
+		hi, _ := extensionjson.Number(s["maximum"].(json.Number))
 		if r.Cmp(lo) < 0 || r.Cmp(hi) > 0 {
 			return errors.New("enum number violates bounds")
 		}
