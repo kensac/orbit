@@ -206,6 +206,53 @@ func TestGitHubBlock(t *testing.T) {
 	}
 }
 
+func TestReposAreReadRepositoriesOnly(t *testing.T) {
+	orbit := `
+defaults: {runner: r, channels: [c]}
+runners: {r: {kind: claude-code}, a: {kind: anthropic, api_key_env: K}}
+channels: {c: {kind: log}}
+github: {app_id: 7, private_key_env: K, repositories: [kensac/orbit], read_repositories: [kensac/orbit, kensac/homelab-config, other/orbit]}
+`
+	bad := `name: m
+charter: x
+runner: a
+repos:
+  - {repo: kensac/orbit, ref: main}
+  - {repo: kensac/secret}
+  - {repo: other/orbit}
+  - {repo: kensac/homelab-config, ref: "--upload-pack=x"}
+`
+	_, err := Load(write(t, map[string]string{"orbit.yaml": orbit, "agents/m.yaml": bad}))
+	for _, want := range []string{
+		"kensac/secret is not in github.read_repositories",
+		`a second repository named "orbit"`,
+		`ref "--upload-pack=x" is not a branch`,
+		`needs "github" in needs`,
+		"an anthropic runner reads no files",
+	} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %v, want %q", err, want)
+		}
+	}
+	good := "name: m\ncharter: x\nneeds: [github]\nrepos: [{repo: kensac/homelab-config, ref: main}, {repo: kensac/orbit}]\n"
+	cfg, err := Load(write(t, map[string]string{"orbit.yaml": orbit, "agents/m.yaml": good}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agents["m"].Repos[0].Name() != "homelab-config" {
+		t.Fatal("a repository's directory is its name")
+	}
+	// Reading a repository grants nothing to act on it.
+	if cfg.Deployment.AllowsRepo("kensac/homelab-config") || !cfg.Deployment.AllowsRead("kensac/homelab-config") {
+		t.Fatal("read_repositories must not widen repositories")
+	}
+	noGitHub := "name: m\ncharter: x\nneeds: [github]\nrepos: [{repo: kensac/orbit}]\n"
+	if _, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/m.yaml": noGitHub})); err == nil ||
+		!strings.Contains(err.Error(), "not in github.read_repositories") {
+		t.Fatalf("repos without a github block = %v", err)
+	}
+}
+
 const buildBase = `
 defaults: {runner: r, channels: [c]}
 runners: {r: {kind: claude-code}, x: {kind: codex}}
@@ -391,5 +438,46 @@ func TestAPrecheckIsForFileAgentsOnly(t *testing.T) {
 		Spec: []byte(`{"name":"b","charter":"y","gates":[{"kind":"precheck","command":"cat /proc/1/environ"}]}`)}})
 	if err == nil || !strings.Contains(err.Error(), "only an agent in the configuration files") {
 		t.Fatalf("a database agent's precheck = %v", err)
+	}
+}
+
+func TestTimezonesAreParsedOnceAndCheckedAtLoad(t *testing.T) {
+	cfg, err := Load(write(t, map[string]string{"orbit.yaml": "timezone: Europe/Berlin\n" + base,
+		"agents/a.yaml": "name: a\ncharter: x\ntimezone: America/New_York\ntriggers: []\n",
+		"agents/b.yaml": "name: b\ncharter: x\ntriggers: []\n"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Agents["a"].Location().String(); got != "America/New_York" {
+		t.Errorf("agent a location = %s", got)
+	}
+	if got := cfg.Agents["b"].Location().String(); got != "Europe/Berlin" {
+		t.Errorf("agent b location = %s, want the deployment's zone", got)
+	}
+	if got := cfg.Deployment.Location().String(); got != "Europe/Berlin" {
+		t.Errorf("deployment location = %s", got)
+	}
+	if got := (&Agent{}).Location(); got != time.UTC {
+		t.Errorf("an unvalidated agent reads as %s, want UTC", got)
+	}
+
+	_, err = Load(write(t, map[string]string{"orbit.yaml": "timezone: Mars/Olympus\n" + base,
+		"agents/a.yaml": "name: a\ncharter: x\ntimezone: Moon/Tranquility\ntriggers: []\n"}))
+	for _, want := range []string{"orbit.yaml timezone", "Mars/Olympus", `agent "a": timezone`, "Moon/Tranquility"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to name %q", err, want)
+		}
+	}
+}
+
+func TestRunURL(t *testing.T) {
+	for public, want := range map[string]string{
+		"":                           "",
+		"https://orbit.example.com":  "https://orbit.example.com/ui/runs/r-1",
+		"https://example.com/orbit/": "https://example.com/orbit/ui/runs/r-1",
+	} {
+		if got := (Deployment{PublicURL: public}).RunURL("r-1"); got != want {
+			t.Errorf("RunURL under %q = %q, want %q", public, got, want)
+		}
 	}
 }

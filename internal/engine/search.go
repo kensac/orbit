@@ -31,66 +31,77 @@ const (
 	searchMost    = 50
 )
 
-// searchSocketPath is per process and agent, short, and outside every workdir: a unix socket path
+// agentSocketPath is per process, kind and agent, short, and outside every workdir: a unix socket path
 // is at most 104 bytes on macOS (108 on Linux), and a run's state directory
 // under the data directory can be longer than that.
-func (e *Engine) searchSocketPath(agent string) string {
+func (e *Engine) agentSocketPath(kind, agent string) string {
 	h := sha256.Sum256(fmt.Appendf(nil, "%d\x00%s\x00%s", os.Getpid(), e.DataDir, agent))
-	return filepath.Join(os.TempDir(), "orbit-search-"+hex.EncodeToString(h[:8])+".sock")
+	return filepath.Join(os.TempDir(), "orbit-"+kind+"-"+hex.EncodeToString(h[:8])+".sock")
 }
 
-// searchSocket returns the agent's search socket, serving it on first use.
-// It returns "" when it cannot listen, and the run goes without the tool.
-func (e *Engine) searchSocket(agent string) string {
+// agentSocket returns the agent's socket of kind, serving it on first use
+// with answer, which gets each connection with its deadline set. It
+// returns "" when it cannot listen, and the run goes without the tools.
+func (e *Engine) agentSocket(kind, agent string, answer func(net.Conn)) string {
 	e.searchMu.Lock()
 	defer e.searchMu.Unlock()
-	if p, ok := e.searchLn[agent]; ok {
+	key := kind + "\x00" + agent
+	if p, ok := e.searchLn[key]; ok {
 		return p
 	}
-	path := e.searchSocketPath(agent)
+	path := e.agentSocketPath(kind, agent)
 	_ = os.Remove(path) // a socket a previous process left
 	ln, err := net.Listen("unix", path)
 	if err != nil {
-		e.Log.Warn("search socket", "agent", agent, "err", err)
+		e.Log.Warn(kind+" socket", "agent", agent, "err", err)
 		return ""
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = ln.Close()
-		e.Log.Warn("search socket", "agent", agent, "err", err)
+		e.Log.Warn(kind+" socket", "agent", agent, "err", err)
 		return ""
 	}
 	if e.searchLn == nil {
 		e.searchLn = map[string]string{}
 	}
-	e.searchLn[agent] = path
-	go e.serveSearch(ln, agent)
+	e.searchLn[key] = path
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				if !errors.Is(err, net.ErrClosed) {
+					e.Log.Warn(kind+" socket", "agent", agent, "err", err)
+				}
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				_ = conn.SetDeadline(time.Now().Add(socketDeadline))
+				answer(conn)
+			}()
+		}
+	}()
 	return path
 }
 
-func (e *Engine) serveSearch(ln net.Listener, agent string) {
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if !errors.Is(err, net.ErrClosed) {
-				e.Log.Warn("search socket", "agent", agent, "err", err)
-			}
-			return
+// socketDeadline bounds one request on an agent socket, above the tool
+// server's own wait (harness's searchTimeout and repoTimeout).
+const socketDeadline = 90 * time.Second
+
+// searchSocket returns the agent's search socket, serving it on first use.
+func (e *Engine) searchSocket(agent string) string {
+	return e.agentSocket("search", agent, func(conn net.Conn) {
+		var resp harness.SearchResponse
+		req, err := harness.ReadSearchRequest(conn)
+		if err == nil {
+			resp.Result, err = e.searchFor(context.Background(), agent, req)
 		}
-		go func() {
-			defer func() { _ = conn.Close() }()
-			_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
-			var resp harness.SearchResponse
-			req, err := harness.ReadSearchRequest(conn)
-			if err == nil {
-				resp.Result, err = e.searchFor(context.Background(), agent, req)
-			}
-			if err != nil {
-				resp.Error = err.Error()
-			}
-			b, _ := json.Marshal(resp)
-			_, _ = conn.Write(append(b, '\n'))
-		}()
-	}
+		if err != nil {
+			resp.Error = err.Error()
+		}
+		b, _ := json.Marshal(resp)
+		_, _ = conn.Write(append(b, '\n'))
+	})
 }
 
 // searchFor runs req within agent's records and shapes the page for a
@@ -100,9 +111,7 @@ func (e *Engine) searchFor(ctx context.Context, agent string, req harness.Search
 	loc := time.UTC
 	q := store.SearchQuery{Q: req.Q, Agent: agent, ConversationID: req.ConversationID, Limit: req.Limit}
 	if a, ok := e.Current().Config.Agents[agent]; ok {
-		if l, err := time.LoadLocation(a.Timezone); err == nil {
-			loc = l
-		}
+		loc = a.Location()
 		// The entries the agent reads are its to search too: the profile's and its topics'.
 		topics, err := e.agentTopics(ctx, a)
 		if err != nil {

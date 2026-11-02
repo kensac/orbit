@@ -28,8 +28,9 @@ const mcpProtocol = "2025-06-18"
 // Each successful query or calc result is also appended to LedgerPath(state),
 // the record the figure check reads of what orbit computed. With a search
 // socket it also serves search (search.go), whose results are earlier
-// writing, not computation, and so never back a figure.
-func ServeMCP(in io.Reader, out io.Writer, root, state, search, version string) error {
+// writing, not computation, and so never back a figure; with a repository
+// socket, the repository tools (repos.go), which back none either.
+func ServeMCP(in io.Reader, out io.Writer, root, state, search, repos, version string) error {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 64<<10), 4<<20)
 	enc := json.NewEncoder(out)
@@ -52,7 +53,7 @@ func ServeMCP(in io.Reader, out io.Writer, root, state, search, version string) 
 		if len(req.ID) == 0 {
 			continue // a notification: nothing to answer
 		}
-		resp := handle(req.ID, req.Method, req.Params, root, state, search, version)
+		resp := handle(req.ID, req.Method, req.Params, root, state, search, repos, version)
 		if err := enc.Encode(resp); err != nil {
 			return err
 		}
@@ -68,7 +69,7 @@ func rpcResult(id json.RawMessage, result any) map[string]any {
 	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
 }
 
-func handle(id json.RawMessage, method string, params json.RawMessage, root, state, search, version string) map[string]any {
+func handle(id json.RawMessage, method string, params json.RawMessage, root, state, search, repos, version string) map[string]any {
 	switch method {
 	case "initialize":
 		var p struct {
@@ -115,6 +116,11 @@ func handle(id json.RawMessage, method string, params json.RawMessage, root, sta
 				"inputSchema": SearchSchema,
 			})
 		}
+		if repos != "" {
+			for _, t := range RepoTools {
+				tools = append(tools, map[string]any{"name": t.Name, "description": t.Description, "inputSchema": t.Schema})
+			}
+		}
 		return rpcResult(id, map[string]any{"tools": tools})
 	case "tools/call":
 		var p struct {
@@ -148,6 +154,15 @@ func handle(id json.RawMessage, method string, params json.RawMessage, root, sta
 				map[string]any{"type": "text", "text": string(meta)},
 				map[string]any{"type": "text", "text": text},
 			}})
+		}
+		if repos != "" && IsRepoTool(p.Name) {
+			// A repository's history is evidence, not a computed figure:
+			// it goes to no ledger.
+			text, err := Repo(repos, RepoRequest{Tool: p.Name, Args: p.Arguments})
+			if err != nil {
+				return rpcResult(id, map[string]any{"isError": true, "content": []any{map[string]any{"type": "text", "text": p.Name + ": " + err.Error()}}})
+			}
+			return rpcResult(id, map[string]any{"content": []any{map[string]any{"type": "text", "text": text}}})
 		}
 		var res map[string]any
 		var err error
