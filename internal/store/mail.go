@@ -92,15 +92,24 @@ func mailSeen(ctx context.Context, db rowQuerier, messageID string) (MailResult,
 	return r, true, nil
 }
 
-// MailForRun is the newest mail among the messages run read: its Message-ID and subject, or "" when the run read none. A run that answers a mail is delivered as a reply to it.
-func (s *Store) MailForRun(ctx context.Context, runID string) (messageID, subject string, err error) {
-	err = s.Pool.QueryRow(ctx, `SELECT mi.message_id, mi.subject FROM mail_in mi
+// RunMail is the mail a run answers: its Message-ID and subject, and the address of its sender.
+type RunMail struct {
+	MessageID, Subject, From string
+}
+
+// MailForRun is the newest mail among the messages run read, or nil when the run read none. A run that answers a mail is delivered as a reply to it, to its sender.
+func (s *Store) MailForRun(ctx context.Context, runID string) (*RunMail, error) {
+	var m RunMail
+	err := s.Pool.QueryRow(ctx, `SELECT mi.message_id, mi.subject, mi.from_addr FROM mail_in mi
 		JOIN messages m ON m.id = mi.orbit_message_id
-		WHERE m.run_id = $1 ORDER BY mi.received_at DESC LIMIT 1`, runID).Scan(&messageID, &subject)
+		WHERE m.run_id = $1 ORDER BY mi.received_at DESC LIMIT 1`, runID).Scan(&m.MessageID, &m.Subject, &m.From)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", nil
+		return nil, nil
 	}
-	return messageID, subject, err
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
 }
 
 // RunConversation is the conversation a run belongs to.

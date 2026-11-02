@@ -12,7 +12,7 @@ import (
 	"github.com/kensac/orbit/internal/spec"
 )
 
-var clockRE = regexp.MustCompile(`^(?:([0-9]{2}):([0-9]{2})|([0-9]{1,2})(?::([0-9]{2}))?\s?(am|pm))$`)
+var clockRE = regexp.MustCompile(`^(?:([0-9]{1,2})(?::([0-9]{2}))?|([0-9]{1,2})(?::([0-9]{2}))?\s?(am|pm))$`)
 var monthlyRE = regexp.MustCompile(`^(?:the ([0-9]{1,2})(st|nd|rd|th)(?: of every month)?|every month on the ([0-9]{1,2})(st|nd|rd|th))$`)
 var days = map[string]string{"monday": "MO", "tuesday": "TU", "wednesday": "WE", "thursday": "TH", "friday": "FR", "saturday": "SA", "sunday": "SU"}
 
@@ -90,10 +90,11 @@ func Parse(text string, anchor time.Time, loc *time.Location) (spec.Trigger, err
 	return trigger, nil
 }
 
+// parseClock reads a time of day: without am or pm it is the 24-hour clock ("8" and "8:00" are 08:00, "20" is 20:00), which the caller echoes back for confirmation.
 func parseClock(s string) (int, int, error) {
 	m := clockRE.FindStringSubmatch(s)
 	if m == nil {
-		return 0, 0, errors.New("time must be HH:MM (24-hour) or explicitly am/pm, such as 9am or 9:30pm")
+		return 0, 0, errors.New("time must be on the 24-hour clock (8, 08:00, 20:30) or explicitly am/pm, such as 9am or 9:30pm")
 	}
 	hour, minute := 0, 0
 	if m[1] != "" {

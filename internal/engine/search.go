@@ -110,9 +110,7 @@ func (e *Engine) searchSocket(agent string) string {
 func (e *Engine) searchFor(ctx context.Context, agent string, req harness.SearchRequest) (map[string]any, error) {
 	loc := time.UTC
 	if a, ok := e.Current().Config.Agents[agent]; ok {
-		if l, err := time.LoadLocation(a.Timezone); err == nil {
-			loc = l
-		}
+		loc = a.Location()
 	}
 	q := store.SearchQuery{Q: req.Q, Agent: agent, ConversationID: req.ConversationID, Limit: req.Limit}
 	if q.Limit <= 0 {

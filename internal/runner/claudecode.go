@@ -14,6 +14,7 @@ import (
 	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/status"
 )
 
 // claudeCode runs `claude -p` headless. Auth is CLAUDE_CODE_OAUTH_TOKEN (a
@@ -80,22 +81,49 @@ func claudeSettings(keepDays int, hooks map[string]any) string {
 // for a loaded host.
 const hookTimeout = 10
 
-// harnessHooks are the hooks orbit configures: a path guard on the file
-// tools, with Figures the figure check on the structured output, and the
-// pinned entries on every prompt.
-// Matchers are tool names joined by |.
+// harnessHooks are the hooks orbit configures, all one command: a path
+// guard on the file tools, with Figures the figure check on the structured
+// output, the run's pinned entries on every prompt (UserPromptSubmit), and
+// with Status every hook event posted to the run's status listener. One PreToolUse entry for every tool keeps it one process per
+// event; the hook decides by tool name. Matchers are tool names joined by
+// |, or * for all. An agent's own hooks (spec hooks) follow orbit's on
+// their event.
 func harnessHooks(h *Harness, workdir, home string) map[string]any {
-	cmd := func(extra string) []any {
-		return []any{map[string]any{"type": "command", "timeout": hookTimeout,
-			"command": shellQuote(h.Bin) + " hook --root " + shellQuote(workdir) +
-				" --state " + shellQuote(harness.StateDir(home)) + extra}}
-	}
-	pre := []any{map[string]any{"matcher": "Read|Glob|Grep", "hooks": cmd("")}}
+	command := shellQuote(h.Bin) + " hook --root " + shellQuote(workdir) +
+		" --state " + shellQuote(harness.StateDir(home))
 	if h.Figures {
-		pre = append(pre, map[string]any{"matcher": "StructuredOutput", "hooks": cmd(" --figures")})
+		command += " --figures"
 	}
-	// Every prompt gets the run's pinned entries (harness.PinnedPath) added as context, so they hold however far the session has compacted.
-	out := map[string]any{"PreToolUse": pre, "UserPromptSubmit": []any{map[string]any{"hooks": cmd("")}}}
+	if h.Status != "" {
+		command += " --status " + shellQuote(h.Status)
+	}
+	entry := func(matcher string) []any {
+		e := map[string]any{"hooks": []any{map[string]any{"type": "command", "timeout": hookTimeout, "command": command}}}
+		if matcher != "" {
+			e["matcher"] = matcher
+		}
+		return []any{e}
+	}
+	out := map[string]any{}
+	if h.Status == "" {
+		matcher := "Read|Glob|Grep"
+		if h.Figures {
+			matcher += "|StructuredOutput"
+		}
+		out["PreToolUse"] = entry(matcher)
+	} else {
+		for _, ev := range status.HookEvents {
+			m := ""
+			if status.ToolEvents[ev] {
+				m = "*"
+			}
+			out[ev] = entry(m)
+		}
+	}
+	// Every prompt gets the run's pinned entries (harness.PinnedPath) added as context, so they hold however far the session has compacted; status mode has the event already.
+	if _, ok := out["UserPromptSubmit"]; !ok {
+		out["UserPromptSubmit"] = entry("")
+	}
 	for _, ah := range h.AgentHooks {
 		timeout := hookTimeout
 		if ah.Def.Timeout > 0 {
@@ -312,7 +340,7 @@ func parseClaudeResult(line []byte) (*Result, error) {
 	usage, _ := json.Marshal(map[string]any{
 		"usage": r.Usage, "model_usage": r.ModelUsage, "num_turns": r.NumTurns,
 	})
-	res := &Result{Usage: usage, CostUSD: r.TotalCostUSD, SessionID: r.SessionID}
+	res := &Result{Usage: usage, Tokens: r.Tokens(), CostUSD: r.TotalCostUSD, SessionID: r.SessionID}
 	if r.IsError {
 		return res, fmt.Errorf("%w: claude-code %s/%s: %s", ErrBackend, r.Subtype, r.TerminalReason, firstLine(r.Failure()))
 	}

@@ -9,7 +9,7 @@ TESTPG_NAME := orbit-testpg-$(CHECKOUT_ID)
 TESTPG_PORT := $(shell echo $$((40000 + 0x$(CHECKOUT_ID) % 20000)))
 TESTPG_URL := postgres://postgres:postgres@127.0.0.1:$(TESTPG_PORT)/postgres?sslmode=disable
 
-.PHONY: check check-sandbox fmt fmt-check vet lint test test-sandbox prose validate vuln build image testdb-up testdb-down
+.PHONY: check check-sandbox fmt fmt-check vet lint test test-sandbox compat prose validate vuln build image testdb-up testdb-down
 
 check: fmt-check vet lint prose validate test ## everything CI gates on
 
@@ -35,6 +35,15 @@ test:           ## the tests, against ORBIT_TEST_DATABASE_URL or make testdb-up'
 	if [ -z "$$url" ] && [ "$$(docker inspect -f '{{.State.Running}}' $(TESTPG_NAME) 2>/dev/null)" = true ]; then url='$(TESTPG_URL)'; fi; \
 	if [ -z "$$url" ]; then echo "no test database: database tests skip (make testdb-up to run them)"; fi; \
 	ORBIT_TEST_DATABASE_URL="$$url" go test -race -count=1 ./...
+
+# The previous release (BASE, default origin/main) keeps working on this
+# tree's schema, as during a rollout (deploy/compat.sh). Needs a database
+# server, as the tests do.
+compat:         ## the previous release on this tree's schema (BASE=<commit>)
+	@url="$${ORBIT_TEST_DATABASE_URL:-}"; \
+	if [ -z "$$url" ] && [ "$$(docker inspect -f '{{.State.Running}}' $(TESTPG_NAME) 2>/dev/null)" = true ]; then url='$(TESTPG_URL)'; fi; \
+	if [ -z "$$url" ]; then echo "compat needs a database server: make testdb-up or ORBIT_TEST_DATABASE_URL"; exit 1; fi; \
+	ORBIT_TEST_DATABASE_URL="$$url" deploy/compat.sh $(or $(BASE),origin/main)
 
 test-sandbox:   ## the tests without -race (it needs cgo) and with database tests skipping
 	ORBIT_TEST_DATABASE_URL= CGO_ENABLED=0 go test -count=1 ./...

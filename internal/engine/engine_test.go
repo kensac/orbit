@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/testdb"
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 var ctx = context.Background()
@@ -39,6 +41,10 @@ type fakeRunner struct {
 	// seen, when set, is called with the request while the run's workdir
 	// exists.
 	seen func(runner.Request)
+	// events are emitted after the first, as the CLI's stream would (tool calls the journal records).
+	events []runner.Event
+	// said are assistant lines emitted before the output.
+	said []string
 }
 
 func (f *fakeRunner) Kind() string  { return "claude-code" }
@@ -69,6 +75,12 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 		}
 	}
 	emit(runner.Event{Kind: "assistant", Payload: []byte(`{"type":"assistant","session_id":"` + sid + `"}`)})
+	for _, ev := range f.events {
+		emit(ev)
+	}
+	for _, l := range f.said {
+		emit(runner.Event{Kind: "assistant", Payload: []byte(l)})
+	}
 	if f.block != nil {
 		close(f.started)
 		<-ctx.Done()
@@ -83,7 +95,8 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 		return nil, ctx.Err()
 	}
 	cost := 0.25
-	return &runner.Result{Output: json.RawMessage(f.output), CostUSD: &cost, SessionID: sid}, f.err
+	used := &tokens.Usage{Count: tokens.Count{Input: 10, Output: 5, CacheRead: 300, CacheCreation: 90}, Model: "claude-fake", NumTurns: 2}
+	return &runner.Result{Output: json.RawMessage(f.output), CostUSD: &cost, SessionID: sid, Tokens: used}, f.err
 }
 
 // hooks collects what the webhook channel and endpoint receive.
@@ -100,6 +113,13 @@ func harness(t *testing.T, fr *fakeRunner) (*engine.Engine, *store.Store, *hooks
 
 // harnessWith appends extra to the agent's YAML.
 func harnessWith(t *testing.T, fr *fakeRunner, extra string) (*engine.Engine, *store.Store, *hooks) {
+	t.Helper()
+	return harnessFiles(t, fr, extra, nil)
+}
+
+// harnessFiles is harnessWith plus files: "orbit.yaml" is appended to the
+// deployment, any other name is written into the configuration directory.
+func harnessFiles(t *testing.T, fr *fakeRunner, extra string, files map[string]string) (*engine.Engine, *store.Store, *hooks) {
 	t.Helper()
 	s := testdb.New(t)
 	h := &hooks{}
@@ -146,7 +166,12 @@ channels:
   hook: {kind: webhook, url: %[1]s/notify}
 endpoints:
   ep: {url: %[1]s/endpoint}
-`, srv.URL))
+%[2]s`, srv.URL, files["orbit.yaml"]))
+	for name, body := range files {
+		if name != "orbit.yaml" {
+			write(name, body)
+		}
+	}
 	write("agents/finance.yaml", fmt.Sprintf(`
 name: finance
 charter: Review my spending.
@@ -228,6 +253,15 @@ func TestRunEndToEnd(t *testing.T) {
 	if run.Status != "succeeded" || *run.Summary != "October spend was $5,914" || *run.CostUSD != 0.25 {
 		t.Fatalf("run = %s err=%v", run.Status, *run.Error)
 	}
+	// The backend's tokens are the attempt's, and the prefix it was sent is recorded with it.
+	want := runner.PrefixOf("claude-code", "fake", fr.got.Prompt[len("# Charter\n\n"):strings.Index(fr.got.Prompt, "\n\n# This run")], fr.got)
+	if tk := run.Tokens; tk == nil || tk.Input != 10 || tk.CacheRead != 300 || tk.NumTurns != 2 || tk.Model != "claude-fake" ||
+		tk.CacheHitRatio == nil || *tk.CacheHitRatio != 0.75 {
+		t.Fatalf("tokens = %+v", run.Tokens)
+	}
+	if run.Prefix == nil || run.Prefix.SHA != want.SHA || run.Prefix.Parts["charter"] != want.Parts["charter"] || run.Prefix.Changed != nil {
+		t.Fatalf("prefix = %+v, want %+v", run.Prefix, want)
+	}
 	// The source was fetched with the credential, both pages merged, and
 	// written where the prompt says it is.
 	if len(fr.got.Inputs) != 1 || string(fr.got.Inputs[0].Content) != `[{"page":1},{"page":2}]` {
@@ -307,6 +341,24 @@ func TestRunEndToEnd(t *testing.T) {
 	}
 }
 
+func TestAStubReportIsReplacedByTheFinalProse(t *testing.T) {
+	answer := "## UX issues\n\n1. The send button is hidden.\n2. Steps count changes on expand."
+	fr := &fakeRunner{output: strings.Replace(goodOutput, `"Spend was fine."`, `"Listed the issues in the chat reply."`, 1),
+		said: []string{
+			`{"type":"assistant","message":{"content":[{"type":"text","text":"Reading."},{"type":"tool_use","id":"t1","name":"Read","input":{}}]}}`,
+			`{"type":"assistant","message":{"content":[{"type":"text","text":` + strconv.Quote(answer) + `}]}}`,
+		}}
+	e, s, _ := harness(t, fr)
+	c := claim(t, e, s)
+	if err := e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	run, _ := s.GetRun(ctx, c.ID)
+	if run.Status != "succeeded" || *run.Report != answer || *run.Summary != "October spend was $5,914" {
+		t.Fatalf("run = %s report=%q summary=%q", run.Status, *run.Report, *run.Summary)
+	}
+}
+
 func TestOutputOutsideTheContractFailsTheRun(t *testing.T) {
 	fr := &fakeRunner{output: `{"summary": "x"}`}
 	e, s, h := harness(t, fr)
@@ -377,6 +429,11 @@ func TestApprovalSignature(t *testing.T) {
 	sig := e.ApprovalSig("a1")
 	if !e.CheckApprovalSig("a1", sig) || e.CheckApprovalSig("a2", sig) || e.CheckApprovalSig("a1", "") {
 		t.Fatal("signature must name exactly one action")
+	}
+	// Recorded before the key derivation moved to internal/secret: an approval link already sent must keep working.
+	old := &engine.Engine{Secret: []byte("0123456789abcdef0123456789abcdef-golden")}
+	if !old.CheckApprovalSig("7a1c2d3e-0000-4000-8000-000000000001", "a1ba81769f93cc542236f4f5698826553c5a38d5252de274a1d29db9172ef66b") {
+		t.Fatal("an approval link signed before the change no longer verifies")
 	}
 }
 

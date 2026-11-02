@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/kensac/orbit/internal/status"
 )
 
 // Claude Code runs a command hook with the event as JSON on stdin and reads
@@ -32,6 +35,9 @@ type HookOptions struct {
 	// ledger, the denial counts), given by orbit as a flag rather than read
 	// from HOME, so nothing in the environment can move it.
 	State string
+	// Status is the run's status socket (status.SocketPath): every event is
+	// posted there, or spooled under State when it does not answer.
+	Status string
 }
 
 // MaxFigureDenials is how often one prompt's output is sent back for
@@ -49,36 +55,71 @@ type hookInput struct {
 	ToolInput json.RawMessage `json:"tool_input"`
 }
 
-// Hook reads one event and writes one decision. It fails closed: an event
-// it cannot read is denied, so a bug here never opens the sandbox.
+// Hook reads one event, writes one decision, then reports the event to
+// the run's status listener.
+//
+// The decision fails closed: an event it cannot read is denied, so a bug
+// here never opens the sandbox. Every event other than PreToolUse gets
+// `{}` (no decision), or for UserPromptSubmit the pinned entries' context,
+// before anything else happens, and the report comes
+// after the decision is written and can neither change it nor the exit
+// status: the CLI reads a hook's exit code 2 as "block" (on Stop: keep
+// working; on PreToolUse: deny), so a failure while reporting status must
+// never surface as one. Reporting is best effort; status falls back to the
+// run's row when it is lost.
 func Hook(in io.Reader, out io.Writer, o HookOptions) error {
-	var ev hookInput
 	b, err := io.ReadAll(io.LimitReader(in, maxLine))
+	var ev hookInput
 	if err == nil {
 		err = json.Unmarshal(b, &ev)
 	}
 	if err != nil {
 		return write(out, deny("PreToolUse", "orbit hook could not read the event: "+err.Error()))
 	}
+	werr := write(out, decide(ev, o))
+	report(b, o)
+	return werr
+}
+
+// decide is the hook's decision on ev: a PreToolUse guard, the run's pinned entries for a prompt (UserPromptSubmit), or none.
+func decide(ev hookInput, o HookOptions) map[string]any {
 	if ev.Event == "UserPromptSubmit" {
-		return write(out, pinnedContext(o.State))
+		return pinnedContext(o.State)
 	}
 	if ev.Event != "PreToolUse" {
-		return write(out, map[string]any{})
+		return map[string]any{}
 	}
 	switch ev.ToolName {
 	case "Read", "Glob", "Grep":
 		if reason := pathGuard(o.Root, ev.ToolName, ev.ToolInput); reason != "" {
-			return write(out, deny(ev.Event, reason))
+			return deny(ev.Event, reason)
 		}
 	case "StructuredOutput":
 		if o.Figures {
 			if reason := figureCheck(o, ev); reason != "" {
-				return write(out, deny(ev.Event, reason))
+				return deny(ev.Event, reason)
 			}
 		}
 	}
-	return write(out, map[string]any{})
+	return map[string]any{}
+}
+
+// report posts the event to the run's status listener. Nothing it does
+// reaches the hook's output or exit status.
+func report(input []byte, o HookOptions) {
+	if o.Status == "" {
+		return
+	}
+	defer func() { _ = recover() }()
+	ev, err := status.FromHook(input, time.Now())
+	if err != nil {
+		return
+	}
+	spool := ""
+	if o.State != "" {
+		spool = status.SpoolPath(o.State)
+	}
+	_ = status.Post(o.Status, spool, ev)
 }
 
 // maxLine bounds the event read: a StructuredOutput input is the whole
