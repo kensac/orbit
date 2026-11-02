@@ -15,6 +15,7 @@ import (
 	"maps"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -93,6 +94,109 @@ type GitHub struct {
 	// for them. Reading a repository never permits a ticket or a merge
 	// there; that is Repositories alone.
 	ReadRepositories []string `yaml:"read_repositories,omitempty" json:"read_repositories,omitempty"`
+	// Box is the token orbit writes into agents' boxes for gh and git
+	// (docs/workspace.md, GitHub in the box).
+	Box *GitHubBox `yaml:"box,omitempty" json:"box,omitempty"`
+}
+
+// GitHubBox is the installation token orbit keeps in every running box at
+// /run/orbit/gh-token, for the person's gh and git there.
+type GitHubBox struct {
+	// Token false writes none (and removes one orbit wrote), so a person's
+	// own `gh auth login` in the box is what gh and git use. Default true.
+	Token *bool `yaml:"token,omitempty" json:"token,omitempty"`
+	// Owner is the account whose installation the token is for; default
+	// the owner of the first of Repositories.
+	Owner string `yaml:"owner,omitempty" json:"owner,omitempty"`
+	// Repositories ("owner/name") the token reaches; when empty, every
+	// repository of the installation that Exclude does not match.
+	Repositories []string `yaml:"repositories,omitempty" json:"repositories,omitempty"`
+	// Exclude are path.Match globs on "owner/name"; default
+	// DefaultBoxExclude, the homelab host repositories.
+	Exclude []string `yaml:"exclude,omitempty" json:"exclude,omitempty"`
+	// Permissions is the token's permission set; default
+	// DefaultBoxPermissions.
+	Permissions map[string]string `yaml:"permissions,omitempty" json:"permissions,omitempty"`
+}
+
+// DefaultBoxExclude leaves out the homelab host repositories (`<host>-config`,
+// with homelab-config and dns-config): a box's token never reaches what
+// deploys to a host unless the configuration names it.
+var DefaultBoxExclude = []string{"*/*-config"}
+
+// DefaultBoxPermissions is what a person at a terminal needs of gh and git:
+// push, pull requests, and reading checks. No workflows, so GitHub refuses
+// a push that changes .github/workflows, as for builds.
+var DefaultBoxPermissions = map[string]string{"contents": "write", "pull_requests": "write", "checks": "read", "statuses": "read"}
+
+// boxPermissionKeys are the permissions a box token may name.
+var boxPermissionKeys = []string{"actions", "checks", "contents", "issues", "pull_requests", "statuses"}
+
+// BoxTokenOn reports whether orbit writes a token into boxes.
+func (g *GitHub) BoxTokenOn() bool {
+	return g != nil && (g.Box == nil || g.Box.Token == nil || *g.Box.Token)
+}
+
+// BoxOwner is the installation's owner for the box token.
+func (g *GitHub) BoxOwner() string {
+	if g.Box != nil && g.Box.Owner != "" {
+		return g.Box.Owner
+	}
+	if g.Box != nil && len(g.Box.Repositories) > 0 {
+		o, _, _ := strings.Cut(g.Box.Repositories[0], "/")
+		return o
+	}
+	if len(g.Repositories) > 0 {
+		o, _, _ := strings.Cut(g.Repositories[0], "/")
+		return o
+	}
+	return ""
+}
+
+// BoxExclude is the box token's exclusion globs.
+func (g *GitHub) BoxExclude() []string {
+	if g.Box != nil && g.Box.Exclude != nil {
+		return g.Box.Exclude
+	}
+	return DefaultBoxExclude
+}
+
+// BoxPermissions is the box token's permission set.
+func (g *GitHub) BoxPermissions() map[string]string {
+	if g.Box != nil && len(g.Box.Permissions) > 0 {
+		return g.Box.Permissions
+	}
+	return DefaultBoxPermissions
+}
+
+func (b *GitHubBox) validate() []error {
+	var errs []error
+	if b.Owner != "" && !ownerRE.MatchString(b.Owner) {
+		errs = append(errs, fmt.Errorf("github.box.owner %q is not a GitHub account name", b.Owner))
+	}
+	for _, r := range b.Repositories {
+		o, _, _ := strings.Cut(r, "/")
+		switch {
+		case !RepoRE.MatchString(r) || strings.Contains(r, ".."):
+			errs = append(errs, fmt.Errorf("github.box.repositories: %q is not owner/name", r))
+		case b.Owner != "" && o != b.Owner, o != strings.Split(b.Repositories[0], "/")[0]:
+			errs = append(errs, fmt.Errorf("github.box.repositories: %q is not the owner's: one token reaches one installation", r))
+		}
+	}
+	for _, x := range b.Exclude {
+		if _, err := path.Match(x, ""); err != nil {
+			errs = append(errs, fmt.Errorf("github.box.exclude: %q: %w", x, err))
+		}
+	}
+	for k, v := range b.Permissions {
+		if !slices.Contains(boxPermissionKeys, k) {
+			errs = append(errs, fmt.Errorf("github.box.permissions: %q is not one of %v", k, boxPermissionKeys))
+		}
+		if v != "read" && v != "write" {
+			errs = append(errs, fmt.Errorf("github.box.permissions.%s: %q, want read or write", k, v))
+		}
+	}
+	return errs
 }
 
 // AllowsRepo reports whether repo is one orbit may act on.
@@ -616,6 +720,8 @@ var (
 	// (docker-network:hetzner).
 	CapabilityRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}(:[a-z0-9][a-z0-9._-]{0,62})?$`)
 	envRefRE     = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
+	// ownerRE is a GitHub account name.
+	ownerRE = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 	// RepoRE is GitHub's owner/name shape.
 	RepoRE    = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
 	cronParse = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
@@ -863,6 +969,9 @@ func (c *Config) Validate() error {
 			if !RepoRE.MatchString(r) || strings.Contains(r, "..") {
 				errs = append(errs, fmt.Errorf("github: read_repositories: %q is not owner/name", r))
 			}
+		}
+		if g.Box != nil {
+			errs = append(errs, g.Box.validate()...)
 		}
 	}
 	for _, ch := range d.Defaults.Channels {

@@ -75,6 +75,17 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `api_url` | URL | `https://api.github.com` | GitHub's API (tests, Enterprise). |
 | `repositories` | list of `owner/name` | required | The repositories tickets and `github:merge` may target; every token is limited to one. |
 | `read_repositories` | list of `owner/name` | none | The repositories an agent's `repos` may name: orbit mirrors them and mints read tokens for them. Reading one never permits a ticket or a merge there (configuration.md, Repositories). |
+| `box` | map (below) | token on | The GitHub token orbit keeps in agents' boxes for the person's gh and git there (docs/workspace.md, GitHub in the box). |
+
+### `github.box`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `token` | bool | `true` | `false` writes no token into boxes and removes the one orbit wrote, so a person's own `gh auth login` in the box is what gh and git use. |
+| `owner` | GitHub account | the owner of `repositories[0]` here, else of `github.repositories[0]` | Whose installation of the App the token is for. |
+| `repositories` | list of `owner/name` | every repository of the installation that `exclude` does not match | Exactly the repositories the token reaches, all of one owner. Naming one here reaches it whatever `exclude` says. |
+| `exclude` | list of globs on `owner/name` (`path.Match`) | `["*/*-config"]` | Left out of the installation's repositories when `repositories` is empty. The default leaves out the homelab host repositories (`<host>-config`, with `homelab-config` and `dns-config`), so a box's token never reaches what deploys to a host unless named. `[]` excludes nothing. |
+| `permissions` | map of permission to `read` or `write` | `{contents: write, pull_requests: write, checks: read, statuses: read}` | The token's permissions, of `actions`, `checks`, `contents`, `issues`, `pull_requests`, `statuses`; never `workflows`, so GitHub refuses a push that changes `.github/workflows`. The App must hold each. |
 
 ### `build`
 
