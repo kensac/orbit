@@ -107,7 +107,7 @@ func Open(archive []byte, hide func(name string) bool) (*Snapshot, error) {
 		if name == "." || name == ".." || path.IsAbs(name) || strings.HasPrefix(name, "../") || (hide != nil && hide(name)) {
 			continue
 		}
-		e := &Entry{Path: name, Mode: fs.FileMode(h.Mode&0o777), ModTime: h.ModTime.UTC()}
+		e := &Entry{Path: name, Mode: fs.FileMode(h.Mode & 0o777), ModTime: h.ModTime.UTC()}
 		switch h.Typeflag {
 		case tar.TypeDir:
 			e.Kind, e.Mode = KindDir, e.Mode|fs.ModeDir
