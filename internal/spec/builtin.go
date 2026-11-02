@@ -78,9 +78,22 @@ func Builtins(d Deployment) []*Agent {
 		Session:         sess,
 		// It may define agents, itself included (docs/api.md, Defining
 		// agents): each change is a new, revertible version.
-		Actions: map[string]Rule{"agent:define": RuleAuto},
+		// GitHub writes wait for approval unless the person asked for them
+		// in the conversation, which approves them (docs/api.md, Chat
+		// agents); unattended runs always wait.
+		Actions: builtinActions(d),
 		// Replies stay in orbit; failures and approvals still notify.
 		Notify: NotifySpec{When: "never"},
 		Origin: OriginBuiltin,
 	}}
+}
+
+func builtinActions(d Deployment) ActionSet {
+	rules := ActionSet{"agent:define": RuleAuto, "continue": RuleAuto}
+	if d.GitHub != nil {
+		rules["github:clone"] = RuleAuto
+		rules["github:pr"] = RuleApprove
+		rules["github:merge"] = RuleApprove
+	}
+	return rules
 }

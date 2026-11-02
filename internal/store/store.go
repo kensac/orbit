@@ -916,6 +916,9 @@ type ProposedAction struct {
 	// Error says why the harness denied it regardless of rule (unknown
 	// type, invalid params).
 	Error string
+	// InstructedBy is the person whose message the run answered. An
+	// approve-rule action they asked for is approved by them.
+	InstructedBy string
 }
 
 // Outcome is everything a successful run writes besides its row.
@@ -994,18 +997,55 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 // insertAction stores one proposal with the state its rule gives it: auto
 // arrives approved by rule, approve waits for a person, deny is recorded
 // and never executed.
-func insertAction(ctx context.Context, tx pgx.Tx, runID, agent string, a ProposedAction) (string, error) {
+func insertAction(ctx context.Context, tx execQuerier, runID, agent string, a ProposedAction) (string, error) {
 	status := map[string]string{"auto": "approved", "approve": "pending", "deny": "denied"}[a.Rule]
+	decidedBy := "rule"
+	switch {
+	case a.Rule == "approve" && a.InstructedBy != "" && a.Error == "":
+		status, decidedBy = "approved", a.InstructedBy
+	case a.Rule == "approve":
+		decidedBy = ""
+	}
 	var id string
 	err := tx.QueryRow(ctx, `
-		INSERT INTO actions (run_id, agent, type, params, reason, rule, status, decided_by, decided_at, error, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7,
-		        CASE WHEN $6 = 'approve' THEN NULL ELSE 'rule' END,
-		        CASE WHEN $6 = 'approve' THEN NULL ELSE now() END,
-		        NULLIF($8, ''), clock_timestamp())
+		INSERT INTO actions (run_id, agent, type, params, reason, rule, status, decided_by, decided_at, error, created_at, instructed_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''),
+		        CASE WHEN $8 = '' THEN NULL ELSE now() END,
+		        NULLIF($9, ''), clock_timestamp(), NULLIF($10, ''))
 		RETURNING id::text`,
-		runID, agent, a.Type, []byte(a.Params), a.Reason, a.Rule, status, a.Error).Scan(&id)
+		runID, agent, a.Type, []byte(a.Params), a.Reason, a.Rule, status, decidedBy, a.Error, a.InstructedBy).Scan(&id)
 	return id, err
+}
+
+type execQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// StartActionNow records an action a running chat turn executes at once
+// (its rule auto, or approve and its person asked for it): the row starts
+// executing, decided by the rule or the person, and FinishAction ends it.
+// Only the run's own running claim may do this.
+func (s *Store) StartActionNow(ctx context.Context, runID string, attempt int, agent string, a ProposedAction) (string, error) {
+	var running bool
+	if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs WHERE id = $1 AND status = 'running' AND attempt = $2)`,
+		runID, attempt).Scan(&running); err != nil {
+		return "", err
+	}
+	if !running {
+		return "", fmt.Errorf("run %s attempt %d: %w (not its running claim)", runID, attempt, ErrConflict)
+	}
+	id, err := insertAction(ctx, s.Pool, runID, agent, a)
+	if err != nil {
+		return "", err
+	}
+	tag, err := s.Pool.Exec(ctx, `UPDATE actions SET status = 'executing', executing_since = now() WHERE id = $1 AND status = 'approved'`, id)
+	if err != nil {
+		return "", err
+	}
+	if tag.RowsAffected() == 0 {
+		return id, fmt.Errorf("action %s was not approved: %w", id, ErrConflict)
+	}
+	return id, nil
 }
 
 // ---------------------------------------------------------------- actions
@@ -1026,10 +1066,14 @@ type Action struct {
 	Result     json.RawMessage `json:"result,omitempty"`
 	Error      *string         `json:"error,omitempty"`
 	CreatedAt  time.Time       `json:"created_at"`
+	// InstructedBy is the person whose message the action answers: they
+	// asked for it in the conversation, which approves an action whose
+	// rule is approve.
+	InstructedBy *string `json:"instructed_by,omitempty"`
 }
 
 const actionCols = `id::text, run_id::text, agent, type, params, reason, rule, status, decided_by,
-	decided_at, executed_at, result, error, created_at`
+	decided_at, executed_at, result, error, created_at, instructed_by`
 
 // GetAction returns one action.
 func (s *Store) GetAction(ctx context.Context, id string) (*Action, error) {

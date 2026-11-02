@@ -133,7 +133,7 @@ installation's), is revoked after its operation, and is refused if GitHub
 grants more than was asked. `github:merge` lets a compromised model ask to
 merge an orbit PR whose checks are green; the executor re-checks the head
 commit, the branch and every check itself, and the rule decides whether a
-person approves first. In the fleet a merge is a deploy: keep it `approve`.
+person approves first. In the fleet a merge is a deploy: keep it `approve`. A chat agent's `approve` rules are satisfied by its person's message in the conversation (`instructed_by`): a prompt injected into what the agent read during that turn can therefore get an approve-rule action executed while the person is chatting, as it could make Claude Code do anything its permissions allow. Unattended runs never get this. `github:pr` pushes only `orbit/chat/<branch>`, built by orbit from the working tree (the model's `.git` is never read or run), held to the build's diff policy; merging still needs every required check green.
 
 `actions: write` (rerunning failed jobs) also covers dispatching and cancelling workflows; orbit mints it alone, only in the ticket loop, for `RerunJob` on the job ids of checks that failed, and no model sees it.
 

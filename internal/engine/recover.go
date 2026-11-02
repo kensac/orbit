@@ -30,6 +30,8 @@ type attemptState struct {
 	keeps       bool
 	sessionID   string
 	baseCostUSD float64
+	// instructor is the person the run answers (runInstructor).
+	instructor string
 	// cancel is closed when a person asks the run to stop.
 	cancel     chan struct{}
 	cancelOnce sync.Once

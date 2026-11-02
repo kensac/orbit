@@ -873,12 +873,12 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if _, ok := c.Deployment.Endpoints[strings.TrimPrefix(typ, "webhook:")]; !ok {
 				at("action %q: unknown endpoint", typ)
 			}
-		case typ == "github:merge":
+		case typ == "github:merge", typ == "github:clone", typ == "github:pr":
 			if c.Deployment.GitHub == nil {
 				at("action %q: needs a github block in orbit.yaml", typ)
 			}
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, webhook:<endpoint> or github:merge)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, webhook:<endpoint>, github:merge, github:clone or github:pr)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
