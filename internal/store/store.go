@@ -476,6 +476,9 @@ type RunResult struct {
 	// Gate names what ended a skipped run without a backend call; set
 	// exactly when Status is skipped (runs_skipped_names_gate).
 	Gate string
+	// DiffPolicyFailed is a build whose diff the diff policy refused
+	// (FailBuild records it for a race's comparison).
+	DiffPolicyFailed bool
 }
 
 // Run statuses that end a run.

@@ -44,6 +44,16 @@ func TicketKey(ticketID string) string {
 	return "ticket-" + strings.ToLower(strings.ReplaceAll(ticketID, "-", ""))
 }
 
+// LaneKey is a race lane's checkout key: its lanes build one after
+// another on their own branches, and a lane's fixes after the pick reuse
+// its clone. An empty lane is the ticket's key.
+func LaneKey(ticketID, lane string) string {
+	if lane == "" {
+		return TicketKey(ticketID)
+	}
+	return TicketKey(ticketID) + "-" + lane
+}
+
 // ConversationKey is a conversation's checkout key, for an agent that
 // reads a repository across the runs of one conversation.
 func ConversationKey(conversationID string) string {

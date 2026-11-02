@@ -48,7 +48,7 @@ func (e *Engine) executeBuild(ctx, actx context.Context, snap *Snapshot, a *spec
 	}
 	kind := "claude-code"
 	if err != nil {
-		rr := store.RunResult{Attempt: c.Attempt, Error: err.Error(), CostUSD: cost}
+		rr := store.RunResult{Attempt: c.Attempt, Error: err.Error(), CostUSD: cost, DiffPolicyFailed: errors.Is(err, build.ErrPolicy)}
 		if ferr := e.Store.FailBuild(context.WithoutCancel(ctx), c.ID, rr); ferr != nil {
 			return ferr
 		}
@@ -64,9 +64,11 @@ func (e *Engine) executeBuild(ctx, actx context.Context, snap *Snapshot, a *spec
 	rr := store.RunResult{Attempt: c.Attempt, Summary: res.Output.Summary, Report: report, Output: out,
 		CostUSD: res.CostUSD, Usage: res.Usage, Gate: res.GateName}
 	pr := res.PRNumber
-	if err := e.Store.FinishBuild(context.WithoutCancel(ctx), c.ID, rr, store.TicketUpdate{
-		BaseSHA: res.BaseSHA, Branch: res.Branch, PRNumber: &pr, HeadSHA: res.HeadSHA,
-	}); err != nil {
+	u := store.TicketUpdate{BaseSHA: res.BaseSHA, Branch: res.Branch, PRNumber: &pr, HeadSHA: res.HeadSHA}
+	if d := res.Diff; d != nil {
+		u.Diff = &store.BuildDiff{Added: d.Added, Deleted: d.Deleted, Files: d.Paths()}
+	}
+	if err := e.Store.FinishBuild(context.WithoutCancel(ctx), c.ID, rr, u); err != nil {
 		return err
 	}
 	status := store.StatusSucceeded
@@ -113,7 +115,16 @@ func (e *Engine) build(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 		return nil, fmt.Errorf("orbit does not build %s (build.repositories)", *t.Repo)
 	}
 	rs := d.Runners[a.Runner]
-	if err := e.Store.SetRunner(ctx, c.ID, c.Attempt, "claude-code", rs.Model, a.SHA); err != nil {
+	model := rs.Model
+	lane := ""
+	if b.Lane != nil {
+		// A race lane runs with its variant (docs/tickets.md, Races).
+		lane = *b.Lane
+		if b.Variant.Model != "" {
+			model = b.Variant.Model
+		}
+	}
+	if err := e.Store.SetRunner(ctx, c.ID, c.Attempt, "claude-code", model, a.SHA); err != nil {
 		return nil, err
 	}
 	author, err := build.ParseIdentity(d.Build.Author)
@@ -156,10 +167,10 @@ func (e *Engine) build(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 
 	emit := e.events(ctx, c, log, false).emit
 	job := build.Job{
-		RunID: c.ID, Attempt: c.Attempt, TicketID: t.ID, Title: t.Title, Repo: *t.Repo,
+		RunID: c.ID, Attempt: c.Attempt, TicketID: t.ID, Lane: lane, Title: t.Title, Repo: *t.Repo,
 		Plan: b.Plan, PlanVersion: b.PlanVersion, Ticket: ticket, Purpose: b.Purpose, Failure: b.Failure, Review: review,
 		StackBranch: stackBranch, StackPR: stackPR,
-		Policy: policy, Model: rs.Model, MaxTurns: rs.MaxTurns, Timeout: time.Duration(a.Timeout),
+		Policy: policy, Model: model, Effort: b.Variant.Effort, MaxTurns: rs.MaxTurns, Timeout: time.Duration(a.Timeout),
 		Credential: cred, Author: author,
 	}
 	deps := build.Deps{

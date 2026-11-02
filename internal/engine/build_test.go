@@ -263,3 +263,57 @@ func TestAStackedBuildStartsFromTheTicketBelow(t *testing.T) {
 		t.Fatalf("the stacked PR = %v", last)
 	}
 }
+
+// Each lane of a race builds on its own branch with its variant, and the
+// ticket goes to review once both delivered, with each lane's diff kept for
+// the comparison.
+func TestARaceBuildsEachLaneWithItsVariant(t *testing.T) {
+	b := newBuildEnv(t)
+	sha := b.e.Current().Config.Agents["orbit"].SHA
+	r, _, err := b.s.CreateTicket(ctx, store.NewTicket{Kind: "request", Title: "Add hello", Body: "please", Agent: "orbit",
+		SpecSHA: sha, Repo: "kensac/orbit", Author: "kanishk", Race: 2, Variants: []store.Variant{{Model: "opus", Effort: "high"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, _ := json.Marshal(map[string]any{"steps": []any{writeStep("/work/hello.txt", "hi\n"), writeStep("/work/hello_test.go", "package x\n")}})
+	_, _ = b.s.ProposePlan(ctx, r.TicketID, "", "Add hello.txt.\n\nFAKE-SCRIPT: "+string(script))
+	_, _ = b.s.ApprovePlan(ctx, r.TicketID, 1, "kanishk", "")
+	if _, err := b.s.StartRace(ctx, store.StartBuild{TicketID: r.TicketID, Agent: "orbit", SpecSHA: sha, Purpose: "build"}); err != nil {
+		t.Fatal(err)
+	}
+	argv := map[string]string{}
+	for range 2 {
+		c, _ := b.s.ClaimRun(ctx, "w")
+		bd, _ := b.s.BuildOfRun(ctx, c.ID)
+		if err := b.e.Execute(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		at := b.sb.Attaches()
+		argv[*bd.Lane] = strings.Join(at[len(at)-1].Argv, " ")
+		run, _ := b.s.GetRun(ctx, c.ID)
+		if want := map[string]string{"a": "opus", "b": "m"}[*bd.Lane]; run.Status != "succeeded" || run.Model == nil || *run.Model != want {
+			t.Fatalf("lane %s run = %s model %v, want %s", *bd.Lane, run.Status, run.Model, want)
+		}
+	}
+	if !strings.Contains(argv["a"], "--model opus") || !strings.Contains(argv["a"], "--effort high") ||
+		!strings.Contains(argv["b"], "--model m") || strings.Contains(argv["b"], "--effort") {
+		t.Fatalf("argv a = %s\nargv b = %s", argv["a"], argv["b"])
+	}
+	short := strings.ReplaceAll(r.TicketID, "-", "")[:8]
+	for _, lane := range []string{"a", "b"} {
+		if buildtest.RevParse(b.bare, "refs/heads/orbit/"+short+"-"+lane) == "" {
+			t.Errorf("lane %s's branch was not pushed", lane)
+		}
+	}
+	tk, _ := b.s.GetTicket(ctx, r.TicketID)
+	if tk.Status != store.TicketReview || tk.PRNumber != nil {
+		t.Fatalf("ticket = %+v", tk)
+	}
+	lanes, _ := b.s.RaceLanes(ctx, r.TicketID)
+	for _, l := range lanes {
+		if !l.Delivered || l.LinesChanged != 2 || l.TestsTouched != 1 || len(l.Files) != 2 || *l.DiffPolicy != "passed" ||
+			*l.Branch != "orbit/"+short+"-"+l.Lane || l.CostUSD == nil {
+			t.Errorf("lane = %+v", l)
+		}
+	}
+}

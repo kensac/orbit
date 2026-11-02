@@ -173,11 +173,19 @@ func (k *tick) prewarm(ctx context.Context) {
 	}
 }
 
-// release drops a finished ticket's kept clone.
+// release drops a finished ticket's kept clones: its own, and each race
+// lane's.
 func (k *tick) release(t *store.Ticket) {
-	if k.l.Checkouts != nil {
-		if err := k.l.Checkouts.Release(build.TicketKey(t.ID)); err != nil {
-			k.l.Log.Warn("release checkout", "ticket", t.ID, "err", err)
+	if k.l.Checkouts == nil {
+		return
+	}
+	lanes := []string{""}
+	if t.Race != nil {
+		lanes = append(lanes, store.Lanes[:*t.Race]...)
+	}
+	for _, lane := range lanes {
+		if err := k.l.Checkouts.Release(build.LaneKey(t.ID, lane)); err != nil {
+			k.l.Log.Warn("release checkout", "ticket", t.ID, "lane", lane, "err", err)
 		}
 	}
 }
@@ -194,17 +202,34 @@ func (k *tick) reconcile(ctx context.Context, t *store.Ticket) error {
 	}
 	switch t.Status {
 	case store.TicketApproved:
+		if t.Racing() {
+			return k.startRace(ctx, t)
+		}
 		if ready, err := k.stackReady(ctx, t); err != nil || !ready {
 			return err
 		}
 		return k.startBuild(ctx, t, store.BuildPurposeBuild, nil)
 	case store.TicketBuilding:
+		if t.Racing() {
+			// A lane the reaper failed or a person cancelled never reached
+			// FinishBuild or FailBuild.
+			return k.l.Store.SettleRace(ctx, t.ID)
+		}
 		return k.building(ctx, t)
 	case store.TicketReview:
+		if t.Racing() {
+			return k.raceReview(ctx, t)
+		}
+		if err := k.closeLosers(ctx, t); err != nil {
+			return err
+		}
 		return k.review(ctx, t)
 	case store.TicketMerging:
 		return k.merging(ctx, t)
 	case store.TicketMerged:
+		if err := k.closeLosers(ctx, t); err != nil {
+			return err
+		}
 		return k.merged(ctx, t)
 	case store.TicketFailed:
 		return k.failedMerge(ctx, t)
@@ -486,9 +511,18 @@ func (k *tick) merged(ctx context.Context, t *store.Ticket) error {
 	return nil
 }
 
-// abandoned closes the PR of a ticket a person abandoned; the branch stays.
+// abandoned closes the PR of a ticket a person abandoned, and every race
+// lane's; the branches stay.
 func (k *tick) abandoned(ctx context.Context, t *store.Ticket) error {
 	k.release(t)
+	if t.Race != nil {
+		if err := k.closeLanes(ctx, t, ""); err != nil {
+			return err
+		}
+	}
+	if t.PRNumber == nil {
+		return nil
+	}
 	_, pr, err := k.pr(ctx, t)
 	if err != nil || pr.State != "open" {
 		return err

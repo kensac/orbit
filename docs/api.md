@@ -578,7 +578,7 @@ Something waiting on a person is an **attention** row, written in the same trans
 
 ## Tickets
 
-A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /tickets` (opens its conversation; returns `ticket_id`, `conversation_id`, `message_id`, `run_id`; `stack_on` files a request on top of another, tickets.md, Stacked tickets), `GET /tickets`, `GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that reached merging carries `merge_action_id`, its `github:merge` action), `POST /tickets/{id}/plans/{version}/approve`, `POST /tickets/{id}/{abandon,retry,reopen}`, and `POST /tickets/{id}/checks/rerun` (`202`; the ticket loop reruns the PR's failed Actions jobs on its next tick, and a failed ticket goes back to review; `GET /tickets/{id}` lists every rerun in `reruns`), and review comments on its PR: `GET`/`POST /tickets/{id}/comments`, `POST /tickets/{id}/comments/{comment}/{edit,withdraw}` and `POST /tickets/{id}/review`, which sends the drafts as one message (tickets.md, Review comments). Its thread and messages are its conversation's (`/conversations/{conversation_id}/thread`, `/messages`); a message there reopens a `planned` ticket, and a `merged`, `done` or `abandoned` one refuses messages (409). A ticket's conversation carries `ticket_id` in the conversation list. Filing and approving take `client_request_id`; the author and approver are the token's person. A transition the ticket's state does not allow is 409.
+A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /tickets` (opens its conversation; returns `ticket_id`, `conversation_id`, `message_id`, `run_id`; `stack_on` files a request on top of another, tickets.md, Stacked tickets; `race` and `variants` build it two or three times, tickets.md, Races), `GET /tickets`, `GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that reached merging carries `merge_action_id`, its `github:merge` action), `POST /tickets/{id}/plans/{version}/approve`, `POST /tickets/{id}/{abandon,retry,reopen}`, and `POST /tickets/{id}/checks/rerun` (`202`; the ticket loop reruns the PR's failed Actions jobs on its next tick, and a failed ticket goes back to review; `GET /tickets/{id}` lists every rerun in `reruns`), and review comments on its PR: `GET`/`POST /tickets/{id}/comments`, `POST /tickets/{id}/comments/{comment}/{edit,withdraw}` and `POST /tickets/{id}/review`, which sends the drafts as one message (tickets.md, Review comments). Its thread and messages are its conversation's (`/conversations/{conversation_id}/thread`, `/messages`); a message there reopens a `planned` ticket, and a `merged`, `done` or `abandoned` one refuses messages (409). A ticket's conversation carries `ticket_id` in the conversation list. Filing and approving take `client_request_id`; the author and approver are the token's person. A transition the ticket's state does not allow is 409.
 
 `GET /tickets?status=&agent=&before=&limit=` is `{"tickets": [...]}`, newest first. `status` and `agent` match exactly; `before` is an RFC 3339 time and returns tickets created before it (400 if it does not parse), so the last ticket's `created_at` is the next page's cursor. `limit` defaults to 50, at most 500. Each ticket:
 
@@ -590,7 +590,28 @@ A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /t
  "created_at": "...", "updated_at": "...", "merge_action_id": "uuid"}
 ```
 
-`repo`, `author`, `approved_plan`, `base_sha`, `branch`, `pr_number`, `head_sha`, `merge_sha`, `error`, `merge_action_id` and `stack_on` are omitted when unset; `error` is set only while the ticket is `failed`. `GET /tickets/{id}` is `{"ticket": <as above>, "plans": [...], "events": [...], "reruns": [...]}`.
+`repo`, `author`, `approved_plan`, `base_sha`, `branch`, `pr_number`, `head_sha`, `merge_sha`, `error`, `merge_action_id`, `stack_on`, `race` and `picked_lane` are omitted when unset; `error` is set only while the ticket is `failed`. `GET /tickets/{id}` is `{"ticket": <as above>, "plans": [...], "events": [...], "reruns": [...]}`, and for a race also `"race": {"lanes": [<lane>], "recommended": "b", "picked": "a"}` (below).
+
+### Races
+
+`POST /tickets` with `"race": 2` or `3` and optionally `"variants": [{"model": "opus", "effort": "high"}, ...]` (at most one per lane; lane `a` takes the first; `model` matches `^[a-z0-9][a-z0-9.-]{0,62}(\[[a-z0-9]{1,8}\])?$`, `effort` is one of `low`, `medium`, `high`, `xhigh`, `max`; an unset field keeps the build agent's runner's) files a request that builds its approved plan once per lane, each on `orbit/<id>-<lane>` with its own PR. 400 for a race outside `2..3`, more variants than lanes, a bad variant, variants without a race, a race on a question, or a race with `stack_on` (and nothing may stack on a race). **409 while the subscription is nearly spent**: any usage window not yet reset above `usage.DeferLowAbove` (0.8, `GET /usage`), whether or not `defer_low_priority` is on; the error names the window, its reading and its source. A plain request is not refused.
+
+Until a person picks, the ticket has no `branch`, `pr_number` or `head_sha`; `race.lanes` is every lane, best first, each scored by code:
+
+```json
+{"lane": "b", "variant": {"effort": "high"},
+ "run_id": "uuid", "run_status": "succeeded", "branch": "orbit/1a2b3c4d-b",
+ "pr_number": 62, "base_sha": "...", "head_sha": "...",
+ "added": 30, "deleted": 4, "files": ["internal/x/x.go", "internal/x/x_test.go"],
+ "diff_policy": "passed", "cost_usd": 1.42,
+ "checks": "green", "checks_head": "...", "pr_state": "open", "checks_at": "...",
+ "delivered": true, "checks_green": true, "lines_changed": 34, "tests_touched": 1,
+ "rank": 1, "picked": false, "why": "checks green"}
+```
+
+`run_*`, `branch`, `pr_number`, `base_sha`, `head_sha`, `added`, `deleted`, `diff_policy` (`passed` or `failed`) and `cost_usd` are the lane's newest build's and omitted until it has them; `files` is always a list. `checks` (`pending`, `green`, `failed`), `checks_head`, `pr_state` (`open`, `closed`, `merged`), `checks_at` and `pr_closed_at` are the ticket loop's latest reading of the lane's PR. `why` is the reason for its place in one phrase. `recommended` is the first lane when it delivered a PR, omitted otherwise; `picked` once a person picked.
+
+`POST /tickets/{id}/pick` `{"lane": "a", "client_request_id": "..."}` is the person's pick (`by` counts only with the operator token): `{"ok": true, "action_id": "uuid"}`, the `ticket:pick` action recorded on the lane's build run with rule `approve`, approved and executed by that person in the same transaction (no rule makes it automatic and no agent is offered it). The ticket stays `review` and takes the lane's `branch`, `pr_number`, `base_sha` and `head_sha`, then goes on like any ticket (checks, fixes, revisions and the merge are that lane's); the loop closes the other lanes' PRs and keeps their branches. 400 for a lane that is not `a`, `b` or `c`; 409 unless the ticket is a race in `review` with no pick and the lane's newest build delivered a PR.
 
 ## Delegation
 

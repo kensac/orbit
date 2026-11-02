@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/kensac/orbit/internal/build/buildtest"
 	"github.com/kensac/orbit/internal/spec"
 )
 
@@ -338,12 +339,31 @@ func TestBranchAndRefspecAreOrbitsOnly(t *testing.T) {
 		t.Fatal("a non-uuid names no branch")
 	}
 	sha := strings.Repeat("a", 40)
-	if r, err := refspec(testTicket, sha); err != nil || r != "+"+sha+":refs/heads/orbit/3f2a9c1e" {
+	if r, err := refspec("orbit/3f2a9c1e", sha); err != nil || r != "+"+sha+":refs/heads/orbit/3f2a9c1e" {
 		t.Fatalf("refspec = %q %v", r, err)
 	}
+	if r, err := refspec("orbit/3f2a9c1e-b", sha); err != nil || r != "+"+sha+":refs/heads/orbit/3f2a9c1e-b" {
+		t.Fatalf("lane refspec = %q %v", r, err)
+	}
 	for _, bad := range []string{"HEAD", "main", sha + ":refs/heads/main", ""} {
-		if _, err := refspec(testTicket, bad); err == nil {
+		if _, err := refspec("orbit/3f2a9c1e", bad); err == nil {
 			t.Errorf("refspec(%q) accepted", bad)
+		}
+	}
+	for _, bad := range []string{"main", "orbit/", "orbit/a/b", "orbit/x:y", "refs/heads/orbit/x"} {
+		if _, err := refspec(bad, sha); err == nil {
+			t.Errorf("refspec to %q accepted", bad)
+		}
+	}
+	if b, err := LaneBranch(testTicket, "c"); err != nil || b != "orbit/3f2a9c1e-c" {
+		t.Fatalf("LaneBranch = %q %v", b, err)
+	}
+	if b, err := LaneBranch(testTicket, ""); err != nil || b != "orbit/3f2a9c1e" {
+		t.Fatalf("LaneBranch without a lane = %q %v", b, err)
+	}
+	for _, bad := range []string{"d", "ab", "A", "/"} {
+		if _, err := LaneBranch(testTicket, bad); err == nil {
+			t.Errorf("LaneBranch(%q) accepted", bad)
 		}
 	}
 }
@@ -390,5 +410,31 @@ func TestARevisionCommitsOnTopOfThePRWithItsComments(t *testing.T) {
 	}
 	if fix := userPrompt(Job{Purpose: "fix", Failure: json.RawMessage(`[]`)}); strings.Contains(fix, "# Review comments") {
 		t.Fatal("a fix carries no review")
+	}
+}
+
+// A race lane builds on its own branch with its variant's model and effort,
+// and its PR says it is one lane of a race.
+func TestARaceLaneBuildsOnItsOwnBranch(t *testing.T) {
+	w := newWorld(t)
+	j := w.job("99999999-9999-4999-8999-999999999999", write("/work/hello.txt", "hello\n"))
+	j.Lane, j.Model, j.Effort = "b", "opus", "high"
+	res, err := w.runner.Run(ctx, j, w.deps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := buildtest.RevParse(w.bare, "refs/heads/orbit/3f2a9c1e-b")
+	if res.Branch != "orbit/3f2a9c1e-b" || res.HeadSHA != head || w.remoteBranch() != "" {
+		t.Fatalf("result = %+v; lane head %s, ticket branch %q", res, head, w.remoteBranch())
+	}
+	argv := strings.Join(w.sb.Attaches()[0].Argv, " ")
+	if !strings.Contains(argv, "--effort high") || !strings.Contains(argv, "--model opus") {
+		t.Fatalf("argv = %s", argv)
+	}
+	w.gh.Mu.Lock()
+	defer w.gh.Mu.Unlock()
+	if len(w.gh.Created) != 1 || w.gh.Created[0]["head"] != "orbit/3f2a9c1e-b" ||
+		!strings.Contains(w.gh.Created[0]["body"].(string), "Race lane `b` (model `opus`, effort `high`)") {
+		t.Fatalf("created = %v", w.gh.Created)
 	}
 }
