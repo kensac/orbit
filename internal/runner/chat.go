@@ -57,6 +57,12 @@ type Chat struct {
 	// Interrupt, when closed, interrupts the turn (a person pressed stop):
 	// the CLI ends it with a result, and the run reports Interrupted.
 	Interrupt <-chan struct{}
+	// Steer carries the person's messages for the turn while it runs
+	// (steer.go); nil for none.
+	Steer <-chan SteerMessage
+	// Steered is told each steer message the turn took: from then on the
+	// turn answers it.
+	Steered func(id string)
 }
 
 // SandboxClient is sandboxd's four operations (*sandbox.Client).
@@ -201,6 +207,9 @@ func contains(list []string, s string) bool {
 type chatProc interface {
 	Turn(ctx context.Context, prompt string, emit func(claudeproto.Line)) (*claudeproto.Result, error)
 	Interrupt(ctx context.Context, cancelQueued bool) (*claudeproto.InterruptReceipt, error)
+	SendUUID(text, uuid string) error
+	CancelQueued(ctx context.Context, uuid string) (bool, error)
+	Capable(name string) bool
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
@@ -352,25 +361,58 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	p.tools.set(req.Chat)
 	defer p.tools.set(nil)
 
-	interrupted := false
+	var (
+		imu         sync.Mutex
+		interrupted bool
+		receipt     *claudeproto.InterruptReceipt
+	)
 	turnCtx, endTurn := context.WithCancel(ctx)
 	defer endTurn()
 	if req.Chat.Interrupt != nil {
 		go func() {
 			select {
 			case <-req.Chat.Interrupt:
+				imu.Lock()
 				interrupted = true
+				imu.Unlock()
 				ictx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
 				defer cancel()
-				if _, err := p.proc.Interrupt(ictx, false); err != nil {
+				// Stop means stop: steer messages still queued go with the turn.
+				r, err := p.proc.Interrupt(ictx, p.proc.Capable(claudeproto.CapInterruptCancelQueued))
+				if err != nil {
 					endTurn()
 				}
+				imu.Lock()
+				receipt = r
+				imu.Unlock()
 			case <-turnCtx.Done():
 			}
 		}()
 	}
-	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) { emit(Event{Kind: l.Kind, Payload: l.Raw}) })
+	var steer *steering
+	if req.Chat.Steer != nil {
+		steer = newSteering(p.proc, req.Chat, emit)
+		go steer.feed(turnCtx, req.Chat.Steer)
+	}
+	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) {
+		if steer != nil {
+			steer.observe(l)
+		}
+		emit(Event{Kind: l.Kind, Payload: l.Raw})
+	})
 	endTurn()
+	imu.Lock()
+	stopped, rec := interrupted, receipt
+	imu.Unlock()
+	interrupted = stopped
+	// Every steer the turn did not take is withdrawn; one that may still
+	// run means this process cannot be kept.
+	clean := true
+	if steer != nil {
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
+		clean = err != nil || steer.finish(wctx, rec)
+		cancel()
+	}
 	if sb, ok := p.proc.(*sandboxProc); ok {
 		// The workspace comes back after every turn, a failed one too:
 		// what the agent wrote is the person's.
@@ -395,6 +437,10 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	if res.IsError && !interrupted {
 		dropOrKill(sess, p)
 		return out, fmt.Errorf("%w: claude-code %s/%s: %s", ErrBackend, res.Subtype, res.TerminalReason, firstLine(res.Failure()))
+	}
+	if !clean {
+		dropOrKill(sess, p)
+		return out, nil
 	}
 	if interrupted || sess == nil || sess.Live == nil || res.SessionID == "" || (!sess.Open && mode != "live") {
 		p.proc.Close(claudeproto.CloseGrace)

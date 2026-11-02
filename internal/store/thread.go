@@ -54,6 +54,8 @@ type ThreadMessage struct {
 	ReplyTo *string   `json:"reply_to,omitempty"`
 	// RunID is the run that read it (person) or asked it (agent).
 	RunID *string `json:"run_id"`
+	// SteeredInto is the run whose turn in progress took it (delivery steer).
+	SteeredInto *string `json:"steered_into,omitempty"`
 	// Open is set on a question: true until answered (openQuestion).
 	Open *bool `json:"open,omitempty"`
 	// Attachments are the files a person's message carries; always an
@@ -323,7 +325,7 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 		}
 		if len(msgIDs) > 0 {
 			rows, err := tx.Query(ctx, `
-				SELECT id::text, created_at, direction, body, author, reply_to::text, run_id::text,
+				SELECT id::text, created_at, direction, body, author, reply_to::text, run_id::text, steered_into::text,
 				       CASE WHEN direction = 'from_agent' THEN (`+openQuestion+`) END
 				FROM messages m WHERE id = ANY($1::uuid[])`, msgIDs)
 			if err != nil {
@@ -332,7 +334,7 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 			for rows.Next() {
 				m := ThreadMessage{Kind: "message"}
 				var dir string
-				if err := rows.Scan(&m.ID, &m.At, &dir, &m.Body, &m.Author, &m.ReplyTo, &m.RunID, &m.Open); err != nil {
+				if err := rows.Scan(&m.ID, &m.At, &dir, &m.Body, &m.Author, &m.ReplyTo, &m.RunID, &m.SteeredInto, &m.Open); err != nil {
 					rows.Close()
 					return err
 				}

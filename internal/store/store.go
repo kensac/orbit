@@ -530,6 +530,9 @@ func finishRun(ctx context.Context, tx pgx.Tx, runID string, r RunResult) error 
 		runID, r.Attempt, r.Status, r.CostUSD, r.SessionCostUSD, r.SessionID); err != nil {
 		return err
 	}
+	if err := wakeForSteers(ctx, tx, runID); err != nil {
+		return err
+	}
 	if r.Status == "failed" {
 		// Every way a run fails ends here (the engine, a build, the reaper).
 		if err := newAttention(ctx, tx, AttentionFailure, "failure:"+runID, runID, " run failed", nil, nil, nil, nil); err != nil {

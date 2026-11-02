@@ -302,7 +302,7 @@ conversation:
   asked). `author` is the person who wrote it (absent for questions).
   `reply_to`, when set, is the message it answers. `attachments` are the uploads it carries (Uploads, above), in order; always an array. `run_id` is the run that
   read a person's message (`null` until one starts) or the run that asked a
-  question.
+  question. `steered_into`, present only on a person's message a running reply took mid-turn (`delivery: "steer"`, below), is that run.
 - **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again), `build` (a ticket's build run, docs/tickets.md), `learn` (a learning run, below; only in an agent's learning conversation), `task` (in a delegated task's conversation: the task starting, or its parent writing to it) or `delegation` (the agent woken because tasks it delegated settled; below). `status` is
   `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
   ended without a backend call because a gate, code, found nothing to judge;
@@ -337,14 +337,16 @@ conversation:
 
 ```json
 {"body": "text", "reply_to": "optional message id", "wake": true,
- "attachments": ["optional upload ids"],
+ "attachments": ["optional upload ids"], "delivery": "queue",
  "client_message_id": "optional, minted by the client"}
 ```
 
 posts to the default conversation, and returns
-`201 {"message_id": "uuid", "run_id": "uuid"}`. `run_id` is present
+`201 {"message_id": "uuid", "run_id": "uuid", "delivered": "queued"}`. `run_id` is present
 when the message woke a run (`wake`, default: the agent's `wake_on_message`).
 Stream that run to show the reply as it is written.
+
+**Delivery.** `delivery` is `queue` (the default) or `steer` (anything else is 400). A queued message waits for the conversation's next run, as above, even while a run is working. A steered one goes into the reply being written: when the conversation has a running run of a chat agent (one nobody asked to stop), the answer is `"delivered": "steered"` with that run's `run_id`, no run is woken, and the running reply takes the message within a few seconds, at its next tool call (the agent sees it mid-turn and answers it in the same reply); keep streaming that run. Its journal then has a `steer` item, and the thread's message carries `steered_into` (and `run_id`) naming the run. A steered message the reply ends without taking (it made no further tool call, or the person stopped it) is answered by the conversation's next run, which orbit queues when the run ends: its thread message stays without `run_id` until that run starts (a message already written into the turn gets an `orbit.steer_withdrawn` status in the reply's journal). With nothing running, for an agent that is not a chat agent, or with `attachments`, a steer is queued exactly as `queue` would be (`wake` applies) and the answer says `"delivered": "queued"`. `delivered` is always present.
 
 **Retries.** With `client_message_id` (1 to 200 characters, unique per agent;
 a UUID), a retry returns the first result, the same `message_id` and
@@ -432,7 +434,7 @@ An attempt (`store.Attempt`), oldest first:
 {"attempt": 1, "seq": 12, "at": "...", "kind": "assistant", "payload": {}}
 ```
 
-`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.figures_unverified`, and a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`.
+`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.figures_unverified`, a chat turn's `orbit.steer` (`{"message_id", "text", "author"}`: it took a steered message) and `orbit.steer_withdrawn` (`{"message_id", "confirmed"}`: a steered message written into the turn and not taken was withdrawn when it ended; `confirmed` false means the backend did not confirm it, and its process was closed), and a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`.
 
 ### The journal
 
@@ -487,6 +489,7 @@ A row:
 | `plan` | `plan` (one per epoch) | `{"entries": [{"text": "read the inputs", "status": "completed"}], "text": "..."}`; the agent's working plan. `entries` is its todo list (Claude Code's `TodoWrite`, Codex's `todo_list`), each `status` `pending`, `in_progress` or `completed`. `text` (when present) is a plan it presented (`ExitPlanMode`). Each update is a revision. |
 | `approval` | `approval:<request id>` | `{"request_id": "...", "tool": "Bash", "input": {...}, "state": "pending", "message": "..."}`; a build's backend asking orbit's policy whether a tool call may run. Revision 1 is the request (`pending`); the decision is the next, `allowed` or `denied`, with orbit's `message`. Actions waiting for a person are a run's `actions`, not these. |
 | `question` | `question:<a>.<s>.<i>` (a question tool's: `question:<call id>.<n>`) | `{"text": "Which card?", "header": "...", "options": [{"label": "...", "description": "..."}], "multi_select": true}`; something the agent asked its person: a question in its final answer (`options` empty), or a question tool's, with what it offered. The thread's question messages are the ones a person replies to. |
+| `steer` | `steer:<message id>` | `{"message_id": "uuid", "text": "...", "author": "kanishk"}`; a person's message the turn took while it worked (`delivery: "steer"`), from the point the backend started on it: what follows answers it too. `author` is absent when none was recorded. |
 | `status` | `status:<a>.<s>.0` | `{"code": "orbit.source_fetched", "detail": <bounded>}`; something that happened to the run that is not the model's output: orbit's steps (`orbit.*`, as in Events), the backend's session start (`system.init`), a rate limit report (`rate_limit_event`), a line that was not JSON (`raw`). `detail` is the event's payload. |
 | `turn` | `turn:<a>.<n>` | below |
 

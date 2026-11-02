@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/spec"
 )
 
@@ -96,4 +97,50 @@ func TestRealCLIChat(t *testing.T) {
 		t.Fatalf("turn 3: %v %+v, want interrupted", err, res3)
 	}
 	t.Logf("modes %v; interrupted reply %d bytes", modes, len(res3.Reply))
+}
+
+// TestRealCLIChatSteer steers a chat turn against the real CLI (as TestRealCLIChat): a message sent while the turn's tool call runs is written into the turn, the CLI starts it there (Steered), and the one reply answers both.
+func TestRealCLIChatSteer(t *testing.T) {
+	bin := os.Getenv("ORBIT_REAL_CLAUDE")
+	if bin == "" {
+		t.Skip("ORBIT_REAL_CLAUDE is not set")
+	}
+	model := os.Getenv("ORBIT_REAL_CLAUDE_MODEL")
+	if model == "" {
+		model = "haiku"
+	}
+	r, err := newClaudeCode(spec.RunnerSpec{Kind: "claude-code", Binary: bin, Model: model},
+		func(n string) (string, bool) {
+			return map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "placeholder"}[n], n == "CLAUDE_CODE_OAUTH_TOKEN"
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	work := filepath.Join(dir, "work")
+	_ = os.MkdirAll(work, 0o700)
+	steer := make(chan SteerMessage, 1)
+	var mu sync.Mutex
+	var steered []string
+	id := claudeproto.NewUUID()
+	sent := false
+	emit := func(e Event) {
+		if !sent && e.Kind == "assistant" && strings.Contains(string(e.Payload), `"tool_use"`) {
+			sent = true
+			steer <- SteerMessage{ID: id, Text: "Also say the word banana in your reply."}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	res, err := r.Run(ctx, Request{Workdir: work, System: "Answer briefly.", Tools: []string{"Bash"},
+		Session: &Session{Home: filepath.Join(dir, "home"), KeepDays: 1},
+		Chat: &Chat{Steer: steer, Steered: func(s string) { mu.Lock(); steered = append(steered, s); mu.Unlock() }},
+		Prompt: "Run the shell command `sleep 5; echo one` with the Bash tool, then reply with exactly what it printed."}, emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("reply %q, steered %v", res.Reply, steered)
+	if len(steered) != 1 || steered[0] != id || !strings.Contains(strings.ToLower(res.Reply), "banana") {
+		t.Fatalf("reply %q, steered %v: want the steer taken and answered", res.Reply, steered)
+	}
 }

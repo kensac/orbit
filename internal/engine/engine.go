@@ -201,7 +201,8 @@ const cancelPoll = 2 * time.Second
 
 // watchCancel stops the attempt when its person asks: a chat turn is
 // interrupted through the CLI's control channel (it ends with what it has),
-// any other run's backend is cancelled.
+// any other run's backend is cancelled. While a chat turn runs, the same
+// poll hands it the conversation's steer messages (steer.go).
 func (e *Engine) watchCancel(ctx context.Context, c *store.ClaimedRun, st *attemptState, chat bool, lose context.CancelCauseFunc) {
 	t := time.NewTicker(cancelPoll)
 	defer t.Stop()
@@ -212,6 +213,9 @@ func (e *Engine) watchCancel(ctx context.Context, c *store.ClaimedRun, st *attem
 		case <-t.C:
 			asked, err := e.Store.CancelRequested(ctx, c.ID)
 			if err != nil || !asked {
+				if f := st.steer.Load(); f != nil && err == nil {
+					e.pollSteers(ctx, c, f)
+				}
 				continue
 			}
 			st.stop()
@@ -557,7 +561,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if chat {
 		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
-			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec,
+			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, steer: &st.steer, rec: rec,
 			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin})
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
