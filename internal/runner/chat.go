@@ -69,11 +69,11 @@ type SandboxClient interface {
 }
 
 // Sandbox is where a sandboxed chat run's CLI runs, and how its workspace
-// crosses the boundary. Only Credential, the backend's, enters it.
+// crosses the boundary. Only Env, the backend's one credential (build.SandboxEnv), enters it.
 type Sandbox struct {
-	Client     SandboxClient
-	Label      string
-	Credential string
+	Client SandboxClient
+	Label  string
+	Env    map[string]string
 	// Profile is the sandbox's kind (spec.SandboxProfiles): a
 	// "workstation" session gets every tool and a home kept in the
 	// workspace.
@@ -512,7 +512,7 @@ func startSandbox(ctx context.Context, sb *Sandbox, args []string, h claudeproto
 		script = `CFG=` + SandboxConfigDir + `; H=` + SandboxHome + `; mkdir -p "$CFG" "$H" && HOME="$H" CLAUDE_CONFIG_DIR="$CFG" PATH="$H/.local/bin:$H/go/bin:$H/.npm-global/bin:$PATH" NPM_CONFIG_PREFIX="$H/.npm-global" exec "$@"`
 	}
 	argv := append([]string{"sh", "-c", script, "sh", bin}, args...)
-	ar := sandbox.AttachRequest{Argv: argv, Env: map[string]string{claudeproto.OAuthToken: sb.Credential}}
+	ar := sandbox.AttachRequest{Argv: argv, Env: sb.Env}
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	actx, cancel := context.WithCancel(context.Background())
