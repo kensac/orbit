@@ -291,9 +291,11 @@ with a prose-only view of them beside. The stream reads only rows,
 so it follows a run across a requeue, a deploy or another replica with no
 signalling between writers and readers. `GET /usage` and `GET /health` are
 the admin read side, computed from stored rows and the configuration in
-force: subscription windows from the newest `rate_limit_event` Claude Code
-wrote into a run's stream (what it last reported, not a live query), exact
-cost sums, the queue, running runs and next fires. `/mcp` serves the same reads and writes as MCP tools (`internal/api/mcp.go`, stateless Streamable HTTP), with an OAuth proxy in front of authentik for clients that need dynamic registration (`oauth.go`). The chat UI is the portfolio's (kanishksachdev.com/orbit, its own repository), a client of `/api/v1` and the streams. Contract: docs/api.md.
+force: subscription windows (the freshest per window of the newest
+`rate_limit_event` Claude Code wrote into a run's stream and, with
+`usage_poll`, the newest poll of the endpoint Claude Code's `/usage` reads;
+each says which and when), exact cost sums, the queue, held runs, running
+runs and next fires. `/mcp` serves the same reads and writes as MCP tools (`internal/api/mcp.go`, stateless Streamable HTTP), with an OAuth proxy in front of authentik for clients that need dynamic registration (`oauth.go`). The chat UI is the portfolio's (kanishksachdev.com/orbit, its own repository), a client of `/api/v1` and the streams. Contract: docs/api.md.
 
 ## Search
 
@@ -304,6 +306,12 @@ Everything a person or an agent wrote is searchable (`Store.Search`, `GET /searc
 - **Scheduling:** one leader by advisory lock. A fire is enqueued at most once
   (`runs_one_per_fire`). After downtime, each trigger runs once for its newest
   missed fire; a trigger that has never fired is not backfilled.
+- **Low-priority work waits for the subscription.** With
+  `defer_low_priority`, the scheduler's leader holds the scheduled runs of
+  `priority: low` agents in the queue (`run_after`, recorded in
+  `run_deferrals`) while a window is above `usage.DeferLowAbove`, enqueueing a
+  fire already held so no executor claims it in between, and lets them go
+  once every window is below (`scheduler/defer.go`).
 - **Shutdown** is a drain (Upgrades, below): runs in progress finish under
   their own timeouts, and only past the drain's cap are they handed back.
   Nothing a run does outside its own rows happens before it finishes, so

@@ -71,6 +71,12 @@ type Deployment struct {
 	Sandbox *SandboxService `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
 	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
+	// UsagePoll polls the subscription's usage windows (usage.go). Without
+	// it /usage shows only what runs' streams reported.
+	UsagePoll *UsagePoll `yaml:"usage_poll,omitempty" json:"usage_poll,omitempty"`
+	// DeferLowPriority holds the scheduled runs of priority: low agents
+	// while a subscription window is nearly spent (internal/usage).
+	DeferLowPriority bool `yaml:"defer_low_priority,omitempty" json:"defer_low_priority,omitempty"`
 	// Credentials are the variables a source may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
 	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
 }
@@ -220,6 +226,10 @@ type Agent struct {
 	// claims a run only when its ORBIT_CAPABILITIES cover every one; an
 	// agent with none runs anywhere (docs/ARCHITECTURE.md, Worker fleet).
 	Needs []string `yaml:"needs,omitempty" json:"needs,omitempty"`
+	// Priority is normal (the default) or low: a low agent's scheduled runs
+	// wait while the subscription is nearly spent, when the deployment sets
+	// defer_low_priority.
+	Priority string `yaml:"priority,omitempty" json:"priority,omitempty"`
 	// Chat makes the agent a conversation, as a Claude Code session is
 	// (claude-code only): its reply is the session's final message, not a
 	// report schema, and memory, questions and actions are orbit's tools it
@@ -756,6 +766,7 @@ func (c *Config) applyDefaults() {
 		d.Defaults.Timeout = Duration(15 * time.Minute)
 	}
 	c.applyMailDefaults()
+	c.applyUsageDefaults()
 	if d.Defaults.MemoryMaxBytes == 0 {
 		// About 4k tokens: memory rides in every prompt, so it must stay a
 		// small fraction of the context the run needs for its inputs.
@@ -884,6 +895,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("sandbox: sandboxd %q is neither host:port nor unix:/path", sb.Sandboxd))
 	}
 	errs = append(errs, c.validateMail()...)
+	errs = append(errs, c.validateUsage()...)
 	return errors.Join(errs...)
 }
 

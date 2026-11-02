@@ -217,6 +217,9 @@ type NewRun struct {
 	// ConversationID is the conversation the run answers in; empty is the
 	// agent's default conversation (schedules, manual runs).
 	ConversationID string
+	// RunAfter holds the run until then (a scheduled run deferred at
+	// enqueue, DeferRun); nil is claimable at once.
+	RunAfter *time.Time
 }
 
 // EnqueueRun inserts a queued run. For a schedule fire already recorded it
@@ -224,11 +227,11 @@ type NewRun struct {
 func (s *Store) EnqueueRun(ctx context.Context, r NewRun) (string, error) {
 	var id string
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO runs (agent, spec_sha, trigger, trigger_index, scheduled_for, prompt, conversation_id)
-		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, '')::uuid)
+		INSERT INTO runs (agent, spec_sha, trigger, trigger_index, scheduled_for, prompt, conversation_id, run_after)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, '')::uuid, $8)
 		ON CONFLICT (agent, trigger_index, scheduled_for) WHERE trigger = 'schedule' DO NOTHING
 		RETURNING id::text`,
-		r.Agent, r.SpecSHA, r.Trigger, r.TriggerIndex, r.ScheduledFor, r.Prompt, r.ConversationID).Scan(&id)
+		r.Agent, r.SpecSHA, r.Trigger, r.TriggerIndex, r.ScheduledFor, r.Prompt, r.ConversationID, r.RunAfter).Scan(&id)
 	if isForeignKeyViolation(err) {
 		return "", ErrNotFound
 	}
