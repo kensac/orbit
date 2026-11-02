@@ -236,13 +236,8 @@ func (e *Engine) learn(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 			return nil, nil, nil, nil, nil, "", err
 		}
 	}
-	seq := 0
-	emit := func(ev runner.Event) {
-		seq++
-		if err := e.Store.AppendEvent(context.WithoutCancel(ctx), c.ID, c.Attempt, seq, ev.Kind, ev.Payload); err != nil {
-			e.Log.Warn("append event", "err", err)
-		}
-	}
+	events := e.events(ctx, c, e.Log, false)
+	emit := func(ev runner.Event) { events.emit(ev.Kind, ev.Payload) }
 	runCtx, cancel := context.WithTimeout(ctx, learnTimeout(a))
 	defer cancel()
 	res, err = r.Run(runCtx, runner.Request{RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs, OutputSchema: schema}, emit)
