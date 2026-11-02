@@ -625,7 +625,7 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
 
 ## Workspace
 
-The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). **Built:** finding a workspace, the file reads (tree, stat, files, download), the writes (write, mkdir, rename, trash and restore, upload and signed upload), history, the change stream, a reply's changes and the audit, on the snapshot backend. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
+The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). **Built:** finding a workspace, the file reads (tree, stat, files, download), the writes (write, mkdir, rename, trash and restore, upload and signed upload), history, the change stream, a reply's changes, review comments and the audit, on the snapshot backend. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
 
 A workspace is a file tree a person and an agent share. Routes take the authentik token as above; writes, trash, uploads, terminals and git writes also require membership of `ORBIT_WORKSPACE_GROUP` (default `ORBIT_OIDC_GROUP`; `403`, `check: "group"`). Errors carry a `check` beside `error`, as authentication errors do:
 
@@ -641,6 +641,7 @@ A workspace is a file tree a person and an agent share. Routes take the authenti
 | `group` | 403 | a write by a person outside `ORBIT_WORKSPACE_GROUP` |
 | `read_only`, `no_shell`, `no_git` | 409 | the backend does not have that capability (`capabilities`, below) |
 | `busy` | 409 | a snapshot write while a run of the conversation is running |
+| `state` | 409 | a review comment's state does not allow the change (editing a withdrawn or edited one, withdrawing a sent one) |
 | `too_large` | 413 | over a size limit (workspace.md, Auth, scope and limits) |
 | `limit` | 409 | a count limit (terminals, clients) |
 | `rate` | 429 | over a rate, with `Retry-After` |
@@ -801,16 +802,24 @@ A client with 4 MiB of output queued is closed (code 4008) and reattaches with a
 
 ### Review comments
 
-*(planned)* Comments on lines, sent to the conversation's agent as one message, as a ticket's review comments are (tickets.md).
+Comments on lines, sent to the conversation's agent as one message, as a ticket's review comments are (tickets.md, Review comments). The routes need a conversation with a workspace (`404`, `check: "no_workspace"`, otherwise); a comment, like a message, needs no workspace group. Errors carry a `check` as the routes above do, and `state` (`409`) when a comment's state does not allow the change.
 
-- `POST /conversations/{id}/comments` `{"path", "start_line", "end_line", "side": "new", "anchor": {"kind": "run", "run_id": "uuid"}, "body"}`: `201 {"comment"}`, a draft. `anchor.kind` is `run` (a reply's changes), `git` (`repo`, `base`, `head` as for a git diff) or `worktree` (the file as it is). `side` is `new` or `old`. Lines `0` and `0` mean the whole file; a body is at most 8 KB.
-- `GET /conversations/{id}/comments?status=`: `{"comments": [...]}`. `status` is `draft`, `sent`, `superseded` or `withdrawn`.
-- `POST /conversations/{id}/comments/{c}/edit` `{"body", "start_line"?, "end_line"?}` writes a new version that supersedes it; `POST .../withdraw` withdraws a draft.
-- `POST /conversations/{id}/review` `{"note"?, "comments"?: ["ids"], "wake"?: true, "client_request_id"?}`: sends the drafts (all of the conversation's, or the ones named) as one message, formatted by code: each comment's file, lines and anchor, the code it is on quoted, then its body quoted line by line. `201 {"message_id", "run_id"}` as `POST /conversations/{id}/messages`.
+```json
+{"id": "uuid", "conversation_id": "uuid", "workspace_id": "uuid", "path": "src/a.go",
+ "start_line": 10, "end_line": 12, "side": "new", "anchor": {"kind": "run", "run_id": "uuid"},
+ "ref": "opaque", "quote": "the lines\n", "body": "Why?", "author": "kanishk",
+ "supersedes": null, "withdrawn_at": null, "message_id": null, "created_at": "...",
+ "status": "draft", "delivered_by": null}
+```
+
+- `POST /conversations/{id}/comments` `{"path", "start_line", "end_line", "side": "new", "anchor": {"kind": "run", "run_id": "uuid"}, "body"}`: `201 {"comment"}`, a draft. `anchor.kind` is `run` (a reply's changes: `side` `new` is the run's `after`, `old` its `before`), `git` (`repo`, `base`, `head` as for a git diff; `no_git` on the snapshot backend) or `worktree` (the file as it is now; `new` only). `side` defaults to `new`. Lines are of the file on that side, 1-based and inclusive; `0` and `0` mean the whole file. The file must be in that snapshot (`not_found`), lines within it and text (a binary file takes only `0` and `0`; `request`), and a run must be of this conversation (`not_found`). A body is at most 8 KB. `ref` is the snapshot the lines are of, readable with `GET /workspaces/{id}/files?path=&ref=`; `quote` is those lines as they were when the comment was written (at most 40 lines or 4 KB, then a line saying how many more), `""` for the whole file. The author is the token's person (with the operator token, the body's `author`).
+- `GET /conversations/{id}/comments?status=`: `{"comments": [...]}`, every version, oldest first. `status` narrows to `draft`, `sent` (in a review message, no run that read it has succeeded yet), `delivered` (a run that read the message succeeded; `delivered_by` names it), `superseded` (edited) or `withdrawn`; statuses are derived from the rows, never stored.
+- `POST /conversations/{id}/comments/{c}/edit` `{"body", "start_line"?, "end_line"?}`: `201 {"comment"}`, a new draft that supersedes it on the same path, side and snapshot, quoted again; the old version keeps its state (a sent one stays sent, a delivered one delivered). A version is edited once; editing a withdrawn or superseded one is `state`. `POST .../withdraw` withdraws a draft: `200 {"ok": true}`, `state` for anything but a draft.
+- `POST /conversations/{id}/review` `{"note"?, "comments"?: ["ids"], "wake"?: true, "client_request_id"?}`: sends the drafts (all of the conversation's, or the ones named, each of which must be a draft here) as one message, formatted by code: a header with the count, the note, then each comment numbered with its file, lines and anchor, the code it is on with every line quoted `   | `, then its body with every line quoted `   > `, so nothing in a body or the code can pass for another comment. `201 {"message_id", "run_id"}` as `POST /conversations/{id}/messages`: `wake` (default true) queues a run for it, and `run_id` is absent without one. Nothing to send is `request` (`400`). The message, each draft's `message_id` and a `review` audit row per comment are one transaction; `client_request_id` makes a retry return the first result.
 
 ### Audit
 
-`GET /workspaces/{id}/events?before=&limit=`: `{"events": [{"id", "at", "person", "op", "path", "from", "version_before", "version_after", "bytes", "terminal_id", "run_id", "request_id"}], "next_before"}`, newest first. `id` is a number; `limit` defaults to 100, at most 500; `next_before` is opaque, `null` on the last page. Fields an operation has no value for are `null` (`person` for the operator token, `version_before` for a create, `version_after` for a trash, `bytes` for a mkdir). Built today: `write`, `mkdir`, `rename`, `trash` (also before an upload's overwrite), `restore` and `upload`, one row per file. Reads are not recorded. `op` is each write route's name (`write`, `mkdir`, `rename`, `trash`, `restore`, `upload`, `commit`, `push`, `terminal.create`, `terminal.attach`, `terminal.detach`, `terminal.kill`, `review`). Terminal input is never recorded.
+`GET /workspaces/{id}/events?before=&limit=`: `{"events": [{"id", "at", "person", "op", "path", "from", "version_before", "version_after", "bytes", "terminal_id", "run_id", "request_id"}], "next_before"}`, newest first. `id` is a number; `limit` defaults to 100, at most 500; `next_before` is opaque, `null` on the last page. Fields an operation has no value for are `null` (`person` for the operator token, `version_before` for a create, `version_after` for a trash, `bytes` for a mkdir). Built today: `write`, `mkdir`, `rename`, `trash` (also before an upload's overwrite), `restore` and `upload`, one row per file, and `review`, one row per comment sent (its path). Reads are not recorded. `op` is each write route's name (`write`, `mkdir`, `rename`, `trash`, `restore`, `upload`, `commit`, `push`, `terminal.create`, `terminal.attach`, `terminal.detach`, `terminal.kill`, `review`). Terminal input is never recorded.
 
 ## Memory
 
