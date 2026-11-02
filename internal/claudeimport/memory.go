@@ -1,4 +1,4 @@
-// Package claudeimport reads what Claude Code keeps on disk (a project's auto memory directory, a skills directory) into orbit's shapes, so a person's existing memories and skills can seed orbit. It reads files only; `orbit import` sends the result to the API.
+// Package claudeimport reads what Claude Code keeps on disk (a project's auto memory directory, a skills directory, session transcripts) into orbit's shapes, so a person's existing memories, skills and sessions can seed orbit. It reads files only; `orbit import` sends the result to the API.
 package claudeimport
 
 import (

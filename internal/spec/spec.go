@@ -83,6 +83,23 @@ type Deployment struct {
 	Expires map[string]string `yaml:"expires,omitempty" json:"expires,omitempty"`
 	// WebhookSecrets are the signing secrets inbound webhooks are verified with, keyed by variable, each bound to the agents that may use it (webhook.go).
 	WebhookSecrets map[string]WebhookSecret `yaml:"webhook_secrets,omitempty" json:"webhook_secrets,omitempty"`
+	// Board tunes GET /board (docs/api.md, The board).
+	Board *Board `yaml:"board,omitempty" json:"board,omitempty"`
+}
+
+// Board tunes the board of every open conversation.
+type Board struct {
+	// Idle is how long a conversation with nothing waiting stays on the
+	// board after its last activity (default store.DefaultBoardIdle, 30m).
+	Idle Duration `yaml:"idle,omitempty" json:"idle,omitempty"`
+}
+
+// BoardIdle is board.idle, or 0 for the default.
+func (d Deployment) BoardIdle() time.Duration {
+	if d.Board == nil {
+		return 0
+	}
+	return time.Duration(d.Board.Idle)
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -961,6 +978,9 @@ func (c *Config) Validate() error {
 				errs = append(errs, fmt.Errorf("github: read_repositories: %q is not owner/name", r))
 			}
 		}
+	}
+	if d.Board != nil && d.Board.Idle < 0 {
+		errs = append(errs, fmt.Errorf("board.idle must not be negative"))
 	}
 	for _, ch := range d.Defaults.Channels {
 		if _, ok := d.Channels[ch]; !ok {

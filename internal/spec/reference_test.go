@@ -29,6 +29,7 @@ var referenceTables = map[string]any{
 	"`webhook_secrets.<VAR>`":           WebhookSecret{},
 	"`mail`":                            Mail{},
 	"`mail.imap`":                       IMAP{},
+	"`board`":                           Board{},
 	"Agent":                             Agent{},
 	"`triggers[]`":                      Trigger{},
 	"`sources[]`":                       Source{},

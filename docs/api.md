@@ -212,7 +212,10 @@ conversation is never deleted, only archived.
   "is_default": false, "archived": false,
   "created_at": "...", "last_activity_at": "...", "needs_input": true,
   "agent_status": {"state": "done", "since": "...", "source": "run", "run_id": "uuid"},
-  "ticket_id": null, "workspace_id": null}],
+  "ticket_id": null, "workspace_id": null, "task_id": null, "purpose": null,
+  "last_run": {"id": "uuid", "status": "running", "trigger": "message",
+               "created_at": "...", "finished_at": null, "summary": null},
+  "read_through": "..."}],
  "has_more": false, "next_before": null}
 ```
 
@@ -222,6 +225,7 @@ thread: `next_before` is an opaque cursor, `null` exactly when `has_more`
 is false; `limit` defaults to 50, at most 200. `needs_input` is true while
 one of its questions is open or one of its runs' actions is pending.
 `ticket_id` is set when the conversation is a ticket's (below), `workspace_id` when it has a workspace (Workspace, below), `task_id` when it is a delegated task's own (Delegation, below); a task conversation's open questions are to the delegating agent, so they do not set `needs_input`.
+`last_run` is the conversation's newest run (`id`, `status`, `trigger`, `created_at`, `finished_at`, `summary`; the last two `null` until it has them), `null` before its first, so a list shows which conversations are working. `read_through` is how far the person has read it (The board, below), `null` before they first did.
 
 `POST /agents/{name}/conversations`
 
@@ -260,6 +264,51 @@ characters (400 otherwise). The default conversation cannot be archived
 
 `POST /conversations/{id}/messages` takes and returns exactly what
 `POST /agents/{name}/messages` does (below), in that conversation.
+
+## The board
+
+Every open conversation's state at a glance, for a sidebar or a status page, without opening each thread.
+
+`GET /board?idle=<bool>&limit=<n>`
+
+```json
+{"rows": [{
+  "conversation_id": "uuid", "agent": "finance", "title": "How much on Uber Eats in October?",
+  "is_default": false, "ticket_id": null,
+  "task": {"id": "uuid", "status": "blocked", "parent_conversation_id": "uuid"},
+  "state": "needs_you",
+  "preview": {"from": "agent", "text": "October: $212 across 9 orders", "at": "..."},
+  "last_activity_at": "...", "age_seconds": 340, "read_through": "...",
+  "last_run": {"id": "uuid", "status": "succeeded", "trigger": "message", "created_at": "...", "finished_at": "...", "summary": "..."},
+  "counts": {"approvals": 1, "questions": 0, "decisions": 0, "tasks": 0, "unread": 1}}],
+ "as_of": "...", "idle_after_seconds": 1800}
+```
+
+- **Rows** are the conversations that are not archived (a learning conversation is), delegated tasks' conversations included, newest activity first; at most `limit` (default 200, at most 500).
+- **`state`** is derived by code (`store.BoardState`) from the counts and runs, the first that holds:
+  - `needs_you`: an approval, a question to the person, or a decision (a task's `task:decision`, a ticket plan to approve) is open, or the row's task is `blocked`.
+  - `working`: a run is running, or queued and due (a `continue` waiting for its `run_after` is not), or the row's task is `working` or `needs_input` (asking its delegating agent).
+  - `failed`: the newest run failed, finished after `read_through` or active within the idle window.
+  - `done_unread`: a run finished (`succeeded`, `skipped` or `failed`) after `read_through`.
+  - `read`: none of these, with activity within the idle window.
+  - `idle`: none of these, quiet for `board.idle` (orbit.yaml, default 30 minutes; `idle_after_seconds`). Left out unless `idle=1`.
+- **`counts`**: `approvals` are the pending actions of its runs other than task decisions; `questions` its open questions to the person (a task conversation's are to its delegating agent, so `0`); `decisions` pending `task:decision` actions plus a ticket plan to approve; `tasks` the tasks it delegated that are not over; `unread` the runs that finished after `read_through`.
+- **`preview`** is the newest prose: a message (`from` is `person`, or `agent` for a question or a delegating agent's brief) or a finished run's summary (its report without one), on one line, at most 140 characters, cut at a word. `null` for a conversation with neither.
+- `task` is set for a delegated task's conversation (Delegation, below); `age_seconds` is `as_of` minus `last_activity_at`; `last_run` is as in the conversation list.
+
+**Read points.** `POST /conversations/{id}/read` `{"through": "optional RFC 3339 time"}` moves the conversation's `read_through` to `through` (default now), never past now and never back: `200 {"conversation_id": "uuid", "read_through": "..."}`, `404` for an unknown conversation. The body is optional. A thread fetched with `mark_read=1` does the same with the time it was read. A client marks a conversation read while the person is looking at it, with the time of the newest item it showed.
+
+**The change feed.** `GET /events` is Server-Sent Events of small change records, so a client that shows every conversation keeps one stream open instead of one per run:
+
+| event | id | data | meaning |
+|---|---|---|---|
+| `ready` | the cursor | `{"cursor": "...", "resumed": true}` | first on every connection |
+| `change` | its cursor | `{"kind": "run", "conversation": "uuid", "run": "uuid", "cursor": "..."}` | something changed; read what it names again |
+
+- `kind` is `run` (a run created, or its status moved), `message` (a message written), `attention` (an attention row opened or dismissed), `action` (an action proposed or decided), `task` (a task created or moved; sent for the task's conversation and for the delegating one) or `conversation` (created, renamed, archived, or its read point moved). `run` is `null` when the record has none.
+- **Resume.** A client that reconnects with `Last-Event-ID` (or `?cursor=`) set to the last id it received gets every record after it, from any instance: `ready` says `resumed: true`. Without one, with an id that is not a cursor, or more than 1000 records behind, the feed starts at the newest record and `ready` says `resumed: false`: read `GET /board` again, then follow the changes.
+- Records are written by database triggers, so every writer is covered; a record appears once its transaction is older than every transaction still open, so one committed late is delivered late, never skipped. The feed is read every second; `: ping` every 15 s. It never ends on its own; reconnect after a deploy.
+- A record carries no content: a client reads the board, a thread or a run's stream for that.
 
 ## Uploads
 
@@ -302,8 +351,8 @@ A thread is the person's messages, the agent's questions, and every run
 (whatever its trigger) of one conversation. An agent's reply is its run's
 `report`, plus any `questions` it asked.
 
-`GET /conversations/{id}/thread?before=<cursor>&limit=<n>&fold=<bool>`, and
-`GET /agents/{name}/thread?before=<cursor>&limit=<n>&fold=<bool>` for the default
+`GET /conversations/{id}/thread?before=<cursor>&limit=<n>&fold=<bool>&mark_read=<bool>`, and
+`GET /agents/{name}/thread?before=<cursor>&limit=<n>&fold=<bool>&mark_read=<bool>` for the default
 conversation:
 
 ```json
@@ -340,9 +389,11 @@ conversation:
    "answers": {"account": "savings"}, "attachments": [], "...": "as above"}
  ],
  "has_more": true,
- "next_before": "opaque-cursor"}
+ "next_before": "opaque-cursor",
+ "read_through": "..."}
 ```
 
+- **Read point.** `read_through` beside `items` is the conversation's read point as it was before this request (`null` before the person first read it): a client draws its "New" divider above the first item after it. With `mark_read=1` the request also moves the read point to when the page was read (`POST /conversations/{id}/read`, The board).
 - **Order and paging.** Items are oldest first, totally ordered by (`at`, a
   run before a message at the same instant, `id`). A page is the newest
   `limit` items before `before`; omit `before` for the newest page. To page
@@ -1069,7 +1120,7 @@ Full-text search across everything orbit stores, ranked best first.
    {"kind": "report", "agent": "finance", "conversation_id": "uuid", "run_id": "uuid",
     "attempt": 1, "seq": null, "message_id": null, "memory_version_id": null,
     "entry_id": null, "entry_version": null, "scope": null, "owner": null, "title": null,
-    "author": null, "tool": null, "at": "...", "rank": 0.083,
+    "author": null, "tool": null, "external_session_id": null, "at": "...", "rank": 0.083,
     "snippet": "The electricity bill rose because of a rate change ...",
     "snippet_parts": [{"text": "The ", "match": false}, {"text": "electricity", "match": true},
                       {"text": " ", "match": false}, {"text": "bill", "match": true},
@@ -1078,13 +1129,37 @@ Full-text search across everything orbit stores, ranked best first.
               "conversation": "/api/v1/conversations/uuid/thread"}}]}
 ```
 
-- **`kind`** is what matched: `message` (a person's message to an agent; `author`, `message_id`), `question` (an agent's question; `message_id`, `run_id`), `report` (a run's summary and report), `error` (a failed run's error), `narration` (the prose a backend wrote while working, one transcript line; `attempt`, `seq` locate it in `GET /runs/{id}/events`), `tool_call` (one tool call's input as JSON, `tool` its name; tool results are not searched), `memory` (an agent's memory document; `memory_version_id`), `memory_entry` (a memory entry: `entry_id`, `entry_version`, `scope`, `owner`, `title`, and `agent` for an agent's own, `null` for a profile or topic entry). Of an agent's memory versions only the newest matching one is returned; a memory entry only as its current version, and never once retired. The `kind` parameter is a comma list of these.
+- **`kind`** is what matched: `message` (a person's message to an agent; `author`, `message_id`), `question` (an agent's question; `message_id`, `run_id`), `report` (a run's summary and report), `error` (a failed run's error), `narration` (the prose a backend wrote while working, one transcript line; `attempt`, `seq` locate it in `GET /runs/{id}/events`), `tool_call` (one tool call's input as JSON, `tool` its name; tool results are not searched), `memory` (an agent's memory document; `memory_version_id`), `memory_entry` (a memory entry: `entry_id`, `entry_version`, `scope`, `owner`, `title`, and `agent` for an agent's own, `null` for a profile or topic entry), `session` (one line of an imported session that carries prose: the person's prompt, the assistant's text, a summary; `external_session_id`, and `seq` its line number, as in `GET /sessions/{id}/lines`; `agent` is `null`, so an agent's own search never returns one). A line a resumed session repeats from its parent is one result, under the session it was imported with first. Of an agent's memory versions only the newest matching one is returned; a memory entry only as its current version, and never once retired. The `kind` parameter is a comma list of these.
 - **`q`** is web-search syntax: words (all must match, stemmed: `bills` finds `bill`), `"a quoted phrase"`, `or` between alternatives, `-word` to exclude. Required (`400` without one). A query of only stop words matches nothing.
 - **Ranking** is Postgres `ts_rank_cd` normalised by document length (`rank`, comparable only within one response), ties newest first. A memory entry's title weighs more than its body, and a tool's name more than its input.
 - **`snippet`** is up to two fragments of the matching text joined by ` ... `; `snippet_parts` is the same text split into runs, `match` true on matched words, so a client highlights without parsing markup (the text is never escaped or marked up).
 - **Filters:** `agent` (that agent's documents; a profile or topic entry belongs to none), `conversation_id`, `run_id` (a UUID, else `400`); `from` and `to` are a calendar day in the deployment's timezone (`to` includes its day) or an RFC 3339 time (`to` excluded), by the document's `at` (a message's or memory version's creation, a run's finish, a transcript line's time). `limit` defaults to 20, at most 100; `offset` pages, at most 1000. `total` counts every match within the filters, whatever the page.
-- **`links`** are where the result is read in full: the run (`run`, and `run_page` when `public_url` is set) and its conversation's thread. A memory version names its run's conversation when it has one.
+- **`links`** are where the result is read in full: the run (`run`, and `run_page` when `public_url` is set) and its conversation's thread, or for a session line the session (`session`). A memory version names its run's conversation when it has one.
 - Documents are derived by triggers as rows are written, and existing rows were indexed by the migration that added search, so a result is there as soon as its row is.
+
+## Imported sessions
+
+Sessions run outside orbit, a person's own Claude Code sessions on their laptop, are imported so search covers them (above) and orbit can learn from them. `orbit import claude-sessions` sends them (deployment.md). A session:
+
+```json
+{"id": "uuid", "source": "claude-code", "session_id": "<Claude Code's session id>",
+ "cwd": "/Users/p/work/widget", "branch": "main", "repo": "someone/widget",
+ "title": null, "first_prompt": "Why is the widget flaky?",
+ "generation": 1, "lines": 120, "offset": 482113, "prefix_sha256": "<hex>", "content_sha256": "<hex>",
+ "first_at": "...", "last_at": "...", "created_at": "...", "updated_at": "..."}
+```
+
+- `source` is `claude-code`; `session_id` is the source's id, unique per source. `cwd` and `branch` are the newest a line named; `repo` is the repository the client found `cwd` to be a checkout of (its origin remote, `owner/name` on GitHub). `title` is a title the session was given (a custom title, the CLI's summary line), `null` when none; `first_prompt` is the person's first typed message (not a tool result, a meta line or a command the CLI wrapped in tags).
+- `lines` counts the current generation's lines; `offset` is how many bytes of the file they came from and `prefix_sha256` the SHA-256 of those bytes, which is how an import knows what to send next. `content_sha256` chains the line digests in order (`sha256(previous || digest)` in hex, from the SHA-256 of nothing): two sessions with the same lines have the same hash. `first_at` and `last_at` are the earliest and newest line timestamps (`last_at` is the import time for a session whose lines have none).
+- A line is stored in a canonical form: a JSON object with its keys sorted and without `sessionId`, credentials replaced by `[REDACTED]` (the values of Claude Code's credential variables and of any secret-named assignment, Authorization and bearer credentials, passwords in URLs, provider-format tokens, private key blocks), and a line over 1 MiB cut to its skeleton: its placing fields (`type`, `uuid`, `parentUuid`, `timestamp`, `cwd`, ...), `orbitOmittedBytes`, and its message with each content block replaced by a note, a tool call keeping its id and name and a tool result its call's id. Each line's content is stored once, by the SHA-256 of that form, so a session resumed or forked from another (which starts with its parent's lines under a new id) adds only its own.
+- Nothing is deleted. A file whose start no longer matches what orbit holds is imported again as the session's next `generation`; the earlier generation's lines stay stored.
+
+Routes:
+
+- `POST /sessions/import` `{"dry_run"?, "source"?, "sessions": [{"session_id", "repo"?, "from_offset", "from_prefix_sha256", "rewrite"?, "to_offset", "to_prefix_sha256", "lines": [<line object>, ...]}]}`: each item is a stretch of one session's file, its complete lines from `from_offset` (where orbit's copy ends, `from_prefix_sha256` the hash of the bytes before it; `0` and `""` for a session orbit does not have) to `to_offset` (`to_prefix_sha256` the hash of the bytes before it). `rewrite: true` (with `from_offset` 0) replaces a session whose prefix changed with a new generation. Items apply in order in one transaction, so several stretches of one session may follow each other. `{"dry_run", "results": [{"session_id", "id", "outcome", "added", "new", "lines", "offset", "generation", "error"?}]}` in request order: `outcome` is `created`, `appended`, `rewritten`, `unchanged` (no lines, nothing moved) or `conflict` (the item does not continue orbit's copy: `error` says where orbit is, `lines`, `offset` and `generation` are orbit's, and nothing of it is written). `added` counts the lines added, `new` those whose content was not stored before. `dry_run` reports and writes nothing (`id` absent for a session it would create). `source` defaults to `claude-code`. At most 200 items and 20,000 lines; a body over 24 MiB is 400, as is a line that is not a JSON object (naming its item and line) or a `session_id` that is not a UUID.
+- `GET /sessions?source=&repo=&before=&limit=`: `{"sessions": [...], "has_more", "next_before"}`, newest `last_at` first, paged as conversations are (`limit` defaults to 100, at most 1000).
+- `GET /sessions/{id}`: `{"session": {...}}`; 404 for an unknown id.
+- `GET /sessions/{id}/lines?after=&limit=`: `{"lines": [{"n", "digest", "line": <the stored line>}]}`, the current generation's lines after line `after` (default 0; lines count from 1), at most `limit` (default 200, at most 1000).
 
 ## Webhooks
 

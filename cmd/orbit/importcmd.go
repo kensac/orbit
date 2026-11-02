@@ -23,19 +23,22 @@ import (
 //
 //	orbit import claude-memory <dir> --scope <profile|topic:NAME|agent:NAME> [--profile-types user] [--apply]
 //	orbit import skills <dir> [--only a,b] [--attach agent] [--apply]
+//	orbit import claude-sessions <dir> [--apply]
 //
 // Without --apply it is a dry run: the server reports what it would create, update or leave alone, and writes nothing. --print shows what was read from disk without calling the server at all.
 func importCmd(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("import: say what to import: claude-memory <dir>")
+		return errors.New("import: say what to import: claude-memory <dir>, skills <dir> or claude-sessions <dir>")
 	}
 	switch args[0] {
 	case "claude-memory":
 		return importMemory(ctx, args[1:])
 	case "skills":
 		return importSkills(ctx, args[1:])
+	case "claude-sessions":
+		return importSessions(ctx, args[1:], os.Stdout)
 	}
-	return fmt.Errorf("import: unknown kind %q (want claude-memory or skills)", args[0])
+	return fmt.Errorf("import: unknown kind %q (want claude-memory, skills or claude-sessions)", args[0])
 }
 
 // apiFlags are how an operator command reaches an orbit API: by default the internal listener inside the container, with the operator token.
@@ -55,13 +58,17 @@ func (f *apiFlags) call(ctx context.Context, method, path string, in, out any) e
 	if f.token == "" {
 		return errors.New("no token: pass --token or set ORBIT_API_TOKEN")
 	}
-	b, err := json.Marshal(in)
-	if err != nil {
-		return err
+	var reqBody io.Reader
+	if in != nil {
+		b, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		reqBody = bytes.NewReader(b)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(f.url, "/")+path, bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(f.url, "/")+path, reqBody)
 	if err != nil {
 		return err
 	}
