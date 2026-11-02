@@ -137,7 +137,7 @@ func (cv *conversation) run(ctx context.Context, proc Process, prompt string) (*
 		convErr = errors.New("the CLI exited without a result")
 	}
 	if ex.err != nil && !errors.Is(ex.err, context.Canceled) {
-		convErr = fmt.Errorf("%w (%v)", convErr, ex.err)
+		convErr = fmt.Errorf("%w (%w)", convErr, ex.err)
 	} else if ex.code != 0 {
 		convErr = fmt.Errorf("%w (exit %d)", convErr, ex.code)
 	}

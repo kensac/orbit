@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -88,11 +87,11 @@ func TestBuildDeliversAPullRequest(t *testing.T) {
 	}
 	// The sandbox got the CLI invocation, the backend credential and
 	// nothing else; it is gone; every token was revoked.
-	created2, destroyed, open := w.sb.counts()
+	created2, destroyed, open := w.sb.Counts()
 	if created2 != 1 || destroyed != 1 || open != 0 {
 		t.Fatalf("sandboxes created %d destroyed %d open %d", created2, destroyed, open)
 	}
-	ar := w.sb.attaches[0]
+	ar := w.sb.Attaches()[0]
 	if len(ar.Env) != 1 || ar.Env["CLAUDE_CODE_OAUTH_TOKEN"] != testCredential {
 		t.Fatalf("env = %v", ar.Env)
 	}
@@ -145,7 +144,7 @@ func TestDiffPolicyRefusesWhatTheHandlerCannotSee(t *testing.T) {
 			if w.remoteBranch() != "" || len(w.gh.Created) != 0 {
 				t.Fatal("a refused build pushed or opened a PR")
 			}
-			if _, _, open := w.sb.counts(); open != 0 {
+			if _, _, open := w.sb.Counts(); open != 0 {
 				t.Fatal("sandbox left behind")
 			}
 		})
@@ -171,7 +170,7 @@ func TestACrashedCLIDeliversNothing(t *testing.T) {
 	if w.remoteBranch() != "" {
 		t.Fatal("pushed after a crash")
 	}
-	if c, d, _ := w.sb.counts(); c != 1 || d != 1 {
+	if c, d, _ := w.sb.Counts(); c != 1 || d != 1 {
 		t.Fatalf("sandbox created %d destroyed %d", c, d)
 	}
 }
@@ -184,7 +183,7 @@ func TestTheBuildTimesOut(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("err = %v", err)
 	}
-	if _, d, open := w.sb.counts(); d != 1 || open != 0 {
+	if _, d, open := w.sb.Counts(); d != 1 || open != 0 {
 		t.Fatal("the sandbox outlived a timeout")
 	}
 }
@@ -221,7 +220,7 @@ func TestAFixCommitsOnTopOfThePR(t *testing.T) {
 	if len(w.gh.Created) != 1 || len(w.gh.Patched) != 1 {
 		t.Fatalf("created %d patched %d: a fix updates the one PR", len(w.gh.Created), len(w.gh.Patched))
 	}
-	if !strings.Contains(strings.Join(w.sb.attaches[1].Argv, " "), "fixes failing checks") {
+	if !strings.Contains(strings.Join(w.sb.Attaches()[1].Argv, " "), "fixes failing checks") {
 		t.Fatal("the fix's prompt says what it is for")
 	}
 }
@@ -245,7 +244,7 @@ func TestARetriedAttemptRedeliversWithoutTheModel(t *testing.T) {
 	if res.Gate == "" || res.HeadSHA != w.remoteBranch() || res.PRNumber != 7 || res.Output.PRTitle != "Add the thing" {
 		t.Fatalf("redelivery = %+v", res)
 	}
-	if c, _, _ := w.sb.counts(); c != 1 {
+	if c, _, _ := w.sb.Counts(); c != 1 {
 		t.Fatalf("sandboxes created %d: the model ran again", c)
 	}
 	w.gh.Mu.Lock()
@@ -289,7 +288,7 @@ func (l *memLedger) Destroyed(id string) error {
 
 func TestALaterAttemptDestroysTheSandboxAnInterruptedOneLeft(t *testing.T) {
 	w := newWorld(t)
-	sb := w.sb.client(t)
+	sb := w.sb.Client(t)
 	// An earlier attempt created a sandbox and died with it up.
 	left, err := sb.Create(ctx, "run", strings.NewReader(""))
 	if err != nil {
@@ -301,10 +300,10 @@ func TestALaterAttemptDestroysTheSandboxAnInterruptedOneLeft(t *testing.T) {
 	if _, err := w.runner.Run(ctx, w.job("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", write("/work/hello.txt", "hi\n")), d); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := w.sb.dir(left.ID); ok {
+	if _, ok := w.sb.Dir(left.ID); ok {
 		t.Fatal("the interrupted attempt's sandbox is still there")
 	}
-	if c, de, open := w.sb.counts(); c != 2 || de != 2 || open != 0 || len(led.open) != 0 {
+	if c, de, open := w.sb.Counts(); c != 2 || de != 2 || open != 0 || len(led.open) != 0 {
 		t.Fatalf("created %d destroyed %d open %d ledger %v", c, de, open, led.open)
 	}
 }
@@ -317,7 +316,7 @@ func TestAStoppedAttemptStartsNoSandbox(t *testing.T) {
 	if !errors.Is(err, ErrStopped) {
 		t.Fatalf("err = %v", err)
 	}
-	if c, _, _ := w.sb.counts(); c != 0 {
+	if c, _, _ := w.sb.Counts(); c != 0 {
 		t.Fatal("a draining instance started a sandbox")
 	}
 	// One that lost its claim between create and record destroys it.
@@ -326,7 +325,7 @@ func TestAStoppedAttemptStartsNoSandbox(t *testing.T) {
 	if _, err := w.runner.Run(ctx, w.job("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", write("/work/hello.txt", "hi\n")), d); !errors.Is(err, ErrStopped) {
 		t.Fatalf("err = %v", err)
 	}
-	if c, de, open := w.sb.counts(); c != 1 || de != 1 || open != 0 {
+	if c, de, open := w.sb.Counts(); c != 1 || de != 1 || open != 0 {
 		t.Fatalf("created %d destroyed %d open %d", c, de, open)
 	}
 }
@@ -365,5 +364,3 @@ func TestTrustBoundary(t *testing.T) {
 		t.Fatal("only orbit's own repository has orbit's trust boundary")
 	}
 }
-
-var _ = exec.Command

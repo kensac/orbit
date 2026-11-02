@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kensac/orbit/internal/sandbox"
 )
 
 // MaxFileBytes bounds one added or changed file: source code, not an
@@ -39,9 +41,14 @@ func policyErr(format string, args ...any) error {
 // history and diff. The clone holds no credential: tokens live only in git's
 // environment, never in .git/config.
 func packTree(dir string) (*bytes.Buffer, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -73,7 +80,7 @@ func packTree(dir string) (*bytes.Buffer, error) {
 			return err
 		}
 		if h.Typeflag == tar.TypeReg {
-			f, err := os.Open(p)
+			f, err := root.Open(rel)
 			if err != nil {
 				return err
 			}
@@ -108,6 +115,7 @@ func applyTree(dir string, archive io.Reader) error {
 		}
 	}
 	tr := tar.NewReader(archive)
+	var total int64
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -130,12 +138,12 @@ func applyTree(dir string, archive io.Reader) error {
 			return err
 		}
 		dst := filepath.Join(dir, filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 			return err
 		}
 		switch h.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(dst, 0o755); err != nil {
+			if err := os.MkdirAll(dst, 0o750); err != nil {
 				return err
 			}
 		case tar.TypeReg:
@@ -147,7 +155,12 @@ func applyTree(dir string, archive io.Reader) error {
 			if err != nil {
 				return err
 			}
-			_, err = io.Copy(f, tr)
+			total += h.Size
+			if total > sandbox.MaxArchiveBytes {
+				_ = f.Close()
+				return policyErr("the tree is over %d bytes", sandbox.MaxArchiveBytes)
+			}
+			_, err = io.CopyN(f, tr, h.Size)
 			if cerr := f.Close(); err == nil {
 				err = cerr
 			}
@@ -155,7 +168,7 @@ func applyTree(dir string, archive io.Reader) error {
 				return err
 			}
 		case tar.TypeSymlink:
-			target := path.Clean(path.Join(path.Dir(name), h.Linkname))
+			target := path.Clean(path.Join(path.Dir(name), h.Linkname)) //nolint:gosec // G305: checked against the tree below
 			if path.IsAbs(h.Linkname) || target == ".." || strings.HasPrefix(target, "../") {
 				return policyErr("symlink %s points outside the repository (%s)", name, h.Linkname)
 			}

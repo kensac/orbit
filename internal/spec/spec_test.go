@@ -151,3 +151,61 @@ func TestGitHubBlock(t *testing.T) {
 		t.Fatal("rule")
 	}
 }
+
+const buildBase = `
+defaults: {runner: r, channels: [c]}
+runners: {r: {kind: claude-code}, x: {kind: codex}}
+channels: {c: {kind: log}}
+github: {app_id: 1, private_key_env: K, repositories: [kensac/orbit, kensac/other]}
+`
+
+func TestBuildSection(t *testing.T) {
+	good := buildBase + `
+build:
+  sandboxd: 100.123.116.85:8091
+  agent: b
+  author: "orbit-kensac[bot] <351241810+orbit-kensac[bot]@users.noreply.github.com>"
+  repositories:
+    kensac/orbit: {commands: [go test, make check], protected: ["deploy/**"]}
+`
+	cfg, err := Load(write(t, map[string]string{"orbit.yaml": good, "agents/b.yaml": "name: b\ncharter: x\ntimeout: 45m\n"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := cfg.Deployment.Build
+	r, ok := cfg.Deployment.Builds("kensac/orbit")
+	if b.TokenEnv != "ORBIT_SANDBOX_TOKEN" || !ok || r.MaxDiffLines != DefaultMaxDiffLines || len(r.Argv()) != 2 || r.Argv()[1][1] != "check" {
+		t.Fatalf("build = %+v %+v", b, r)
+	}
+	if _, ok := cfg.Deployment.Builds("kensac/other"); ok {
+		t.Fatal("a repository without a policy is not built")
+	}
+	if name, email, err := ParseAuthor(b.Author); err != nil || name != "orbit-kensac[bot]" || !strings.HasPrefix(email, "351241810+") {
+		t.Fatalf("author = %q %q %v", name, email, err)
+	}
+
+	bad := buildBase + `
+build:
+  sandboxd: nowhere
+  agent: b
+  author: orbit
+  repositories:
+    kensac/other: {commands: ["go test $(x)"], protected: ["/etc/**"], max_diff_lines: 999999}
+    kensac/third: {commands: []}
+`
+	_, err = Load(write(t, map[string]string{"orbit.yaml": bad, "agents/b.yaml": "name: b\ncharter: x\nrunner: x\ntimeout: 2h\n"}))
+	if err == nil {
+		t.Fatal("expected errors")
+	}
+	for _, want := range []string{"neither host:port", "must be \"Name <email>\"", "claude-code runner", "exceeds 50m0s",
+		`"kensac/third" is not in github.repositories`, "only kensac/orbit", "is not a plain word", "not a relative glob",
+		"max_diff_lines", "at least one command"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q:\n%v", want, err)
+		}
+	}
+	if _, err := Load(write(t, map[string]string{"orbit.yaml": base + "build: {sandboxd: unix:/s, agent: b, author: \"A <a@b>\", repositories: {kensac/orbit: {commands: [ls]}}}\n",
+		"agents/b.yaml": "name: b\ncharter: x\n"})); err == nil || !strings.Contains(err.Error(), "needs a github block") {
+		t.Fatalf("build without github = %v", err)
+	}
+}

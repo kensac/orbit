@@ -20,7 +20,7 @@ import (
 
 // buildCredential is the one secret a build sandbox receives: what the CLI
 // needs to reach its own backend (sandbox.AllowedEnv).
-const buildCredential = "CLAUDE_CODE_OAUTH_TOKEN"
+const buildCredential = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // G101: the variable's name, not a value
 
 // errDraining stops a build attempt from starting its sandbox on an
 // instance that is leaving: the run is handed back to the ready instance.

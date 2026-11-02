@@ -3,6 +3,7 @@ package build
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -55,7 +56,8 @@ func TestRealCLIPermissionProtocol(t *testing.T) {
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 		cmd.Dir, cmd.Stdin, cmd.Stdout, cmd.Stderr = dir, stdin, stdout, stderr
 		err := cmd.Run()
-		if ee, ok := err.(*exec.ExitError); ok {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
 			return ee.ExitCode(), nil
 		}
 		return 0, err

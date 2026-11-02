@@ -293,8 +293,11 @@ func (k *tick) proposeMerge(ctx context.Context, t *store.Ticket, c *github.Clie
 		return nil
 	}
 	b, err := k.l.Store.LatestBuild(ctx, t.ID)
-	if err != nil || b == nil {
-		return fmt.Errorf("the ticket's build run: %v", err)
+	if err != nil {
+		return err
+	}
+	if b == nil {
+		return errors.New("a ticket in review has no build run")
 	}
 	params, _ := json.Marshal(map[string]any{"repo": *t.Repo, "pull_number": pr.Number, "head_sha": pr.Head.SHA})
 	reason := fmt.Sprintf("Every check the merge gate requires passed on %s (PR #%d, %q).", short(pr.Head.SHA), pr.Number, pr.Title)

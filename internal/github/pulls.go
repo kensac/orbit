@@ -136,7 +136,7 @@ func (c *Client) JobLogTail(ctx context.Context, repo string, jobID int64, max i
 	if err != nil {
 		return "", err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	loc := resp.Header.Get("Location")
 	if resp.StatusCode != http.StatusFound || loc == "" {
 		return "", &APIError{Method: http.MethodGet, Path: path, Status: resp.StatusCode, Message: "no redirect to the log"}
