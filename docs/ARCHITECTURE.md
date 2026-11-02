@@ -264,9 +264,9 @@ to the agent, a validator, and an executor. An agent's spec maps types to
 Today: `notify` (an extra message to one of the agent's channels),
 `continue` (wake this agent again later, above), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; a change that widens it waits for a person; docs/api.md, Defining agents), `webhook:<endpoint>` (a
 JSON body to an endpoint whose URL and credentials are configuration, never
-chosen by the model), and `github:merge` (squash one of orbit's own
+chosen by the model), `github:merge` (squash one of orbit's own
 `orbit/*` PRs, only if its head is still the approved commit and every
-required check passed; [tickets.md](tickets.md)).
+required check passed; [tickets.md](tickets.md)), and `github:comment` (a comment on an issue or pull request of `github.comment_repositories`, as the App with an `issues: write` token per comment).
 
 Approval happens from a signed link (`/ui/actions/{id}?sig=`), the API, or
 `orbit approve`. An action is executed at most once: one interrupted during
@@ -469,4 +469,5 @@ The direction, so changes now do not close it off:
 
 - **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)).
 - **Event triggers** from webhooks (a ticket assigned, a comment).
+- **Gmail drafts and Calendar events** as actions (`gmail:draft`, `calendar:create`): orbit holds no Google credential, so they wait for the connectors work, where orbit holds a connector's credential and an action rule gates its writes.
 - **The workspace**: an IDE in the portfolio chat over files, terminals and git in a conversation's snapshot or an agent's box ([workspace.md](workspace.md)).

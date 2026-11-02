@@ -92,6 +92,9 @@ type Server struct {
 	// Others are pull requests besides PR (7), by number: read and
 	// patched, nothing else.
 	Others map[int]map[string]any
+	// Comments are the issue and pull request comments posted, each with
+	// "number" set to the issue's.
+	Comments []map[string]any
 }
 
 // New starts a fake, stopped when the test ends.
@@ -299,6 +302,14 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		f.write(w, 200, map[string]any{"statuses": f.Statuses})
 	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/commits/") && strings.HasSuffix(r.URL.Path, "/status"):
 		f.write(w, 200, map[string]any{"statuses": []any{}})
+	case r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/issues/") && strings.HasSuffix(r.URL.Path, "/comments"):
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		var n int
+		_, _ = fmt.Sscan(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/repos/kensac/orbit/issues/"), "/comments"), &n)
+		b["number"] = n
+		f.Comments = append(f.Comments, b)
+		f.write(w, 201, map[string]any{"id": 1000 + len(f.Comments), "html_url": fmt.Sprintf("https://github.com/kensac/orbit/issues/%d#issuecomment-%d", n, 1000+len(f.Comments))})
 	case r.Method == "PUT" && r.URL.Path == "/repos/kensac/orbit/pulls/7/merge":
 		_ = json.NewDecoder(r.Body).Decode(&f.Merged)
 		if f.Merged["sha"] != f.PR["head"].(map[string]any)["sha"] {

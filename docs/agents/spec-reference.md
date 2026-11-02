@@ -75,6 +75,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `api_url` | URL | `https://api.github.com` | GitHub's API (tests, Enterprise). |
 | `repositories` | list of `owner/name` | required | The repositories tickets and `github:merge` may target; every token is limited to one. |
 | `read_repositories` | list of `owner/name` | none | The repositories an agent's `repos` may name: orbit mirrors them and mints read tokens for them. Reading one never permits a ticket or a merge there (configuration.md, Repositories). |
+| `comment_repositories` | list of `owner/name` | none | Where `github:comment` may post, with an `issues: write` token per comment. Commenting never permits a push, a ticket or a merge. |
 
 ### `build`
 
@@ -248,6 +249,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `task:message`, `task:cancel` | Messages or cancels a delegated task; follow the `delegate` rule unless named. | `delegates` |
 | `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint; never a URL or header of the model's. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
+| `github:comment` | Posts a comment on an issue or a pull request as the App: `{repo, number, body}`, body at most 20000 bytes, attribution lines scrubbed. | `github.comment_repositories` |
 | `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |
 
 ### `notify`

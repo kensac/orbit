@@ -63,6 +63,9 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 	if d.GitHub != nil && a.RuleFor(MergeType) != spec.RuleDeny {
 		out = append(out, mergeType(d))
 	}
+	if d.GitHub != nil && len(d.GitHub.CommentRepositories) > 0 && a.RuleFor(CommentType) != spec.RuleDeny {
+		out = append(out, commentType(d))
+	}
 	if a.RuleFor(DefineType) != spec.RuleDeny {
 		out = append(out, defineType(a))
 	}
@@ -410,6 +413,8 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 		return result, nil
 	case typ == MergeType:
 		return e.merge(ctx, params)
+	case typ == CommentType:
+		return e.comment(ctx, params)
 	case typ == store.DecisionType:
 		// A person approved it; the task it holds starts at the next
 		// reconcile. Nothing else happens here.
