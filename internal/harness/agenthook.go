@@ -46,7 +46,7 @@ const agentHookOutputMax = 64 << 10
 func AgentHook(in io.Reader, out, errOut io.Writer, d AgentHookDef, root string) int {
 	ev, err := io.ReadAll(io.LimitReader(in, maxLine))
 	if err != nil {
-		fmt.Fprintln(errOut, "orbit agent-hook: read the event:", err)
+		_, _ = fmt.Fprintln(errOut, "orbit agent-hook: read the event:", err)
 		return 1
 	}
 	switch {
@@ -72,7 +72,7 @@ func AgentHook(in io.Reader, out, errOut io.Writer, d AgentHookDef, root string)
 	case len(d.Run) > 0:
 		return runAgentHook(ev, out, errOut, d, root)
 	}
-	fmt.Fprintln(errOut, "orbit agent-hook: the hook does nothing")
+	_, _ = fmt.Fprintln(errOut, "orbit agent-hook: the hook does nothing")
 	return 1
 }
 
@@ -100,12 +100,12 @@ func runAgentHook(ev []byte, out, errOut io.Writer, d AgentHookDef, root string)
 	var exit *exec.ExitError
 	switch {
 	case ctx.Err() != nil:
-		fmt.Fprintf(errOut, "orbit agent-hook: %s timed out after %s\n", d.Run[0], timeout)
+		_, _ = fmt.Fprintf(errOut, "orbit agent-hook: %s timed out after %s\n", d.Run[0], timeout)
 		return 1
 	case errors.As(err, &exit):
 		return exit.ExitCode()
 	case err != nil:
-		fmt.Fprintln(errOut, "orbit agent-hook:", err)
+		_, _ = fmt.Fprintln(errOut, "orbit agent-hook:", err)
 		return 1
 	}
 	return 0
