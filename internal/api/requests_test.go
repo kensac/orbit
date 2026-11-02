@@ -86,6 +86,7 @@ func TestQueryIntegersAre400(t *testing.T) {
 		"/memory/entries?limit=x",
 		"/tickets?limit=x",
 		"/search?q=a&offset=x",
+		"/attention?limit=x",
 	} {
 		code, v := call(t, "GET", srv.URL+"/api/v1"+path, token, "")
 		if code != 400 || !strings.Contains(v["error"].(string), "want an integer") {
