@@ -1113,6 +1113,19 @@ A Claude Code run of such an agent has six read-only tools, `mcp__orbit__<name>`
 
 A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main~3`, or a pull request's head as `refs/pull/<n>/head`.
 
+## Prometheus
+
+An agent with a `prometheus` source (docs/agents/configuration.md, Prometheus queries) also has `prometheus_query` (`mcp__orbit__prometheus_query` in a Claude Code run, an SDK tool of that name in a chat), run by orbit against that source's URL with its credentials; the model writes only the PromQL and the times. An unknown argument, a source that is not one of the agent's prometheus sources, or a query outside the bounds is a tool error the model reads, and nothing is sent.
+
+| argument | meaning |
+|---|---|
+| `query` | PromQL (required, at most 4000 bytes), sent as written: never rendered, so a `${VAR}` or `{{today}}` in it reaches Prometheus as text |
+| `source` | the prometheus source's name; may be left out when the agent has one |
+| `time` | an instant query's time: RFC 3339, `now`, or `now-<duration>` (`s`, `m`, `h`, `d`); default now |
+| `start`, `end`, `step` | a range query (`start` makes it one; `time` is then refused): `end` defaults to now, `step` (a duration) to the range over 250 points; at most 31 days and 1000 points per series |
+
+The answer is Prometheus's `data`, `{"resultType", "result"}`, with `warnings` when Prometheus sent any. Every query asks Prometheus for at most 500 series (`limit`, which it reports as a warning when it cuts) and a 20 s evaluation timeout; an answer over 256 KiB is an error asking for a narrower query, never a cut document. In a report run its answers are in the figures ledger, so a number read from Prometheus backs a figure as a `query` result does.
+
 ## Usage
 
 `GET /usage?from=YYYY-MM-DD&to=YYYY-MM-DD`

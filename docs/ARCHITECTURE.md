@@ -130,6 +130,7 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
   (`engine/search.go`), the engine fills in the agent, and its results are
   not ledgered, since an earlier run's words back no figure.
   With `repos`, the repository tools (Repositories, below) are served the same way, over a socket of their own, and are not ledgered either.
+  With a `prometheus` source, `mcp__orbit__prometheus_query` runs read-only PromQL (instant or range, bounded in `sources.PromQuery`) against that source's URL with its credentials, asked of the engine over a socket of its own (`engine/prometheus.go`); its answers are Prometheus's numbers, so they are ledgered. A chat agent has it among its SDK tools.
 - **Hooks** (`orbit hook`, from `--settings`; with `--setting-sources ""` no
   other hook is loaded, so `disableAllHooks` is on whenever orbit has none):
   PreToolUse on Read, Glob and Grep denies a path that leaves the workdir after

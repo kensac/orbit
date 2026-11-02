@@ -193,6 +193,10 @@ An agent's `repos` (configuration.md, Repositories) are read by orbit, never by 
 - **What a compromised model gains:** the contents and history of the repositories its agent names, and their pull requests and checks, which its run already reads. A repository's text is data like any input: a file can carry instructions. A network tool (`WebFetch`, a workstation's egress) could carry what it read out; give `repos` naming a private repository only to agents whose tools you would let see it leave. `agent:define` can give a database agent `repos`, but only within `github.read_repositories`.
 - **Workers** hold no App key, so an agent with `repos` must need `github`, a capability only control advertises.
 
+## The Prometheus tool
+
+`prometheus_query` (docs/api.md, Prometheus) lets a model choose a PromQL query and its times, never the URL, a header or the HTTP method: orbit sends a GET of `/api/v1/query` or `/api/v1/query_range` to the agent's prometheus source, with that source's credentials under their binding, and the engine reads the source from the agent's spec in force on every call. The query is a value, never rendered, so a model cannot make orbit expand a `${VAR}` into it. What a compromised model gains is every series that Prometheus holds, which is usually more than the source's own `expr` reads (on hetzner: every host's metrics, container names, scrape targets), and the load of the queries the bounds allow (31 days, 1000 points, 500 series, a 20 s evaluation timeout). Give a prometheus source only to agents that may read the whole Prometheus.
+
 ## The build sandbox
 
 A build run's model can write files and run any command its tool policy

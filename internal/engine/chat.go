@@ -470,6 +470,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	st := &chatState{}
 	chat := e.chatTools(snap, a, c, t.instructor, t.types, d.Defaults.MemoryMaxBytes, st)
 	e.repoChatTools(a, chat)
+	e.promChatTools(a, chat)
 	chat.Interrupt = t.cancel
 	chat.Fresh = t.fresh
 	if t.steer != nil {
