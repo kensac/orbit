@@ -10,11 +10,11 @@ import (
 )
 
 // searchMigration is the migration that creates search_docs.
-const searchMigration = 14
+const searchMigration = 20261102032149
 
-// finishWith runs one claimed run of agent to success with a transcript of
+// searchedRun runs one claimed run of agent to success with a transcript of
 // events, a report and a memory document.
-func finishWith(t *testing.T, s *store.Store, agent string, events []string, summary, report, memory string) string {
+func searchedRun(t *testing.T, s *store.Store, agent string, events []string, summary, report, memory string) string {
 	t.Helper()
 	id := manual(t, s, agent)
 	c, err := s.ClaimRun(ctx, "w")
@@ -59,7 +59,7 @@ func TestSearchFindsEveryKindWithHighlights(t *testing.T) {
 	if _, err := s.SendToAgent(ctx, "finance", "Why did the electricity bill jump?", "kanishk", nil); err != nil {
 		t.Fatal(err)
 	}
-	run := finishWith(t, s, "finance", []string{electricityEvents}, "Electricity rose 12%",
+	run := searchedRun(t, s, "finance", []string{electricityEvents}, "Electricity rose 12%",
 		"The **electricity** bill rose because of a rate change.", "Electricity baseline: $80 a month.")
 	if _, err := s.SendToAgent(ctx, "other", "nothing about power here", "kanishk", nil); err != nil {
 		t.Fatal(err)
@@ -133,8 +133,8 @@ func TestSearchFindsEveryKindWithHighlights(t *testing.T) {
 func TestSearchReturnsOnlyTheNewestMatchingMemory(t *testing.T) {
 	s := testdb.New(t)
 	seed(t, s, "a")
-	finishWith(t, s, "a", nil, "first", "first", "solar panels: none yet")
-	finishWith(t, s, "a", nil, "second", "second", "solar panels: two installed")
+	searchedRun(t, s, "a", nil, "first", "first", "solar panels: none yet")
+	searchedRun(t, s, "a", nil, "second", "second", "solar panels: two installed")
 	p, err := s.Search(ctx, store.SearchQuery{Q: "solar", Kinds: []string{"memory"}})
 	if err != nil || len(p.Results) != 1 || !strings.Contains(p.Results[0].Snippet, "two installed") {
 		t.Fatalf("memory search = %+v %v, want only the newest version", p, err)
@@ -150,7 +150,7 @@ func TestSearchBackfillsRowsWrittenBeforeIt(t *testing.T) {
 	if _, err := s.SendToAgent(ctx, "a", "the heat pump is loud", "kanishk", nil); err != nil {
 		t.Fatal(err)
 	}
-	finishWith(t, s, "a", []string{`{"type":"assistant","message":{"content":[{"type":"text","text":"Checking the heat pump logs."}]}}`},
+	searchedRun(t, s, "a", []string{`{"type":"assistant","message":{"content":[{"type":"text","text":"Checking the heat pump logs."}]}}`},
 		"Heat pump fine", "The heat pump ran normally.", "heat pump: quiet mode on")
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatal(err)

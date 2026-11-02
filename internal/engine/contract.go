@@ -38,6 +38,11 @@ type Output struct {
 	// planTicket is the ticket a non-empty Plan is for, set by the engine,
 	// never read from the output.
 	planTicket string
+	// Entries are memory entry writes (entries.go).
+	Entries []OutputEntry `json:"entries"`
+	// known and topics are the entries the run was shown and the topics it reads, set by the engine to resolve Entries.
+	known  []store.Entry
+	topics []string
 }
 
 // summaryMax keeps a summary to one notification title line.
@@ -197,6 +202,9 @@ type promptRun struct {
 	// "" when it has none. Repeated in a continued session, as memory is:
 	// it may have changed since the session's last run.
 	Known string
+	// Attached are the files the messages carry, by message id, as placed
+	// in the workdir.
+	Attached map[string][]placedUpload
 }
 
 // userPrompt is the run's content: charter, why it woke, memory and inbox.
@@ -232,6 +240,9 @@ func userPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 		b.WriteString("\n# Messages from your person since your last run\n\n")
 		for _, m := range rc.Messages {
 			fmt.Fprintf(&b, "- %s: %s\n", m.CreatedAt.In(now.Location()).Format("2006-01-02 15:04"), m.Body)
+			for _, f := range run.Attached[m.ID] {
+				fmt.Fprintf(&b, "  - attached: %s (%s, %d bytes)\n", f.Path, f.MediaType, f.Bytes)
+			}
 		}
 	}
 	if len(rc.Questions) > 0 {

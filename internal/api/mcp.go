@@ -14,7 +14,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kensac/orbit/internal/auth"
-	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 )
@@ -376,13 +375,14 @@ func (s *Server) mcpWait(ctx context.Context, req *mcp.CallToolRequest, id strin
 	return nil
 }
 
-// mcpNarrator turns a run's transcript into progress notifications, the MCP form of /runs/{id}/stream's text and tool events.
+// mcpNarrator turns a run's journal into progress notifications, the MCP
+// form of /runs/{id}/stream's text and tool events.
 type mcpNarrator struct {
 	s        *Server
 	req      *mcp.CallToolRequest
 	token    any
 	run      string
-	attempt  int
+	epoch    int
 	seq      int
 	progress float64
 }
@@ -391,28 +391,38 @@ func (n *mcpNarrator) drain(ctx context.Context, p *store.RunProgress) {
 	if n.token == nil || n.req == nil || n.req.Session == nil || p.Attempt == 0 {
 		return
 	}
-	if p.Attempt != n.attempt {
-		n.attempt, n.seq = p.Attempt, 0
+	if n.s.Store.SyncJournal(ctx, n.run) != nil {
+		return
+	}
+	h, err := n.s.Store.GetJournalHead(ctx, n.run, 0)
+	if err != nil {
+		return
+	}
+	if h.Epoch != n.epoch {
+		n.epoch, n.seq = h.Epoch, 0
 	}
 	for {
-		evs, err := n.s.Store.ListEvents(ctx, n.run, n.attempt, n.seq, eventPage)
+		items, more, err := n.s.Store.ReadJournal(ctx, n.run, n.epoch, n.seq, store.MaxJournalLimit)
 		if err != nil {
 			return
 		}
-		for _, ev := range evs {
-			n.seq = ev.Seq
-			for _, nr := range runner.Narrate(p.RunnerKind, ev.Kind, ev.Payload) {
-				msg := nr.Text
-				if nr.Tool != nil {
-					msg = nr.Tool.Name + " " + nr.Tool.Summary
-				}
-				n.progress++
-				// Best effort: a client that dropped progress still gets the reply.
-				_ = n.req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
-					ProgressToken: n.token, Progress: n.progress, Message: strings.TrimSpace(msg)})
+		for _, it := range items {
+			n.seq = it.Seq
+			ev, data := narration(it)
+			if ev == "" {
+				continue
 			}
+			m := data.(map[string]string)
+			msg := m["text"]
+			if ev == "tool" {
+				msg = m["name"] + " " + m["summary"]
+			}
+			n.progress++
+			// Best effort: a client that dropped progress still gets the reply.
+			_ = n.req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+				ProgressToken: n.token, Progress: n.progress, Message: strings.TrimSpace(msg)})
 		}
-		if len(evs) < eventPage {
+		if !more {
 			return
 		}
 	}

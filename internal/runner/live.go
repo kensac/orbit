@@ -203,7 +203,10 @@ func (c *claudeCode) runLive(ctx context.Context, sess *Session, args, env []str
 		if sess.Resume != "" {
 			mode = "resumed"
 		}
-		full := append(append(append([]string{}, args...), "--input-format", "stream-json"), claudeproto.ResumeArgs(sess.Resume)...)
+		full, err := claudeproto.Args(claudeproto.Transport{Stream: true, Resume: sess.Resume}, args)
+		if err != nil {
+			return nil, true, err
+		}
 		if p, err = startLive(c.bin, full, env, req.Workdir); err != nil {
 			return nil, true, err
 		}
