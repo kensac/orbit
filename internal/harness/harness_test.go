@@ -6,7 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/kensac/orbit/internal/status"
 )
 
 const tx = `{"transactions":[
@@ -258,5 +261,61 @@ func TestOrbitToolResultsReadsTheStream(t *testing.T) {
 	b.AddText(got[0])
 	if m := b.Unbacked("$55.49 and $999.99"); len(m) != 1 || m[0] != "$999.99" {
 		t.Fatalf("unbacked = %v", m)
+	}
+}
+
+// Every event is posted to the run's status listener after the decision,
+// which the report never changes; with the listener gone, it is spooled.
+func TestHookReportsEveryEvent(t *testing.T) {
+	root := workdir(t)
+	state := t.TempDir()
+	dir, err := os.MkdirTemp("/tmp", "ohk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s.sock")
+	var mu sync.Mutex
+	var got []status.Event
+	l, err := status.Listen(sock, status.SpoolPath(state), func(e status.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, e)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := HookOptions{Root: root, State: state, Status: sock}
+	if v := hook(t, o, `{"hook_event_name":"UserPromptSubmit","prompt_id":"p","prompt":"hi"}`); len(v) != 0 {
+		t.Fatalf("UserPromptSubmit decision = %v, want {}", v)
+	}
+	if denied(hook(t, o, pre("Read", `{"file_path":"/etc/passwd"}`))) == "" {
+		t.Fatal("reporting must not open the guard")
+	}
+	if v := hook(t, o, `{"hook_event_name":"PermissionRequest","tool_name":"Write","agent_id":"a1"}`); len(v) != 0 {
+		t.Fatalf("PermissionRequest decision = %v, want none: the CLI's own permission flow decides", v)
+	}
+	l.Close()
+	// No listener: the event lands in the spool, the decision as before.
+	if v := hook(t, o, `{"hook_event_name":"Stop","prompt_id":"p"}`); len(v) != 0 {
+		t.Fatalf("Stop decision = %v", v)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 3 || got[0].Name != "UserPromptSubmit" || got[0].PromptID != "p" ||
+		got[1].Name != "PreToolUse" || got[1].Tool != "Read" ||
+		got[2].Name != "PermissionRequest" || got[2].AgentID != "a1" || got[2].Tool != "Write" {
+		t.Fatalf("posted = %+v", got)
+	}
+	if b, _ := os.ReadFile(status.SpoolPath(state)); !strings.Contains(string(b), `"event":"Stop"`) {
+		t.Fatalf("spool = %s", b)
+	}
+	// Nowhere to report (a state directory that cannot be made): the
+	// decision is still written, and the hook still succeeds.
+	blocked := filepath.Join(t.TempDir(), "file")
+	_ = os.WriteFile(blocked, nil, 0o600)
+	o.State = filepath.Join(blocked, "state")
+	if v := hook(t, o, `{"hook_event_name":"Stop"}`); len(v) != 0 {
+		t.Fatalf("decision = %v", v)
 	}
 }

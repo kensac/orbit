@@ -14,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/status"
 )
 
 // fakeCLI writes an executable script that records its argv, environment
@@ -540,11 +542,41 @@ func TestClaudeCodeHarnessToolsAndHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 	pre := settings.Hooks["PreToolUse"]
-	if settings.DisableAllHooks || len(pre) != 2 || pre[0].Matcher != "Read|Glob|Grep" || pre[1].Matcher != "StructuredOutput" {
+	if settings.DisableAllHooks || len(settings.Hooks) != 1 || len(pre) != 1 || pre[0].Matcher != "Read|Glob|Grep|StructuredOutput" {
 		t.Fatalf("settings = %+v", settings)
 	}
-	if want := "'/opt/orbit' hook --root '" + work + "' --state '" + state + "' --figures"; pre[1].Hooks[0].Command != want {
-		t.Fatalf("hook command = %q, want %q", pre[1].Hooks[0].Command, want)
+	if want := "'/opt/orbit' hook --root '" + work + "' --state '" + state + "' --figures"; pre[0].Hooks[0].Command != want {
+		t.Fatalf("hook command = %q, want %q", pre[0].Hooks[0].Command, want)
+	}
+}
+
+// With a status socket every hook event runs the one hook command, which
+// posts it; tool events match every tool, so the guard still sees Read.
+func TestClaudeCodeHarnessStatusHooksEveryEvent(t *testing.T) {
+	work := t.TempDir()
+	home := filepath.Join(work, ".home")
+	hooks := harnessHooks(&Harness{Bin: "/opt/orbit", Status: "/tmp/orbit-hook-x.sock"}, work, home)
+	want := "'/opt/orbit' hook --root '" + work + "' --state '" + harness.StateDir(home) + "' --status '/tmp/orbit-hook-x.sock'"
+	if len(hooks) != len(status.HookEvents) {
+		t.Fatalf("%d events configured, want %d", len(hooks), len(status.HookEvents))
+	}
+	for _, ev := range status.HookEvents {
+		entries, _ := hooks[ev].([]any)
+		if len(entries) != 1 {
+			t.Fatalf("%s: %d entries", ev, len(entries))
+		}
+		e := entries[0].(map[string]any)
+		m, hasMatcher := e["matcher"]
+		if status.ToolEvents[ev] != hasMatcher || (hasMatcher && m != "*") {
+			t.Fatalf("%s: matcher %v", ev, m)
+		}
+		cmd := e["hooks"].([]any)[0].(map[string]any)
+		if cmd["command"] != want || cmd["timeout"] != hookTimeout {
+			t.Fatalf("%s: %v", ev, cmd)
+		}
+	}
+	if _, ok := hooks["TeammateIdle"]; ok {
+		t.Fatal("orbit never starts a team")
 	}
 }
 

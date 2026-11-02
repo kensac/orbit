@@ -36,6 +36,8 @@ type fakeRunner struct {
 	// savedCost, when set, is the running total a blocked run's
 	// transcript saves when it is stopped.
 	savedCost float64
+	// during, when set, runs inside Run, as the CLI's hooks do.
+	during func(req runner.Request)
 }
 
 func (f *fakeRunner) Kind() string  { return "claude-code" }
@@ -63,6 +65,9 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 		}
 	}
 	emit(runner.Event{Kind: "assistant", Payload: []byte(`{"type":"assistant","session_id":"` + sid + `"}`)})
+	if f.during != nil {
+		f.during(req)
+	}
 	if f.block != nil {
 		close(f.started)
 		<-ctx.Done()

@@ -32,6 +32,7 @@ import (
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/sources"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/status"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -272,7 +273,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	seq := 0
 	figures := a.Verifies("figures")
 	var transcript [][]byte // the backend's message lines, for the figure check
+	// The runner's stream and the hook listener both emit; seq is shared.
+	var emitMu sync.Mutex
 	emit := func(kind string, payload any) {
+		emitMu.Lock()
+		defer emitMu.Unlock()
 		b, ok := payload.([]byte)
 		if !ok {
 			b, _ = json.Marshal(payload)
@@ -425,6 +430,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if e.Harness != "" && r.Kind() == "claude-code" {
 		hr = &runner.Harness{Bin: e.Harness, Figures: figures}
 	}
+	var hooks *status.Listener
+	if hr != nil {
+		hooks, hr.Status = e.listenHooks(ctx, c, home, emit, log)
+		defer hooks.Close()
+	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr != nil)
 	if tk != nil {
 		system += ticketContract(tk, planning)
@@ -451,6 +461,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
 		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr,
 	}, func(ev runner.Event) { emit(ev.Kind, ev.Payload) })
+	// Every hook of the turn has run once the CLI returned; what they
+	// spooled is read now, before the outcome is recorded.
+	hooks.Close()
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
 	}

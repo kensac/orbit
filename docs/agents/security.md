@@ -51,6 +51,10 @@ more than its agent's rules allow.
   gains no reach it lacked (it could already Read those files). The hook fails
   closed: an event it cannot parse is denied. Hooks come only from orbit's
   `--settings`; a workdir's `.claude/settings.json` is never read.
+  orbit never writes hooks or a status line into any settings file, the
+  user's `~/.claude/settings.json` least of all: they exist for one run's
+  CLI process, on its command line.
+- **The status channel** is a unix socket, mode 0600, and a spool file in the run's state directory under the CLI's HOME (which the CLI denies reading): local to the host, never a network listener. What arrives on it is the model's process tree reporting on itself, so it is data, never trusted for a decision: it sets the status a person sees and the run's `orbit.hook` events, and nothing else. A forged event can misreport a running run's status at most; the run's row decides once it is final.
 
 ## What the model can cause
 

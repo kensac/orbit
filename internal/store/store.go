@@ -430,6 +430,22 @@ func (s *Store) SetRunner(ctx context.Context, runID string, attempt int, kind, 
 	})
 }
 
+// SetHookStatus records what the run's hooks last reported (a
+// status.Snapshot, as JSON) while the attempt still holds the running run.
+// ErrConflict means it no longer does: a report that arrives after the run
+// finished, or from a superseded attempt, is not the run's status.
+func (s *Store) SetHookStatus(ctx context.Context, runID string, attempt int, snapshot json.RawMessage) error {
+	tag, err := s.Pool.Exec(ctx, `UPDATE runs SET hook_status = $3
+		WHERE id = $1 AND status = 'running' AND attempt = $2`, runID, attempt, snapshot)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("set hook status of run %s attempt %d: %w (no longer its claim)", runID, attempt, ErrConflict)
+	}
+	return nil
+}
+
 // RunResult is a finished run's outcome.
 type RunResult struct {
 	// Attempt is the attempt finishing the run; only the attempt holding
@@ -542,20 +558,22 @@ type Run struct {
 	Steps int `json:"steps"`
 	// Gate names what ended a skipped run.
 	Gate *string `json:"gate,omitempty"`
+	// HookStatus is what the run's hooks last reported (status.Snapshot).
+	HookStatus json.RawMessage `json:"-"`
 }
 
 // runCols reads a run aliased r: stepsCount names it.
 const runCols = `r.id::text, r.attempt, r.agent, r.spec_sha, r.trigger, r.trigger_index, r.scheduled_for, r.prompt, r.status,
 	r.runner_kind, r.model, r.worker, r.created_at, r.started_at, r.finished_at, r.error, r.summary, r.report,
 	r.output, r.usage, r.cost_usd::float8, r.session_id, r.session_mode, r.session_parent, r.session_depth,
-	r.run_after, r.continues::text, r.chain, r.gate, ` + stepsCount
+	r.run_after, r.continues::text, r.chain, r.gate, r.hook_status, ` + stepsCount
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.Attempt, &r.Agent, &r.SpecSHA, &r.Trigger, &r.TriggerIndex, &r.ScheduledFor, &r.Prompt,
 		&r.Status, &r.RunnerKind, &r.Model, &r.Worker, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.Error,
 		&r.Summary, &r.Report, &r.Output, &r.Usage, &r.CostUSD, &r.SessionID, &r.SessionMode, &r.SessionParent,
-		&r.SessionDepth, &r.RunAfter, &r.Continues, &r.Chain, &r.Gate, &r.Steps)
+		&r.SessionDepth, &r.RunAfter, &r.Continues, &r.Chain, &r.Gate, &r.HookStatus, &r.Steps)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

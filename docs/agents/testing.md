@@ -32,6 +32,8 @@ After changing `internal/harness` or its wiring, run an agent with
 a Read of `../x` is denied with orbit's message, and a figure asked for "in
 your head" is sent back and recomputed with a tool.
 
+After changing the hook events or `internal/status`, watch `runs.hook_status` during that run: it reads `working` from UserPromptSubmit and `done` at Stop, the run's events hold an `orbit.hook` per hook event (SessionStart, UserPromptSubmit, a PreToolUse and a PostToolUse per allowed tool, Stop), and a second message to a live process records only its own turn's events (a new `prompt_id`, no SessionStart). The SessionEnd a live process sends when it closes lands in the spool, read by no run.
+
 After changing sessions or the live process, also run an agent with
 `session: {resume: true, live: 10m}` and `continue: approve`: a message (run
 fresh), a second message (`session_mode` live, one `claude` process), a

@@ -57,6 +57,10 @@ type Harness struct {
 	// Figures sends an output back when its money amounts cannot be traced
 	// to the inputs or orbit's tool results (spec verify: [figures]).
 	Figures bool
+	// Status is the socket the engine's status listener serves for the
+	// run (status.SocketPath of the run's state directory); with it, every
+	// Claude Code hook event is configured and posted there.
+	Status string
 }
 
 // Session is how one run uses a persistent Claude Code session. The engine
