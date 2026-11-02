@@ -989,6 +989,19 @@ Routes:
 
 **In a conversation.** An agent whose rules enable `template:create` (the built-in `orbit` has it under `approve`) proposes `{"template", "version"?, "name"?, "parameters"}`. It is never executed as itself. When proposed, code renders it (the chat `act` tool answers at once with what will happen): a `user_prompt` value is the person's, taken from their `answers` to orbit's question for that template in this conversation and never from the proposal; when there are none, orbit asks it, a question with those parameters as its form (text `To create an agent from the template <name>, I need these from you.`), and the proposal is `denied` saying so. The person's answer reaches the agent's next run, which proposes again. A `required` value the proposal lacks, a parameter the template does not have, or a rendered agent that does not load denies it with the reason. A proposal that renders is recorded as an `agent:define` of the new agent, `pending` whatever the rules, its params the rendered `spec` and `template` (`{"name", "version"}`, the version it was rendered from); a person approves it like any action.
 
+### Sharing templates
+
+A template travels as a **bundle**: `{"format": "orbit.templates/1", "templates": [<document>]}`, each document `{"name", "description", "parameters", "spec"}` as a template is written. At most 100 templates and 1 MiB.
+
+- `POST /templates/share` `{"templates": [{"name", "version"?}], "link"?, "expires_in_hours"?}`: `200 {"bundle"}`, the named versions (the current one when `version` is absent, which must be active). With `link: true`, also `"link"` and `"expires_at"`: a URL under `public_url`, `<public_url>/api/v1/templates/shared/<token>`, that serves the bundle to anyone holding it, until it expires (`expires_in_hours`, 1 to 168; default 24). The token names those exact versions and the expiry, signed with a key derived from `ORBIT_API_TOKEN`, so the link always serves the same bundle and rotating the token voids every link. `503` without `public_url`.
+- `GET /templates/shared/{token}` takes no `Authorization`: the signature is the credential, as for signed uploads. `200` is the bundle; an altered or expired link is `403`.
+- `POST /templates/import` `{"bundle": {...}}` or `{"link": "<another orbit's link>"}`, with `dry_run`, `note`: `200 {"dry_run", "results": [{"name", "outcome": "created"|"updated"|"unchanged", "version", "lowered": [...]}]}`, in bundle order, as `source: "import"` versions with the token's person as `author`. All of it is one transaction; one bad template refuses the import (`400`, naming its index). A link is fetched with one GET: `https` only, a path under `/api/v1/templates/shared/`, no credential sent, no redirect followed, a public address only (checked on the connection, so a name resolving to a private, loopback or tailnet address is refused), within 10 s and 1 MiB.
+
+**What an import is held to**, all by code (`internal/share`) before anything is written:
+
+- **The scan.** Every key and string of the bundle, after JSON escapes are decoded, is checked for characters that hide or reorder text: Unicode tag characters (U+E0000 to U+E007F) and bidirectional controls (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069). One anywhere refuses the import, naming where (`/templates/0/spec/charter: a hidden character U+202E ...`).
+- **It grants nothing.** Every action rule in a template's spec that is not `deny` arrives as `approve`: an `auto`, and a slot that could render one, so nothing an import brings runs without a person. `connectors` are removed. `lowered` lists each change (`actions.notify: auto arrives as approve`). An agent created from an imported template is then held to everything any database agent is (Defining agents).
+
 ## Search
 
 `GET /search?q=&agent=&conversation_id=&run_id=&kind=&from=&to=&limit=&offset=`

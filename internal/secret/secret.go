@@ -12,6 +12,8 @@ const (
 	UploadURL = "orbit upload url"
 	// MCPOAuth keys the MCP OAuth proxy's sealed state and codes (internal/api oauth.go).
 	MCPOAuth = "orbit mcp oauth"
+	// TemplateLink keys a signed templates link (docs/api.md, Sharing templates).
+	TemplateLink = "orbit template link"
 )
 
 // Approval is the purpose that signs the approval link of one action: the link's signature is Derive(Approval(id)) itself, in hex.
