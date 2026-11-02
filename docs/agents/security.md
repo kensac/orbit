@@ -139,6 +139,8 @@ merge an orbit PR whose checks are green; the executor re-checks the head
 commit, the branch and every check itself, and the rule decides whether a
 person approves first. In the fleet a merge is a deploy: keep it `approve`.
 
+`actions: write` (rerunning failed jobs) also covers dispatching and cancelling workflows; orbit mints it alone, only in the ticket loop, for `RerunJob` on the job ids of checks that failed, and no model sees it.
+
 ## The build sandbox
 
 A build run's model can write files and run any command its tool policy
@@ -245,6 +247,10 @@ run; `internal/build`):
 - **Not guaranteed**: the backend credential is in the sandbox (above);
   everything the sandbox section says it does not guarantee holds for a
   build.
+
+## Prechecks
+
+A `precheck` gate runs a shell command from an agent's spec in orbit's own process tree, as orbit's user, before the model is called. Its environment is the fixed list in `engine.precheckEnv` (no secret, no credential), but the same user can read what orbit can, `/proc/<orbit>/environ` included. So a precheck is accepted only in an agent defined in the configuration files, which a person writes and reviews in git: a database agent (written through the API, or by an agent's `agent:define`) with one fails validation, so nothing a model writes ever becomes a command. Its output reaches only the run's events, never a prompt.
 
 ## Adding a capability
 

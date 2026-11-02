@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,6 +24,7 @@ import (
 	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 
+	"github.com/kensac/orbit/internal/rrule"
 	"github.com/kensac/orbit/internal/transforms"
 )
 
@@ -183,6 +185,15 @@ type Agent struct {
 	// claims a run only when its ORBIT_CAPABILITIES cover every one; an
 	// agent with none runs anywhere (docs/ARCHITECTURE.md, Worker fleet).
 	Needs []string `yaml:"needs,omitempty" json:"needs,omitempty"`
+	// Delegates names the agents this one may hand tasks to with the
+	// delegate action ("*" is every configured agent, itself included).
+	// The delegate rule still decides whether it may (docs/ARCHITECTURE.md,
+	// Delegation).
+	Delegates []string `yaml:"delegates,omitempty" json:"delegates,omitempty"`
+
+	// delegateTargets is Delegates resolved against the configuration,
+	// sorted; set by Validate.
+	delegateTargets []string
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
@@ -272,12 +283,65 @@ const MaxSessionIdle = 24 * time.Hour
 // resume picks up after it closes.
 const MaxSessionLive = time.Hour
 
-// Trigger is one way an agent wakes. Exactly one of Schedule is set today;
-// the struct leaves room for event triggers.
+// Trigger is one way an agent wakes: a cron Schedule, or an RRule (RFC
+// 5545, internal/rrule) anchored at Start. Exactly one is set; the struct
+// leaves room for event triggers.
 type Trigger struct {
 	Schedule string `yaml:"schedule" json:"schedule"`
+	// RRule is a recurrence rule ("FREQ=WEEKLY;INTERVAL=2;BYDAY=TU"), for
+	// what cron cannot say: every other week, the last Friday, a series
+	// that ends.
+	RRule string `yaml:"rrule,omitempty" json:"rrule,omitempty"`
+	// Start anchors an RRule: its first period, and the time of day it
+	// does not name, as local time in the agent's timezone
+	// ("2026-11-02T09:00").
+	Start string `yaml:"start,omitempty" json:"start,omitempty"`
 	// Prompt is the reason for this wake, appended to the charter.
 	Prompt string `yaml:"prompt,omitempty" json:"prompt,omitempty"`
+}
+
+// Schedule is when a trigger fires: the first fire strictly after a time,
+// or the zero time when it never fires again. A cron schedule and an
+// RRULE are both one.
+type Schedule interface {
+	Next(time.Time) time.Time
+}
+
+// startLayouts are the forms Trigger.Start is written in.
+var startLayouts = []string{"2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-02 15:04"}
+
+// TriggerSchedule is a trigger's schedule, read in loc (the agent's
+// timezone).
+func TriggerSchedule(t Trigger, loc *time.Location) (Schedule, error) {
+	switch {
+	case t.Schedule != "" && t.RRule != "":
+		return nil, errors.New("schedule and rrule cannot both be set")
+	case t.Schedule != "":
+		if t.Start != "" {
+			return nil, errors.New("start is for an rrule")
+		}
+		return ParseSchedule(t.Schedule)
+	case t.RRule != "":
+		if t.Start == "" {
+			return nil, errors.New("an rrule needs a start (local time, 2026-11-02T09:00)")
+		}
+		var start time.Time
+		var err error
+		for _, l := range startLayouts {
+			if start, err = time.ParseInLocation(l, t.Start, loc); err == nil {
+				break
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("start %q: want local time as 2026-11-02T09:00", t.Start)
+		}
+		r, err := rrule.Parse(t.RRule, start)
+		if err != nil {
+			return nil, fmt.Errorf("rrule: %w", err)
+		}
+		return r, nil
+	}
+	return nil, errors.New("schedule or rrule is required")
 }
 
 // Source is data the harness fetches before a run and hands to the agent as
@@ -314,17 +378,30 @@ type Transform struct {
 // Gate is a check, in code, that ends a scheduled run as skipped before
 // any backend call. Kinds: unchanged (every input the model would see is
 // byte for byte what the agent's newest succeeded run saw, under the same
-// spec) and items_above (Input, a source or transform, has at most N
-// records at Items: nothing to review).
+// spec), items_above (Input, a source or transform, has at most N records
+// at Items: nothing to review) and precheck (Command, a shell command the
+// person wrote, exits 1: nothing to do; 0 runs, anything else fails).
 type Gate struct {
 	Kind  string `yaml:"kind" json:"kind"`
 	Input string `yaml:"input,omitempty" json:"input,omitempty"`
 	Items string `yaml:"items,omitempty" json:"items,omitempty"`
 	N     int    `yaml:"n,omitempty" json:"n,omitempty"`
+	// Command is a precheck's shell command (sh -c), run in the run's
+	// workdir with the inputs fetched; Timeout bounds it.
+	Command string   `yaml:"command,omitempty" json:"command,omitempty"`
+	Timeout Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 }
 
 // GateKinds lists every gate kind.
-var GateKinds = []string{"unchanged", "items_above"}
+var GateKinds = []string{"unchanged", "items_above", "precheck"}
+
+// Precheck bounds: the default and the longest a precheck may run. It runs
+// before every scheduled run of its agent, on the executor, so it is a
+// quick test, not a job.
+const (
+	DefaultPrecheckTimeout = 30 * time.Second
+	MaxPrecheckTimeout     = 2 * time.Minute
+)
 
 // Withheld reports whether the model is not shown source: a transform reads
 // it and none keeps it.
@@ -405,13 +482,24 @@ func (a *Agent) Verifies(check string) bool { return slices.Contains(a.Verify, c
 // either way.
 func (a *Agent) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
 
-// RuleFor returns the rule for an action type, deny if unnamed.
+// RuleFor returns the rule for an action type, deny if unnamed. The task
+// types (task:message, task:cancel) manage tasks the agent delegated, so
+// unnamed they follow the delegate rule.
 func (a *Agent) RuleFor(actionType string) Rule {
 	if r, ok := a.Actions[actionType]; ok {
 		return r
 	}
+	if strings.HasPrefix(actionType, "task:") {
+		if r, ok := a.Actions["delegate"]; ok {
+			return r
+		}
+	}
 	return RuleDeny
 }
+
+// DelegateTargets is the agents this one may delegate to, sorted: Delegates
+// with "*" resolved against the configuration it was validated in.
+func (a *Agent) DelegateTargets() []string { return a.delegateTargets }
 
 // ReservedAgentNames are the names an agent may not take: the portfolio
 // serves an agent at /orbit/<name>, beside these static segments of its own
@@ -712,12 +800,12 @@ func (c *Config) validateAgent(a *Agent) []error {
 	if _, ok := c.Deployment.Runners[a.Runner]; !ok {
 		at("unknown runner %q", a.Runner)
 	}
+	loc, err := time.LoadLocation(a.Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
 	for i, t := range a.Triggers {
-		if t.Schedule == "" {
-			at("trigger %d: schedule is required", i)
-			continue
-		}
-		if _, err := ParseSchedule(t.Schedule); err != nil {
+		if _, err := TriggerSchedule(t, loc); err != nil {
 			at("trigger %d: %v", i, err)
 		}
 	}
@@ -773,10 +861,28 @@ func (c *Config) validateAgent(a *Agent) []error {
 	for i, g := range a.Gates {
 		switch g.Kind {
 		case "unchanged":
+			if g.Input != "" || g.Items != "" || g.N != 0 || g.Command != "" || g.Timeout != 0 {
+				at("gate %d: unchanged takes no input, items, n, command or timeout", i)
+			}
+		case "precheck":
+			if a.Origin != OriginFile {
+				// The API and agent:define write database agents; a
+				// command on orbit's host is for reviewed files only.
+				at("gate %d: a precheck runs a command on orbit's host, so only an agent in the configuration files may have one", i)
+			}
+			if strings.TrimSpace(g.Command) == "" {
+				at("gate %d: precheck needs a command", i)
+			}
 			if g.Input != "" || g.Items != "" || g.N != 0 {
-				at("gate %d: unchanged takes no input, items or n", i)
+				at("gate %d: precheck takes a command and a timeout only", i)
+			}
+			if g.Timeout < 0 || time.Duration(g.Timeout) > MaxPrecheckTimeout {
+				at("gate %d: timeout is at most %s", i, MaxPrecheckTimeout)
 			}
 		case "items_above":
+			if g.Command != "" || g.Timeout != 0 {
+				at("gate %d: items_above takes no command or timeout", i)
+			}
 			if !seen[g.Input] {
 				at("gate %d: input %q is not a source or transform of this agent", i, g.Input)
 			}
@@ -793,6 +899,10 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		switch {
 		case typ == "notify", typ == "continue", typ == "agent:define":
+		case typ == "delegate", typ == "task:message", typ == "task:cancel":
+			if len(a.Delegates) == 0 {
+				at("action %q: needs delegates, the agents this one may hand tasks to", typ)
+			}
 		case strings.HasPrefix(typ, "webhook:"):
 			if _, ok := c.Deployment.Endpoints[strings.TrimPrefix(typ, "webhook:")]; !ok {
 				at("action %q: unknown endpoint", typ)
@@ -802,7 +912,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 				at("action %q: needs a github block in orbit.yaml", typ)
 			}
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, webhook:<endpoint> or github:merge)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, delegate, task:message, task:cancel, webhook:<endpoint> or github:merge)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
@@ -853,6 +963,21 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("hooks[%d]: timeout is for run, at most %s", i, MaxHookTimeout)
 		}
 	}
+	a.delegateTargets = nil
+	for _, d := range a.Delegates {
+		switch {
+		case d == "*":
+			a.delegateTargets = slices.Sorted(maps.Keys(c.Agents))
+		case c.Agents[d] == nil:
+			at("delegates: %q is not a configured agent", d)
+		case !slices.Contains(a.delegateTargets, d):
+			a.delegateTargets = append(a.delegateTargets, d)
+		}
+	}
+	if slices.Contains(a.Delegates, "*") && len(a.Delegates) > 1 {
+		at("delegates: \"*\" already names every agent; list nothing beside it")
+	}
+	slices.Sort(a.delegateTargets)
 	seenSkill := map[string]bool{}
 	for _, k := range a.Skills {
 		if !nameRE.MatchString(k) {

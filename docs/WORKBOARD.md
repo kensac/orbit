@@ -20,6 +20,7 @@ A self-hosted Go service on Kanishk's server (hetzner) that runs Claude Code on 
 | Sandbox | `orbit sandboxd` (one locked-down container per build or workspace), `orbit egress` (allowlist proxy, never GitHub), the build image | #15 |
 | Operations | seamless upgrades (readiness, drain, resuming interrupted attempts), the worker fleet (capabilities, control vs worker, sessions across hosts), usage and health APIs | #11 #16 #25 |
 | Surfaces | thread and SSE API with authentik JWT auth, MCP server with OAuth proxy, mail (replies continue a conversation), uploads | #4 #21 #31 #45 |
+| Orchestration | `delegate` to other agents or fresh workers, each task in its own conversation; task DAGs; parent and child mailboxes (`task:message`, questions to the parent first); decision gates only a person resolves; `delegation` wakeups when tasks settle (never polling); the built-in `orbit` agent delegates to every agent; tasks in the thread, `/tasks` API and a live tasks stream (ARCHITECTURE.md, Delegation) | #46 |
 | Hygiene | API fixes, exact documented shapes, reserved agent names, migration uniqueness | #18 #19 #26 #29 #30 #40 |
 
 Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/compose.orbit.yml` (at the time of writing 21ab048; newer images were blocked by a duplicate migration, fixed in #50). MCP is live; mail is prepared but not enabled (docs in the homelab repo). The worker fleet is built but not deployed.
@@ -29,7 +30,6 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | Area | Branch / PR | Notes |
 |---|---|---|
 | General `orbit` agent: a plain Claude Code session per conversation in a sandboxed persistent workspace, owner messages as instructions, agent self-edit (`agent:define`), uploads/files endpoints for the chat, stopping a running reply | #47, branch general-agent work | the chat UI already calls the endpoints described in docs/api.md |
-| Orchestration: `delegate`, task DAGs, mailboxes, decision gates, wakeups | #46 delegation | |
 | Search across everything stored, plus a live usage poller and deferring low-priority runs | #42 search | |
 | Attention events, inbox API, Web Push (portfolio PWA) | #41 orbit-push-attention | the portfolio is already a PWA |
 | Hook-driven live agent status | #37 agent-status | |
@@ -52,7 +52,7 @@ Pick one, put your name and branch in the Owner column in your first PR, keep ea
 | 6 | Backup and export: export/import agents, memory, skills and conversations as a portable bundle; a restore drill for orbit-db documented | | |
 | 7 | Messaging channels: Telegram (or Slack) as a two-way surface like mail: replies continue a conversation, new messages start one | | mirror internal/mail's design |
 | 8 | Voice: dictation in the chat (browser) and spoken replies | | portfolio repo, app/orbit/ |
-| 9 | Plugin system for sources, actions and tools without editing orbit (a manifest plus an executable or WASM module, run in the sandbox) | | design doc first, in docs/ |
+| 9 | Plugin system for sources, actions and tools without editing orbit (a manifest plus an executable or WASM module, run in the sandbox) | plugin-design, codex/plugin-design, #56 | Proposed design: [docs/plugins.md](plugins.md); manifest/protocol, grants, sandbox boundary and acceptance tests; no runtime implementation |
 | 10 | Docs and onboarding: a user guide (what orbit can do, creating an agent in a minute, the chat, email, MCP), kept short | onboarding-guide, #52 | Built: [docs/guide/README.md](guide/README.md); API examples, approval results, email and MCP prerequisites; deployment availability stated explicitly |
 
 ## Standards (summary; AGENTS.md and docs/agents/ are authoritative)

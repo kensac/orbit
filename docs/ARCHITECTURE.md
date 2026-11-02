@@ -7,12 +7,12 @@ alone, what waits for approval, what it may not do at all).
 
 ## Code first, model last
 
-The model is the expensive, slow, non-deterministic part, so it gets only the part of a job that needs judgment. Everything else is code that runs before it: the harness fetches and paginates sources, and runs an agent's transforms (`internal/transforms`: coded reducers over a source, such as per-category totals with transfers removed, each output an input of its own), and then its gates (`unchanged`, `items_above`: a scheduled run whose inputs are what the last review judged, or that has nothing to review, ends `skipped`, naming the gate, without a backend call, so a quiet day costs no tokens). A report's numbers should come from code, with the model explaining them.
+The model is the expensive, slow, non-deterministic part, so it gets only the part of a job that needs judgment. Everything else is code that runs before it: the harness fetches and paginates sources, and runs an agent's transforms (`internal/transforms`: coded reducers over a source, such as per-category totals with transfers removed, each output an input of its own), and then its gates (`unchanged`, `items_above`, `precheck`: a scheduled run whose inputs are what the last review judged, that has nothing to review, or whose precheck command says there is nothing to do, ends `skipped`, naming the gate, without a backend call, so a quiet day costs no tokens). A report's numbers should come from code, with the model explaining them.
 
 ## One run
 
 ```
-trigger (schedule | manual | message | continue; a ticket's build runs its own path, below)
+trigger (schedule: cron or RRULE | manual | message | continue | task | delegation; a ticket's build runs its own path, below)
   -> runs row, status queued
   -> executor claims it (FOR UPDATE SKIP LOCKED; at most one running per agent;
      a continuation not before its run_after)
@@ -147,6 +147,20 @@ per agent, and a chain is bounded by `actions.MaxContinueChain` (12): the
 run at the limit has its proposal denied, and `EnqueueContinuation` holds the
 same bound. A long task becomes a chain of short checkpointed runs, each with
 the session continued when the agent has one.
+
+## Delegation
+
+One agent coordinates others. An agent whose spec names `delegates` (agents, or `"*"`) and a rule for `delegate` proposes `delegate` with a batch of tasks: each a `key`, an `agent`, a `brief`, optionally `after` (keys of the same batch it waits for), `fresh` and `decision`. Executing it (`store.Delegate`, one transaction) gives each task its own conversation of its agent, with the brief as the first message (author `agent:<parent>`), and returns the tasks' ids as the handle. Code does the rest (`store.ReconcileTasks`, on control after each run, after delegation actions and every 5 s):
+
+- **Start.** A task starts, as a `task` run in its conversation, once its dependencies are done and any decision approved; the run is told it reports to an agent, not a person, and given its dependencies' reports. Tasks of different agents run in parallel; one agent's queue behind each other (`runs_one_running`).
+- **Settle.** A task is `working` while a run of its conversation is queued or running, or one of its actions is approved and not yet executed (a `continue` about to queue); then its newest run decides: failed or cancelled end it so, an open question makes it `needs_input`, otherwise it is `done` and that run's summary and report are its `report`. A failed or cancelled dependency cancels its dependents.
+- **Wake, never poll.** A task needing input is due to its parent at once; finished tasks when their whole batch is over (`report_due_at`). A parent conversation with a due task and no run started since gets one `delegation` run (`runs_one_delegation`), whose prompt lists every task with its status and, in full, what is new: reports, questions with their ids, errors. Any run in that conversation sees the same section, and one that started after the change clears it, so a parent is told once.
+- **Mailboxes.** A task's questions go to its parent, never to the person (a task's run notifies nothing but approvals, and its open questions do not make anything need the person's input). The parent answers with `task:message` (`reply_to` the question), which writes into the task's conversation and queues a run to read it (a done task reopens), or escalates by asking its own person. `task:cancel` ends a task. A person can read and write any task's conversation like any other.
+- **Decision gates.** A task with `decision` waits `blocked` on a `task:decision` action of the parent run, which only a person resolves (approve or reject, as any approval; no rule decides it). It is re-checked every reconcile: approved starts the task, told so; rejected cancels it and its dependents.
+- **Interactive and unattended.** In a run answering the person's own message, delegation's types under an `approve` rule apply directly (`engine.ruleFor`); every other run follows the rules as written. `task:message` and `task:cancel` follow the `delegate` rule unless named.
+- **Fresh workers.** `fresh: true` runs the agent's spec as a template: the task's runs read none of its memory and write none.
+- **The general agent** (`orbit`, built in) delegates to every agent (`delegates: ["*"]`, `delegate: approve`): the super agent a person talks to, which hands work to the others.
+- **Bounds** (`store`): `MaxTasksPerDelegation` (8) per action, `MaxTaskDepth` (3) levels of tasks delegating, `MaxConversationTasks` (64) per conversation.
 
 ## The output contract
 

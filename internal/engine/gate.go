@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"path"
+	"path/filepath"
 	"time"
 
 	"github.com/kensac/orbit/internal/harness"
@@ -34,10 +35,16 @@ func gated(a *spec.Agent, c *store.ClaimedRun, rc *store.RunContext, recovering 
 
 // gate runs the agent's gates in order over what the model would be shown
 // (inputs) and every document fetched or computed (docs, by source or
-// transform name), and returns the first that ends the run, or nil.
-func (e *Engine) gate(ctx context.Context, a *spec.Agent, inputs []runner.Input, docs map[string][]byte) (*gateSkip, error) {
+// transform name), and returns the first that ends the run, or nil. A
+// precheck runs its command in the workdir, where the inputs are written.
+func (e *Engine) gate(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, workdir, inputsDir string, inputs []runner.Input, docs map[string][]byte, emit func(string, any)) (*gateSkip, error) {
 	for i, g := range a.Gates {
 		switch g.Kind {
+		case "precheck":
+			sk, err := e.precheck(ctx, a, g, c.ID, workdir, filepath.Join(workdir, inputsDir), emit)
+			if err != nil || sk != nil {
+				return sk, err
+			}
 		case "unchanged":
 			last, err := e.Store.LastSucceededInputs(ctx, a.Name)
 			if err != nil {

@@ -85,6 +85,10 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
 	api("POST /api/v1/conversations/{id}/messages", s.conversationMessage)
+	api("GET /api/v1/conversations/{id}/tasks", s.conversationTasks)
+	api("GET /api/v1/conversations/{id}/tasks/stream", s.streamTasks)
+	api("GET /api/v1/tasks/{id}", s.getTask)
+	api("POST /api/v1/tasks/{id}/cancel", s.cancelTask)
 	api("POST /api/v1/conversations/{id}/uploads", s.createUpload)
 	api("POST /api/v1/conversations/{id}/uploads/url", s.uploadURL)
 	api("GET /api/v1/conversations/{id}/uploads/{upload}", s.getUpload)
@@ -119,6 +123,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/abandon", s.ticketMove(store.TicketAbandoned))
 	api("POST /api/v1/tickets/{id}/retry", s.ticketMove(store.TicketApproved))
 	api("POST /api/v1/tickets/{id}/reopen", s.ticketMove(store.TicketOpen))
+	api("POST /api/v1/tickets/{id}/checks/rerun", s.rerunChecks)
 	s.memoryRoutes(api)
 	s.skillsRoutes(api)
 

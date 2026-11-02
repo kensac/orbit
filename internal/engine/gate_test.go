@@ -98,3 +98,60 @@ gates:
 		t.Fatalf("run = %s %v %q, calls %d", r.Status, r.Gate, *r.Summary, fr.calls)
 	}
 }
+
+// TestAPrecheckDecidesWhetherTheModelIsCalled: exit 1 skips (naming what
+// it printed), 0 runs, any other status and a timeout fail the run, and
+// the command sees the inputs and none of orbit's environment.
+func TestAPrecheckDecidesWhetherTheModelIsCalled(t *testing.T) {
+	t.Setenv("ORBIT_PROBE_SECRET", "s3cret")
+	for _, c := range []struct {
+		name, gate string
+		status     string
+		calls      int
+		want       string
+	}{
+		{"nothing to do", `{kind: precheck, command: 'test -z "$ORBIT_PROBE_SECRET" && test -f "$ORBIT_INPUTS/tx.json" && test -f inputs/tx.json && echo no new rows; exit 1'}`,
+			store.StatusSkipped, 0, "Skipped: precheck exited 1: no new rows"},
+		{"work to do", `{kind: precheck, command: 'exit 0'}`, store.StatusSucceeded, 1, ""},
+		{"broken", `{kind: precheck, command: 'echo boom >&2; exit 3'}`, "failed", 0, "precheck exited 3: boom"},
+		{"too slow", `{kind: precheck, command: 'sleep 30', timeout: 1s}`, "failed", 0, "precheck timed out after 1s"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fr := &fakeRunner{output: goodOutput}
+			e, s, _ := harnessWith(t, fr, "gates: ["+c.gate+"]\n")
+			run := scheduled(t, e, s, 0)
+			start := time.Now()
+			if err := e.Execute(ctx, run); err != nil {
+				t.Fatal(err)
+			}
+			if d := time.Since(start); d > 10*time.Second {
+				t.Fatalf("took %s", d)
+			}
+			r, _ := s.GetRun(ctx, run.ID)
+			if r.Status != c.status || fr.calls != c.calls {
+				t.Fatalf("run = %s, calls %d (error %v)", r.Status, fr.calls, r.Error)
+			}
+			got := ""
+			switch {
+			case r.Status == store.StatusSkipped:
+				got = *r.Summary
+				if *r.Gate != "precheck" {
+					t.Fatalf("gate = %s", *r.Gate)
+				}
+			case r.Error != nil:
+				got = *r.Error
+			}
+			if !strings.Contains(got, c.want) {
+				t.Fatalf("got %q, want %q", got, c.want)
+			}
+			evs, _ := s.ListEvents(ctx, run.ID, 0, 0, 100)
+			found := false
+			for _, ev := range evs {
+				found = found || ev.Kind == "orbit.precheck"
+			}
+			if !found {
+				t.Fatal("no orbit.precheck event")
+			}
+		})
+	}
+}
