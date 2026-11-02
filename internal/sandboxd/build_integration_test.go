@@ -62,6 +62,10 @@ func TestIntegrationBuild(t *testing.T) {
 		Network: internalNet,
 		Proxy:   proxyName + ":3128",
 		Docker:  d.sock,
+
+		// The fake CLI never calls its backend, so no credential proxy runs.
+		CredProxy:    "orbit-credproxy-" + suffix + ":3129",
+		CredProxyKey: credproxyKey,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
