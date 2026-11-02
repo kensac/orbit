@@ -77,7 +77,7 @@ type Deployment struct {
 	// DeferLowPriority holds the scheduled runs of priority: low agents
 	// while a subscription window is nearly spent (internal/usage).
 	DeferLowPriority bool `yaml:"defer_low_priority,omitempty" json:"defer_low_priority,omitempty"`
-	// Credentials are the variables a source may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
+	// Credentials are the variables a source or an endpoint's headers may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
 	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
 	// Expires records when a credential orbit cannot inspect stops working (the Claude Code subscription token lasts a year), keyed by its variable, as YYYY-MM-DD (expires.go). It only feeds orbit_credential_expiry_timestamp_seconds, so an alert fires before the date.
 	Expires map[string]string `yaml:"expires,omitempty" json:"expires,omitempty"`
@@ -165,12 +165,20 @@ type Channel struct {
 }
 
 // Endpoint is a named HTTP target a `webhook` action may call. The agent
-// chooses only the endpoint name and the body; the URL and credentials stay
-// in configuration, so a model cannot point a write at anything new.
+// chooses only the endpoint name, the body and the values of the path's
+// placeholders, each checked against Params; the URL, method and credentials
+// stay in configuration, so a model cannot point a write at anything new.
 type Endpoint struct {
 	URL     string            `yaml:"url" json:"url"`
 	Method  string            `yaml:"method" json:"method"`
 	Headers map[string]string `yaml:"headers" json:"headers"`
+	// Description tells the model what the endpoint does.
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+	// Path is appended to URL; each {name} in it is filled from the action's path params, declared in Params (endpoint.go).
+	Path   string                   `yaml:"path,omitempty" json:"path,omitempty"`
+	Params map[string]EndpointParam `yaml:"params,omitempty" json:"params,omitempty"`
+	// BodySchema is a JSON Schema the action's body must satisfy; without one, any object.
+	BodySchema map[string]any `yaml:"body_schema,omitempty" json:"body_schema,omitempty"`
 }
 
 // RunnerSpec configures one model backend.
@@ -910,16 +918,8 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
-	for name, ep := range d.Endpoints {
-		if !nameRE.MatchString(name) {
-			errs = append(errs, fmt.Errorf("endpoint %q: invalid name", name))
-		}
-		if ep.URL == "" {
-			errs = append(errs, fmt.Errorf("endpoint %q: url is required", name))
-		}
-		if ep.Method != "" && !slices.Contains([]string{"POST", "PUT", "PATCH"}, ep.Method) {
-			errs = append(errs, fmt.Errorf("endpoint %q: method must be POST, PUT or PATCH", name))
-		}
+	for _, name := range slices.Sorted(maps.Keys(d.Endpoints)) {
+		errs = append(errs, c.validateEndpoint(name, d.Endpoints[name])...)
 	}
 	for name, r := range d.Runners {
 		if !nameRE.MatchString(name) {

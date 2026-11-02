@@ -275,8 +275,8 @@ to the agent, a validator, and an executor. An agent's spec maps types to
 `auto`, `approve` or `deny`; unnamed types are denied and not offered.
 Today: `notify` (an extra message to one of the agent's channels),
 `continue` (wake this agent again later, above), `schedule:add`, `schedule:pause`, `schedule:resume`, `schedule:remove` and `run:now` (an agent's triggers changed from the person's words, parsed by code, each a new version; configuration.md, Changing schedules by talking), `agent:save` (the conversation as a new agent: the model writes its words, code its reach from what the conversation did, held for a person as an `agent:define`), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; a change that widens it waits for a person; docs/api.md, Defining agents), `github:clone` and `github:pr` (a chat agent's repository work: orbit clones into its workspace and commits and pushes its working tree to `orbit/chat/<branch>`, `build.Git`), `webhook:<endpoint>` (a
-JSON body to an endpoint whose URL and credentials are configuration, never
-chosen by the model), and `github:merge` (squash one of orbit's own
+JSON body to an endpoint whose URL, method and credentials are configuration, never
+chosen by the model; an endpoint's `path` may have `{name}` placeholders the action fills from params checked against the endpoint's declared types, and a `body_schema` the body must match, so a write like Sure's `PUT /transactions/{id}` is expressible without the model choosing a route; configuration.md, Endpoints), and `github:merge` (squash one of orbit's own
 `orbit/*` PRs, only if its head is still the approved commit and every
 required check passed; [tickets.md](tickets.md)).
 

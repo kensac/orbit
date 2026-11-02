@@ -16,7 +16,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `build` | map | absent | How approved tickets become PRs. Without it no ticket is built. |
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
-| `credentials` | map of variable to credential | none | The variables sources may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
+| `credentials` | map of variable to credential | none | The variables sources and endpoint headers may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
 | `expires` | map of variable to `YYYY-MM-DD` | none | When a credential orbit cannot inspect stops working (the Claude Code subscription token), exported as `orbit_credential_expiry_timestamp_seconds{credential}` at midnight UTC of the date so an alert fires before it lapses. Nothing else reads it. |
 | `webhook_secrets` | map of variable to webhook secret | none | The signing secrets inbound webhooks are verified with, each bound to the agents whose webhook triggers may name it (below). |
 | `usage_poll` | map: `every` (default 5m, at least 1m), `token_env` (default `CLAUDE_CODE_OAUTH_TOKEN`) | absent | Poll the subscription's usage windows (configuration.md, Subscription usage and low-priority agents). |
@@ -55,9 +55,23 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
-| `url` | URL | required | Where the action sends its body. The model never chooses it. |
+| `url` | absolute http(s) URL | required | Where the action sends its body, before `path`. The model never chooses it. |
 | `method` | `POST`, `PUT`, `PATCH` | `POST` | HTTP method. |
-| `headers` | map | none | Request headers; values may use `${VAR}`. |
+| `headers` | map | none | Request headers; values may use `${VAR}`. A credential is sent only to a URL under its `url_prefix`. |
+| `description` | string | none | What the endpoint does, shown to the model with the action. |
+| `path` | `/...` with `{name}` placeholders | none | Appended to `url`; each placeholder is filled from the action's `path` params, escaped as one path segment. No query, fragment, `%`, backslash, space or dot segment; with it, `url` has no query or fragment. |
+| `params` | map of placeholder to param | none | One entry per placeholder of `path`, and no other (below). |
+| `body_schema` | JSON Schema | any object | What the action's `body` must satisfy, checked before the action is stored and again before it is sent; shown to the model. |
+
+### `endpoints.<name>.params.<name>`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `type` | `string`, `integer` | required | An integer is a non-negative JSON integer. |
+| `pattern` | RE2 regular expression | none | The whole value must match. A string needs `pattern` or `enum`. |
+| `enum` | list of strings | none | The only values allowed. |
+| `max_length` | int | `200` | A string's longest value, at most 200. |
+| `description` | string | none | What the value is, shown to the model. |
 
 ### `runners.<name>`
 
@@ -111,7 +125,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
-| `url_prefix` | http(s) URL, path ending in `/` | required | Every request the variable is rendered into, redirects included, must start with it; no user, query or fragment (configuration.md, Secrets). |
+| `url_prefix` | http(s) URL, path ending in `/` | required | Every request the variable is rendered into (a source's, redirects included, or an endpoint's), must start with it; no user, query or fragment (configuration.md, Secrets). |
 
 ### `webhook_secrets.<VAR>`
 
@@ -267,7 +281,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `continue` | Wakes the agent again in 1m to 24h, at most 12 in a row. | |
 | `delegate` | Hands a task to an agent in `delegates`. | `delegates` |
 | `task:message`, `task:cancel`, `task:retry` | Messages, cancels or retries a delegated task; follow the `delegate` rule unless named. A retry past a task's third failure waits for a person whatever the rule. | `delegates` |
-| `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint; never a URL or header of the model's. | the endpoint |
+| `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint, with `path` params filling its path's placeholders; never a URL, method or header of the model's. No redirect is followed. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
 | `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |
 | `schedule:add`, `schedule:pause`, `schedule:resume`, `schedule:remove` | Changes one trigger (or, pausing and resuming, every trigger) of this agent or one in `delegates`, as a new revertible version; times are the person's words, parsed by code (configuration.md, Changing schedules by talking). `approve` applies directly in a run answering the person's message. | a database or built-in target |
