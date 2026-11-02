@@ -51,7 +51,60 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 	if d.GitHub != nil && a.RuleFor(MergeType) != spec.RuleDeny {
 		out = append(out, mergeType(d))
 	}
+	if a.RuleFor(DefineType) != spec.RuleDeny {
+		out = append(out, defineType(a))
+	}
 	return out
+}
+
+// DefineType creates or changes an agent defined in the database, this
+// agent included: its charter, schedule, tools, sources, rules. It applies
+// as a new version of that agent (every version kept, revertible through
+// the API), recording the run and the person it answered.
+const DefineType = "agent:define"
+
+type defineParams struct {
+	Spec json.RawMessage `json:"spec"`
+}
+
+func defineType(a *spec.Agent) Type {
+	return Type{
+		Name: DefineType,
+		Description: "Create an agent or change one (yourself included, \"" + a.Name + "\"): spec is the whole agent, " +
+			"the same fields as an agents/<name>.yaml file (name, description, charter, triggers, sources, tools, actions, " +
+			"session, notify, ...; durations as strings like \"15m\"). It replaces the agent's spec as a new version; " +
+			"every version is kept and can be reverted. Agents defined in configuration files cannot be changed this way.",
+		ParamsSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"spec": map[string]any{"type": "object", "properties": map[string]any{
+					"name": map[string]any{"type": "string", "pattern": spec.AgentNamePattern}}, "required": []string{"name"}},
+			},
+			"required":             []string{"spec"},
+			"additionalProperties": false,
+		},
+		Validate: func(p json.RawMessage) error {
+			_, err := DecodeDefine(p)
+			return err
+		},
+	}
+}
+
+// DecodeDefine reads agent:define's params: the spec, decoded as strictly
+// as a file, with a name.
+func DecodeDefine(p json.RawMessage) (json.RawMessage, error) {
+	var v defineParams
+	if err := strictDecode(p, &v); err != nil {
+		return nil, err
+	}
+	ag, err := spec.DecodeAgent(v.Spec)
+	if err != nil {
+		return nil, fmt.Errorf("agent:define: spec: %w", err)
+	}
+	if ag.Name == "" {
+		return nil, fmt.Errorf("agent:define: spec.name is required")
+	}
+	return v.Spec, nil
 }
 
 // MergeType squash-merges one of orbit's own PRs once its checks are green.
@@ -245,6 +298,8 @@ type Executor struct {
 	// It returns the queued run's id, and queued false when one was
 	// already waiting (whose id it returns instead).
 	Continue func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (id string, queued bool, err error)
+	// Define applies an agent:define for the call's run.
+	Define func(ctx context.Context, c Call, spec json.RawMessage) (json.RawMessage, error)
 }
 
 // Call is one action to execute: its type and parameters, and the agent
@@ -334,6 +389,15 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 		return result, nil
 	case typ == MergeType:
 		return e.merge(ctx, params)
+	case typ == DefineType:
+		sp, err := DecodeDefine(params)
+		if err != nil {
+			return nil, err
+		}
+		if e.Define == nil {
+			return nil, fmt.Errorf("agent:define: not available in this process")
+		}
+		return e.Define(ctx, c, sp)
 	}
 	return nil, fmt.Errorf("unknown action type %q", typ)
 }

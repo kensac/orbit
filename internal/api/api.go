@@ -11,7 +11,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -55,10 +54,6 @@ type Server struct {
 	// Push sends Web Push and holds its key; nil is push off (the inbox
 	// still works).
 	Push *push.Sender
-	// Reload puts the configuration and the database's agent definitions
-	// in force after the API changes a definition. Nil reloads through
-	// Engine.Reload alone (tests).
-	Reload func(context.Context) error
 	// OAuth, when set, serves the authorization server MCP clients sign in through (oauth.go) on the public listener. Without it /mcp still takes an authentik token from a client that has one.
 	OAuth *OAuthProxy
 }
@@ -86,6 +81,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/agents/{name}/disable", s.setAgentState("disable"))
 	api("POST /api/v1/agents/{name}/archive", s.setAgentState("archive"))
 	api("GET /api/v1/agents/{name}/definitions", s.agentDefinitions)
+	api("POST /api/v1/agents/{name}/definitions/{version}/revert", s.revertAgent)
 	api("GET /api/v1/agents/{name}/thread", s.thread)
 	api("GET /api/v1/agents/{name}/conversations", s.listConversations)
 	api("POST /api/v1/agents/{name}/conversations", s.createConversation)
@@ -134,7 +130,9 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/abandon", s.ticketMove(store.TicketAbandoned))
 	api("POST /api/v1/tickets/{id}/retry", s.ticketMove(store.TicketApproved))
 	api("POST /api/v1/tickets/{id}/reopen", s.ticketMove(store.TicketOpen))
+	api("POST /api/v1/tickets/{id}/checks/rerun", s.rerunChecks)
 	s.memoryRoutes(api)
+	s.skillsRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
 

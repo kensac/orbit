@@ -1,0 +1,9 @@
+[{
+  "name": "quiet-day",
+  "cost_usd": 0,
+  "output": {
+    "summary": "Nothing to review",
+    "actions": [],
+    "notify": {"send": false}
+  }
+}]

@@ -7,12 +7,12 @@ alone, what waits for approval, what it may not do at all).
 
 ## Code first, model last
 
-The model is the expensive, slow, non-deterministic part, so it gets only the part of a job that needs judgment. Everything else is code that runs before it: the harness fetches and paginates sources, and runs an agent's transforms (`internal/transforms`: coded reducers over a source, such as per-category totals with transfers removed, each output an input of its own), and then its gates (`unchanged`, `items_above`: a scheduled run whose inputs are what the last review judged, or that has nothing to review, ends `skipped`, naming the gate, without a backend call, so a quiet day costs no tokens). A report's numbers should come from code, with the model explaining them.
+The model is the expensive, slow, non-deterministic part, so it gets only the part of a job that needs judgment. Everything else is code that runs before it: the harness fetches and paginates sources, and runs an agent's transforms (`internal/transforms`: coded reducers over a source, such as per-category totals with transfers removed, each output an input of its own), and then its gates (`unchanged`, `items_above`, `precheck`: a scheduled run whose inputs are what the last review judged, that has nothing to review, or whose precheck command says there is nothing to do, ends `skipped`, naming the gate, without a backend call, so a quiet day costs no tokens). A report's numbers should come from code, with the model explaining them.
 
 ## One run
 
 ```
-trigger (schedule | manual | message | continue; a ticket's build runs its own path, below)
+trigger (schedule: cron or RRULE | manual | message | continue; a ticket's build runs its own path, below)
   -> runs row, status queued
   -> executor claims it (FOR UPDATE SKIP LOCKED; at most one running per agent;
      a continuation not before its run_after)
@@ -104,7 +104,7 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
 - **Tools** (`orbit mcp`, an MCP stdio server from `--mcp-config` under
   `--strict-mcp-config`): `mcp__orbit__query` filters, groups and
   counts or sums the records of a JSON input, exactly (numbers are read as the
-  decimal literals they are); `mcp__orbit__calc` is exact rational arithmetic.
+  decimal literals they are); `mcp__orbit__calc` is exact rational arithmetic; `mcp__orbit__skill`, listed only when the run has skills, serves their text (Skills, below).
   The system prompt tells the model to compute every figure with them. Both
   read only under the workdir, and append each result to a ledger in the run's
   state directory.
@@ -153,7 +153,7 @@ Every backend returns the same JSON (`internal/engine/contract.go`):
 `summary`, `report` (Markdown), `notify` (send, priority, title), `memory`
 (update, the complete new document), `questions`, `actions`, and, only for a
 run in a request ticket's conversation that is still being discussed,
-`plan` ([tickets.md](tickets.md)), and `entries`, the memory entry writes the run makes (below). The backend is
+`plan` ([tickets.md](tickets.md)), `entries`, the memory entry writes the run makes, and `skills`, the skill writes (both below). The backend is
 given a strict schema in which each action type's parameters are spelled out;
 the engine validates against a looser envelope and then judges each action on
 its own, so one malformed proposal is denied without losing the report.
@@ -214,13 +214,22 @@ A run that starts fresh (not a recovery) reads every active entry in its scopes 
 
 `orbit import claude-memory` maps a Claude Code memory directory (one file per fact, frontmatter `name`/`description`/`type`, `**Why:**` and `**How to apply:**` paragraphs, the `MEMORY.md` index for titles) onto entries by key, through `POST /memory/import`, so a repeated import changes only what changed (docs/agents/deployment.md).
 
+## Skills
+
+orbit keeps Claude Code skills in a library (`skills`, `skill_versions`, `skill_files`; every version kept, `internal/store/skills.go`) and gives each agent the ones its spec names (`skills`) or the API attached, at their current versions (`internal/engine/skills.go`):
+
+- **Claude Code** loads them as real skills from a plugin, `<HOME>/.claude/orbit-skills-<digest>/`, passed with `--plugin-dir` (with `--setting-sources ""` Claude Code reads no skills directory of its own; verified on 2.1.316), with `Skill` added to the run's tools. The plugin holds a stub per skill: its name and description, which is what the CLI decides by, and an instruction to read the rest with `mcp__orbit__skill`. orbit's tool server serves each skill's `SKILL.md` and files from the run's own copy under its state directory, confined to the skill's directory after symlinks, so what the model follows is exactly the version the run was given, and a skill's files are readable without a path outside the workdir. The directory's name carries a digest of the skills' contents: an unchanged set is reused, a changed one replaces it, and because the digest is in the CLI's arguments, a live process holding the old set is closed rather than fed a turn. Without orbit's tools (no harness binary) the plugin holds each full `SKILL.md` instead, and its files are not reachable.
+- **Other backends** get every `SKILL.md` as one input file, `inputs/_skills.md`.
+
+A run records the versions it had (`skills.json`). Its output may write or retire skills (`skills`, at most `maxSkillWrites`, 3): applied in `RecordOutcome`, each in a savepoint like entry writes, against the version the run had, and a written skill is attached to the agent. `orbit import skills` seeds the library from a Claude Code skills directory.
+
 ## Actions and rules
 
 An action type is code (`internal/actions`): a name, a parameter schema shown
 to the agent, a validator, and an executor. An agent's spec maps types to
 `auto`, `approve` or `deny`; unnamed types are denied and not offered.
 Today: `notify` (an extra message to one of the agent's channels),
-`continue` (wake this agent again later, above), `webhook:<endpoint>` (a
+`continue` (wake this agent again later, above), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; docs/api.md, Defining agents), `webhook:<endpoint>` (a
 JSON body to an endpoint whose URL and credentials are configuration, never
 chosen by the model), and `github:merge` (squash one of orbit's own
 `orbit/*` PRs, only if its head is still the approved commit and every
