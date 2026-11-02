@@ -374,12 +374,14 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 		ClientMessageID string `json:"client_message_id"`
 		// Attachments are uploads of this conversation the message carries.
 		Attachments []string `json:"attachments"`
+		// Answers fill the form of the question reply_to names.
+		Answers map[string]json.RawMessage `json:"answers"`
 	}
 	if !decode(w, r, 64<<10, &body, bodyRequired) {
 		return
 	}
-	if strings.TrimSpace(body.Body) == "" && len(body.Attachments) == 0 {
-		writeErr(w, http.StatusBadRequest, "body or attachments is required")
+	if strings.TrimSpace(body.Body) == "" && len(body.Attachments) == 0 && body.Answers == nil {
+		writeErr(w, http.StatusBadRequest, "body, attachments or answers is required")
 		return
 	}
 	wake := a.MessagesTrigger
@@ -389,6 +391,7 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 	res, replayed, err := s.Store.PostMessageOnce(r.Context(), store.PostMessage{
 		Agent: a.Name, SpecSHA: a.SHA, Body: body.Body, Author: actor(r, body.Author), ReplyTo: body.ReplyTo,
 		Wake: wake, ClientID: body.ClientMessageID, ConversationID: conversationID, Attachments: body.Attachments,
+		Answers: body.Answers,
 	})
 	if err != nil {
 		respond(w, nil, err)

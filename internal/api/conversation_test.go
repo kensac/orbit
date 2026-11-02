@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/api"
+	"github.com/kensac/orbit/internal/forms"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -164,9 +165,10 @@ type threadPage struct {
 		Open       *bool      `json:"open"`
 		NeedsInput bool       `json:"needs_input"`
 		Questions  []struct {
-			ID   string `json:"id"`
-			Body string `json:"body"`
-			Open bool   `json:"open"`
+			ID     string        `json:"id"`
+			Body   string        `json:"body"`
+			Open   bool          `json:"open"`
+			Fields []forms.Field `json:"fields"`
 		} `json:"questions"`
 		Actions []struct {
 			ID     string `json:"id"`
@@ -213,7 +215,7 @@ func TestThread(t *testing.T) {
 		assistantText("Summing."),
 		assistantTool("StructuredOutput", `{}`))
 	if _, err := v.s.RecordOutcome(ctx, run, "a", store.RunResult{Attempt: 1, Status: "succeeded", Summary: "s", Report: "$84"}, store.Outcome{
-		Questions: []string{"Was the 12th a refund?", "Count tips?"},
+		Questions: []store.Question{{Body: "Was the 12th a refund?"}, {Body: "Count tips?"}},
 		Actions:   []store.ProposedAction{{Type: "notify", Params: json.RawMessage(`{"channel":"c"}`), Reason: "r", Rule: "approve"}},
 	}); err != nil {
 		t.Fatal(err)
@@ -473,7 +475,7 @@ wait:
 	}
 
 	if _, err := v.s.RecordOutcome(ctx, run, "a", store.RunResult{Attempt: a2, Status: "succeeded", Report: "r"},
-		store.Outcome{Questions: []string{"q?"}}); err != nil {
+		store.Outcome{Questions: []store.Question{{Body: "q?"}}}); err != nil {
 		t.Fatal(err)
 	}
 	expect(t, ch, "status", `{"attempt":2,"epoch":2,"status":"succeeded"}`)

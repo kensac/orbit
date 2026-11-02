@@ -111,7 +111,7 @@ const taskSelect = `
 	                 WHERE x.task_id = t.id), '{}'),
 	       da.id::text, da.reason, da.status, da.decided_by,
 	       t.report, t.error, lr.id, lr.status,
-	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', true) ORDER BY m.created_at, m.id)
+	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', true, 'fields', m.fields) ORDER BY m.created_at, m.id)
 	                 FROM messages m WHERE m.conversation_id = t.conversation_id AND ` + openQuestion + `), '[]'),
 	       t.created_at, t.updated_at, t.finished_at
 	FROM tasks t

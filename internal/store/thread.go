@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/kensac/orbit/internal/forms"
 )
 
 // ThreadItem is one entry of an agent's conversation: exactly one of
@@ -63,6 +65,10 @@ type ThreadMessage struct {
 	// Attachments are the files a person's message carries; always an
 	// array.
 	Attachments []Upload `json:"attachments"`
+	// Fields are a question's form, absent for a question without one and for a person's message.
+	Fields []forms.Field `json:"fields,omitempty"`
+	// Answers are what a person's reply to a form answered (forms.Answers, by field name), absent otherwise.
+	Answers json.RawMessage `json:"answers,omitempty"`
 }
 
 // MessageRead is one attempt's read of a person's message.
@@ -109,6 +115,8 @@ type ThreadQuestion struct {
 	ID   string `json:"id"`
 	Body string `json:"body"`
 	Open bool   `json:"open"`
+	// Fields are its form; absent without one.
+	Fields []forms.Field `json:"fields,omitempty"`
 }
 
 // ThreadAction is an action as a thread shows it.
@@ -168,7 +176,7 @@ const latestTurn = `(
 const threadRunSelect = `
 	SELECT r.id::text, r.created_at, r.trigger, r.status, r.attempt, r.started_at, r.finished_at,
 	       ` + stepsCount + `, ` + latestTurn + `, r.summary, r.report, r.error, r.cost_usd::float8, r.gate,
-	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', (` + openQuestion + `)) ORDER BY m.created_at, m.id)
+	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', (` + openQuestion + `), 'fields', m.fields) ORDER BY m.created_at, m.id)
 	                 FROM messages m WHERE m.run_id = r.id AND m.direction = 'from_agent'), '[]'),
 	       COALESCE((SELECT json_agg(json_build_object('id', a.id, 'type', a.type, 'status', a.status,
 	                                                   'reason', a.reason, 'params', a.params)
@@ -341,7 +349,8 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 				       (SELECT json_agg(json_build_object('run_id', x.run_id, 'attempt', x.attempt,
 				                                          'read_at', x.read_at, 'released_at', x.released_at)
 				                        ORDER BY x.read_at, x.attempt)
-				        FROM message_reads x WHERE x.message_id = m.id)
+				        FROM message_reads x WHERE x.message_id = m.id),
+				       fields, answers
 				FROM messages m WHERE id = ANY($1::uuid[])`, msgIDs)
 			if err != nil {
 				return err
@@ -349,11 +358,16 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 			for rows.Next() {
 				m := ThreadMessage{Kind: "message"}
 				var dir string
-				var reads []byte
-				if err := rows.Scan(&m.ID, &m.At, &dir, &m.Body, &m.Author, &m.ReplyTo, &m.RunID, &m.Open, &reads); err != nil {
+				var reads, fields, answers []byte
+				if err := rows.Scan(&m.ID, &m.At, &dir, &m.Body, &m.Author, &m.ReplyTo, &m.RunID, &m.Open, &reads, &fields, &answers); err != nil {
 					rows.Close()
 					return err
 				}
+				if err := unmarshalNullable(fields, &m.Fields); err != nil {
+					rows.Close()
+					return err
+				}
+				m.Answers = answers
 				if reads != nil {
 					if err := json.Unmarshal(reads, &m.Reads); err != nil {
 						rows.Close()
@@ -402,6 +416,14 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 	}
 	sort.Slice(page.Items, func(i, j int) bool { return page.Items[i].key().less(page.Items[j].key()) })
 	return page, nil
+}
+
+// unmarshalNullable decodes a nullable jsonb column, leaving v as it is for NULL.
+func unmarshalNullable(b []byte, v any) error {
+	if b == nil {
+		return nil
+	}
+	return json.Unmarshal(b, v)
 }
 
 // less is the thread's order, the same one the query's row comparison

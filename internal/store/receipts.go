@@ -7,8 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/kensac/orbit/internal/forms"
 )
 
 // ErrReceiptMismatch is a client request id reused for a different request.
@@ -76,6 +80,8 @@ type PostMessage struct {
 	ConversationID string
 	// Attachments are uploads of the conversation the message carries.
 	Attachments []string
+	// Answers fill the form of the question ReplyTo names (forms.Answers); nil for a message without.
+	Answers map[string]json.RawMessage
 }
 
 // PostResult is what PostMessage did.
@@ -89,7 +95,7 @@ type PostResult struct {
 // message nor wakes a second run. replayed reports a retry.
 func (s *Store) PostMessageOnce(ctx context.Context, p PostMessage) (res PostResult, replayed bool, err error) {
 	req := map[string]any{"op": "message", "conversation": p.ConversationID, "body": p.Body, "reply_to": p.ReplyTo,
-		"author": p.Author, "wake": p.Wake, "attachments": p.Attachments}
+		"author": p.Author, "wake": p.Wake, "attachments": p.Attachments, "answers": p.Answers}
 	raw, replayed, err := s.withReceipt(ctx, p.Agent, p.ClientID, req, func(tx pgx.Tx) (json.RawMessage, error) {
 		r, err := postMessage(ctx, tx, p)
 		if err != nil {
@@ -131,13 +137,25 @@ func postMessage(ctx context.Context, tx pgx.Tx, p PostMessage) (PostResult, err
 			return r, err
 		}
 	}
+	var answers []byte
+	if p.Answers != nil {
+		var err error
+		if p.Body, p.Attachments, answers, err = answerForm(ctx, tx, conv, p); err != nil {
+			return r, err
+		}
+	}
 	if err := ticketOnMessage(ctx, tx, conv, p.Author); err != nil {
 		return r, err
 	}
-	err := tx.QueryRow(ctx, `
-		INSERT INTO messages (agent, direction, body, author, reply_to, conversation_id)
-		VALUES ($1, 'to_agent', $2, NULLIF($3, ''), $4, $5) RETURNING id::text`,
-		p.Agent, p.Body, p.Author, p.ReplyTo, conv).Scan(&r.MessageID)
+	// The answers column is named only when there are answers, so a message without is the INSERT every schema since conversations takes (TestSearchBackfillsRowsWrittenBeforeIt writes through an older one).
+	insert, args := `INSERT INTO messages (agent, direction, body, author, reply_to, conversation_id)
+		VALUES ($1, 'to_agent', $2, NULLIF($3, ''), $4, $5) RETURNING id::text`, []any{p.Agent, p.Body, p.Author, p.ReplyTo, conv}
+	if answers != nil {
+		insert = `INSERT INTO messages (agent, direction, body, author, reply_to, conversation_id, answers)
+		VALUES ($1, 'to_agent', $2, NULLIF($3, ''), $4, $5, $6) RETURNING id::text`
+		args = append(args, answers)
+	}
+	err := tx.QueryRow(ctx, insert, args...).Scan(&r.MessageID)
 	if isForeignKeyViolation(err) {
 		return r, ErrNotFound
 	}
@@ -158,6 +176,60 @@ func postMessage(ctx context.Context, tx pgx.Tx, p PostMessage) (PostResult, err
 		}
 	}
 	return r, nil
+}
+
+// answerForm checks a reply's answers against the form of the question it names and returns the message as stored: the body the person typed followed by the answers as a numbered list (forms.Text, which is what the agent reads), the attachments with every file answer's upload added, and the answers as JSON. A file answer must be an upload of the conversation.
+func answerForm(ctx context.Context, tx pgx.Tx, conv string, p PostMessage) (string, []string, []byte, error) {
+	if p.ReplyTo == nil {
+		return "", nil, nil, fmt.Errorf("%w: answers need reply_to, the question they answer", ErrInvalid)
+	}
+	var question string
+	var raw []byte
+	if err := tx.QueryRow(ctx, `SELECT body, fields FROM messages WHERE id = $1`, *p.ReplyTo).Scan(&question, &raw); err != nil {
+		return "", nil, nil, err
+	}
+	if raw == nil {
+		return "", nil, nil, fmt.Errorf("%w: answers: the question reply_to names has no form", ErrInvalid)
+	}
+	var fields []forms.Field
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return "", nil, nil, err
+	}
+	vals, err := forms.Answers(fields, p.Answers)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	attachments := p.Attachments
+	names := map[string]string{}
+	for _, f := range fields {
+		id, ok := vals[f.Name].(string)
+		if !ok || f.Type != forms.File {
+			continue
+		}
+		var name, of string
+		err := tx.QueryRow(ctx, `SELECT name, conversation_id::text FROM uploads WHERE id = $1`, id).Scan(&name, &of)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && of != conv) {
+			return "", nil, nil, fmt.Errorf("%w: answers: %s: %s is not an upload of this conversation", ErrInvalid, f.Name, id)
+		}
+		if err != nil {
+			return "", nil, nil, err
+		}
+		names[id] = "uploads/" + name
+		if !slices.Contains(attachments, id) {
+			attachments = append(attachments, id)
+		}
+	}
+	head := strings.TrimSpace(question)
+	if i := strings.IndexByte(head, '\n'); i >= 0 {
+		head = head[:i]
+	}
+	text := fmt.Sprintf("Answers to %q:\n%s", head, forms.Text(fields, vals, names))
+	body := strings.TrimSpace(p.Body)
+	if body != "" {
+		body += "\n\n"
+	}
+	stored, err := json.Marshal(vals)
+	return strings.TrimRight(body+text, "\n"), attachments, stored, err
 }
 
 // DecideActionOnce is DecideAction with an optional client request id: a

@@ -184,7 +184,7 @@ One agent coordinates others. An agent whose spec names `delegates` (agents, or 
 
 Every backend returns the same JSON (`internal/engine/contract.go`):
 `summary`, `report` (Markdown), `notify` (send, priority, title), `memory`
-(update, the complete new document), `questions`, `actions`, and, only for a
+(update, the complete new document), `questions` (each a string, or a question with a form), `actions`, and, only for a
 run in a request ticket's conversation that is still being discussed,
 `plan` ([tickets.md](tickets.md)), `entries`, the memory entry writes the run makes, and `skills`, the skill writes (both below). The backend is
 given a strict schema in which each action type's parameters are spelled out;
@@ -224,7 +224,7 @@ carries a title and a link only; bursts fold into one summary push.
   sets `memory.update`. Every version is kept (`memory_versions`).
 - **Memory entries** are the durable layer above it (below).
 - **Questions** a run asks become `from_agent` messages and are delivered with
-  the report, in the asking run's conversation. A question stays open until
+  the report, in the asking run's conversation. A question may carry a form (`fields`, `internal/forms`: typed fields with options, defaults and required), checked by code when it is recorded; a reply's `answers` are checked against it when they are posted and listed in the reply's body, which is what the agent reads (docs/api.md, A conversation's thread). A question stays open until
   a reply names it or any later message reaches that conversation; open
   questions are shown to the conversation's next run so it does not ask
   again.
