@@ -14,8 +14,8 @@ A self-hosted Go service on Kanishk's server (hetzner) that runs Claude Code on 
 | Claude Code | `internal/claudeproto`: the CLI's stream-json protocol in Go (turns, control requests, interrupt, permission prompts, credential scrubbing); session resume with fork; a live process per conversation | #33 #35 #36 #39 #6 |
 | Journal | typed run journal (messages, thinking estimates, tool calls with inputs and bounded results, diffs, plans, approvals, questions, turn state vs outcome), read by the thread, the SSE stream, the run page and MCP | #34 #38 |
 | Determinism | orbit's MCP tools (exact `query`, `calc`), hooks (path guard, figures check), transforms (`sure-monthly`, JSON reducers), gates that skip a scheduled run with no model call, the `skipped` status, RRULE triggers and a precheck gate | #8 #20 #23 #27 #43 |
-| Memory | typed memory entries at profile, topic and agent scope with every version kept; agents write their own; a learning pass over quiet conversations; `orbit import claude-memory` | #28 #44 |
-| Skills | a versioned skills library, real Claude Code skills per run, agents writing and retiring their own, `orbit import skills` | #49 |
+| Memory | typed memory entries at profile, topic and agent scope with every version kept; agents write their own; a learning pass over quiet conversations; memory document write and restore; `orbit import claude-memory` | #28 #44 |
+| Skills and hooks | a versioned skills library given to each Claude Code run as real skills (stubs plus `mcp__orbit__skill`), agents writing and retiring their own, `orbit import skills`; per-agent hooks (`say`, `deny`, `run` at a Claude Code event) | #49 #57 |
 | Search | search across messages, reports, narration, tool calls and memory | #42 |
 | Tickets and builds | tickets on conversations, GitHub App tokens (App `orbit-kensac`, id 5571920), the build runner (sandboxed Claude Code, orbit commits and pushes), the ticket loop, `github:merge` gated on green checks, failed checks rerun once and compared with the base before a fix, review comments on a ticket's PR applied by a revise build, stacked tickets restacked by code and merged in order, a checkout pool (one clone per ticket, warm spares) and setup and cleanup scripts trusted by content hash | #9 #14 #17 #32 #58 #69 #77 |
 | Sandbox | `orbit sandboxd` (one locked-down container per build, or a `workstation` per chat conversation), `orbit egress` (allowlist proxy, never GitHub; open egress for workstations), the build image | #15 #59 |
@@ -35,7 +35,6 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | Area | Branch / PR | Notes |
 |---|---|---|
 | A live usage poller and deferring low-priority runs | #55 usage-poll | search merged in #42 |
-| Memory restore endpoint, per-agent hooks | #57 context-hooks-2 (hooks) | skills library merged in #49 |
 | Hook-driven live agent status | #37 agent-status | |
 
 The Claude side also plans: agent templates and more sources (Gmail, Calendar, Drive, GitHub, Prometheus/Loki, RSS, the DuckDB lake), a homelab-ops agent, presence-aware notifications across devices, the "safeguard later" pass (a credential proxy so the Claude token stays out of the sandbox, a review of self-edit rights, rate limits), and deploying the worker fleet. Ask before starting any of these.
