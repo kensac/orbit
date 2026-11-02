@@ -19,7 +19,7 @@ come from code, with the model explaining them.
 ## One run
 
 ```
-trigger (schedule | manual | message | continue)
+trigger (schedule | manual | message | continue; a ticket's build runs its own path, below)
   -> runs row, status queued
   -> executor claims it (FOR UPDATE SKIP LOCKED; at most one running per agent;
      a continuation not before its run_after)
