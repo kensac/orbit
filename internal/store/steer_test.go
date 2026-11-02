@@ -4,6 +4,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/testdb"
@@ -121,5 +122,74 @@ func TestASteerGoesToTheRunningRunOrIsQueued(t *testing.T) {
 	}
 	if r := post("too late", false, true, store.DeliverySteer); r.Delivered != store.DeliveredQueued {
 		t.Fatalf("a steer to a stopping run = %+v", r)
+	}
+}
+
+// A parent's task:message steers the task's running run only for a chat agent that nobody asked to stop; otherwise it is queued. A parent's steer the turn did not take wakes a task run.
+func TestATaskMessageSteersOnlyAChatAgentsRunningRun(t *testing.T) {
+	s := testdb.New(t)
+	seed(t, s, "p", "w")
+	parent := manual(t, s, "p")
+	pc, err := s.ClaimRun(ctx, "x")
+	if err != nil || pc == nil || pc.ID != parent {
+		t.Fatalf("claim = %+v %v", pc, err)
+	}
+	act, err := s.StartActionNow(ctx, parent, pc.Attempt, "p", store.ProposedAction{Type: "delegate", Params: []byte(`{}`), Rule: "auto"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	made, err := s.Delegate(ctx, store.Delegation{ActionID: act, RunID: parent, Tasks: []store.NewTask{{Key: "k", Agent: "w", Brief: "do it"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReconcileTasks(ctx, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	wc, err := s.ClaimRun(ctx, "x")
+	if err != nil || wc == nil || wc.Agent != "w" {
+		t.Fatalf("claim = %+v %v", wc, err)
+	}
+	chat := true
+	send := func(body string) store.TaskMessaged {
+		t.Helper()
+		r, err := s.MessageTask(ctx, store.TaskMessage{FromRun: parent, TaskID: made[0].ID, Body: body,
+			Steerable: func(agent string) bool { return agent == "w" && chat }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	if r := send("steer me"); r.Delivered != store.DeliveredSteered || r.RunID != wc.ID {
+		t.Fatalf("to a chat agent's running run = %+v", r)
+	}
+	chat = false
+	not := send("not a chat agent")
+	if not.Delivered != store.DeliveredQueued || not.RunID == "" || not.RunID == wc.ID {
+		t.Fatalf("to an agent that cannot take one = %+v", not)
+	}
+	// Its queued run is set aside, so the next message has none to join.
+	if _, err := s.Pool.Exec(ctx, `UPDATE runs SET status = 'cancelled' WHERE id = $1`, not.RunID); err != nil {
+		t.Fatal(err)
+	}
+	chat = true
+	if _, err := s.CancelRun(ctx, wc.ID, "me"); err != nil {
+		t.Fatal(err)
+	}
+	if r := send("stopping"); r.Delivered != store.DeliveredQueued || r.RunID == "" {
+		t.Fatalf("to a run asked to stop = %+v", r)
+	}
+	// So is that one, so the run's end finds nothing queued to read the steer.
+	if _, err := s.Pool.Exec(ctx, `UPDATE runs SET status = 'cancelled' WHERE agent = 'w' AND status = 'queued'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// The steer still waiting when the run ends wakes a task run, not a person's.
+	if err := s.FinishRun(ctx, wc.ID, store.RunResult{Attempt: wc.Attempt, Status: store.StatusSucceeded}); err != nil {
+		t.Fatal(err)
+	}
+	var trigger string
+	if err := s.Pool.QueryRow(ctx, `SELECT trigger FROM runs WHERE agent = 'w' AND status = 'queued'`).Scan(&trigger); err != nil || trigger != "task" {
+		t.Fatalf("the woken run's trigger = %q %v, want task", trigger, err)
 	}
 }

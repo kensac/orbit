@@ -74,19 +74,21 @@ func (o *taskOps) Delegate(ctx context.Context, c actions.Call, p actions.Delega
 	return json.Marshal(map[string]any{"tasks": made})
 }
 
+// MessageTask writes to a task: into its running reply when a chat agent's run works on it (a correction reaches the worker mid-turn), otherwise for its next run, which it wakes. The result's delivered says which.
 func (o *taskOps) MessageTask(ctx context.Context, c actions.Call, p actions.TaskMessageParams) (json.RawMessage, error) {
-	msg, run, err := o.e.Store.MessageTask(ctx, store.TaskMessage{FromRun: c.RunID, TaskID: p.TaskID, Body: strings.TrimSpace(p.Body), ReplyTo: p.ReplyTo})
+	steerable := func(agent string) bool {
+		a, ok := o.snap.Config.Agents[agent]
+		return ok && a.Chat
+	}
+	got, err := o.e.Store.MessageTask(ctx, store.TaskMessage{FromRun: c.RunID, TaskID: p.TaskID, Body: strings.TrimSpace(p.Body), ReplyTo: p.ReplyTo,
+		Steerable: steerable})
 	if err != nil {
 		return nil, err
 	}
-	if run != "" && o.e.Wake != nil {
+	if got.RunID != "" && got.Delivered == store.DeliveredQueued && o.e.Wake != nil {
 		o.e.Wake()
 	}
-	out := map[string]any{"message_id": msg}
-	if run != "" {
-		out["run_id"] = run
-	}
-	return json.Marshal(out)
+	return json.Marshal(got)
 }
 
 func (o *taskOps) CancelTask(ctx context.Context, c actions.Call, p actions.TaskCancelParams) (json.RawMessage, error) {
