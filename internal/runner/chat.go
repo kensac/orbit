@@ -17,6 +17,7 @@ import (
 
 	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/sandbox"
+	"github.com/kensac/orbit/internal/workspace"
 )
 
 // A chat run is a plain Claude Code session (docs/ARCHITECTURE.md, Chat
@@ -57,6 +58,17 @@ type Chat struct {
 	// Interrupt, when closed, interrupts the turn (a person pressed stop):
 	// the CLI ends it with a result, and the run reports Interrupted.
 	Interrupt <-chan struct{}
+	// Fresh is a workspace a person changed since the last turn: a live
+	// process (its sandbox's copy of the workspace, or a cwd the restore
+	// replaced) is not reused, and the session resumes in a new one
+	// started from the workdir as it is now.
+	Fresh bool
+	// Steer carries the person's messages for the turn while it runs
+	// (steer.go); nil for none.
+	Steer <-chan SteerMessage
+	// Steered is told each steer message the turn took: from then on the
+	// turn answers it.
+	Steered func(id string)
 }
 
 // SandboxClient is sandboxd's four operations (*sandbox.Client).
@@ -68,11 +80,11 @@ type SandboxClient interface {
 }
 
 // Sandbox is where a sandboxed chat run's CLI runs, and how its workspace
-// crosses the boundary. Only Credential, the backend's, enters it.
+// crosses the boundary. Only Env, the backend's one credential (build.SandboxEnv), enters it.
 type Sandbox struct {
-	Client     SandboxClient
-	Label      string
-	Credential string
+	Client SandboxClient
+	Label  string
+	Env    map[string]string
 	// Profile is the sandbox's kind (spec.SandboxProfiles): a
 	// "workstation" session gets every tool and a home kept in the
 	// workspace.
@@ -200,7 +212,10 @@ func contains(list []string, s string) bool {
 // chatProc is a CLI a chat run talks to: on this host, or in a sandbox.
 type chatProc interface {
 	Turn(ctx context.Context, prompt string, emit func(claudeproto.Line)) (*claudeproto.Result, error)
-	Interrupt(ctx context.Context) error
+	Interrupt(ctx context.Context, cancelQueued bool) (*claudeproto.InterruptReceipt, error)
+	SendUUID(text, uuid string) error
+	CancelQueued(ctx context.Context, uuid string) (bool, error)
+	Capable(name string) bool
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
@@ -211,19 +226,59 @@ type chatProc interface {
 type chatTools struct {
 	mu   sync.Mutex
 	chat *Chat
+	ws   Workspace
 }
 
-func (t *chatTools) set(c *Chat) {
+func (t *chatTools) set(c *Chat, ws Workspace) {
 	t.mu.Lock()
-	t.chat = c
+	t.chat, t.ws = c, ws
 	t.mu.Unlock()
+}
+
+// Workspace is the turn's workspace as orbit's tools reach it while the CLI
+// runs: the sandbox's /work, or the workdir on this host.
+type Workspace interface {
+	// Put unpacks a tar under dir (relative to the workspace).
+	Put(ctx context.Context, dir string, tar []byte) error
+	// Get packs dir as a tar, entries relative to it.
+	Get(ctx context.Context, dir string) ([]byte, error)
+}
+
+type workspaceKey struct{}
+
+// WorkspaceOf is the workspace of the turn a chat tool call came from.
+func WorkspaceOf(ctx context.Context) Workspace {
+	ws, _ := ctx.Value(workspaceKey{}).(Workspace)
+	return ws
+}
+
+// LocalWorkspace is a workspace directory on this host.
+type LocalWorkspace string
+
+// Put unpacks tar under dir.
+func (l LocalWorkspace) Put(_ context.Context, dir string, tar []byte) error {
+	_, err := workspace.Unpack(strings.NewReader(string(tar)), workspace.Into(filepath.Join(string(l), filepath.FromSlash(dir))))
+	return err
+}
+
+// Get packs dir.
+func (l LocalWorkspace) Get(_ context.Context, dir string) ([]byte, error) {
+	p := filepath.Join(string(l), filepath.FromSlash(dir))
+	if _, err := os.Stat(p); err != nil {
+		return nil, err
+	}
+	tree, _, err := workspace.Pack(workspace.Tree{Dir: p})
+	return tree, err
 }
 
 func (t *chatTools) handler() claudeproto.Handler {
 	return claudeproto.Handler{Name: "orbit", MCP: func(ctx context.Context, req claudeproto.MCPMessage) (json.RawMessage, error) {
 		t.mu.Lock()
-		c := t.chat
+		c, ws := t.chat, t.ws
 		t.mu.Unlock()
+		if ws != nil {
+			ctx = context.WithValue(ctx, workspaceKey{}, ws)
+		}
 		return serveMCP(ctx, c, req)
 	}}
 }
@@ -310,7 +365,9 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	var p *liveProc
 	mode, parent := "fresh", resume
 	if sess != nil && sess.Live != nil {
-		if p = sess.Live.take(sess.Key, key, resume); p != nil {
+		if req.Chat.Fresh {
+			sess.Live.discard(sess.Key)
+		} else if p = sess.Live.take(sess.Key, key, resume); p != nil {
 			mode = "live"
 		}
 	}
@@ -349,28 +406,64 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			return nil, err
 		}
 	}
-	p.tools.set(req.Chat)
-	defer p.tools.set(nil)
+	var ws Workspace = LocalWorkspace(req.Workdir)
+	if sb, ok := p.proc.(*sandboxProc); ok {
+		ws = sb
+	}
+	p.tools.set(req.Chat, ws)
+	defer p.tools.set(nil, nil)
 
-	interrupted := false
+	var (
+		imu     sync.Mutex
+		stopped bool
+		receipt *claudeproto.InterruptReceipt
+	)
 	turnCtx, endTurn := context.WithCancel(ctx)
 	defer endTurn()
 	if req.Chat.Interrupt != nil {
 		go func() {
 			select {
 			case <-req.Chat.Interrupt:
-				interrupted = true
+				imu.Lock()
+				stopped = true
+				imu.Unlock()
 				ictx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
 				defer cancel()
-				if err := p.proc.Interrupt(ictx); err != nil {
+				// Stop means stop: steer messages still queued go with the turn.
+				r, err := p.proc.Interrupt(ictx, p.proc.Capable(claudeproto.CapInterruptCancelQueued))
+				if err != nil {
 					endTurn()
 				}
+				imu.Lock()
+				receipt = r
+				imu.Unlock()
 			case <-turnCtx.Done():
 			}
 		}()
 	}
-	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) { emit(Event{Kind: l.Kind, Payload: l.Raw}) })
+	var steer *steering
+	if req.Chat.Steer != nil {
+		steer = newSteering(p.proc, req.Chat, emit)
+		go steer.feed(turnCtx, req.Chat.Steer)
+	}
+	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) {
+		if steer != nil {
+			steer.observe(l)
+		}
+		emit(Event{Kind: l.Kind, Payload: l.Raw})
+	})
 	endTurn()
+	imu.Lock()
+	interrupted, rec := stopped, receipt
+	imu.Unlock()
+	// Every steer the turn did not take is withdrawn; one that may still
+	// run means this process cannot be kept.
+	clean := true
+	if steer != nil {
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
+		clean = err != nil || steer.finish(wctx, rec)
+		cancel()
+	}
 	if sb, ok := p.proc.(*sandboxProc); ok {
 		// The workspace comes back after every turn, a failed one too:
 		// what the agent wrote is the person's.
@@ -385,7 +478,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		}
 		return nil, err
 	}
-	out := &Result{Reply: res.Result, CostUSD: res.TotalCostUSD, SessionID: res.SessionID, Interrupted: interrupted}
+	out := &Result{Reply: res.Result, Tokens: res.Tokens(), CostUSD: res.TotalCostUSD, SessionID: res.SessionID, Interrupted: interrupted}
 	usage, _ := json.Marshal(map[string]any{"usage": res.Usage, "model_usage": res.ModelUsage, "num_turns": res.NumTurns})
 	out.Usage = usage
 	out.Output, _ = json.Marshal(map[string]any{"reply": res.Result})
@@ -395,6 +488,10 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	if res.IsError && !interrupted {
 		dropOrKill(sess, p)
 		return out, fmt.Errorf("%w: claude-code %s/%s: %s", ErrBackend, res.Subtype, res.TerminalReason, firstLine(res.Failure()))
+	}
+	if !clean {
+		dropOrKill(sess, p)
+		return out, nil
 	}
 	if interrupted || sess == nil || sess.Live == nil || res.SessionID == "" || (!sess.Open && mode != "live") {
 		p.proc.Close(claudeproto.CloseGrace)
@@ -467,7 +564,7 @@ func startSandbox(ctx context.Context, sb *Sandbox, args []string, h claudeproto
 		script = `CFG=` + SandboxConfigDir + `; H=` + SandboxHome + `; mkdir -p "$CFG" "$H" && HOME="$H" CLAUDE_CONFIG_DIR="$CFG" PATH="$H/.local/bin:$H/go/bin:$H/.npm-global/bin:$PATH" NPM_CONFIG_PREFIX="$H/.npm-global" exec "$@"`
 	}
 	argv := append([]string{"sh", "-c", script, "sh", bin}, args...)
-	ar := sandbox.AttachRequest{Argv: argv, Env: map[string]string{claudeproto.OAuthToken: sb.Credential}}
+	ar := sandbox.AttachRequest{Argv: argv, Env: sb.Env}
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	actx, cancel := context.WithCancel(context.Background())
@@ -524,6 +621,29 @@ func (p *sandboxProc) push(ctx context.Context, paths []string) error {
 		err = fmt.Errorf("tar exited %d: %s", code, claudeproto.LastLines(stderr.String(), 2))
 	}
 	return err
+}
+
+// Put unpacks a tar under dir in the running sandbox, with tar inside it.
+func (p *sandboxProc) Put(ctx context.Context, dir string, tree []byte) error {
+	var stderr claudeproto.Tail
+	code, err := p.sb.Client.Attach(ctx, p.id, sandbox.AttachRequest{Argv: []string{"sh", "-c", `mkdir -p "$1" && tar -xf - -C "$1"`, "sh", sandbox.WorkDir + "/" + dir}},
+		strings.NewReader(string(tree)), io.Discard, &stderr)
+	if err == nil && code != 0 {
+		err = fmt.Errorf("tar exited %d: %s", code, claudeproto.LastLines(stderr.String(), 2))
+	}
+	return err
+}
+
+// Get packs dir of the running sandbox.
+func (p *sandboxProc) Get(ctx context.Context, dir string) ([]byte, error) {
+	var out strings.Builder
+	var stderr claudeproto.Tail
+	code, err := p.sb.Client.Attach(ctx, p.id, sandbox.AttachRequest{Argv: []string{"tar", "-cf", "-", "-C", sandbox.WorkDir + "/" + dir, "."}},
+		nil, &out, &stderr)
+	if err == nil && code != 0 {
+		err = fmt.Errorf("tar exited %d: %s", code, claudeproto.LastLines(stderr.String(), 2))
+	}
+	return []byte(out.String()), err
 }
 
 // Close ends the CLI (stdin closed, it exits after its turn), then removes

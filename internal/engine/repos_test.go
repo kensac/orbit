@@ -106,7 +106,7 @@ func (w *repoWorld) run(t *testing.T, trigger string, minute int) *store.Claimed
 	a := w.e.Current().Config.Agents["reader"]
 	nr := store.NewRun{Agent: "reader", SpecSHA: a.SHA, Trigger: trigger, Prompt: "look"}
 	if trigger == "schedule" {
-		idx, at := 0, time.Date(2026, 10, 1, 9, minute, 0, 0, time.UTC)
+		idx, at := 0, fireBase.Add(time.Duration(minute)*time.Minute)
 		nr.TriggerIndex, nr.ScheduledFor, nr.Prompt = &idx, &at, ""
 	}
 	if _, err := w.s.EnqueueRun(ctx, nr); err != nil {
