@@ -25,7 +25,7 @@ import (
 
 var ctx = context.Background()
 
-var secret = []byte(strings.Repeat("t", 32))
+var testSecret = []byte(strings.Repeat("t", 32))
 
 // imapServer is a real IMAP server over the memory backend (its one user is username/password), on loopback.
 func imapServer(t *testing.T) (addr string, inbox backend.Mailbox) {
@@ -96,7 +96,7 @@ mail:
 		t.Fatal(err)
 	}
 	f := &fixture{s: s, cfg: cfg}
-	f.p = &Poller{Store: s, Config: func() *spec.Config { return cfg }, Secret: secret,
+	f.p = &Poller{Store: s, Config: func() *spec.Config { return cfg }, Secret: testSecret,
 		Env:  func(k string) (string, bool) { return map[string]string{"U": "username", "P": "password"}[k], true },
 		Log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Wake: func() { f.woke++ },
@@ -120,7 +120,7 @@ func TestPollRepliesNewMailsAndIgnores(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok := Token(secret, conv.ConversationID)
+	tok := Token(testSecret, conv.ConversationID)
 
 	// A reply to orbit's mail, by its plus address.
 	deliver(t, inbox, mailFrom("Kanishk <ME@example.com>", "<r1@mail.example.com>", "orbit+"+tok+"@example.com",
