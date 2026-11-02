@@ -113,6 +113,7 @@ type mcpReadThreadIn struct {
 	ConversationID string `json:"conversation_id,omitempty" jsonschema:"read this conversation"`
 	Limit          int    `json:"limit,omitempty" jsonschema:"the newest this many items (default 20, at most 200)"`
 	Before         string `json:"before,omitempty" jsonschema:"next_before from a previous page, to page back"`
+	Unfold         bool   `json:"unfold,omitempty" jsonschema:"list every skipped run instead of folding a streak of identical skips into its newest"`
 }
 
 type mcpListActionsIn struct {
@@ -271,7 +272,7 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 			default:
 				return nil, nil, errors.New("give agent or conversation_id")
 			}
-			out, err := threadPage(in.Before, limit, fetch)
+			out, err := threadPage(in.Before, limit, !in.Unfold, fetch)
 			if err != nil {
 				return nil, nil, mcpErr(err)
 			}

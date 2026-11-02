@@ -261,8 +261,8 @@ A thread is the person's messages, the agent's questions, and every run
 (whatever its trigger) of one conversation. An agent's reply is its run's
 `report`, plus any `questions` it asked.
 
-`GET /conversations/{id}/thread?before=<cursor>&limit=<n>`, and
-`GET /agents/{name}/thread?before=<cursor>&limit=<n>` for the default
+`GET /conversations/{id}/thread?before=<cursor>&limit=<n>&fold=<bool>`, and
+`GET /agents/{name}/thread?before=<cursor>&limit=<n>&fold=<bool>` for the default
 conversation:
 
 ```json
@@ -328,6 +328,7 @@ conversation:
   and the agent is waiting for an answer or an approval. It is a state
   distinct from `status`, which says only whether the run itself is done.
   The agents list carries the same flag per agent.
+- **Folded skips.** With `fold` (default `true`; `false` lists every run, anything else is a `400`), each streak of consecutive items that are `skipped` runs of the same `trigger`, trigger index and `gate` is one item: the streak's newest run, with `"folded": {"count": 12, "first_at": "...", "last_at": "...", "run_ids": ["oldest", "...", "newest"]}`. `last_at` is the shown run's `at`; every run of the streak is still its own run (`GET /runs/{id}`), and nothing stored changes. Any other item between two skips (a message, another run) ends a streak. `limit`, `has_more` and the cursor count every run, so paging is exact, and a streak that crosses a page boundary is one folded item on each page. `folded` is absent on every other item. The MCP tool `read_thread` folds the same way unless `unfold` is set.
 - **Tasks** are the tasks the run delegated (its `delegate` actions), in the order it listed them; always an array. `summary` is the finished task's report summary. For the whole task, and live status, see Delegation below.
 - **Actions.** `status` is `pending` (waiting for a person), `approved`
   (by a person or by an `auto` rule, about to execute), `rejected` (by a
@@ -872,7 +873,7 @@ After a conversation goes quiet, orbit runs a short learning pass over it (trigg
 | `create_conversation` | `agent`, `title`, `message`, `wait_seconds` | `conversation_id`, `message_id`, `run_id`, and `reply` as `send_message` |
 | `send_message` | `body`, and `agent` (its default conversation) or `conversation_id`; `reply_to`, `wait_seconds` | `message_id`, `run_id`, `reply`: the run as a thread run item (`report`, `questions`, `actions`, `status`) |
 | `wait_for_reply` | `run_id`, `wait_seconds` | `reply`, the run as a thread run item |
-| `read_thread` | `agent` or `conversation_id`, `limit` (default 20, at most 200), `before` | as a thread page: `items`, `has_more`, `next_before` |
+| `read_thread` | `agent` or `conversation_id`, `limit` (default 20, at most 200), `before`, `unfold` | as a thread page: `items`, `has_more`, `next_before`; identical skips folded unless `unfold` (A conversation's thread, Folded skips) |
 | `list_actions` | `agent`, `status` (default `pending`; `all` for every status), `run_id`, `limit`, `before` | as `GET /actions`: `actions`, `has_more`, `next_before` |
 | `approve_action`, `reject_action` | `action_id` | the decided `action`; a decided one is an error |
 | `search` | `q`, and as `GET /search`: `agent`, `conversation_id`, `run_id`, `kind`, `from`, `to`, `limit`, `offset` | as `GET /search` |
