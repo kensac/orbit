@@ -144,12 +144,22 @@ func TestSearchBackfillsRowsWrittenBeforeIt(t *testing.T) {
 	if err := s.MigrateTo(ctx, searchMigration-1); err != nil {
 		t.Fatal(err)
 	}
-	seed(t, s, "a")
-	if _, err := s.SendToAgent(ctx, "a", "the heat pump is loud", "kanishk", nil); err != nil {
+	// Rows in SQL as that schema had them, never with today's store code (docs/agents/testing.md).
+	conv := oldAgent(t, s, "a")
+	id := oldRun(t, s, "a", conv, `summary = 'Heat pump fine', report = 'The heat pump ran normally.'`)
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO messages (agent, direction, body, author, conversation_id)
+		VALUES ('a', 'to_agent', 'the heat pump is loud', 'kanishk', $1)`, conv); err != nil {
 		t.Fatal(err)
 	}
-	searchedRun(t, s, "a", []string{`{"type":"assistant","message":{"content":[{"type":"text","text":"Checking the heat pump logs."}]}}`},
-		"Heat pump fine", "The heat pump ran normally.", "heat pump: quiet mode on")
+	for _, q := range []string{
+		`INSERT INTO run_events (run_id, attempt, seq, kind, payload) VALUES ($1, 1, 1, 'assistant',
+			'{"type":"assistant","message":{"content":[{"type":"text","text":"Checking the heat pump logs."}]}}')`,
+		`INSERT INTO memory_versions (agent, run_id, content) VALUES ('a', $1, 'heat pump: quiet mode on')`,
+	} {
+		if _, err := s.Pool.Exec(ctx, q, id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
