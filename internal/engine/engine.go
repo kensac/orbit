@@ -202,6 +202,11 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		// conversation's next run, claimed on any host, finds it.
 		e.saveSession(ctx, c, st.home, st.workdir, res.SessionID)
 	}
+	if a.Chat {
+		// A chat with its person is instructions; a report agent's
+		// proposals still wait on their rules.
+		out.instructedBy = st.instructor
+	}
 	return e.succeed(ctx, snap, a, c, start, out, res)
 }
 
@@ -377,6 +382,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		rc.Memory = ""
 	}
 	st.task = task
+	st.instructor = runInstructor(c, rc)
 	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "memory.md", "text/markdown", []byte(rc.Memory)); err != nil {
 		return nil, nil, err
 	}
@@ -574,7 +580,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if chat {
 		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
-			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec,
+			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec, instructor: st.instructor,
 			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun})
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
@@ -739,7 +745,8 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		o.Memory = &m
 	}
 	for _, act := range out.Actions {
-		pa := store.ProposedAction{Type: act.Type, Params: act.Params, Reason: act.Reason, Rule: string(ruleFor(a, act.Type, c.Trigger))}
+		pa := store.ProposedAction{Type: act.Type, Params: act.Params, Reason: act.Reason, Rule: string(ruleFor(a, act.Type, c.Trigger)),
+			InstructedBy: out.instructedBy}
 		if t, ok := types[act.Type]; !ok {
 			pa.Rule, pa.Error = string(spec.RuleDeny), "action type not enabled for this agent"
 		} else if err := t.Validate(act.Params); err != nil {
@@ -756,7 +763,9 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		if act.Type == actions.DefineType && pa.Error == "" && pa.Rule == string(spec.RuleAuto) {
 			// A change that widens an agent waits for a person, whatever the rule: a model steered by its input must not grant itself reach.
 			if w := e.defineWidening(ctx, act.Params); len(w) > 0 {
-				pa.Rule = string(spec.RuleApprove)
+				// Nor does its person's message in the chat approve it: the
+				// decision is theirs to make on the change itself.
+				pa.Rule, pa.InstructedBy = string(spec.RuleApprove), ""
 				e.Log.Info("agent:define widens an agent; held for approval", "run", c.ID, "widens", strings.Join(w, "; "))
 			}
 		}
@@ -1104,21 +1113,44 @@ func (e *Engine) DeliverOutbox(ctx context.Context) error {
 // a person's approval.
 func (e *Engine) ExecuteActions(ctx context.Context) error {
 	snap := e.Current()
-	ex := &actions.Executor{Deployment: snap.Config.Deployment, Channels: snap.Channels, Client: e.Client, Env: e.Env,
+	ex := e.executor(snap)
+	for {
+		act, err := e.Store.ClaimApprovedAction(ctx)
+		if err != nil || act == nil {
+			return err
+		}
+		call := actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)}
+		var after func()
+		if a, ok := snap.Config.Agents[act.Agent]; ok && a.Chat {
+			call.Workspace, after = e.storedWorkspace(ctx, act.RunID)
+		}
+		actx, cancel := context.WithTimeout(ctx, ActionTimeout)
+		result, xerr := ex.Execute(actx, call)
+		cancel()
+		if after != nil {
+			after()
+		}
+		if err := e.finishAction(ctx, snap, act, result, xerr); err != nil {
+			return err
+		}
+	}
+}
+
+// executor executes actions with this instance's channels and credentials.
+func (e *Engine) executor(snap *Snapshot) *actions.Executor {
+	return &actions.Executor{Deployment: snap.Config.Deployment, Channels: snap.Channels, Client: e.Client, Env: e.Env,
+		Git:   build.Git{WorkRoot: filepath.Join(e.DataDir, "actions")},
 		Tasks: &taskOps{e: e, snap: snap},
 		Continue: func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (string, bool, error) {
 			return e.Store.EnqueueContinuation(ctx, store.Continuation{
 				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
 		},
 		Define: e.defineAction}
-	for {
-		act, err := e.Store.ClaimApprovedAction(ctx)
-		if err != nil || act == nil {
-			return err
-		}
-		actx, cancel := context.WithTimeout(ctx, ActionTimeout)
-		result, xerr := ex.Execute(actx, actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)})
-		cancel()
+}
+
+// finishAction records an execution and tells the person of a failure.
+func (e *Engine) finishAction(ctx context.Context, snap *Snapshot, act *store.Action, result json.RawMessage, xerr error) error {
+	{
 		if err := e.Store.FinishAction(context.WithoutCancel(ctx), act.ID, result, xerr); err != nil {
 			return err
 		}
@@ -1133,6 +1165,7 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 			}
 		}
 	}
+	return nil
 }
 
 func recFrom(r *recovery) int {
