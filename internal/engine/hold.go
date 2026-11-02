@@ -74,9 +74,15 @@ func (e *Engine) holdFor(ctx context.Context, a *spec.Agent, c *store.ClaimedRun
 	return h
 }
 
-// failHeld fails a run whose backend refused orbit and holds its runner. Only the run that opens the hold notifies, once, saying why and what resumes it; a run that finds the runner held already notifies nothing.
+// failHeld fails a run whose backend refused orbit and holds its runner. A run a person started (a message, a mail, a manual run) reports its failure as any failure does (fail: in the chat, a reply to the mail, a notification), since that person is waiting on it; the hold opens silently beside it. Otherwise only the run that opens the hold notifies, once, saying why and what resumes it, and a run that finds the runner held already notifies nothing.
 func (e *Engine) failHeld(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, start time.Time, runErr error, r *runner.Result, h *store.NewHold) error {
 	e.Log.Warn("run failed; holding its runner", "run", c.ID, "agent", c.Agent, "runner", h.Runner, "kind", h.Kind, "err", runErr)
+	if personal(c.Trigger) {
+		if _, err := e.Store.OpenHold(context.WithoutCancel(ctx), *h); err != nil {
+			e.Log.Error("open hold", "runner", h.Runner, "err", err)
+		}
+		return e.fail(ctx, snap, a, c, start, runErr, r)
+	}
 	rr := store.RunResult{Attempt: c.Attempt, Status: "failed", Error: runErr.Error()}
 	fillResult(&rr, r)
 	if err := e.Store.FinishRun(context.WithoutCancel(ctx), c.ID, rr); err != nil {
@@ -106,7 +112,7 @@ func (e *Engine) failHeld(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 
 // personResumed closes the runner's hold when a person's own run on it succeeded: the backend answers again.
 func (e *Engine) personResumed(ctx context.Context, a *spec.Agent, c *store.ClaimedRun) {
-	if c.Trigger != "message" && c.Trigger != "manual" {
+	if !personal(c.Trigger) {
 		return
 	}
 	closed, err := e.Store.CloseHold(ctx, a.Runner, "run:"+c.ID)
@@ -119,6 +125,9 @@ func (e *Engine) personResumed(ctx context.Context, a *spec.Agent, c *store.Clai
 		e.wake()
 	}
 }
+
+// personal reports whether a person started a run of this trigger and is waiting on it; such runs are never held (store's holdFilter).
+func personal(trigger string) bool { return trigger == "message" || trigger == "manual" }
 
 // probeOutput is all a probe asks the backend for.
 const probeSchema = `{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}`
