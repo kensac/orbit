@@ -147,7 +147,7 @@ func (s *Server) DefineAgent(ctx context.Context, req DefineRequest) (*DefineRes
 	cfg, err := s.Engine.LoadConfig(ctx, map[string]*spec.Definition{a.Name: {
 		Name: a.Name, Version: after + 1, Enabled: enabled, Spec: canon}})
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", store.ErrInvalid, err)
+		return nil, fmt.Errorf("%w: %w", store.ErrInvalid, err)
 	}
 	res := &DefineResult{Valid: true, Agent: cfg.Agents[a.Name], NextFires: scheduler.NextFires(cfg.Agents[a.Name], time.Now())}
 	if req.DryRun {
@@ -193,7 +193,7 @@ func (s *Server) changeAgentState(ctx context.Context, name, change, author stri
 		override = nil
 	}
 	if _, err := s.Engine.LoadConfig(ctx, map[string]*spec.Definition{name: override}); err != nil {
-		return nil, fmt.Errorf("%w: %v", store.ErrInvalid, err)
+		return nil, fmt.Errorf("%w: %w", store.ErrInvalid, err)
 	}
 	d, err := s.Store.PutDefinition(ctx, store.NewDefinition{Name: name, Spec: prev.Spec, Enabled: enabled,
 		Archived: archived, Change: change, Author: author, After: prev.Version})

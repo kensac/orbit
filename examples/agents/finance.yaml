@@ -11,6 +11,9 @@ triggers:
     prompt: Review last month, which has just closed.
   - schedule: "0 9 15 * *"
     prompt: Mid-month check on this month so far. Only notify if something is off.
+# Sure is reachable from hetzner's docker network only, and only hosts
+# advertising these hold ORBIT_SURE_API_KEY.
+needs: [docker-network:hetzner, sure]
 sources:
   - name: transactions
     kind: http
@@ -30,6 +33,22 @@ sources:
     url: https://sure.example.com/api/v1/accounts
     headers:
       X-Api-Key: ${SURE_API_KEY}
+# Code sums the month before the model looks: per month and category,
+# transfers left out. The model explains these totals; it keeps the raw
+# transactions to name one-off charges.
+transforms:
+  - name: monthly
+    source: transactions
+    kind: sure-monthly
+    keep_source: true
+# Code decides whether there is anything to judge: a scheduled run with no
+# transactions, or with exactly the inputs the last review judged, ends
+# skipped without calling the model.
+gates:
+  - kind: items_above
+    input: transactions
+    n: 0
+  - kind: unchanged
 actions:
   notify: auto
   webhook:home-assistant: approve

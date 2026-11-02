@@ -59,7 +59,9 @@ func (e *Engine) Reload(ctx context.Context) error {
 	return e.SetConfig(cfg)
 }
 
-// SyncAgents records a loaded configuration's agents and their specs.
+// SyncAgents records a loaded configuration: the deployment first, so a
+// worker that sees the new agents builds them against the deployment they
+// were loaded with, then every agent and its spec.
 func SyncAgents(ctx context.Context, s *store.Store, cfg *spec.Config) error {
 	specs := map[string]store.AgentSpec{}
 	for name, a := range cfg.Agents {
@@ -68,6 +70,13 @@ func SyncAgents(ctx context.Context, s *store.Store, cfg *spec.Config) error {
 			return err
 		}
 		specs[name] = store.AgentSpec{SHA: a.SHA, JSON: b, Enabled: a.IsEnabled()}
+	}
+	sha, doc, err := cfg.DeploymentJSON()
+	if err != nil {
+		return err
+	}
+	if err := s.SyncDeployment(ctx, sha, doc); err != nil {
+		return err
 	}
 	return s.SyncAgents(ctx, specs)
 }

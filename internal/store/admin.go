@@ -14,7 +14,7 @@ import (
 // ---------------------------------------------------------------- usage
 
 // RunStatuses is every run status, so a count by status lists them all.
-var RunStatuses = []string{"queued", "running", "succeeded", "failed", "cancelled"}
+var RunStatuses = []string{"queued", "running", "succeeded", "failed", "cancelled", "skipped"}
 
 // CostTotal is a sum of runs' API-equivalent cost and how many runs it covers.
 // The sum is exact (numeric in Postgres) and kept as its decimal literal.
@@ -192,7 +192,8 @@ type RunningRun struct {
 	HeartbeatAgeSeconds *float64 `json:"heartbeat_age_seconds"`
 }
 
-// LastSuccess is an agent's newest succeeded run.
+// LastSuccess is an agent's newest run that finished well: succeeded, or
+// skipped by a gate (a quiet day is not a stale agent).
 type LastSuccess struct {
 	RunID      string    `json:"run_id"`
 	FinishedAt time.Time `json:"finished_at"`
@@ -245,7 +246,7 @@ func (s *Store) Health(ctx context.Context) (*Health, error) {
 			FROM agents a
 			JOIN LATERAL (
 			    SELECT r.id::text, r.finished_at FROM runs r
-			    WHERE r.agent = a.name AND r.status = 'succeeded'
+			    WHERE r.agent = a.name AND r.status IN ('succeeded', 'skipped')
 			    ORDER BY r.finished_at DESC LIMIT 1
 			) ls ON true
 			WHERE a.present`)

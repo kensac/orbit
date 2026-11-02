@@ -22,6 +22,8 @@ import (
 
 	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
+
+	"github.com/kensac/orbit/internal/transforms"
 )
 
 // Rule is what the harness does with an action an agent proposes.
@@ -138,16 +140,22 @@ type Agent struct {
 	Name        string `yaml:"name" json:"name"`
 	Description string `yaml:"description" json:"description"`
 	// Charter is the standing instruction every run starts from.
-	Charter  string     `yaml:"charter" json:"charter"`
-	Enabled  *bool      `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	Timezone string     `yaml:"timezone,omitempty" json:"timezone,omitempty"`
-	Runner   string     `yaml:"runner,omitempty" json:"runner,omitempty"`
-	Timeout  Duration   `yaml:"timeout,omitempty" json:"timeout,omitempty"`
-	Triggers []Trigger  `yaml:"triggers" json:"triggers"`
-	Sources  []Source   `yaml:"sources,omitempty" json:"sources,omitempty"`
-	Tools    []string   `yaml:"tools,omitempty" json:"tools,omitempty"`
-	Actions  ActionSet  `yaml:"actions,omitempty" json:"actions,omitempty"`
-	Notify   NotifySpec `yaml:"notify,omitempty" json:"notify,omitempty"`
+	Charter  string    `yaml:"charter" json:"charter"`
+	Enabled  *bool     `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Timezone string    `yaml:"timezone,omitempty" json:"timezone,omitempty"`
+	Runner   string    `yaml:"runner,omitempty" json:"runner,omitempty"`
+	Timeout  Duration  `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	Triggers []Trigger `yaml:"triggers" json:"triggers"`
+	Sources  []Source  `yaml:"sources,omitempty" json:"sources,omitempty"`
+	// Transforms run over sources before the model sees them; each output
+	// is an input of its own (internal/transforms).
+	Transforms []Transform `yaml:"transforms,omitempty" json:"transforms,omitempty"`
+	// Gates end a scheduled run without a backend call when code finds
+	// nothing to judge; the run is skipped, naming the gate.
+	Gates   []Gate     `yaml:"gates,omitempty" json:"gates,omitempty"`
+	Tools   []string   `yaml:"tools,omitempty" json:"tools,omitempty"`
+	Actions ActionSet  `yaml:"actions,omitempty" json:"actions,omitempty"`
+	Notify  NotifySpec `yaml:"notify,omitempty" json:"notify,omitempty"`
 	// MessagesTrigger starts a run when a person sends the agent a message.
 	MessagesTrigger bool `yaml:"wake_on_message,omitempty" json:"wake_on_message,omitempty"`
 	// Session keeps the backend's conversation between runs (claude-code
@@ -158,6 +166,11 @@ type Agent struct {
 	// money amount in the summary and report must be in the inputs or in a
 	// result of orbit's query or calc tool.
 	Verify []string `yaml:"verify,omitempty" json:"verify,omitempty"`
+	// Needs names the capabilities a host must have to run this agent
+	// ("docker-network:hetzner", "sure", "browser", "sandbox"). A worker
+	// claims a run only when its ORBIT_CAPABILITIES cover every one; an
+	// agent with none runs anywhere (docs/ARCHITECTURE.md, Worker fleet).
+	Needs []string `yaml:"needs,omitempty" json:"needs,omitempty"`
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
@@ -228,6 +241,49 @@ type Source struct {
 	Path string `yaml:"path,omitempty" json:"path,omitempty"`
 	// MaxBytes bounds one source's fetched size.
 	MaxBytes int64 `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
+}
+
+// Transform is code run over one source's bytes before the run: its output
+// is the input named Name. A source a transform reads is withheld from the
+// model (stored under sources/, not inputs/) unless one of its transforms
+// keeps it.
+type Transform struct {
+	Name   string         `yaml:"name" json:"name"`
+	Source string         `yaml:"source" json:"source"`
+	Kind   string         `yaml:"kind" json:"kind"`
+	Params map[string]any `yaml:"params,omitempty" json:"params,omitempty"`
+	// KeepSource hands the source to the model as well.
+	KeepSource bool `yaml:"keep_source,omitempty" json:"keep_source,omitempty"`
+}
+
+// Gate is a check, in code, that ends a scheduled run as skipped before
+// any backend call. Kinds: unchanged (every input the model would see is
+// byte for byte what the agent's newest succeeded run saw, under the same
+// spec) and items_above (Input, a source or transform, has at most N
+// records at Items: nothing to review).
+type Gate struct {
+	Kind  string `yaml:"kind" json:"kind"`
+	Input string `yaml:"input,omitempty" json:"input,omitempty"`
+	Items string `yaml:"items,omitempty" json:"items,omitempty"`
+	N     int    `yaml:"n,omitempty" json:"n,omitempty"`
+}
+
+// GateKinds lists every gate kind.
+var GateKinds = []string{"unchanged", "items_above"}
+
+// Withheld reports whether the model is not shown source: a transform reads
+// it and none keeps it.
+func (a *Agent) Withheld(source string) bool {
+	read := false
+	for _, t := range a.Transforms {
+		if t.Source == source {
+			if t.KeepSource {
+				return false
+			}
+			read = true
+		}
+	}
+	return read
 }
 
 // Paginate describes page-numbered pagination: the harness requests
@@ -313,8 +369,11 @@ var ReservedAgentNames = map[string]bool{
 }
 
 var (
-	nameRE   = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
-	envRefRE = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
+	nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	// CapabilityRE is a capability's shape: a name, optionally qualified
+	// (docker-network:hetzner).
+	CapabilityRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}(:[a-z0-9][a-z0-9._-]{0,62})?$`)
+	envRefRE     = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
 	// RepoRE is GitHub's owner/name shape.
 	RepoRE    = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
 	cronParse = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
@@ -632,6 +691,42 @@ func (c *Config) validateAgent(a *Agent) []error {
 			}
 		}
 	}
+	for _, t := range a.Transforms {
+		if !nameRE.MatchString(t.Name) {
+			at("transform %q: invalid name", t.Name)
+		}
+		if seen[t.Name] {
+			at("transform %q: name is taken by another source or transform", t.Name)
+		}
+		seen[t.Name] = true
+		if !slices.ContainsFunc(a.Sources, func(s Source) bool { return s.Name == t.Source }) {
+			at("transform %q: unknown source %q", t.Name, t.Source)
+		}
+		params, err := json.Marshal(t.Params)
+		if err == nil {
+			err = transforms.Validate(t.Kind, params)
+		}
+		if err != nil {
+			at("transform %q: %v", t.Name, err)
+		}
+	}
+	for i, g := range a.Gates {
+		switch g.Kind {
+		case "unchanged":
+			if g.Input != "" || g.Items != "" || g.N != 0 {
+				at("gate %d: unchanged takes no input, items or n", i)
+			}
+		case "items_above":
+			if !seen[g.Input] {
+				at("gate %d: input %q is not a source or transform of this agent", i, g.Input)
+			}
+			if g.N < 0 {
+				at("gate %d: n must be at least 0", i)
+			}
+		default:
+			at("gate %d: unknown kind %q (want one of %v)", i, g.Kind, GateKinds)
+		}
+	}
 	for typ, rule := range a.Actions {
 		if !slices.Contains([]Rule{RuleAuto, RuleApprove, RuleDeny}, rule) {
 			at("action %q: rule must be auto, approve or deny", typ)
@@ -662,6 +757,16 @@ func (c *Config) validateAgent(a *Agent) []error {
 		if !slices.Contains(verifyChecks, v) {
 			at("verify: unknown check %q (want one of %v)", v, verifyChecks)
 		}
+	}
+	seenNeed := map[string]bool{}
+	for _, n := range a.Needs {
+		if !CapabilityRE.MatchString(n) {
+			at("needs: %q is not a capability (want name or name:qualifier, lower case)", n)
+		}
+		if seenNeed[n] {
+			at("needs: %q is listed twice", n)
+		}
+		seenNeed[n] = true
 	}
 	if ss := a.Session; ss != nil {
 		rs := c.Deployment.Runners[a.Runner]

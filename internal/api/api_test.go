@@ -189,3 +189,29 @@ func TestApprovalPage(t *testing.T) {
 		t.Fatalf("second decision = %d, want 409", resp.StatusCode)
 	}
 }
+
+// TestAnIDThatIsNotAUUIDIs400: such an id names no row, and is the
+// client's mistake, not a server error.
+func TestAnIDThatIsNotAUUIDIs400(t *testing.T) {
+	srv, _, _ := server(t)
+	for _, path := range []string{"/runs/nope", "/runs/nope/events", "/actions/nope", "/conversations/nope/thread", "/artifacts/nope"} {
+		if code, v := call(t, "GET", srv.URL+"/api/v1"+path, token, ""); code != 400 || v["error"] != "not a valid id" {
+			t.Errorf("%s = %d %v", path, code, v)
+		}
+	}
+}
+
+// TestLimitsAreClampedNotReset: asking for more than a list's maximum gets
+// the maximum, not the default.
+func TestLimitsAreClampedNotReset(t *testing.T) {
+	srv, s, e := server(t)
+	a := e.Current().Config.Agents["a"]
+	for range 60 {
+		if _, err := s.EnqueueRun(ctx, store.NewRun{Agent: "a", SpecSHA: a.SHA, Trigger: "manual"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, v := call(t, "GET", srv.URL+"/api/v1/runs?limit=100000", token, ""); len(v["runs"].([]any)) != 60 {
+		t.Fatalf("runs = %d, want all 60", len(v["runs"].([]any)))
+	}
+}
