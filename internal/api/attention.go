@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -25,7 +24,11 @@ func (s *Server) linkBase() string {
 // listAttention serves GET /attention: everything waiting on a person,
 // across agents, newest first.
 func (s *Server) listAttention(w http.ResponseWriter, r *http.Request) {
-	list, err := s.Store.ListAttention(r.Context(), intParam(r, "limit"))
+	var limit int
+	if !queryInt(w, r, "limit", &limit) {
+		return
+	}
+	list, err := s.Store.ListAttention(r.Context(), limit)
 	items := make([]attentionItem, 0, len(list))
 	for _, a := range list {
 		items = append(items, attentionItem{Attention: a, Link: push.Link(s.linkBase(), a)})
@@ -68,7 +71,9 @@ type subscriptionBody struct {
 		P256DH string `json:"p256dh"`
 		Auth   string `json:"auth"`
 	} `json:"keys"`
-	Label string `json:"label"`
+	// ExpirationTime is part of PushSubscription.toJSON(); it is read and ignored so the browser's object is accepted as it is.
+	ExpirationTime *float64 `json:"expirationTime"`
+	Label          string   `json:"label"`
 }
 
 // savePushSubscription serves POST /push/subscriptions with a browser's
@@ -79,8 +84,7 @@ func (s *Server) savePushSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b subscriptionBody
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&b); err != nil {
-		writeErr(w, http.StatusBadRequest, "body: "+err.Error())
+	if !decode(w, r, 8<<10, &b, bodyRequired) {
 		return
 	}
 	if err := push.AllowedEndpoint(b.Endpoint); err != nil {
@@ -100,7 +104,10 @@ func (s *Server) savePushSubscription(w http.ResponseWriter, r *http.Request) {
 // {"endpoint": ...}: the device stops receiving pushes.
 func (s *Server) deletePushSubscription(w http.ResponseWriter, r *http.Request) {
 	var b subscriptionBody
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&b); err != nil || b.Endpoint == "" {
+	if !decode(w, r, 8<<10, &b, bodyRequired) {
+		return
+	}
+	if b.Endpoint == "" {
 		writeErr(w, http.StatusBadRequest, "body: want {\"endpoint\": ...}")
 		return
 	}
