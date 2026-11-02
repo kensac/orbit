@@ -44,8 +44,12 @@ type Engine struct {
 	// ConfigDir is the configuration directory (orbit.yaml, agents/),
 	// loaded with the database's agent definitions (config.go).
 	ConfigDir string
-	Env       func(string) (string, bool)
-	Client    *http.Client
+	// Reloader puts the configuration in force after a definition changes
+	// (define.go); serve sets it to also refresh its metrics and wake the
+	// scheduler. Nil is Reload.
+	Reloader func(context.Context) error
+	Env      func(string) (string, bool)
+	Client   *http.Client
 	// Secret signs approval links (see ApprovalSig).
 	Secret []byte
 	// NewRunner is runner.New, replaceable in tests.
@@ -78,6 +82,9 @@ type Engine struct {
 
 	mu  sync.RWMutex
 	cfg *Snapshot
+
+	searchMu sync.Mutex
+	searchLn map[string]string // agent -> socket path being served
 }
 
 // Snapshot is one loaded configuration with its built channels.
@@ -471,9 +478,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	var hr *runner.Harness
 	if e.Harness != "" && r.Kind() == "claude-code" {
-		hr = &runner.Harness{Bin: e.Harness, Figures: figures}
+		hr = &runner.Harness{Bin: e.Harness, Figures: figures, Search: e.searchSocket(a.Name)}
 	}
-	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr != nil)
+	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
 	if tk != nil {
 		system += ticketContract(tk, planning)
 	}
@@ -882,7 +889,8 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 		Continue: func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (string, bool, error) {
 			return e.Store.EnqueueContinuation(ctx, store.Continuation{
 				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
-		}}
+		},
+		Define: e.defineAction}
 	for {
 		act, err := e.Store.ClaimApprovedAction(ctx)
 		if err != nil || act == nil {
