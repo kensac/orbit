@@ -67,6 +67,10 @@ more than its agent's rules allow.
 
 A run writes memory entries directly, and a learning run writes them from a conversation, so a poisoned input or message can plant an entry that later runs of every agent reading its scope are shown. What bounds it: entries are shown as data (the system prompt says they never authorize an action the rules do not, and an instruction in one is not to be followed); a run may write only to the profile, itself and the topics it reads, at most 10 writes, and only change entries it was shown at the version it was shown; every version is kept with the run and conversation it came from (`GET /memory/entries?run_id=`), so a bad one is found and retired or restored. A learning run reads the person's messages and the agent's reports (which can quote inputs), not the inputs themselves.
 
+## Agent hooks
+
+An agent's `run` hooks are commands from its configuration, never chosen by a model, but they read the event's JSON (tool inputs the model wrote) on stdin, so write them as parsers of untrusted input. They run as orbit's user with only `PATH`, `HOME` (the workdir) and `LANG` in their environment, so no orbit secret and no backend credential; the filesystem and network are not isolated beyond that, so a hook command is as trusted as anything else in the configuration. `say` and `deny` run no command.
+
 ## Skills
 
 A skill is instructions a run follows, and agents write their own, so a run steered by a poisoned input can write a skill that steers its later runs, and those of every agent the skill is attached to. What bounds it: a run writes at most 3 skills, only new ones or ones it was given (at the version given), and a written skill is attached to that agent only; every version is kept with its run (`source_run_id`), so a bad one is found, restored or retired. The skill tool reads only the run's own copy, inside each skill's directory after symlinks; it records nothing in the ledger, so a skill's text never backs a figure. Supporting files are stored as given and never executed by orbit; a script in a skill runs only if the agent's own `tools` let it.
@@ -78,6 +82,18 @@ configuration. `continue` can make an agent run again on its own, so it is
 bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body, never a URL or a header. `agent:define` lets a model rewrite an agent defined in the database, itself included: its charter, tools, sources and rules, so an agent with it enabled can widen any database agent's reach up to what orbit.yaml offers (endpoints, channels, repositories); never a file agent's, and never past the configuration. Every change is a version with its run, so it is seen and reverted through the API.
 `deny` is the default for every type an agent does not name, and denied
 types are not even offered.
+
+## Web Push
+
+- A push leaves orbit for a third party (the browser vendor's push
+  service, then the device's lock screen), so it carries only the
+  attention row's title (an agent name and a fixed phrase) and a link into
+  the app. Never a report, a question, an error or an action's parameters:
+  agents read finance data. The payload is encrypted to the device, so the
+  push service sees only its size.
+- A subscription's endpoint is a URL a browser chose, and orbit posts to it
+  from inside the network, so registration accepts only https URLs on the
+  known push services (`push.AllowedEndpoint`).
 
 ## The API
 
@@ -171,7 +187,7 @@ without docker):
   unit tests pin the full create document and reject any container the
   daemon made differently (`verifyCreated`). The API answers "no such
   sandbox" for any container without sandboxd's label, including every
-  other container on oci.
+  other container on its host.
 - Lifetime: PID 1 is `sleep 1h`, so the kernel ends every process at
   expiry; the reaper removes the container 30 minutes later. At most two
   exist at once, each limited to 6 GiB of memory (tmpfs included), 2 CPUs
@@ -189,19 +205,23 @@ without docker):
   diff is reviewed, until the credential proxy keeps the token out) and the
   diff policy's exact-match scan before anything is committed. Treat every
   allowlisted host as a channel for anything the sandbox holds.
-- **The kernel is shared** with oci. A container escape is root on oci,
-  which runs CI runners and holds less than hetzner; `ORBIT_SANDBOX_RUNTIME=
+- **The kernel is shared** with the host, hetzner today. A container escape is root on hetzner,
+  which holds every other secret in the fleet; `ORBIT_SANDBOX_RUNTIME=
   runsc` (gVisor) narrows this where installed.
-- **`/work` has no disk quota**: a sandbox can fill oci's docker volume
+- **`/work` has no disk quota**: a sandbox can fill the host's docker volume
   until its lifetime ends. The readback refuses more than 256 MiB.
-- **sandboxd holds the docker socket**, so a bug in it is root on oci. Its
-  surface is the four handlers and `docker.go`; it listens only on the
-  tailnet address or a unix socket (`validListen` refuses every interface)
+- **sandboxd holds the docker socket**, so a bug in it is root on its host. Its
+  surface is the four handlers and `docker.go`; it listens only on one address (on hetzner, an internal docker network only orbit shares)
+  or a unix socket (`validListen` refuses every interface)
   and requires the token on every request.
 - **A dropped attach does not stop the process**; the lifetime or a destroy
   does.
 - Tunnelled traffic is opaque: the proxy sees hostnames, not requests, so
   it cannot tell a download from an upload to an allowed host.
+
+## Sandboxed chats
+
+A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as a workstation when sandboxd is configured) runs Claude Code in a sandboxd container with `bypassPermissions`; a workstation has every tool. There is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the backend credential is in the container, readable by any command the model runs. A workstation's egress reaches any public host (`orbit egress` with `*`, still never a private, loopback, link-local or tailnet address), so the credential and anything the session read can leave the box, by design: it holds no GitHub token, no orbit secret, and nothing of the person's beyond what they gave the conversation. Pushing, merging, mail and spend stay orbit's actions, under the agent's rules. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
 
 ## Build runs
 
@@ -232,6 +252,9 @@ run; `internal/build`):
   cannot build for any other ref. Neither has `workflows`, so GitHub
   refuses a workflow change too. An Actions log is fetched by following
   its storage redirect by hand, with no credential.
+- **Setup and cleanup scripts run only by content hash.** They are repository code orbit runs in the sandbox outside the tool policy, so each must hash to a value in `trusted_scripts`, which only a person's configuration change adds; a build that changed one on its branch cannot get its version run. They get no credential at all.
+- **A kept clone is orbit's**: the checkout pool reuses a ticket's clone across its builds, cleaned before each use, its `.git` written only by orbit's git.
+- **A restack is code**: a stacked ticket's branch moved onto a new base is `git rebase --onto` in orbit's clone, pushed with the same one refspec; the read and delivery tokens are minted for it and revoked after, and no model runs.
 - **The PR is orbit's**: title and body from the model's result, scrubbed
   of attribution, with the ticket and plan version and, for orbit itself,
   a trust boundary line. A compromised model can therefore at most open a

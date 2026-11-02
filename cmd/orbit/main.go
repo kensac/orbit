@@ -13,6 +13,7 @@
 //	orbit import skills <dir> [--attach <agent>] [--apply]   seed the skills library through the API
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
 //	orbit hook --root <dir> --state <dir> [--figures] [--status <socket>]   orbit's hook, run by Claude Code
+//	orbit agent-hook --root <dir> --def <hook>   one of an agent's own hooks, run by Claude Code
 //	orbit tls-cert --dir <d> [--owner uid:gid]   orbit-db's self-signed TLS certificate
 //	orbit sandboxd           the build sandbox service (holds the docker socket)
 //	orbit egress             the allowlisting proxy, a sandbox's only route out
@@ -48,6 +49,7 @@ import (
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
+	"github.com/kensac/orbit/internal/push"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
@@ -88,12 +90,16 @@ func main() {
 		err = importCmd(ctx, os.Args[2:])
 	case "mcp", "hook":
 		err = harnessCmd(os.Args[1], os.Args[2:])
+	case "agent-hook":
+		os.Exit(agentHookCmd(os.Args[2:]))
 	case "tls-cert":
 		err = tlsCertCmd(os.Args[2:])
 	case "sandboxd":
 		err = sandboxdCmd(ctx, log)
 	case "egress":
 		err = egressCmd(ctx, log)
+	case "vapid":
+		err = vapid()
 	case "version":
 		fmt.Println(revision)
 	default:
@@ -127,8 +133,24 @@ func harnessCmd(name string, args []string) error {
 	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state, Status: *statusSock})
 }
 
+// agentHookCmd runs one of an agent's own hooks for Claude Code (spec hooks): the definition is a flag orbit wrote, the event is stdin, and the exit code is the CLI's to read.
+func agentHookCmd(args []string) int {
+	fs := flag.NewFlagSet("agent-hook", flag.ContinueOnError)
+	root := fs.String("root", "", "the run's working directory")
+	def := fs.String("def", "", "the hook, as orbit encoded it")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	d, err := harness.DecodeAgentHook(*def)
+	if err != nil || *root == "" {
+		fmt.Fprintln(os.Stderr, "orbit agent-hook: --root and a valid --def are required")
+		return 1
+	}
+	return harness.AgentHook(os.Stdin, os.Stdout, os.Stderr, d, *root)
+}
+
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress")
 	os.Exit(2)
 }
 
@@ -253,6 +275,10 @@ func validate(args []string) error {
 		refs[b.TokenEnv] = true
 		refs["CLAUDE_CODE_OAUTH_TOKEN"] = true
 	}
+	if addr, tokenEnv := cfg.Deployment.SandboxService(); addr != "" {
+		refs[tokenEnv] = true
+		refs["CLAUDE_CODE_OAUTH_TOKEN"] = true
+	}
 	names := make([]string, 0, len(cfg.Agents))
 	for n := range cfg.Agents {
 		names = append(names, n)
@@ -371,6 +397,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			}
 		}
 		reload := make(chan struct{}, 1)
+		eng.Wake = nudge
 
 		// SIGTERM, or POST /api/v1/drain on the internal listener, drains:
 		// no new claims, not ready, the API and streams still served, the
@@ -379,7 +406,10 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		// the drain's cap, which hands the remaining runs back.
 		drain := engine.NewDrain()
 		eng.Drain = drain
-		eng.Builder = &build.Runner{WorkRoot: filepath.Join(eng.DataDir, "builds")}
+		// One spare clone per build repository: a build starts from a
+		// checkout that needs only an incremental fetch.
+		checkouts := &build.Pool{Root: filepath.Join(eng.DataDir, "checkouts"), Warm: 1}
+		eng.Builder = &build.Runner{WorkRoot: filepath.Join(eng.DataDir, "builds"), Pool: checkouts}
 		life, endLife := context.WithCancel(context.WithoutCancel(ctx))
 		defer endLife()
 		runCtx, cancelRuns := context.WithCancel(life)
@@ -398,6 +428,13 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			metrics.Draining.Set(1)
 		}()
 
+		pusher, err := push.FromEnv(s, log.With("component", "push"))
+		if err != nil {
+			return err
+		}
+		if pusher == nil {
+			log.Info("ORBIT_VAPID_* not set: Web Push is off (the inbox still lists what needs attention)")
+		}
 		// reloadNow puts the files and the database's definitions in force,
 		// for the poll below and for the API after it writes a definition.
 		var reloadMu sync.Mutex
@@ -422,7 +459,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
-			ConfigState: configState, Drain: drain, OAuth: oauth}
+			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		// Bind before any executor starts: an instance that cannot serve
@@ -449,7 +486,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			(&tickets.Loop{
 				Store: s, Config: func() *spec.Config { return eng.Current().Config }, Env: os.LookupEnv,
 				Client: &http.Client{Timeout: 2 * time.Minute}, Revision: revision, Log: log.With("component", "tickets"),
-				Approval: eng.NotifyApproval, Wake: nudge,
+				Approval: eng.NotifyApproval, Wake: nudge, Restack: eng.Builder.Restack, Checkouts: checkouts,
 			}).Run(claimCtx)
 		}()
 
@@ -514,7 +551,9 @@ func serve(ctx context.Context, log *slog.Logger) error {
 					if err := eng.ExecuteActions(claimCtx); err != nil && claimCtx.Err() == nil {
 						log.Error("actions", "err", err)
 					}
+					reconcileTasks(claimCtx, eng, log)
 					deliverOutbox(claimCtx, eng, log)
+					deliverPush(claimCtx, pusher, log)
 				}
 			},
 		}).start(claimCtx, runCtx)
@@ -537,9 +576,13 @@ func serve(ctx context.Context, log *slog.Logger) error {
 					continue
 				}
 				deliverOutbox(claimCtx, eng, log)
+				deliverPush(claimCtx, pusher, log)
 				if err := eng.ExecuteActions(claimCtx); err != nil && claimCtx.Err() == nil {
 					log.Error("actions", "err", err)
 				}
+				// Runs a worker finished, and decisions a person resolved,
+				// move their tasks here.
+				reconcileTasks(claimCtx, eng, log)
 			}
 		}()
 
@@ -610,6 +653,15 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		loops.Wait()
 		return nil
 	})
+}
+
+// reconcileTasks moves delegated tasks and wakes their parents
+// (engine.ReconcileTasks); control only, as it executes the actions that
+// create them.
+func reconcileTasks(ctx context.Context, eng *engine.Engine, log *slog.Logger) {
+	if err := eng.ReconcileTasks(ctx); err != nil && ctx.Err() == nil {
+		log.Error("delegation: reconcile", "err", err)
+	}
 }
 
 // drainMax is ORBIT_DRAIN_MAX, or engine.DrainMax of the configuration in

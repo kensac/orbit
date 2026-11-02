@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"path/filepath"
 	"regexp"
 	"sync"
@@ -64,10 +63,12 @@ type liveProc struct {
 	key     string
 	hash    string
 	session string // the session the process holds, from its last result
-	proc    *claudeproto.Process
-	busy    bool
-	used    time.Time
-	timer   *time.Timer
+	proc    liveProcess
+	// tools serves a chat process's orbit tools to the turn in progress.
+	tools *chatTools
+	busy  bool
+	used  time.Time
+	timer *time.Timer
 }
 
 // stop ends the process: closed between turns (stdin closed, so it exits on its own, within claudeproto.CloseGrace), or killed after a failed turn.
@@ -158,6 +159,32 @@ func (l *Live) expire(p *liveProc) {
 	l.async(func() { p.stop(false) })
 }
 
+// liveProcess is a live process: a local CLI (*claudeproto.Process) or one in
+// a sandbox (chat.go).
+type liveProcess interface {
+	Turn(ctx context.Context, prompt string, emit func(claudeproto.Line)) (*claudeproto.Result, error)
+	Close(grace time.Duration)
+	Kill()
+	Exited() <-chan struct{}
+	Interrupt(ctx context.Context) error
+}
+
+// closeIdle closes every idle live process, for a sandbox slot or memory.
+func (l *Live) closeIdle() {
+	l.mu.Lock()
+	var idle []*liveProc
+	for k, p := range l.procs {
+		if !p.busy {
+			idle = append(idle, p)
+			delete(l.procs, k)
+		}
+	}
+	l.mu.Unlock()
+	for _, p := range idle {
+		p.stop(false)
+	}
+}
+
 func (l *Live) async(f func()) {
 	l.wg.Add(1)
 	go func() { defer l.wg.Done(); f() }()
@@ -221,12 +248,8 @@ func (c *claudeCode) runLive(ctx context.Context, sess *Session, args, env []str
 		sess.Live.drop(p)
 		return nil, true, err
 	}
-	var r struct {
-		IsError          bool            `json:"is_error"`
-		SessionID        string          `json:"session_id"`
-		StructuredOutput json.RawMessage `json:"structured_output"`
-	}
-	if json.Unmarshal(final, &r) != nil || r.IsError || r.SessionID == "" || len(r.StructuredOutput) == 0 || string(r.StructuredOutput) == "null" {
+	r, perr := claudeproto.ParseResult(final)
+	if perr != nil || r.IsError || r.SessionID == "" || !r.HasOutput() {
 		sess.Live.drop(p)
 		return final, true, nil
 	}

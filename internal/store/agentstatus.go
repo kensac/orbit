@@ -43,13 +43,18 @@ func (f StatusFacts) Status() status.Status {
 	return status.Aggregate(f.Run.run(), f.OpenQuestion, f.PendingAction)
 }
 
+// personQuestion is an open question (alias m) its person is to answer: a
+// delegated task's questions are the delegating agent's to answer.
+const personQuestion = openQuestion + `
+	AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.conversation_id = m.conversation_id)`
+
 // runFacts is a run (alias x) as RunFacts' JSON. Its questions and actions
 // are read through messages_run and actions_run.
 func runFacts(x string) string {
 	return `json_build_object('id', ` + x + `.id, 'status', ` + x + `.status, 'attempt', ` + x + `.attempt,
 	    'created_at', ` + x + `.created_at, 'started_at', ` + x + `.started_at, 'finished_at', ` + x + `.finished_at,
 	    'error', ` + x + `.error, 'hook', ` + x + `.hook_status,
-	    'open_question', EXISTS (SELECT 1 FROM messages m WHERE m.run_id = ` + x + `.id AND ` + openQuestion + `),
+	    'open_question', EXISTS (SELECT 1 FROM messages m WHERE m.run_id = ` + x + `.id AND ` + personQuestion + `),
 	    'pending_action', EXISTS (SELECT 1 FROM actions pa WHERE pa.run_id = ` + x + `.id AND pa.status = 'pending'))`
 }
 

@@ -12,7 +12,7 @@ The model is the expensive, slow, non-deterministic part, so it gets only the pa
 ## One run
 
 ```
-trigger (schedule: cron or RRULE | manual | message | continue; a ticket's build runs its own path, below)
+trigger (schedule: cron or RRULE | manual | message | continue | task | delegation; a ticket's build runs its own path, below)
   -> runs row, status queued
   -> executor claims it (FOR UPDATE SKIP LOCKED; at most one running per agent;
      a continuation not before its run_after)
@@ -96,6 +96,16 @@ so `ORBIT_DATA_DIR` must be a persistent volume for resume to survive a restart.
   CLI reports a cumulative cost per session (across turns, resumes and forks),
   so `cost_usd` is the difference from the parent run's total.
 
+## Chat agents (claude-code, `chat: true`)
+
+A chat agent is a plain Claude Code session, as a person's own terminal is: the built-in `orbit` agent is one (`spec.Builtins`). `engine/chat.go` and `runner/chat.go`.
+
+- **The contract.** No `--json-schema`: the reply is the turn's final message (the `result` line's text), stored as the run's report, its first line the summary. Memory, questions and actions are tools orbit serves during the turn, `mcp__orbit__remember`, `mcp__orbit__ask` and `mcp__orbit__act` (the agent's enabled action types, each validated when called), and become the run's outcome exactly as a report agent's output does (`RecordOutcome`). They are an SDK MCP server (`{"type": "sdk", "name": "orbit"}` in `--mcp-config`): the CLI sends each JSON-RPC message to orbit's process as an `mcp_message` control request on its stdout and orbit answers on its stdin (`claudeproto.Handler.MCP`; verified on 2.1.316), so the tools run in orbit, with the store, wherever the CLI runs.
+- **The workspace** is the conversation's directory (`<data>/conversations/<id>/work`, HOME beside it), kept between messages. After every run its files (without `inputs/` and `.orbit/`) are stored as a snapshot (`workspaces`, every one kept, a new row only when the tar changed); a host whose copy is not the newest snapshot restores it before the run (`workspace.sha256` marks which it has). So a conversation continues on any host, and `GET /conversations/{id}/files` reads the snapshot, not a host's disk.
+- **Sessions and the live process** work as for any session agent (below), keyed by the conversation; the built-in has `resume` for a day and `live` for 10 minutes.
+- **Stop.** `POST /runs/{id}/cancel` on a running run sets `cancel_requested_at`; the attempt polls it (`engine.cancelPoll`, 2 s) and, for a chat turn, sends the CLI an `interrupt` control request, which ends the turn with a result; the run ends `cancelled` with the reply so far.
+- **Sandboxed** (`sandbox: workstation | build`, needs sandboxd: `sandbox:` or `build:` in orbit.yaml). The CLI runs in a sandboxd container (The build sandbox, below) created from the workspace's tar, attached with `sh -c 'CLAUDE_CONFIG_DIR=/work/.orbit/claude exec claude ...'` (the environment a caller may set is the credential alone) and `--permission-mode bypassPermissions`: the container is the boundary. The profile is sandboxd's choice of box, named at create (`?profile=`): `workstation` gives the session Claude Code's full tool set (no `--tools` list), a HOME kept with the workspace (`/work/.orbit/home`, stored beside it as `box-home/` without `.cache`, with `~/.local/bin`, `~/go/bin` and an npm prefix on `PATH` so user installs persist) and egress to any public host through sandboxd's workstation proxy (`ORBIT_SANDBOX_WORKSTATION_PROXY`, an `orbit egress` with the allowlist `*`); `build` gives the tools the agent names and the build allowlist. A later workstation tier (root inside, a docker daemon of its own, stronger isolation) is another profile behind the same name. The conversation's session transcripts ride into the tar under `.orbit/claude/projects/-work/` and come back to HOME after every turn, with the workspace (`Archive`), so resume, the session store and recovery work unchanged. A live sandbox stays up with its process (`session.live`, inside the sandbox's one-hour lifetime); files a later message brings (uploads, inputs) are pushed into it with `tar -x` over an attach of their own. When sandboxd is full (429), idle live sandboxes are closed and the create retried once. The built-in `orbit` is a `workstation` whenever orbit.yaml names sandboxd, and then needs the `sandbox` capability; without sandboxd it runs on orbit's host with read-only file tools, the web and subagents.
+
 ## orbit inside the CLI: tools and hooks (claude-code)
 
 A Claude Code run starts orbit's own binary twice over, so deterministic work
@@ -125,6 +135,7 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
 - **Status** (`internal/status`): with orbit's binary, every Claude Code hook event (`status.HookEvents`; agent-team events left out) runs the same `orbit hook`, which writes its decision first (`{}` for any event but PreToolUse, so no decision of the CLI's own is changed) and then posts a small summary of the event to the attempt's listener over a unix socket only orbit's user can open (`status.SocketPath`, in the temporary directory and named for a hash of the state directory, so a live process's fixed hook command reaches every run it serves). When the socket does not answer, the hook appends the event to the spool in the state directory, which the listener reads every second and once more after the CLI returns. Reporting never changes the hook's output or exit status: an exit code 2 would block a Stop or deny a tool. The engine records each event of the attempt's own turn as an `orbit.hook` event and each change of the turn's state on the run (`hook_status`). An event stamped before the attempt began, or naming another turn (`prompt_id`, adopted from the first event that names one), is an earlier run's and is ignored.
 - **Agent status** is derived (`status.Derive`): while a run is running, its hooks speak for it wherever they reported for its current attempt (UserPromptSubmit and tool events: working; PermissionRequest, Elicitation, an AskUserQuestion call and permission or elicitation notifications: waiting; Stop: done, shown as working until orbit has recorded the output; StopFailure, or SessionEnd before Stop: errored); the run's row fills in where they have not. A final run decides by its row: failed is errored, a finished run with an open question or a pending action is waiting on its person, otherwise done. A subagent's events change the turn's state only to wait on the person, and only the agent that waits clears its wait. PreCompact and PostCompact change nothing: an automatic compaction is mid-turn.
 - Claude Code runs `statusLine` only in its interactive interface, never under `-p` (checked on 2.1.316 with one-shot and stream-json input), so subscription windows still come from `rate_limit_event` (docs/api.md, Usage).
+- **An agent's own hooks** (spec `hooks`): `say`, `deny` or `run` at a Claude Code event, each run by `orbit agent-hook` with its definition as a flag (docs/agents/configuration.md, Hooks), added to the same `--settings` after orbit's own.
 
 ## Mail
 
@@ -145,6 +156,20 @@ per agent, and a chain is bounded by `actions.MaxContinueChain` (12): the
 run at the limit has its proposal denied, and `EnqueueContinuation` holds the
 same bound. A long task becomes a chain of short checkpointed runs, each with
 the session continued when the agent has one.
+
+## Delegation
+
+One agent coordinates others. An agent whose spec names `delegates` (agents, or `"*"`) and a rule for `delegate` proposes `delegate` with a batch of tasks: each a `key`, an `agent`, a `brief`, optionally `after` (keys of the same batch it waits for), `fresh` and `decision`. Executing it (`store.Delegate`, one transaction) gives each task its own conversation of its agent, with the brief as the first message (author `agent:<parent>`), and returns the tasks' ids as the handle. Code does the rest (`store.ReconcileTasks`, on control after each run, after delegation actions and every 5 s):
+
+- **Start.** A task starts, as a `task` run in its conversation, once its dependencies are done and any decision approved; the run is told it reports to an agent, not a person, and given its dependencies' reports. Tasks of different agents run in parallel; one agent's queue behind each other (`runs_one_running`).
+- **Settle.** A task is `working` while a run of its conversation is queued or running, or one of its actions is approved and not yet executed (a `continue` about to queue); then its newest run decides: failed or cancelled end it so, an open question makes it `needs_input`, otherwise it is `done` and that run's summary and report are its `report`. A failed or cancelled dependency cancels its dependents.
+- **Wake, never poll.** A task needing input is due to its parent at once; finished tasks when their whole batch is over (`report_due_at`). A parent conversation with a due task and no run started since gets one `delegation` run (`runs_one_delegation`), whose prompt lists every task with its status and, in full, what is new: reports, questions with their ids, errors. Any run in that conversation sees the same section, and one that started after the change clears it, so a parent is told once.
+- **Mailboxes.** A task's questions go to its parent, never to the person (a task's run notifies nothing but approvals, and its open questions do not make anything need the person's input). The parent answers with `task:message` (`reply_to` the question), which writes into the task's conversation and queues a run to read it (a done task reopens), or escalates by asking its own person. `task:cancel` ends a task. A person can read and write any task's conversation like any other.
+- **Decision gates.** A task with `decision` waits `blocked` on a `task:decision` action of the parent run, which only a person resolves (approve or reject, as any approval; no rule decides it). It is re-checked every reconcile: approved starts the task, told so; rejected cancels it and its dependents.
+- **Interactive and unattended.** In a run answering the person's own message, delegation's types under an `approve` rule apply directly (`engine.ruleFor`); every other run follows the rules as written. `task:message` and `task:cancel` follow the `delegate` rule unless named.
+- **Fresh workers.** `fresh: true` runs the agent's spec as a template: the task's runs read none of its memory and write none.
+- **The general agent** (`orbit`, built in) delegates to every agent (`delegates: ["*"]`, `delegate: approve`): the super agent a person talks to, which hands work to the others.
+- **Bounds** (`store`): `MaxTasksPerDelegation` (8) per action, `MaxTaskDepth` (3) levels of tasks delegating, `MaxConversationTasks` (64) per conversation.
 
 ## The output contract
 
@@ -177,6 +202,12 @@ approvals and failure are in the conversation they are reading
 (`engine.Attended`). Schedule, manual, continue and build runs deliver per
 the agent's `notify.when`, and always their failures and the approvals
 they wait on.
+
+Separately from channels, everything waiting on a person is an `attention`
+row (store/attention.go), written in the transaction that created it, for
+attended runs too. It feeds the app's inbox (`GET /attention`) and, for
+unattended runs, Web Push to the person's devices (`internal/push`), which
+carries a title and a link only; bursts fold into one summary push.
 
 ## Memory, questions, messages
 
@@ -250,7 +281,7 @@ signalling between writers and readers. `GET /usage` and `GET /health` are
 the admin read side, computed from stored rows and the configuration in
 force: subscription windows from the newest `rate_limit_event` Claude Code
 wrote into a run's stream (what it last reported, not a live query), exact
-cost sums, the queue, running runs and next fires. `/mcp` serves the same reads and writes as MCP tools (`internal/api/mcp.go`, stateless Streamable HTTP), with an OAuth proxy in front of authentik for clients that need dynamic registration (`oauth.go`). Contract: docs/api.md.
+cost sums, the queue, running runs and next fires. `/mcp` serves the same reads and writes as MCP tools (`internal/api/mcp.go`, stateless Streamable HTTP), with an OAuth proxy in front of authentik for clients that need dynamic registration (`oauth.go`). The chat UI is the portfolio's (kanishksachdev.com/orbit, its own repository), a client of `/api/v1` and the streams. Contract: docs/api.md.
 
 ## Search
 
@@ -356,7 +387,7 @@ container that holds nothing worth taking. Three pieces, all in this
 repository and all built; build runs use them (below, and tickets.md):
 
 ```
-orbit (hetzner) --tailnet, bearer token--> orbit sandboxd (oci, holds the docker socket)
+orbit (hetzner) --internal network, bearer token--> orbit sandboxd (hetzner, holds the docker socket)
                                               -> build container (deploy/build.Dockerfile)
                                                  on the internal network orbit-sandbox
                                                     -> orbit egress (CONNECT proxy) -> allowlisted hosts
@@ -427,7 +458,5 @@ ticket loop, every 30 s: checks green -> github:merge proposed (approve for orbi
 
 The direction, so changes now do not close it off:
 
-- **Tickets, what is left**: review comments on a PR's diff, and webhook
-  events in place of the loop's polling ([tickets.md](tickets.md)).
+- **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)).
 - **Event triggers** from webhooks (a ticket assigned, a comment).
-- **A UI** over `/api/v1` (the thread and the stream are its read side).

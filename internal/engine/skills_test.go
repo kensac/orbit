@@ -62,3 +62,17 @@ func TestARunHasItsSkillsAndWritesItsOwn(t *testing.T) {
 		t.Fatalf("next system:\n%s", fr.got.System)
 	}
 }
+
+func TestARunGetsItsAgentsHooks(t *testing.T) {
+	fr := &fakeRunner{output: goodOutput}
+	e, s, _ := harnessWith(t, fr, "hooks:\n  - {event: Stop, say: Check every figure.}\n  - {event: PostToolUse, matcher: Write, run: [gofmt, -l, .]}\n")
+	e.Harness = "/usr/local/bin/orbit"
+	if err := e.Execute(ctx, claim(t, e, s)); err != nil {
+		t.Fatal(err)
+	}
+	h := fr.got.Harness
+	if h == nil || len(h.AgentHooks) != 2 || h.AgentHooks[0].Def.Say != "Check every figure." || h.AgentHooks[1].Matcher != "Write" ||
+		h.AgentHooks[1].Def.Timeout.Seconds() != 10 {
+		t.Fatalf("hooks = %+v", h)
+	}
+}

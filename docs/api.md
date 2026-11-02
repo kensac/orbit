@@ -3,6 +3,10 @@
 Base path `/api/v1`. JSON in and out; errors are `{"error": "..."}` with a
 4xx/5xx status. Times are RFC 3339.
 
+Every JSON request body is decoded strictly: a field the endpoint does not read is a `400` naming it (`json: unknown field "x"`), as is a body that is not one JSON value, is malformed, or exceeds the endpoint's size limit. An endpoint whose body is optional treats an empty body as `{}`: `POST /agents/{name}/runs`, `POST /agents/{name}/conversations`, `POST /actions/{id}/approve` and `/reject`, `POST /tickets` and every `POST /tickets/{id}/...` (transitions, comments, review), `POST /tasks/{id}/cancel`, `POST /memory/entries/{id}/retire` and `POST /skills/{name}/retire`. Any other empty body is a `400`. `POST /oauth/register` is the exception: RFC 7591 clients send metadata orbit does not use, so it ignores unknown fields.
+
+An integer query parameter (`limit`, `after`, `attempt`, `offset`) that is not an integer is a `400` (`limit: want an integer`); an absent one takes its default.
+
 ## Authentication: authentik
 
 Every request carries `Authorization: Bearer <token>`, where the token is one
@@ -56,8 +60,11 @@ A rejected token is `401` with `{"error": "<check>: <reason>", "check":
 ```json
 {"agents": [{
   "name": "finance",
+  "spec_sha": "...",
   "spec": {"description": "Monthly spending review from Sure.", "...": "..."},
   "present": true, "enabled": true,
+  "first_seen": "...", "updated_at": "...",
+  "origin": "file",
   "last_run": {"id": "uuid", "status": "succeeded", "trigger": "message",
                "created_at": "...", "finished_at": "...", "summary": "..."},
   "unread_messages": 1,
@@ -72,7 +79,7 @@ A rejected token is `401` with `{"error": "<check>: <reason>", "check":
 conversations. `needs_input` is true
 while the agent waits on its person: an open question or a pending action.
 `spec` is the agent's spec as loaded (the canonical JSON stored for
-`spec_sha`, defaults applied). `agent_status` is what the agent is doing (below).
+`spec_sha`, defaults applied). `first_seen` is when orbit first stored the agent, `updated_at` when its stored spec, `enabled` or `present` last changed. `origin` and `version` are as in Defining agents (below); both are omitted for an agent no longer configured, and `version` for one not defined in the database. `last_run` is omitted before an agent's first run. `agent_status` is what the agent is doing (below).
 
 `GET /agents/{name}` is `{"agent": <as in the list>, "memory": "<markdown>",
 "next_fires": [...]}`. `next_fires` is as in `GET /health` (below); `[]` for
@@ -195,7 +202,7 @@ Newest activity first (a message or a run in it is activity). `archived`
 thread: `next_before` is an opaque cursor, `null` exactly when `has_more`
 is false; `limit` defaults to 50, at most 200. `needs_input` is true while
 one of its questions is open or one of its runs' actions is pending.
-`ticket_id` is set when the conversation is a ticket's (below).
+`ticket_id` is set when the conversation is a ticket's (below), `task_id` when it is a delegated task's own (Delegation, below); a task conversation's open questions are to the delegating agent, so they do not set `needs_input`.
 
 `POST /agents/{name}/conversations`
 
@@ -212,7 +219,19 @@ removed, cut at a word to 60 characters (`store.DefaultTitle`, code, never
 a model). `client_request_id` makes a retry return the first result, as for
 messages below.
 
+`POST /conversations` takes the same body plus `agent`, and creates the conversation with that agent, or with the built-in general agent `orbit` when `agent` is absent: what "New chat" calls. 404 when the agent is not configured.
+
 `GET /conversations/{id}` returns `{"conversation": {...}}`, the same shape.
+
+`GET /conversations/{id}/files` lists a chat agent's workspace for the conversation (below, Chat agents) as of its newest snapshot, stored after every run:
+
+```json
+{"files": [{"path": "src/main.go", "bytes": 13, "modified_at": "..."}],
+ "snapshot": {"id": 4, "conversation_id": "uuid", "run_id": "uuid", "attempt": 1,
+              "sha256": "hex", "bytes": 10240, "files": 3, "created_at": "..."}}
+```
+
+Regular files only, by path; orbit's own state (`.orbit/`, the run's `inputs/`) is left out. `snapshot` is `null` (and `files` empty) for a conversation without one. `GET /conversations/{id}/files/{path}` is one file, always as a download (`application/octet-stream`, `Content-Disposition: attachment`, `nosniff`, a CSP that runs nothing), 404 for a path the snapshot does not have.
 
 `PATCH /conversations/{id}` `{"title": "...", "archived": true}` (either
 field) returns the updated `{"conversation": {...}}`. A title is at most 240
@@ -249,6 +268,10 @@ The browser sends the file as the body of a `PUT` to `url`, with no `Authorizati
 
 A message carries uploads with `attachments` (below): ids of uploads of the same conversation, at most 20; one from another conversation is a `400`. A message with attachments may have an empty `body`.
 
+## Chat agents
+
+An agent with `chat: true` (the built-in `orbit` is one) is a Claude Code session rather than a report writer: its run's `report` is the session's final message, as written, and `summary` that reply's first line. It changes its memory, asks questions and proposes actions with orbit's tools during the turn instead of in a schema, so its runs carry `questions` and `actions` as any run does. Each conversation has its own workspace (`GET /conversations/{id}/files`): files the agent writes, and the person's uploads, stay between messages. With `sandbox: workstation` (the built-in's, when sandboxd is configured) the session runs in a sandbox container with Claude Code's full tool set and the open internet; `sandbox: build` with the tools it names.
+
 ## A conversation's thread
 
 A thread is the person's messages, the agent's questions, and every run
@@ -274,6 +297,9 @@ conversation:
    "questions": [{"id": "uuid-of-the-question-message", "body": "...", "open": true}],
    "error": null, "cost_usd": 0.03, "gate": null,
    "actions": [{"id": "uuid", "type": "notify", "status": "pending", "reason": "...", "params": {}}],
+   "tasks": [{"id": "uuid", "key": "facts", "agent": "researcher", "status": "working",
+              "conversation_id": "uuid", "depends_on": [], "summary": null, "error": null,
+              "decision_action_id": null}],
    "needs_input": true,
    "agent_status": {"state": "waiting", "kind": "approval", "since": "...", "source": "run", "run_id": "uuid"}},
   {"kind": "message", "id": "uuid-of-the-question-message", "at": "...", "from": "agent",
@@ -295,7 +321,7 @@ conversation:
   `reply_to`, when set, is the message it answers. `attachments` are the uploads it carries (Uploads, above), in order; always an array. `run_id` is the run that
   read a person's message (`null` until one starts) or the run that asked a
   question.
-- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again) `build` (a ticket's build run, docs/tickets.md) or `learn` (a learning run, below; only in an agent's learning conversation). `status` is
+- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again), `build` (a ticket's build run, docs/tickets.md), `learn` (a learning run, below; only in an agent's learning conversation), `task` (in a delegated task's conversation: the task starting, or its parent writing to it) or `delegation` (the agent woken because tasks it delegated settled; below). `status` is
   `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
   ended without a backend call because a gate, code, found nothing to judge;
   `gate` names it, and is `null` for every other status). `attempt` counts
@@ -319,6 +345,7 @@ conversation:
   and the agent is waiting for an answer or an approval. It is a state
   distinct from `status`, which says only whether the run itself is done.
   The agents list carries the same flag per agent.
+- **Tasks** are the tasks the run delegated (its `delegate` actions), in the order it listed them; always an array. `summary` is the finished task's report summary. For the whole task, and live status, see Delegation below.
 - **Actions.** `status` is `pending` (waiting for a person), `approved`
   (by a person or by an `auto` rule, about to execute), `rejected` (by a
   person), `denied` (by rule or invalid; never executes), `executing`,
@@ -415,7 +442,7 @@ An attempt (`store.Attempt`), oldest first:
 
 `attempt`, `worker` and `started_at` are always present; the rest is omitted when unset. `outcome` is `succeeded`, `failed`, `skipped`, `handed_back` (stopped by its instance) or `lost` (reaped without a heartbeat), absent while the attempt runs. `recovered_from` is the attempt whose session it continued, `recover_skipped` why it started over instead. `cost_usd` is the attempt's share, absent when unknown (a killed process saved none); `session_cost_usd` is the backend's running total for the session after it.
 
-`POST /runs/{id}/cancel` is `200 {"cancelled": true}` for a queued run, 409 otherwise.
+`POST /runs/{id}/cancel` stops a run. A queued run is cancelled at once: `200 {"cancelled": true, "status": "cancelled"}`. A running run is asked to stop: `202 {"cancelled": false, "status": "cancelling"}`; its attempt sees the request within 2 s (`engine.cancelPoll`), interrupts the backend (a chat agent's turn through Claude Code's control channel, which ends the turn with what it has; any other run's backend is stopped), and ends the run `cancelled`, with the reply so far as its `report` and `error` `"stopped by its person"`. A stopped run notifies nothing. Any other state is 409.
 
 ### Events
 
@@ -538,11 +565,80 @@ A row:
   of a decision that succeeded returns `200 {"ok": true}` again instead of
   409. The
   decider is the token's person. Only with the operator token, `{"by":
-  "name"}` names it (default `operator`).
+  "name"}` names it (default `operator`). The body is optional; one that is malformed or has another field is a `400` and decides nothing.
+
+## Attention and push
+
+Something waiting on a person is an **attention** row, written in the same transaction as the thing itself, one per thing (`key`): a pending approval (`approval`, key `action:<id>`), a run's question (`question`, `question:<message id>`), a failed run (`failure`, `failure:<run id>`) and a decision: a ticket plan to approve (`decision`, `plan:<ticket id>:<version>`) or a delegated task blocked on a person (`decision`, `action:<task:decision action id>`). Whether it is still open is read from the thing at query time: the action still `pending`, the question unanswered, the plan the ticket's newest while it is `planned`, a task's decision action still `pending`, a failure until a later run of its conversation succeeds or the person writes there. Dismissing closes any of them for the inbox only (a dismissed approval stays pending).
+
+`GET /attention?limit=<n>` is everything open, newest first (`limit` defaults to and is at most 500):
+
+```json
+{"items": [{
+  "id": "uuid", "key": "action:uuid", "kind": "approval", "agent": "finance",
+  "run_id": "uuid", "conversation_id": "uuid", "action_id": "uuid",
+  "message_id": null, "ticket_id": null, "plan_version": null,
+  "title": "finance wants to webhook:pay", "detail": "<the action's reason>",
+  "push": true, "created_at": "...", "link": "/orbit/c/<conversation_id>#action-<action_id>"}]}
+```
+
+`title` is the agent's name and a fixed phrase, never anything a run wrote. `detail` is the question, the action's reason, the run's error or the ticket's title, for a signed-in inbox only. `push` is false for a run a person's message woke (`engine.Attended`): listed, not pushed. `link` is where to act, under `ORBIT_PUSH_LINK_BASE`: the conversation, with `#action-<id>` for an approval or a task's decision, `#message-<id>` for a question. `POST /attention/{id}/dismiss` is `{"ok": true}` (repeating it is fine; 404 for an unknown id).
+
+**Web Push.** Control sends each attention row with `push` set to every registered device, straight to the browser's push service (RFC 8291 encryption, RFC 8292 VAPID; `internal/webpush`). The payload is only `{"title", "url", "tag", "kind", "count"}`: the title above and the link. Rows that arrive within 20 s of the previous push (`push.Gap`) wait and go out together as one summary (`"3 things need you: finance, ops"`, url `<base>/inbox`, tag `orbit-inbox`); a row that closed before its turn, or waited more than a day (`push.MaxAge`), is not sent. `tag` and the `Topic` header are the row's key, so a device and the push service each keep one notification per thing. A send that fails is not retried; the inbox still lists it.
+
+- `GET /push` is `{"enabled": true, "public_key": "<VAPID public key, base64url>"}` (`enabled: false`, `public_key: null` without keys).
+- `POST /push/subscriptions` takes a browser's `PushSubscription.toJSON()` (`{"endpoint", "expirationTime", "keys": {"p256dh", "auth"}}`; `expirationTime` is ignored) and an optional `label`, and returns `201 {"id": "uuid"}`. The endpoint must be https on a known push service (FCM, Apple, Windows, Mozilla; `push.AllowedEndpoint`), else 400. The same endpoint again refreshes its row. 503 when push is not configured.
+- `GET /push/subscriptions` is the caller's active devices (`id`, `endpoint`, `author`, `label`, `created_at`, `last_sent_at`, `last_error`, `failures`; never the keys); every device for the operator token.
+- `DELETE /push/subscriptions` with `{"endpoint": "..."}` stops pushing to it (404 when none is active). A push service answering 404 or 410 revokes it too.
+- `POST /push/test` sends `orbit notifications are on` to the caller's devices now, ignoring the gap: `{"sent": <devices that accepted it>}`.
+
+| variable | meaning |
+|---|---|
+| `ORBIT_VAPID_PUBLIC_KEY`, `ORBIT_VAPID_PRIVATE_KEY` | the VAPID pair, base64url (`orbit vapid` prints a new one). Both unset: push is off, the inbox still works. Set but invalid or mismatched: `serve` refuses to start. Rotating the pair invalidates every subscription (browsers bind them to the key), so devices subscribe again. |
+| `ORBIT_VAPID_SUBJECT` | the contact push services may use, `mailto:` or `https:`. Required with the keys. |
+| `ORBIT_PUSH_LINK_BASE` | the app path links start with, default `/orbit` (the portfolio's chat). |
 
 ## Tickets
 
-A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /tickets` (opens its conversation; returns `ticket_id`, `conversation_id`, `message_id`, `run_id`), `GET /tickets`, `GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that reached merging carries `merge_action_id`, its `github:merge` action), `POST /tickets/{id}/plans/{version}/approve`, `POST /tickets/{id}/{abandon,retry,reopen}`, and `POST /tickets/{id}/checks/rerun` (`202`; the ticket loop reruns the PR's failed Actions jobs on its next tick, and a failed ticket goes back to review; `GET /tickets/{id}` lists every rerun in `reruns`). Its thread and messages are its conversation's (`/conversations/{conversation_id}/thread`, `/messages`); a message there reopens a `planned` ticket, and a `merged`, `done` or `abandoned` one refuses messages (409). A ticket's conversation carries `ticket_id` in the conversation list. Filing and approving take `client_request_id`; the author and approver are the token's person. A transition the ticket's state does not allow is 409.
+A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /tickets` (opens its conversation; returns `ticket_id`, `conversation_id`, `message_id`, `run_id`; `stack_on` files a request on top of another, tickets.md, Stacked tickets), `GET /tickets`, `GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that reached merging carries `merge_action_id`, its `github:merge` action), `POST /tickets/{id}/plans/{version}/approve`, `POST /tickets/{id}/{abandon,retry,reopen}`, and `POST /tickets/{id}/checks/rerun` (`202`; the ticket loop reruns the PR's failed Actions jobs on its next tick, and a failed ticket goes back to review; `GET /tickets/{id}` lists every rerun in `reruns`), and review comments on its PR: `GET`/`POST /tickets/{id}/comments`, `POST /tickets/{id}/comments/{comment}/{edit,withdraw}` and `POST /tickets/{id}/review`, which sends the drafts as one message (tickets.md, Review comments). Its thread and messages are its conversation's (`/conversations/{conversation_id}/thread`, `/messages`); a message there reopens a `planned` ticket, and a `merged`, `done` or `abandoned` one refuses messages (409). A ticket's conversation carries `ticket_id` in the conversation list. Filing and approving take `client_request_id`; the author and approver are the token's person. A transition the ticket's state does not allow is 409.
+
+`GET /tickets?status=&agent=&before=&limit=` is `{"tickets": [...]}`, newest first. `status` and `agent` match exactly; `before` is an RFC 3339 time and returns tickets created before it (400 if it does not parse), so the last ticket's `created_at` is the next page's cursor. `limit` defaults to 50, at most 500. Each ticket:
+
+```json
+{"id": "uuid", "kind": "request", "title": "...", "agent": "builder",
+ "conversation_id": "uuid", "repo": "kensac/orbit", "status": "review",
+ "author": "kanishk", "approved_plan": 1, "base_sha": "...", "branch": "orbit/1a2b3c4d",
+ "pr_number": 61, "head_sha": "...",
+ "created_at": "...", "updated_at": "...", "merge_action_id": "uuid"}
+```
+
+`repo`, `author`, `approved_plan`, `base_sha`, `branch`, `pr_number`, `head_sha`, `merge_sha`, `error`, `merge_action_id` and `stack_on` are omitted when unset; `error` is set only while the ticket is `failed`. `GET /tickets/{id}` is `{"ticket": <as above>, "plans": [...], "events": [...], "reruns": [...]}`.
+
+## Delegation
+
+An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each task has its own conversation of its agent, which is an ordinary conversation (thread, messages, runs) whose first message is the brief, written by the delegating agent: a message's `author` of `agent:<name>` is an agent, not a person. The delegating conversation's thread shows each run's `tasks`; these routes show the rest.
+
+`GET /conversations/{id}/tasks` is `{"tasks": [<task>]}`: the tasks delegated from that conversation, oldest first. `GET /tasks/{id}` is `{"task": <task>}`:
+
+```json
+{"id": "uuid", "key": "facts", "agent": "researcher", "conversation_id": "uuid",
+ "parent_agent": "planner", "parent_conversation_id": "uuid", "parent_run_id": "uuid",
+ "action_id": "uuid", "brief": "Find the facts.", "fresh": false, "depth": 1,
+ "status": "done", "depends_on": ["other-key"],
+ "decision": {"action_id": "uuid", "question": "Spend $20?", "status": "executed", "decided_by": "kanishk"},
+ "report": {"run_id": "uuid", "summary": "...", "report": "<markdown>"},
+ "error": null, "run_id": "uuid", "run_status": "succeeded",
+ "questions": [{"id": "uuid", "body": "Which year?", "open": true}],
+ "created_at": "...", "updated_at": "...", "finished_at": "..."}
+```
+
+- `status`: `waiting` (a dependency is not done), `blocked` (its decision is pending), `working` (a run in its conversation is queued or running), `needs_input` (its agent asked the delegating agent something; `questions`), `done` (`report` is the reply of the run that finished it), `failed` or `cancelled` (`error` says why). A message from the delegating agent moves a `done` task back to `working`; `report` keeps the previous reply until the next.
+- `depends_on` is the keys of tasks in the same batch (`action_id`) it waits for. `decision` is `null` without one; otherwise approve or reject its `action_id` like any action (`POST /actions/{id}/approve`), and the task starts or is cancelled within seconds.
+- `run_id` and `run_status` are the newest run in its conversation; stream it with `/runs/{id}/stream` to show the task's work as it happens. `fresh` is a worker started from its agent's spec without its memory. `depth` is 1 for a task a top-level conversation delegated.
+
+`POST /tasks/{id}/cancel` `{"reason": "optional"}`: `200 {"cancelled": true}`, `409` when the task is already over. Its queued runs are cancelled (a running one finishes, unheeded) and its dependents with it. The canceller is the token's person (with the operator token, `"by"` names it).
+
+`GET /conversations/{id}/tasks/stream` is Server-Sent Events: a `tasks` event (`{"tasks": [<task>]}`, as the list) on connect and again whenever any task of the conversation changes, and `: ping` every 15 s. It never ends on its own; reconnect after a deploy (there is no `Last-Event-ID`: the first event is the whole state). A chat UI shows the delegating run's tasks from its thread item, then keeps them live from this stream, and opens a task's `conversation_id` to show its work.
 
 ## Memory
 
@@ -585,7 +681,7 @@ An entry:
 Nothing is deleted. Every change is a new version, kept:
 
 - `GET /memory/entries?scope=&topic=&agent=&type=&status=&q=&run_id=&limit=`: `{"entries": [...]}`, current versions, by scope (profile, topics, agents), then name, then most recently changed. `topic` or `agent` (not both) selects one place. `status` is `active` (default), `retired` or `all`; `q` matches key, title, description, body, why and how_to_apply, case-insensitively. `run_id` selects entries that run wrote a version of. `limit` defaults to 200, at most 1000.
-- `POST /memory/entries` `{"scope", "topic"|"agent", "key"?, "type", "title", "description"?, "body", "why"?, "how_to_apply"?, "note"?}`: `201 {"entry": ...}`. An explicit `key` already used in the scope is 409; an `agent` that is not configured is 400. Unknown fields are 400.
+- `POST /memory/entries` `{"scope", "topic"|"agent", "key"?, "type", "title", "description"?, "body", "why"?, "how_to_apply"?, "note"?}`: `201 {"entry": ...}`. An explicit `key` already used in the scope is 409; an `agent` that is not configured is 400.
 - `GET /memory/entries/{id}`: `{"entry": <current>, "versions": [...]}`, every version newest first.
 - `PATCH /memory/entries/{id}` `{"version"?, "type"?, "title"?, "description"?, "body"?, "why"?, "how_to_apply"?, "status"?, "note"?}`: the next version, with absent fields kept. `version` is the version the client read; another current one is 409, so two edits never silently overwrite each other (omit it to write regardless). `status: "active"` restores a retired entry (clearing `superseded_by`). An edit that changes nothing writes no version and returns the current one.
 - `POST /memory/entries/{id}/restore` `{"restore": <version>, "version"?, "note"?}`: the next version, a copy of an earlier one's content and status (and its `superseded_by` while that entry is still active). `restore` must be an earlier version (400); `version` is as for `PATCH`. `note` defaults to `restored version <n>`.

@@ -14,12 +14,14 @@ A self-hosted Go service on Kanishk's server (hetzner) that runs Claude Code on 
 | Claude Code | `internal/claudeproto`: the CLI's stream-json protocol in Go (turns, control requests, interrupt, permission prompts, credential scrubbing); session resume with fork; a live process per conversation | #33 #35 #36 #39 #6 |
 | Journal | typed run journal (messages, thinking estimates, tool calls with inputs and bounded results, diffs, plans, approvals, questions, turn state vs outcome), read by the thread, the SSE stream, the run page and MCP | #34 #38 |
 | Determinism | orbit's MCP tools (exact `query`, `calc`), hooks (path guard, figures check), transforms (`sure-monthly`, JSON reducers), gates that skip a scheduled run with no model call, the `skipped` status | #8 #20 #23 #27 |
-| Memory | typed memory entries at profile, topic and agent scope with every version kept; agents write their own; a learning pass over quiet conversations; `orbit import claude-memory` | #28 #44 |
+| Memory | typed memory entries at profile, topic and agent scope with every version kept; agents write their own; a learning pass over quiet conversations; memory document write and restore; `orbit import claude-memory` | #28 #44 |
+| Skills and hooks | a versioned skills library given to each Claude Code run as real skills (stubs plus `mcp__orbit__skill`), agents writing and retiring their own, `orbit import skills`; per-agent hooks (`say`, `deny`, `run` at a Claude Code event) | #49 #57 |
 | Tickets and builds | tickets on conversations, GitHub App tokens (App `orbit-kensac`, id 5571920), the build runner (sandboxed Claude Code, orbit commits and pushes), the ticket loop, `github:merge` gated on green checks | #9 #14 #17 |
 | Sandbox | `orbit sandboxd` (one locked-down container per build or workspace), `orbit egress` (allowlist proxy, never GitHub), the build image | #15 |
 | Operations | seamless upgrades (readiness, drain, resuming interrupted attempts), the worker fleet (capabilities, control vs worker, sessions across hosts), usage and health APIs | #11 #16 #25 |
 | Surfaces | thread and SSE API with authentik JWT auth, MCP server with OAuth proxy, mail (replies continue a conversation), uploads | #4 #21 #31 #45 |
-| Hygiene | API fixes, exact documented shapes, reserved agent names, migration uniqueness | #18 #19 #26 #29 #30 #40 |
+| Orchestration | `delegate` to other agents or fresh workers, each task in its own conversation; task DAGs; parent and child mailboxes (`task:message`, questions to the parent first); decision gates only a person resolves; `delegation` wakeups when tasks settle (never polling); the built-in `orbit` agent delegates to every agent; tasks in the thread, `/tasks` API and a live tasks stream (ARCHITECTURE.md, Delegation) | #46 |
+| Hygiene | API fixes, exact documented shapes, reserved agent names, migration uniqueness, the runners on claudeproto's protocol code (no copies in internal/runner), `make check` skipping DB tests without a database, `make check-sandbox` for build sandboxes, a spec field reference (docs/agents/spec-reference.md) held to the structs by `TestReferenceCoversSpec`; one strict request decoder (unknown fields are 400), integer query params checked, one limit clamp and one UUID check | #18 #19 #26 #29 #30 #40 #65 #73 #66 #74 |
 
 Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/compose.orbit.yml` (at the time of writing 21ab048; newer images were blocked by a duplicate migration, fixed in #50). MCP is live; mail is prepared but not enabled (docs in the homelab repo). The worker fleet is built but not deployed.
 
@@ -28,15 +30,19 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | Area | Branch / PR | Notes |
 |---|---|---|
 | General `orbit` agent: a plain Claude Code session per conversation in a sandboxed persistent workspace, owner messages as instructions, agent self-edit (`agent:define`), uploads/files endpoints for the chat, stopping a running reply | #47, branch general-agent work | the chat UI already calls the endpoints described in docs/api.md |
-| Orchestration: `delegate`, task DAGs, mailboxes, decision gates, wakeups | #46 delegation | |
 | Search across everything stored, plus a live usage poller and deferring low-priority runs | #42 search | |
 | Attention events, inbox API, Web Push (portfolio PWA) | #41 orbit-push-attention | the portfolio is already a PWA |
-| Skills library (versioned, real Claude Code skills per run, agents writing their own), memory restore endpoint, per-agent hooks | #49 context-skills | |
 | Hook-driven live agent status | #37 agent-status | |
 | Worktrees, review comments on PR diffs, stacked PRs, check reruns, RRULE schedules with a precheck | #32 #43 | |
 | Migration fix (duplicate version 14) | #50 | |
 
 The Claude side also plans: agent templates and more sources (Gmail, Calendar, Drive, GitHub, Prometheus/Loki, RSS, the DuckDB lake), a homelab-ops agent, presence-aware notifications across devices, the "safeguard later" pass (a credential proxy so the Claude token stays out of the sandbox, a review of self-edit rights, rate limits), and deploying the worker fleet. Ask before starting any of these.
+
+## Integration prerequisites
+
+| Area | Branch / PR | Notes |
+|---|---|---|
+| Run event ordering | `codex/event-sequence`, #72 | Serializes sequence allocation, message capture and complete event/journal persistence across concurrent callbacks; blocks integration checks until reviewed |
 
 ## Open for Codex
 
@@ -61,7 +67,7 @@ Pick one, put your name and branch in the Owner column in your first PR, keep ea
 - **The model never holds orbit's secrets or GitHub tokens.** Writes an agent wants are actions executed by orbit. Interactive messages from the owner count as his instructions; unattended runs follow the agent's rules.
 - **Never delete stored data.** New versions, never overwrites. DB access only through `internal/store`, with guarded state transitions.
 - **Migrations:** name new ones by UTC timestamp, `YYYYMMDDHHMMSS_name.sql` (`date -u +%Y%m%d%H%M%S`). Never the next small number: parallel agents reusing numbers broke main twice. Additive only; never edit a merged migration.
-- **Tests against real Postgres** (`ORBIT_TEST_DATABASE_URL`, `make testdb-up`); `make check` and golangci-lint must pass; CI must be green before merging.
+- **Tests against real Postgres** (`ORBIT_TEST_DATABASE_URL`, `make testdb-up`; without either, database tests skip); `make check` and golangci-lint must pass; CI must be green before merging. Inside a build sandbox (no Postgres, no cgo) run `make check-sandbox`; CI still runs the full gates.
 - **Workflow:** your own git worktree or clone (never switch the branch of a shared checkout); small PRs; merge your own PR (squash) once CI is green; if main moved, merge main into your branch; never force-push. Keep docs/api.md exact when the API changes, because the portfolio chat builds against it.
 - **Writing:** no AI attribution anywhere (no tool or model names, no "generated with", no Co-Authored-By) in commits, PR titles and bodies, code or docs. No em dashes. Do not hard-wrap prose at 80 columns: one line per paragraph or sentence in docs, comments, commit messages and PR bodies (code follows gofmt). Comments state the current rule and its reason, not history.
 - **Deploying is not your job here.** A merged PR builds an image; the owner's main session pins it on hetzner and rolls it out. Never edit anything on a host.

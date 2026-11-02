@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/spec"
 )
 
@@ -48,6 +49,9 @@ type Request struct {
 	// Harness, when set, gives a claude-code run orbit's tools (`orbit
 	// mcp`) and hooks (`orbit hook`). Other backends ignore it.
 	Harness *Harness
+	// Chat, when set, makes a claude-code run a chat run (chat.go): no
+	// OutputSchema, the reply its final message.
+	Chat *Chat
 	// SkillsPlugin is a plugin directory holding the run's skills (engine/skills.go), loaded with --plugin-dir; claude-code only.
 	SkillsPlugin string
 }
@@ -66,6 +70,15 @@ type Harness struct {
 	// Search is the engine's search socket for the run's agent; empty
 	// offers no search tool.
 	Search string
+	// AgentHooks are the agent's own hooks (spec hooks), run by `orbit agent-hook` beside orbit's.
+	AgentHooks []AgentHook
+}
+
+// AgentHook is one agent hook: when it fires, and what orbit's binary does.
+type AgentHook struct {
+	Event   string
+	Matcher string
+	Def     harness.AgentHookDef
 }
 
 // Session is how one run uses a persistent Claude Code session. The engine
@@ -122,6 +135,10 @@ type Result struct {
 	// SessionCostUSD is the backend's cumulative cost for the session, when
 	// the run had one; CostUSD is then this run's share of it.
 	SessionCostUSD *float64
+	// Reply is a chat run's answer: the turn's final message.
+	Reply string
+	// Interrupted is a chat turn a person stopped (Chat.Interrupt).
+	Interrupted bool
 }
 
 // Runner is a model backend.

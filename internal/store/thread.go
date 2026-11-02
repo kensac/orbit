@@ -86,6 +86,8 @@ type ThreadRun struct {
 	Actions   []ThreadAction   `json:"actions"`
 	// Gate names what ended a skipped run; null otherwise.
 	Gate *string `json:"gate"`
+	// Tasks are the tasks the run delegated, in the order it listed them.
+	Tasks []ThreadTask `json:"tasks"`
 	// NeedsInput is true when the run is waiting on its person: one of its
 	// questions is open or one of its actions awaits approval.
 	NeedsInput bool `json:"needs_input"`
@@ -108,6 +110,22 @@ type ThreadAction struct {
 	Status string          `json:"status"`
 	Reason string          `json:"reason"`
 	Params json.RawMessage `json:"params"`
+}
+
+// ThreadTask is a delegated task as its parent's thread shows it; the whole
+// task, with its report, is GET /tasks/{id}.
+type ThreadTask struct {
+	ID             string   `json:"id"`
+	Key            string   `json:"key"`
+	Agent          string   `json:"agent"`
+	Status         string   `json:"status"`
+	ConversationID string   `json:"conversation_id"`
+	DependsOn      []string `json:"depends_on"`
+	Summary        *string  `json:"summary"`
+	Error          *string  `json:"error"`
+	// DecisionActionID is the task:decision a person resolves before it
+	// starts, when it has one.
+	DecisionActionID *string `json:"decision_action_id"`
 }
 
 // DefaultThreadLimit and MaxThreadLimit are a thread page's size.
@@ -148,14 +166,22 @@ const threadRunSelect = `
 	                                                   'reason', a.reason, 'params', a.params)
 	                                 ORDER BY a.created_at, a.id)
 	                 FROM actions a WHERE a.run_id = r.id), '[]'),
+	       COALESCE((SELECT json_agg(json_build_object('id', k.id, 'key', k.key, 'agent', k.agent, 'status', k.status,
+	                                                   'conversation_id', k.conversation_id, 'summary', k.report->>'summary',
+	                                                   'error', k.error, 'decision_action_id', k.decision_action_id,
+	                                                   'depends_on', COALESCE((SELECT json_agg(d.key ORDER BY d.key)
+	                                                       FROM task_deps x JOIN tasks d ON d.id = x.depends_on
+	                                                       WHERE x.task_id = k.id), '[]'))
+	                                 ORDER BY k.created_at, k.id)
+	                 FROM tasks k WHERE k.parent_run_id = r.id), '[]'),
 	       r.hook_status
 	FROM runs r`
 
 func scanThreadRun(row pgx.Row) (*ThreadRun, error) {
 	r := ThreadRun{Kind: "run"}
-	var questions, actions, hook []byte
+	var questions, actions, tasks, hook []byte
 	if err := row.Scan(&r.ID, &r.At, &r.Trigger, &r.Status, &r.Attempt, &r.StartedAt, &r.FinishedAt, &r.Steps,
-		&r.Turn, &r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions, &hook); err != nil {
+		&r.Turn, &r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions, &tasks, &hook); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -165,6 +191,9 @@ func scanThreadRun(row pgx.Row) (*ThreadRun, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal(actions, &r.Actions); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(tasks, &r.Tasks); err != nil {
 		return nil, err
 	}
 	openQ, pending := false, false
@@ -244,10 +273,7 @@ func (s *Store) Thread(ctx context.Context, agent string, before *ThreadCursor, 
 // and runs (every trigger): the newest limit items before the cursor (nil:
 // the newest), oldest first.
 func (s *Store) ConversationThread(ctx context.Context, conversationID string, before *ThreadCursor, limit int) (*ThreadPage, error) {
-	if limit <= 0 {
-		limit = DefaultThreadLimit
-	}
-	limit = min(limit, MaxThreadLimit)
+	limit = clampLimit(limit, DefaultThreadLimit, MaxThreadLimit)
 	at, rank, id := any(nil), rankMessage+1, "ffffffff-ffff-ffff-ffff-ffffffffffff"
 	if before != nil {
 		at, rank, id = before.At, before.Rank, before.ID

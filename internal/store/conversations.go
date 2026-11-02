@@ -64,6 +64,10 @@ type Conversation struct {
 	TicketID *string `json:"ticket_id"`
 	// Purpose is learning for the agent's learning conversation, where its learning runs are (archived); null for a person's.
 	Purpose *string `json:"purpose"`
+	// TaskID is set when the conversation is a delegated task's own. Its
+	// questions are to the delegating agent, so they do not count as
+	// waiting on the person.
+	TaskID *string `json:"task_id"`
 	// AgentStatus is the agent's status in this conversation
 	// (status.Aggregate over its current run).
 	AgentStatus status.Status `json:"agent_status" db:"-"`
@@ -81,7 +85,8 @@ func (c *Conversation) derive() {
 
 var conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived, c.created_at, c.last_activity_at,
 	(SELECT t.id::text FROM tickets t WHERE t.conversation_id = c.id), c.purpose,
-	EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND ` + openQuestion + `),
+	(SELECT k.id::text FROM tasks k WHERE k.conversation_id = c.id),
+	EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND ` + personQuestion + `),
 	EXISTS (SELECT 1 FROM actions x JOIN runs xr ON xr.id = x.run_id
 	        WHERE xr.conversation_id = c.id AND x.status = 'pending'),
 	` + currentRun("c.agent", "sr.conversation_id = c.id")
@@ -140,10 +145,7 @@ type ConversationPage struct {
 // earlier page; the list never repeats one within a page walk started from
 // a fixed cursor.
 func (s *Store) ListConversations(ctx context.Context, agent string, archived bool, before *ConversationCursor, limit int) (*ConversationPage, error) {
-	if limit <= 0 {
-		limit = DefaultThreadLimit
-	}
-	limit = min(limit, MaxThreadLimit)
+	limit = clampLimit(limit, DefaultThreadLimit, MaxThreadLimit)
 	var at any
 	id := "ffffffff-ffff-ffff-ffff-ffffffffffff"
 	if before != nil {
