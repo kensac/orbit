@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -187,6 +188,8 @@ func (e *Engine) learn(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 	if err != nil {
 		return nil, nil, nil, nil, nil, "", err
 	}
+	// A /remember was written when it was said (remember.go); learning from it again would only duplicate it.
+	items = slices.DeleteFunc(items, func(it store.ConversationItem) bool { return it.Kind == "message" && isRemember(it.Body) })
 	said := false
 	for _, it := range items {
 		said = said || it.Kind == "message"
