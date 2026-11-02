@@ -563,6 +563,16 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err := t.Validate(v.Params); err != nil {
 		return "invalid params: " + err.Error(), true
 	}
+	// A schedule change is parsed by code now: one it cannot read is refused, and what a recorded one will do goes back to the model to confirm with the person (an executed one's result says it).
+	preview := ""
+	if actions.IsScheduleType(v.Type) && v.Type != actions.RunNowType {
+		res, err := e.PreviewSchedule(ctx, a.Name, v.Type, v.Params)
+		if err != nil {
+			return err.Error(), true
+		}
+		b, _ := json.Marshal(res)
+		preview = " It will do this; tell the person the rule and the next fires: " + string(b)
+	}
 	rule := ruleFor(a, v.Type, c.Trigger)
 	if !a.Chat {
 		instructor = ""
@@ -581,9 +591,9 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 		st.actions = append(st.actions, v)
 		if rule == spec.RuleAuto {
-			return "Recorded: it runs when your reply is sent.", false
+			return "Recorded: it runs when your reply is sent." + preview, false
 		}
-		return "Recorded: it waits for the person's approval.", false
+		return "Recorded: it waits for the person's approval." + preview, false
 	}
 	id, err := e.Store.StartActionNow(ctx, c.ID, c.Attempt, a.Name, store.ProposedAction{Type: v.Type, Params: v.Params,
 		Reason: v.Reason, Rule: string(rule), InstructedBy: instructor})

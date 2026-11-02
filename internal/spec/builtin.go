@@ -90,9 +90,11 @@ func Builtins(d Deployment) []*Agent {
 }
 
 func builtinActions(d Deployment) ActionSet {
-	// It delegates under approve: directly in its person's chat, after
-	// approval when unattended.
-	rules := ActionSet{"agent:define": RuleAuto, "continue": RuleAuto, "delegate": RuleApprove}
+	// It delegates, changes schedules and starts runs under approve:
+	// directly in its person's chat, after approval when unattended.
+	rules := ActionSet{"agent:define": RuleAuto, "continue": RuleAuto, "delegate": RuleApprove,
+		"schedule:add": RuleApprove, "schedule:pause": RuleApprove, "schedule:resume": RuleApprove,
+		"schedule:remove": RuleApprove, "run:now": RuleApprove}
 	if d.GitHub != nil {
 		rules["github:clone"] = RuleAuto
 		rules["github:pr"] = RuleApprove

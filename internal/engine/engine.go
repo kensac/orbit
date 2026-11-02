@@ -807,6 +807,12 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		if act.Type == actions.DelegateType && pa.Error == "" && out.task != nil && out.task.Depth >= store.MaxTaskDepth {
 			pa.Rule, pa.Error = string(spec.RuleDeny), fmt.Sprintf("delegation is nested at most %d deep, and this task is at depth %d", store.MaxTaskDepth, out.task.Depth)
 		}
+		if actions.IsScheduleType(act.Type) && act.Type != actions.RunNowType && pa.Error == "" {
+			// Parsed now, so a phrase code cannot read, or a trigger that is not there, is refused with the reason while the person is still there to rephrase.
+			if _, err := e.PreviewSchedule(ctx, a.Name, act.Type, act.Params); err != nil {
+				pa.Rule, pa.Error = string(spec.RuleDeny), err.Error()
+			}
+		}
 		if act.Type == actions.TaskRetryType && pa.Error == "" && e.retryNeedsPerson(ctx, act.Params) {
 			// The circuit breaker: past it, a retry waits for a person even
 			// in a run answering one, so an agent cannot loop a hopeless task.
@@ -1014,13 +1020,13 @@ func shortError(err error) string {
 // A run that read a mail is the exception: its sender is answered by mail (mailForRun).
 func Attended(trigger string) bool { return trigger == "message" }
 
-// ruleFor is the rule a run's proposal of typ gets. Delegation's types
-// under an approve rule apply directly in a run answering the person's
-// own message: they are reading the conversation and asked for the work.
-// Unattended runs follow the agent's rules as written.
+// ruleFor is the rule a run's proposal of typ gets. Delegation's types and
+// the schedule actions under an approve rule apply directly in a run
+// answering the person's own message: they are reading the conversation
+// and asked for the work. Unattended runs follow the agent's rules as written.
 func ruleFor(a *spec.Agent, typ, trigger string) spec.Rule {
 	r := a.RuleFor(typ)
-	if r == spec.RuleApprove && actions.IsTaskType(typ) && Attended(trigger) {
+	if r == spec.RuleApprove && (actions.IsTaskType(typ) || actions.IsScheduleType(typ)) && Attended(trigger) {
 		return spec.RuleAuto
 	}
 	return r
@@ -1197,7 +1203,7 @@ func (e *Engine) executor(snap *Snapshot) *actions.Executor {
 			return e.Store.EnqueueContinuation(ctx, store.Continuation{
 				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
 		},
-		Define: e.defineAction}
+		Define: e.defineAction, Schedule: e.scheduleAction}
 }
 
 // finishAction records an execution and tells the person of a failure.

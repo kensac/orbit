@@ -174,6 +174,19 @@ A database or built-in agent's spec may not have a `file` source, a `${VAR}` tha
 
 **Agents change agents.** An agent whose rules enable `agent:define` (the built-in `orbit` does, `auto`) proposes `{"spec": {...}}`: a whole agent, as `POST /agents` takes it, for a new agent or one already defined in the database or built in, itself included. Executed, it goes through the same validation and is stored as the next version with the run as `run_id`. A file agent cannot be changed this way (the action fails, naming why). A change that widens the agent compared with its current version (a tool, source, credential, delegate target or need it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily; for a new agent, any of these) is recorded with `rule: "approve"` and waits as `pending` for a person, whatever the agent's rule; one executing by rule that widens the agent as it is by then fails, naming what it widens.
 
+**Schedules by talking.** `schedule:add`, `schedule:pause`, `schedule:resume` and `schedule:remove` change one database or built-in agent's triggers as the next version (`change: "update"`, the run as `run_id`), and `run:now` starts a manual run (docs/agents/configuration.md, Changing schedules by talking). Times are the person's words, parsed by orbit in the agent's timezone. An executed one's `result`, and a pending one's `preview` (Actions, below), is:
+
+```json
+{"agent": "news", "timezone": "America/New_York", "triggers": [0],
+ "trigger": {"rrule": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=8;BYMINUTE=0;BYSECOND=0", "start": "2026-11-02T00:00:00", "prompt": "headlines"},
+ "rule": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=8;BYMINUTE=0;BYSECOND=0",
+ "paused_until": "2026-11-09T05:00:00Z",
+ "next_fires": ["2026-11-03T08:00:00-05:00", "2026-11-04T08:00:00-05:00", "2026-11-05T08:00:00-05:00"],
+ "version": 4}
+```
+
+`triggers` are the indexes changed (as `next_fires`' `trigger_index`); `trigger` is the one added or removed; `rule` is set when one trigger changed; `paused_until` only for a pause with an end; `next_fires` are the changed triggers' next three fires, merged, as local times (`[]` when paused with no end); `version` only once executed. `run:now`'s result is `{"agent": "news", "run_id": "uuid"}`.
+
 `GET /agents/{name}/definitions` is `{"name": "news", "origin":
 "database", "versions": [<definition>, ...]}`, newest first (empty for a
 file or built-in agent).
@@ -575,7 +588,7 @@ A row:
 
 ## Actions
 
-`GET /actions?agent=&status=&run_id=&before=<cursor>&limit=<n>` is `{"actions": [<action>], "has_more": false, "next_before": null}`, newest first. `status` is as in a thread action; `run_id` narrows to one run's proposals (400 when it is not a UUID). Paging is as for a thread: `next_before` is an opaque cursor, `null` exactly when `has_more` is false; `limit` defaults to 100, at most 500. `GET /actions/{id}` is `{"action": <action>}`:
+`GET /actions?agent=&status=&run_id=&before=<cursor>&limit=<n>` is `{"actions": [<action>], "has_more": false, "next_before": null}`, newest first. `status` is as in a thread action; `run_id` narrows to one run's proposals (400 when it is not a UUID). Paging is as for a thread: `next_before` is an opaque cursor, `null` exactly when `has_more` is false; `limit` defaults to 100, at most 500. `GET /actions/{id}` is `{"action": <action>, "preview": {...}}`. `preview` is what a `pending` action would do if it executed now, computed by orbit for the person deciding (for the schedule actions, the shape in Defining agents above); it is omitted for a decided action and a type without one, and replaced by `preview_error` (a string) when it would fail now. The approval page shows it too.
 
 ```json
 {"id": "uuid", "run_id": "uuid", "agent": "finance", "type": "webhook:home-assistant",
