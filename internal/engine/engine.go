@@ -39,6 +39,9 @@ import (
 type Engine struct {
 	Store   *store.Store
 	DataDir string
+	// ConfigDir is the configuration directory (orbit.yaml, agents/),
+	// loaded with the database's agent definitions (config.go).
+	ConfigDir string
 	Env     func(string) (string, bool)
 	Client  *http.Client
 	// Secret signs approval links (see ApprovalSig).

@@ -206,7 +206,9 @@ func configDir(args []string) string {
 // validate loads a configuration and lists the environment it needs, so a
 // change can be checked in CI and before a deploy.
 func validate(args []string) error {
-	cfg, err := spec.Load(configDir(args))
+	// The files and the built-in agents; database agents are checked when
+	// they are written (POST /api/v1/agents).
+	cfg, err := spec.LoadAll(configDir(args), nil)
 	if err != nil {
 		return err
 	}
@@ -255,16 +257,17 @@ func enqueue(ctx context.Context, args []string) error {
 	if len(args) < 1 {
 		return errors.New("usage: orbit run <agent> [prompt]")
 	}
-	cfg, err := spec.Load(configDir(nil))
-	if err != nil {
-		return err
-	}
-	a, ok := cfg.Agents[args[0]]
-	if !ok {
-		return fmt.Errorf("no agent %q", args[0])
-	}
 	return withStore(ctx, func(s *store.Store) error {
-		if err := syncAgents(ctx, s, cfg); err != nil {
+		eng := &engine.Engine{Store: s, ConfigDir: configDir(nil)}
+		cfg, err := eng.LoadConfig(ctx, nil)
+		if err != nil {
+			return err
+		}
+		a, ok := cfg.Agents[args[0]]
+		if !ok {
+			return fmt.Errorf("no agent %q", args[0])
+		}
+		if err := engine.SyncAgents(ctx, s, cfg); err != nil {
 			return err
 		}
 		id, err := s.EnqueueRun(ctx, store.NewRun{Agent: a.Name, SpecSHA: a.SHA, Trigger: "manual",
@@ -281,18 +284,6 @@ func decide(ctx context.Context, approve bool, args []string) error {
 		return errors.New("usage: orbit approve|reject <action-id>")
 	}
 	return withStore(ctx, func(s *store.Store) error { return s.DecideAction(ctx, args[0], approve, "cli") })
-}
-
-func syncAgents(ctx context.Context, s *store.Store, cfg *spec.Config) error {
-	specs := map[string]store.AgentSpec{}
-	for name, a := range cfg.Agents {
-		b, err := json.Marshal(a)
-		if err != nil {
-			return err
-		}
-		specs[name] = store.AgentSpec{SHA: a.SHA, JSON: b, Enabled: a.IsEnabled()}
-	}
-	return s.SyncAgents(ctx, specs)
 }
 
 // ---------------------------------------------------------------- serve
@@ -315,10 +306,6 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		log.Warn("ORBIT_OIDC_ISSUER is not set: the public /api/v1 refuses every request")
 	}
 	dir := configDir(nil)
-	cfg, err := spec.Load(dir)
-	if err != nil {
-		return err
-	}
 	hostname, _ := os.Hostname()
 	workerName := env("ORBIT_WORKER_NAME", hostname)
 
@@ -326,11 +313,8 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		if err := s.Migrate(ctx); err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}
-		if err := syncAgents(ctx, s, cfg); err != nil {
-			return err
-		}
 		eng := &engine.Engine{
-			Store: s, DataDir: env("ORBIT_DATA_DIR", "/data"), Env: os.LookupEnv,
+			Store: s, DataDir: env("ORBIT_DATA_DIR", "/data"), ConfigDir: dir, Env: os.LookupEnv,
 			Client: &http.Client{Timeout: 2 * time.Minute}, Secret: []byte(token),
 			NewRunner: runner.New, Log: log, Live: runner.NewLive(runner.MaxLive),
 		}
@@ -339,9 +323,10 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		} else {
 			log.Warn("orbit's tools and hooks are off: cannot find this binary", "err", err)
 		}
-		if err := eng.SetConfig(cfg); err != nil {
+		if err := eng.Reload(ctx); err != nil {
 			return err
 		}
+		cfg := eng.Current().Config
 		metrics.ConfigValid.Set(1)
 		configState := &engine.ConfigState{}
 		configState.Loaded(time.Now())
@@ -390,9 +375,29 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			metrics.Draining.Set(1)
 		}()
 
+		// reloadNow puts the files and the database's definitions in force,
+		// for the poll below and for the API after it writes a definition.
+		var reloadMu sync.Mutex
+		reloadNow := func(ctx context.Context) error {
+			reloadMu.Lock()
+			defer reloadMu.Unlock()
+			if err := eng.Reload(ctx); err != nil {
+				metrics.ConfigValid.Set(0)
+				configState.Failed(err, time.Now())
+				return err
+			}
+			metrics.ConfigValid.Set(1)
+			configState.Loaded(time.Now())
+			select {
+			case reload <- struct{}{}:
+			default:
+			}
+			return nil
+		}
+
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
-			ConfigState: configState, Drain: drain}
+			ConfigState: configState, Drain: drain, Reload: reloadNow}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		// Bind before any executor starts: an instance that cannot serve
@@ -479,7 +484,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			defer loops.Done()
 			t := time.NewTicker(30 * time.Second)
 			defer t.Stop()
-			last := configHash(dir)
+			last := configHash(dir) + definitionGeneration(life, s)
 			for {
 				select {
 				case <-life.Done():
@@ -499,20 +504,12 @@ func serve(ctx context.Context, log *slog.Logger) error {
 				}
 				failOrphanedActions(life, s, log)
 				refreshGauges(life, s, log)
-				if h := configHash(dir); h != last {
-					if err := reloadConfig(life, s, eng, dir); err != nil {
-						metrics.ConfigValid.Set(0)
-						configState.Failed(err, time.Now())
+				if h := configHash(dir) + definitionGeneration(life, s); h != last {
+					if err := reloadNow(life); err != nil {
 						log.Error("config reload failed; keeping the previous configuration", "err", err)
 					} else {
 						last = h
-						metrics.ConfigValid.Set(1)
-						configState.Loaded(time.Now())
 						log.Info("config reloaded")
-						select {
-						case reload <- struct{}{}:
-						default:
-						}
 					}
 				}
 			}
@@ -614,15 +611,14 @@ func oidcVerifier() (*auth.Verifier, error) {
 	return auth.New(auth.Config{Issuers: issuers, ClientIDs: clients, Group: group})
 }
 
-func reloadConfig(ctx context.Context, s *store.Store, eng *engine.Engine, dir string) error {
-	cfg, err := spec.Load(dir)
+// definitionGeneration fingerprints the database's agent definitions, so a
+// definition another instance wrote reloads this one too.
+func definitionGeneration(ctx context.Context, s *store.Store) string {
+	n, err := s.DefinitionGeneration(ctx)
 	if err != nil {
-		return err
+		return "db?"
 	}
-	if err := syncAgents(ctx, s, cfg); err != nil {
-		return err
-	}
-	return eng.SetConfig(cfg)
+	return "db" + strconv.FormatInt(n, 10)
 }
 
 // configHash fingerprints every file under dir. A deploy's git pull swaps
