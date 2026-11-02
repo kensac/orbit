@@ -455,6 +455,8 @@ func respondStatus(w http.ResponseWriter, status int, v any, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "not found")
+	case store.IsBadID(err):
+		writeErr(w, http.StatusBadRequest, "not a valid id")
 	case errors.Is(err, store.ErrReplyElsewhere), errors.Is(err, store.ErrInvalid):
 		writeErr(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, store.ErrReceiptMismatch):
