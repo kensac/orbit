@@ -91,6 +91,8 @@ COPY --chmod=0755 deploy/workstation/git-credential-orbit /usr/local/bin/git-cre
 COPY --chmod=0644 deploy/workstation/tmux.conf /etc/tmux.conf
 # Claude Code's status line records each account's rate limits where orbit
 # reads them; managed settings, so every account and profile has it.
+# (COPY --chmod would give a directory it creates the file's mode.)
+RUN install -d -m 0755 /etc/claude-code
 COPY --chmod=0755 deploy/workstation/orbit-statusline /usr/local/bin/orbit-statusline
 COPY --chmod=0644 deploy/workstation/managed-settings.json /etc/claude-code/managed-settings.json
 RUN git config --system credential.https://github.com.helper orbit
