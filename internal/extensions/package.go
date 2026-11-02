@@ -26,6 +26,7 @@ type Package struct {
 // ValidateDir reads a package without executing code or mutating it. The caller
 // must keep the directory immutable; validation is not a later install handle.
 func ValidateDir(dir string) (*Package, error) {
+	dir = rootName(dir)
 	info, err := os.Lstat(dir)
 	if err != nil {
 		return nil, err
@@ -179,4 +180,23 @@ func readPackageFile(root *os.Root, name string, capBytes int64) ([]byte, fs.Fil
 		return nil, 0, fmt.Errorf("%s: changed during validation", name)
 	}
 	return body, stat.Mode().Perm(), nil
+}
+
+// rootName removes only terminal separators and dot components so Lstat sees the named root itself.
+// Meaningful parent components, including .., retain their filesystem semantics.
+func rootName(dir string) string {
+	if dir == "" {
+		return dir
+	}
+	separator := string(os.PathSeparator)
+	for {
+		dir = strings.TrimRight(dir, separator)
+		if dir == "" {
+			return separator
+		}
+		if !strings.HasSuffix(dir, separator+".") {
+			return dir
+		}
+		dir = strings.TrimSuffix(dir, separator+".")
+	}
 }

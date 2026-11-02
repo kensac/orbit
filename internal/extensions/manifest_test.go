@@ -247,3 +247,52 @@ func TestPackageDirectoryBoundsAndOrdering(t *testing.T) {
 		}
 	})
 }
+
+func TestPackageRootAliasesCannotHideSymlinks(t *testing.T) {
+	dir := packageDir(t)
+	link := filepath.Join(t.TempDir(), "package-link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "/", "/.", "/./", "//.//./"} {
+		if _, err := ValidateDir(link + suffix); err == nil {
+			t.Errorf("accepted root symlink with suffix %q", suffix)
+		}
+		if _, err := ValidateDir(dir + suffix); err != nil {
+			t.Errorf("rejected ordinary root with suffix %q: %v", suffix, err)
+		}
+	}
+	// A parent symlink followed by .. must resolve in the filesystem, rather than being lexically cleaned into another package.
+	parent := t.TempDir()
+	actual := filepath.Join(parent, "actual")
+	if err := os.Mkdir(actual, 0700); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(actual, "nested")
+	if err := os.Mkdir(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(parent, "alias")
+	if err := os.Symlink(nested, alias); err != nil {
+		t.Fatal(err)
+	}
+	root := alias + "/../."
+	if rootName(root) != alias+"/.." {
+		t.Fatal("meaningful parent traversal was changed")
+	}
+	if _, err := ValidateDir(root); err == nil {
+		t.Fatal("lexical cleanup selected a package outside the filesystem-resolved root")
+	}
+	for _, name := range []string{"manifest.json", "reducer"} {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(filepath.Join(parent, name), b, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ValidateDir(root); err == nil {
+		t.Fatal("parent symlink/.. was lexically cleaned to the unrelated valid package")
+	}
+}
