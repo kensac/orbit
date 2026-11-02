@@ -520,19 +520,7 @@ A row:
 
 ## Tickets
 
-A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)):
-`POST /tickets` (opens its conversation; returns `ticket_id`,
-`conversation_id`, `message_id`, `run_id`), `GET /tickets`,
-`GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that
-reached merging carries `merge_action_id`, its `github:merge` action),
-`POST /tickets/{id}/plans/{version}/approve`, and
-`POST /tickets/{id}/{abandon,retry,reopen}`. Its thread and messages are
-its conversation's (`/conversations/{conversation_id}/thread`,
-`/messages`); a message there reopens a `planned` ticket, and a `merged`,
-`done` or `abandoned` one refuses messages (409). A ticket's conversation
-carries `ticket_id` in the conversation list. Filing and approving take
-`client_request_id`; the author and approver are the token's person. A
-transition the ticket's state does not allow is 409.
+A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /tickets` (opens its conversation; returns `ticket_id`, `conversation_id`, `message_id`, `run_id`), `GET /tickets`, `GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that reached merging carries `merge_action_id`, its `github:merge` action), `POST /tickets/{id}/plans/{version}/approve`, `POST /tickets/{id}/{abandon,retry,reopen}`, and `POST /tickets/{id}/checks/rerun` (`202`; the ticket loop reruns the PR's failed Actions jobs on its next tick, and a failed ticket goes back to review; `GET /tickets/{id}` lists every rerun in `reruns`). Its thread and messages are its conversation's (`/conversations/{conversation_id}/thread`, `/messages`); a message there reopens a `planned` ticket, and a `merged`, `done` or `abandoned` one refuses messages (409). A ticket's conversation carries `ticket_id` in the conversation list. Filing and approving take `client_request_id`; the author and approver are the token's person. A transition the ticket's state does not allow is 409.
 
 ## Memory
 
@@ -815,4 +803,4 @@ Full-text search across everything orbit stores, ranked best first.
   `next_fires` is each schedule trigger's next fire after now, read in the
   agent's timezone, soonest first, in UTC; `[]` for a disabled agent or one
   without triggers. A fire is enqueued by the scheduler's leader, so it is
-  when the run is due, not when it starts.
+  when the run is due, not when it starts. A cron trigger carries `schedule`; an RRULE trigger carries `rrule` and `start` instead, and one whose series has ended is not listed.

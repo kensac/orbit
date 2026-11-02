@@ -94,3 +94,25 @@ func TestDisabledAgentsDoNotFire(t *testing.T) {
 		t.Fatal("a disabled agent fired")
 	}
 }
+
+func TestAnRRuleTriggerFiresAndAnEndedOneStops(t *testing.T) {
+	sch, s, cfg := setup(t, "")
+	// The last Friday of the month at 17:30, two occurrences only.
+	cfg.Agents["a"].Triggers = []spec.Trigger{{RRule: "FREQ=MONTHLY;BYDAY=-1FR;COUNT=2", Start: "2026-11-01T17:30", Prompt: "month end"}}
+	ny, _ := time.LoadLocation("America/New_York")
+	sch.Tick(ctx, cfg, time.Date(2026, 11, 26, 0, 0, 0, 0, ny), time.Date(2026, 11, 28, 0, 0, 0, 0, ny))
+	runs, _ := s.ListRuns(ctx, store.RunFilter{Agent: "a"})
+	if len(runs) != 1 || !runs[0].ScheduledFor.Equal(time.Date(2026, 11, 27, 17, 30, 0, 0, ny)) || runs[0].Prompt != "month end" {
+		t.Fatalf("runs = %+v", runs)
+	}
+	// After the second and last occurrence, a long window enqueues nothing
+	// and ends (the series answers zero).
+	sch.Tick(ctx, cfg, time.Date(2026, 12, 1, 0, 0, 0, 0, ny), time.Date(2026, 12, 31, 0, 0, 0, 0, ny))
+	sch.Tick(ctx, cfg, time.Date(2027, 1, 1, 0, 0, 0, 0, ny), time.Date(2030, 1, 1, 0, 0, 0, 0, ny))
+	if count(t, s) != 2 {
+		t.Fatalf("runs = %d, want the two occurrences", count(t, s))
+	}
+	if got := NextFires(cfg.Agents["a"], time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)); len(got) != 0 {
+		t.Fatalf("next fires of an ended series = %+v", got)
+	}
+}
