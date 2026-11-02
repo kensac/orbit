@@ -88,6 +88,11 @@ type Session struct {
 	// (mode fresh, resumed or live; parent the session continued), before
 	// the prompt is sent. An error aborts the run.
 	Started func(mode, parent string) error
+	// Attached, when set, is called with the session the backend writes
+	// to as soon as its stream names it (a fresh or forked session's new
+	// id, or the live process's), so an attempt interrupted before its
+	// result still says where its work is.
+	Attached func(sessionID string)
 }
 
 // Event is one line of the backend's stream, kept as the run's transcript.

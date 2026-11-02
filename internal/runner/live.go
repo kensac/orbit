@@ -68,8 +68,11 @@ func (l *Live) Len() int {
 	return len(l.procs)
 }
 
-// Close ends every live process and waits for them to exit. Later runs
-// fall back to one process per run.
+// Close ends every live process and waits for them to exit: stdin closed,
+// so a process between turns exits on its own and one mid-turn finishes
+// that turn first, within liveCloseGrace. orbit calls it once no run is
+// in progress (the end of a drain), so none is mid-turn. Later runs fall
+// back to one process per run.
 func (l *Live) Close() {
 	l.mu.Lock()
 	l.closed = true
@@ -77,7 +80,7 @@ func (l *Live) Close() {
 	l.procs = map[string]*liveProc{}
 	l.mu.Unlock()
 	for _, p := range procs {
-		p.stop(true)
+		l.async(func() { p.stop(false) })
 	}
 	l.wg.Wait()
 }

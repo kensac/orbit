@@ -51,6 +51,8 @@ type Engine struct {
 	// Harness is the orbit binary a claude-code run starts for orbit's
 	// tools and hooks (os.Executable in serve). Empty runs without them.
 	Harness string
+	// HeartbeatEvery overrides heartbeatEvery when set; tests shorten it.
+	HeartbeatEvery time.Duration
 
 	mu  sync.RWMutex
 	cfg *Snapshot
@@ -105,29 +107,27 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		return e.fail(ctx, snap, nil, c, start, fmt.Errorf("agent %q is no longer configured", c.Agent), nil)
 	}
 
-	hbCtx, stopHB := context.WithCancel(ctx)
-	defer stopHB()
-	go func() {
-		t := time.NewTicker(heartbeatEvery)
-		defer t.Stop()
-		for {
-			select {
-			case <-hbCtx.Done():
-				return
-			case <-t.C:
-				if err := e.Store.Heartbeat(context.WithoutCancel(hbCtx), c.ID); err != nil {
-					log.Warn("heartbeat", "err", err)
-				}
-			}
-		}
-	}()
+	// actx ends when ctx does (a drain past its cap) or when the attempt
+	// loses its claim; the heartbeat finds out which.
+	actx, lose := context.WithCancelCause(ctx)
+	defer lose(nil)
+	go e.heartbeat(actx, c, lose, log)
 
-	out, res, err := e.attempt(ctx, snap, a, c, log)
+	st := &attemptState{}
+	out, res, err := e.attempt(actx, snap, a, c, log, st)
+	if errors.Is(context.Cause(actx), errLostClaim) {
+		// The run is another attempt's now; anything written here would be
+		// refused, and a notification would be a lie.
+		log.Warn("attempt stopped: it lost its claim on the run", "attempt", c.Attempt)
+		return nil
+	}
 	if ctx.Err() != nil {
-		// orbit is shutting down, not the run failing: give it back to
-		// the queue for the next process.
-		log.Info("requeued by shutdown")
-		return e.Store.RequeueRun(context.WithoutCancel(ctx), c.ID)
+		// orbit is stopping, not the run failing: give it back to the
+		// queue with what it spent, and the next attempt, here or on
+		// another instance, continues its session (planRecovery).
+		cost, total := st.spent()
+		log.Info("handed back", "attempt", c.Attempt, "session", st.sessionID)
+		return e.Store.HandBack(context.WithoutCancel(ctx), c.ID, c.Attempt, cost, total)
 	}
 	if err != nil {
 		return e.fail(ctx, snap, a, c, start, err, res)
@@ -135,29 +135,74 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 	return e.succeed(ctx, snap, a, c, start, out, res)
 }
 
-// attempt does the work; any error fails the run.
-func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, log *slog.Logger) (*Output, *runner.Result, error) {
+// heartbeat keeps the attempt's claim alive and cancels the attempt with
+// errLostClaim when the claim is gone, or when no beat has landed for long
+// enough that the reaper (on any instance) may have requeued it: one beat
+// short of StaleAfter, so this attempt stops before another can start.
+func (e *Engine) heartbeat(ctx context.Context, c *store.ClaimedRun, lose context.CancelCauseFunc, log *slog.Logger) {
+	every := heartbeatEvery
+	if e.HeartbeatEvery > 0 {
+		every = e.HeartbeatEvery
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	last := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			err := e.Store.Heartbeat(context.WithoutCancel(ctx), c.ID, c.Attempt)
+			switch {
+			case err == nil:
+				last = time.Now()
+			case errors.Is(err, store.ErrConflict):
+				lose(errLostClaim)
+				return
+			default:
+				log.Warn("heartbeat", "err", err)
+				if time.Since(last) > StaleAfter-heartbeatEvery {
+					lose(errLostClaim)
+					return
+				}
+			}
+		}
+	}
+}
+
+// attempt does the work; any error fails the run. st collects what a
+// hand-back needs to cost the attempt.
+func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, log *slog.Logger, st *attemptState) (*Output, *runner.Result, error) {
 	rs := snap.Config.Deployment.Runners[a.Runner]
 	r, err := e.NewRunner(a.Runner, rs, e.Env)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := e.Store.SetRunner(ctx, c.ID, r.Kind(), r.Model(), a.SHA); err != nil {
+	if err := e.Store.SetRunner(ctx, c.ID, c.Attempt, r.Kind(), r.Model(), a.SHA); err != nil {
 		return nil, nil, err
 	}
 
 	// Every byte the run read is stored as an artifact, so a workdir is
-	// scratch. A run without a session gets its own, removed when it ends.
-	// An agent with a session keeps one workdir and HOME (its sessions
-	// live under HOME, keyed by the workdir's path, and a live process
-	// has one cwd for its life); its inputs go in a directory named for
-	// the attempt, so a continued session never mistakes this run's
-	// files for the ones it read before, and are removed when it ends.
+	// scratch. A Claude Code run without a session gets one per run, not
+	// per attempt, with its HOME inside: the CLI files a session under
+	// its cwd, so an attempt that continues an interrupted one's session
+	// must run where that one did. Other backends get one per attempt. An
+	// agent with a session keeps one workdir and HOME (its sessions live
+	// under HOME, keyed by the workdir's path, and a live process has one
+	// cwd for its life); its inputs go in a directory named for the
+	// attempt, so a continued session never mistakes this run's files for
+	// the ones it read before. Scratch is removed when the attempt ends
+	// the run, and kept when it is handed back, for the next attempt.
 	attemptName := fmt.Sprintf("%s-%d", c.ID, c.Attempt)
+	claudeCode := r.Kind() == "claude-code"
 	workdir := filepath.Join(e.DataDir, "runs", attemptName)
+	if claudeCode {
+		workdir = filepath.Join(e.DataDir, "runs", c.ID)
+	}
+	home := filepath.Join(workdir, ".home")
 	inputsDir := "inputs"
-	var home string
-	withSession := a.Session != nil && a.Session.Resume && r.Kind() == "claude-code"
+	keepScratch := func() bool { return ctx.Err() != nil }
+	withSession := a.Session != nil && a.Session.Resume && claudeCode
 	if withSession {
 		base := filepath.Join(e.DataDir, "agents", a.Name)
 		workdir, home = filepath.Join(base, "work"), filepath.Join(base, "home")
@@ -167,20 +212,34 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		if err := os.RemoveAll(filepath.Join(workdir, "inputs")); err != nil {
 			return nil, nil, err
 		}
-		defer os.RemoveAll(filepath.Join(workdir, "inputs"))
+		defer func() {
+			if !keepScratch() {
+				_ = os.RemoveAll(filepath.Join(workdir, "inputs"))
+			}
+		}()
 		// The tool ledger and the hook's counters are per run.
 		if err := os.RemoveAll(harness.StateDir(home)); err != nil {
 			return nil, nil, err
 		}
 	} else {
-		defer os.RemoveAll(workdir)
+		defer func() {
+			if !keepScratch() {
+				_ = os.RemoveAll(workdir)
+			}
+		}()
 	}
+	st.home, st.workdir = home, workdir
 	if err := os.MkdirAll(filepath.Join(workdir, inputsDir), 0o700); err != nil {
 		return nil, nil, err
 	}
 
 	loc, _ := time.LoadLocation(a.Timezone)
 	now := time.Now().In(loc)
+
+	rec, skipped, err := e.planRecovery(ctx, a, c, r.Kind(), workdir, home)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	rc, err := e.Store.StartRunContext(ctx, c.ID, a.Name)
 	if err != nil {
@@ -213,10 +272,27 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 	}
 
+	if c.Attempt > 1 && claudeCode {
+		emit("orbit.recovery", map[string]any{"recovers_attempt": recFrom(rec), "skipped_because": skipped})
+	}
 	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env}
 	vars := sources.Vars(now)
 	var inputs []runner.Input
+	if rec != nil {
+		// The session read these; it continues on exactly them.
+		if inputs, err = restoreInputs(rec, workdir); err != nil {
+			return nil, nil, err
+		}
+		for _, in := range inputs {
+			if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", in.Path, in.MediaType, in.Content); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
 	for _, s := range a.Sources {
+		if rec != nil {
+			break
+		}
 		f, err := fetcher.Fetch(ctx, s, vars)
 		if err != nil {
 			emit("orbit.source_failed", map[string]any{"source": s.Name, "error": err.Error()})
@@ -242,14 +318,34 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 
 	var sess *runner.Session
 	continuing := false
-	if withSession {
-		sess, continuing, err = e.planSession(ctx, a, c, workdir, home, emit)
+	switch {
+	case withSession:
+		sess, continuing, err = e.planSession(ctx, a, c, workdir, home, rec, emit)
 		if err != nil {
 			return nil, nil, err
 		}
+	case claudeCode:
+		// No session between runs, but one within the run, kept in the
+		// run's own HOME (removed with the workdir), so an interrupted
+		// attempt can be continued rather than paid for twice.
+		sess = &runner.Session{Home: home, KeepDays: 1, Started: func(string, string) error { return nil }}
+		if rec != nil {
+			sess.Resume, sess.BaseCostUSD = rec.sessionID, rec.base
+		}
+		// rec.base is 0 when the transcript saved no total, which is this
+		// run's base anyway: it started from nothing.
+	}
+	if sess != nil {
+		st.baseCostUSD = sess.BaseCostUSD
+		sess.Attached = func(id string) {
+			st.sessionID = id
+			if err := e.Store.AttachSession(context.WithoutCancel(ctx), c.ID, c.Attempt, id); err != nil {
+				log.Warn("attach session", "err", err)
+			}
+		}
 	}
 	var convo []store.ConversationItem
-	if !continuing {
+	if !continuing && rec == nil {
 		// A continued session holds the thread already; a fresh one is
 		// told it as text.
 		items, err := e.Store.Conversation(ctx, a.Name, c.ID, conversationRows)
@@ -276,6 +372,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	trigger := c.Trigger
 	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing},
 		rc, convo, inputs)
+	if rec != nil {
+		prompt = recoveryPrompt(rec, rc, now.Location())
+	}
 	for name, b := range map[string]string{"system.md": system, "prompt.md": prompt, "schema.json": string(schema)} {
 		mt := "text/markdown"
 		if strings.HasSuffix(name, ".json") {
@@ -412,7 +511,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 		o.Actions = append(o.Actions, pa)
 	}
-	rr := store.RunResult{Status: "succeeded", Summary: out.Summary, Report: out.Report}
+	rr := store.RunResult{Attempt: c.Attempt, Status: "succeeded", Summary: out.Summary, Report: out.Report}
 	fillResult(&rr, res)
 	ids, err := e.Store.RecordOutcome(ctx, c.ID, a.Name, rr, o)
 	if err != nil {
@@ -467,7 +566,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 
 func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, start time.Time, runErr error, r *runner.Result) error {
 	e.Log.Warn("run failed", "run", c.ID, "agent", c.Agent, "err", runErr)
-	rr := store.RunResult{Status: "failed", Error: runErr.Error()}
+	rr := store.RunResult{Attempt: c.Attempt, Status: "failed", Error: runErr.Error()}
 	fillResult(&rr, r)
 	if err := e.Store.FinishRun(context.WithoutCancel(ctx), c.ID, rr); err != nil {
 		return err
@@ -564,7 +663,7 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 		if err != nil || act == nil {
 			return err
 		}
-		actx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		actx, cancel := context.WithTimeout(ctx, ActionTimeout)
 		result, xerr := ex.Execute(actx, actions.Call{Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params})
 		cancel()
 		if err := e.Store.FinishAction(context.WithoutCancel(ctx), act.ID, result, xerr); err != nil {
@@ -581,4 +680,11 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func recFrom(r *recovery) int {
+	if r == nil {
+		return 0
+	}
+	return r.from
 }

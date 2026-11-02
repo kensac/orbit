@@ -41,7 +41,11 @@ ENV PATH="/opt/cli/node_modules/.bin:${PATH}" \
     ORBIT_LISTEN=:8080
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD ["orbit", "healthcheck"]
+# Liveness, not readiness: a draining instance is alive and must not be
+# restarted (traefik health-checks /readyz for routing). start-interval
+# makes a new container healthy, and so routable by traefik's docker
+# provider, within seconds of listening rather than at the first 30 s tick.
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=2m --start-interval=2s CMD ["orbit", "healthcheck"]
 # tini reaps the CLIs' child processes, which orbit starts in their own
 # process groups and kills as a group on timeout.
 ENTRYPOINT ["tini", "--", "orbit"]

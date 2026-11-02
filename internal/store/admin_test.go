@@ -17,7 +17,7 @@ func finished(t *testing.T, s *store.Store, agent, status string, cost *float64,
 	if err != nil || c == nil || c.ID != id {
 		t.Fatalf("claim = %v %v, want %s", c, err, id)
 	}
-	if err := s.FinishRun(ctx, id, store.RunResult{Status: status, CostUSD: cost}); err != nil {
+	if err := s.FinishRun(ctx, id, store.RunResult{Attempt: 1, Status: status, CostUSD: cost}); err != nil {
 		t.Fatal(err)
 	}
 	createdAt(t, s, id, at)

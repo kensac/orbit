@@ -6,7 +6,8 @@
 //	orbit validate [dir]     load and check a configuration directory
 //	orbit run <agent> [prompt]   queue a manual run (a running serve picks it up)
 //	orbit approve <action-id> / orbit reject <action-id>
-//	orbit healthcheck        exit 0 if the local server answers /healthz
+//	orbit healthcheck [--ready]  exit 0 if the local server answers /healthz (/readyz)
+//	orbit drain              tell the local server to drain (a deploy replacing it)
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
 //	orbit hook --root <dir> --state <dir> [--figures]   orbit's hook, run by Claude Code
 //	orbit sandboxd           the build sandbox service (holds the docker socket)
@@ -20,8 +21,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -68,7 +71,9 @@ func main() {
 	case "approve", "reject":
 		err = decide(ctx, os.Args[1] == "approve", os.Args[2:])
 	case "healthcheck":
-		err = healthcheck()
+		err = healthcheck(len(os.Args) > 2 && os.Args[2] == "--ready")
+	case "drain":
+		err = drainCmd()
 	case "mcp", "hook":
 		err = harnessCmd(os.Args[1], os.Args[2:])
 	case "sandboxd":
@@ -107,25 +112,65 @@ func harnessCmd(name string, args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck | version | mcp | hook | sandboxd | egress")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | version | mcp | hook | sandboxd | egress")
 	os.Exit(2)
 }
 
-// healthcheck is the image's HEALTHCHECK: the image has no curl.
-func healthcheck() error {
-	addr := env("ORBIT_LISTEN", ":8080")
-	if strings.HasPrefix(addr, ":") {
-		addr = "127.0.0.1" + addr
+// healthcheck is the image's HEALTHCHECK (liveness, /healthz), and with
+// --ready the rollout's readiness wait (/readyz): the image has no curl.
+func healthcheck(ready bool) error {
+	path := "/healthz"
+	if ready {
+		path = "/readyz"
 	}
 	c := &http.Client{Timeout: 4 * time.Second}
-	resp, err := c.Get("http://" + addr + "/healthz")
+	resp, err := c.Get("http://" + local(env("ORBIT_LISTEN", ":8080")) + path)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("healthz: %s", resp.Status)
+		return fmt.Errorf("%s: %s", path, resp.Status)
 	}
+	return nil
+}
+
+// local turns a listen address into one to dial on this host.
+func local(addr string) string {
+	if strings.HasPrefix(addr, ":") {
+		return "127.0.0.1" + addr
+	}
+	return addr
+}
+
+// drainCmd asks the server in this container to drain, over the internal
+// listener with the operator token, both from the environment the server
+// itself runs with (docker exec orbit orbit drain). It returns at once;
+// the server exits when its runs are done.
+func drainCmd() error {
+	token := os.Getenv("ORBIT_API_TOKEN")
+	if token == "" {
+		return errors.New("ORBIT_API_TOKEN is not set")
+	}
+	addr := local(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"))
+	if strings.HasPrefix(addr, "0.0.0.0:") {
+		addr = "127.0.0.1" + strings.TrimPrefix(addr, "0.0.0.0")
+	}
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/api/v1/drain", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	if resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("drain: %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	fmt.Println(strings.TrimSpace(string(b)))
 	return nil
 }
 
@@ -297,11 +342,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		if err := seedMetrics(ctx, s); err != nil {
 			return err
 		}
-		if n, err := s.FailOrphanedActions(ctx); err != nil {
-			return err
-		} else if n > 0 {
-			log.Warn("failed orphaned actions", "count", n)
-		}
+		failOrphanedActions(ctx, s, log)
 
 		// A manual run, a message or a decision wakes one executor and the
 		// action loop rather than waiting for their next poll.
@@ -317,94 +358,129 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		}
 		reload := make(chan struct{}, 1)
 
-		var wg sync.WaitGroup
-		// runCtx outlives ctx by the drain window, so a run in progress at
-		// SIGTERM can finish if it is close; anything still going after it
-		// is requeued.
-		runCtx, cancelRuns := context.WithCancel(context.WithoutCancel(ctx))
+		// SIGTERM, or POST /api/v1/drain on the internal listener, drains:
+		// no new claims, not ready, the API and streams still served, the
+		// runs held here finish under their own timeouts. life outlives
+		// the signal until the drain is over; runCtx is cancelled only at
+		// the drain's cap, which hands the remaining runs back.
+		drain := engine.NewDrain()
+		life, endLife := context.WithCancel(context.WithoutCancel(ctx))
+		defer endLife()
+		runCtx, cancelRuns := context.WithCancel(life)
 		defer cancelRuns()
+		claimCtx, stopClaims := context.WithCancel(life)
+		defer stopClaims()
+		go func() {
+			select {
+			case <-ctx.Done():
+				if drain.Start() {
+					log.Info("draining: signal received")
+				}
+			case <-drain.Done():
+			}
+			stopClaims()
+			metrics.Draining.Set(1)
+		}()
 
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
-			ConfigState: configState}
+			ConfigState: configState, Drain: drain}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
+		// Bind before any executor starts: an instance that cannot serve
+		// (its port taken) must not claim runs, or a rollout's readiness
+		// wait would be answered by whatever holds the port.
 		for _, hs := range []*http.Server{srv, internal} {
+			ln, err := net.Listen("tcp", hs.Addr)
+			if err != nil {
+				return fmt.Errorf("listen: %w", err)
+			}
 			go func() {
-				if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				if err := hs.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 					log.Error("http", "addr", hs.Addr, "err", err)
 				}
 			}()
 		}
 
+		// The scheduler only enqueues, so it keeps leading through a drain
+		// (fires stay on time, the ready instance claims them) and lets go
+		// of the lock when this process ends.
+		var loops sync.WaitGroup
 		sched := &scheduler.Scheduler{
 			Store: s, Log: log.With("component", "scheduler"), Reload: reload, Now: time.Now,
 			Config: func() *spec.Config { return eng.Current().Config },
 		}
-		wg.Add(1)
+		loops.Add(1)
 		go func() {
-			defer wg.Done()
-			for ctx.Err() == nil {
-				if err := sched.Run(ctx); err != nil {
+			defer loops.Done()
+			for life.Err() == nil {
+				if err := sched.Run(life); err != nil {
 					log.Error("scheduler", "err", err)
-					sleep(ctx, 30*time.Second)
+					sleep(life, 30*time.Second)
 				}
 			}
 		}()
 
+		var executors sync.WaitGroup
 		for i := 0; i < workers; i++ {
-			wg.Add(1)
+			executors.Add(1)
 			go func(i int) {
-				defer wg.Done()
+				defer executors.Done()
 				name := fmt.Sprintf("%s/%d", workerName, i)
-				for ctx.Err() == nil {
-					c, err := s.ClaimRun(ctx, name)
+				for claimCtx.Err() == nil {
+					c, err := s.ClaimRun(claimCtx, name)
 					if err != nil {
-						if ctx.Err() == nil {
+						if claimCtx.Err() == nil {
 							log.Error("claim", "err", err)
 						}
-						sleep(ctx, 5*time.Second)
+						sleep(claimCtx, 5*time.Second)
 						continue
 					}
 					if c == nil {
-						waitFor(ctx, wakeRuns, 5*time.Second)
+						waitFor(claimCtx, wakeRuns, 5*time.Second)
 						continue
 					}
 					if err := eng.Execute(runCtx, c); err != nil {
 						log.Error("execute", "run", c.ID, "err", err)
 					}
-					// Its actions are ready the moment it finishes.
-					if err := eng.ExecuteActions(ctx); err != nil && ctx.Err() == nil {
-						log.Error("actions", "err", err)
+					// Its actions are ready the moment it finishes; a
+					// draining instance leaves them to the ready one.
+					if !drain.Draining() {
+						if err := eng.ExecuteActions(claimCtx); err != nil && claimCtx.Err() == nil {
+							log.Error("actions", "err", err)
+						}
 					}
 				}
 			}(i)
 		}
 
-		wg.Add(1)
+		loops.Add(1)
 		go func() {
-			defer wg.Done()
+			defer loops.Done()
 			t := time.NewTicker(30 * time.Second)
 			defer t.Stop()
 			last := configHash(dir)
 			for {
 				select {
-				case <-ctx.Done():
+				case <-life.Done():
 					return
 				case <-wakeActions:
 				case <-t.C:
 				}
-				if err := eng.ExecuteActions(ctx); err != nil && ctx.Err() == nil {
-					log.Error("actions", "err", err)
+				if !drain.Draining() {
+					if err := eng.ExecuteActions(claimCtx); err != nil && claimCtx.Err() == nil {
+						log.Error("actions", "err", err)
+					}
 				}
-				if failed, err := s.ReapStale(ctx, engine.StaleAfter); err != nil {
+				if failed, err := s.ReapStale(life, engine.StaleAfter); err != nil {
 					log.Error("reap", "err", err)
 				} else if len(failed) > 0 {
 					log.Warn("failed runs whose worker was lost", "runs", failed)
 				}
-				refreshGauges(ctx, s, log)
+				failOrphanedActions(life, s, log)
+				refreshGauges(life, s, log)
 				if h := configHash(dir); h != last {
-					if err := reloadConfig(ctx, s, eng, dir); err != nil {
+					if err := reloadConfig(life, s, eng, dir); err != nil {
 						metrics.ConfigValid.Set(0)
 						configState.Failed(err, time.Now())
 						log.Error("config reload failed; keeping the previous configuration", "err", err)
@@ -424,31 +500,70 @@ func serve(ctx context.Context, log *slog.Logger) error {
 
 		log.Info("orbit serving", "addr", srv.Addr, "internal_addr", internal.Addr, "workers", workers,
 			"agents", len(cfg.Agents), "oidc", verifier != nil)
-		<-ctx.Done()
-		log.Info("shutting down")
-		// Shutdown waits for open requests, and a stream is open until its
-		// run ends: end streams first (clients reconnect and replay).
+		<-drain.Done()
+		capAfter := drainMax(eng.Current().Config, log)
+		log.Info("draining: waiting for the runs held here", "cap", capAfter.String())
+
+		// A second signal is an operator who will not wait: hand back now.
+		again := make(chan os.Signal, 1)
+		signal.Notify(again, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(again)
+		drained := make(chan struct{})
+		go func() { executors.Wait(); close(drained) }()
+		select {
+		case <-drained:
+		case <-time.After(capAfter):
+			log.Warn("draining: cap reached; handing the remaining runs back")
+			cancelRuns()
+			<-drained
+		case <-again:
+			log.Warn("draining: second signal; handing the remaining runs back")
+			cancelRuns()
+			<-drained
+		}
+		// No run is in progress here now, so no live process is mid-turn:
+		// each is closed between turns, and the next run of its
+		// conversation, on whichever instance, resumes its session from
+		// the shared data volume.
+		eng.Live.Close()
+		log.Info("drained; exiting")
+		// Streams end last (clients reconnect to the ready instance and
+		// replay from Last-Event-ID); Shutdown then waits for the rest.
 		close(stopStreams)
 		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_ = srv.Shutdown(shutCtx)
 		_ = internal.Shutdown(shutCtx)
 		cancel()
-		// Runs in progress get the drain window, then are cancelled and
-		// requeued by the engine.
-		drained := make(chan struct{})
-		go func() { wg.Wait(); close(drained) }()
-		drain, _ := time.ParseDuration(env("ORBIT_DRAIN", "20s"))
-		select {
-		case <-drained:
-		case <-time.After(drain):
-			cancelRuns()
-			<-drained
-		}
-		// No run is in progress now; an idle live process holds nothing a
-		// later run needs beyond its session, which resume picks up.
-		eng.Live.Close()
+		endLife()
+		loops.Wait()
 		return nil
 	})
+}
+
+// drainMax is ORBIT_DRAIN_MAX, or engine.DrainMax of the configuration in
+// force: long enough that every run held here can finish within its own
+// timeout.
+func drainMax(cfg *spec.Config, log *slog.Logger) time.Duration {
+	if os.Getenv("ORBIT_DRAIN") != "" {
+		log.Warn("ORBIT_DRAIN is no longer read; ORBIT_DRAIN_MAX bounds a drain")
+	}
+	if v := os.Getenv("ORBIT_DRAIN_MAX"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d
+		}
+		log.Warn("ORBIT_DRAIN_MAX is not a duration; using the default", "value", v)
+	}
+	return engine.DrainMax(cfg)
+}
+
+func failOrphanedActions(ctx context.Context, s *store.Store, log *slog.Logger) {
+	if n, err := s.FailOrphanedActions(ctx, engine.OrphanAfter); err != nil {
+		if ctx.Err() == nil {
+			log.Error("orphaned actions", "err", err)
+		}
+	} else if n > 0 {
+		log.Warn("failed orphaned actions", "count", n)
+	}
 }
 
 // writeTimeout bounds an ordinary response, so a client that stops reading

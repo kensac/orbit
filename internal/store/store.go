@@ -259,26 +259,35 @@ type ClaimedRun struct {
 const MaxAttempts = 3
 
 // ClaimRun moves the oldest queued run whose agent has nothing running to
-// running, owned by worker. It returns nil when there is nothing to claim.
-// runs_one_running is what makes "nothing running" true under concurrency: a
-// second claimer for the same agent fails the index and tries the next row.
+// running, owned by worker, and records the claim as a new attempt. It
+// returns nil when there is nothing to claim. FOR UPDATE SKIP LOCKED gives
+// one row to one claimer across processes; runs_one_running is what makes
+// "nothing running" true under concurrency: a second claimer for the same
+// agent fails the index and tries the next row.
 func (s *Store) ClaimRun(ctx context.Context, worker string) (*ClaimedRun, error) {
-	for attempt := 0; attempt < 5; attempt++ {
+	for try := 0; try < 5; try++ {
 		var c ClaimedRun
-		err := s.Pool.QueryRow(ctx, `
-			UPDATE runs SET status = 'running', worker = $1, started_at = now(), heartbeat_at = now(),
-			       attempt = attempt + 1
-			WHERE id = (
-			    SELECT q.id FROM runs q
-			    WHERE q.status = 'queued'
-			      AND (q.run_after IS NULL OR q.run_after <= now())
-			      AND NOT EXISTS (SELECT 1 FROM runs b WHERE b.agent = q.agent AND b.status = 'running')
-			    ORDER BY q.created_at
-			    LIMIT 1
-			    FOR UPDATE SKIP LOCKED
-			)
-			RETURNING id::text, attempt, agent, spec_sha, trigger, prompt, chain, conversation_id::text`, worker).
-			Scan(&c.ID, &c.Attempt, &c.Agent, &c.SpecSHA, &c.Trigger, &c.Prompt, &c.Chain, &c.ConversationID)
+		err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+			if err := tx.QueryRow(ctx, `
+				UPDATE runs SET status = 'running', worker = $1, started_at = now(), heartbeat_at = now(),
+				       attempt = attempt + 1
+				WHERE id = (
+				    SELECT q.id FROM runs q
+				    WHERE q.status = 'queued'
+				      AND (q.run_after IS NULL OR q.run_after <= now())
+				      AND NOT EXISTS (SELECT 1 FROM runs b WHERE b.agent = q.agent AND b.status = 'running')
+				    ORDER BY q.created_at
+				    LIMIT 1
+				    FOR UPDATE SKIP LOCKED
+				)
+				RETURNING id::text, attempt, agent, spec_sha, trigger, prompt, chain, conversation_id::text`, worker).
+				Scan(&c.ID, &c.Attempt, &c.Agent, &c.SpecSHA, &c.Trigger, &c.Prompt, &c.Chain, &c.ConversationID); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `INSERT INTO run_attempts (run_id, attempt, worker) VALUES ($1, $2, $3)`,
+				c.ID, c.Attempt, worker)
+			return err
+		})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -293,10 +302,20 @@ func (s *Store) ClaimRun(ctx context.Context, worker string) (*ClaimedRun, error
 	return nil, nil
 }
 
-// Heartbeat marks a running run alive.
-func (s *Store) Heartbeat(ctx context.Context, runID string) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE runs SET heartbeat_at = now() WHERE id = $1 AND status = 'running'`, runID)
-	return err
+// Heartbeat marks a running attempt alive. ErrConflict means the attempt no
+// longer holds the run (the reaper requeued it, and another worker may have
+// claimed it): its executor must stop, and everything it would still write
+// is refused anyway.
+func (s *Store) Heartbeat(ctx context.Context, runID string, attempt int) error {
+	tag, err := s.Pool.Exec(ctx, `UPDATE runs SET heartbeat_at = now()
+		WHERE id = $1 AND status = 'running' AND attempt = $2`, runID, attempt)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("heartbeat of run %s attempt %d: %w (no longer its claim)", runID, attempt, ErrConflict)
+	}
+	return nil
 }
 
 // ReapStale handles running runs whose heartbeat is older than staleAfter:
@@ -321,13 +340,16 @@ func (s *Store) ReapStale(ctx context.Context, staleAfter time.Duration) ([]stri
 			return err
 		}
 		for _, r := range list {
+			if err := endAttempt(ctx, tx, r.ID, r.Attempt, "lost"); err != nil {
+				return err
+			}
 			if r.Attempt < MaxAttempts {
-				if err := requeue(ctx, tx, r.ID); err != nil {
+				if err := requeue(ctx, tx, r.ID, r.Attempt); err != nil {
 					return err
 				}
 				continue
 			}
-			if err := finishRun(ctx, tx, r.ID, RunResult{Status: "failed",
+			if err := finishRun(ctx, tx, r.ID, RunResult{Status: "failed", Attempt: r.Attempt,
 				Error: fmt.Sprintf("worker lost on attempt %d of %d", r.Attempt, MaxAttempts)}); err != nil {
 				return err
 			}
@@ -341,20 +363,42 @@ func (s *Store) ReapStale(ctx context.Context, staleAfter time.Duration) ([]stri
 	return failed, err
 }
 
-// RequeueRun returns a running run to the queue: its process is shutting
-// down. Nothing a run does outside its own rows happens before it finishes
-// (actions and notifications follow RecordOutcome), so a fresh attempt is
-// safe.
-func (s *Store) RequeueRun(ctx context.Context, runID string) error {
-	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error { return requeue(ctx, tx, runID) })
+// HandBack returns a running attempt's run to the queue: its executor
+// stopped it (a drain past its cap, or a lost claim). Nothing a run does
+// outside its own rows happens before it finishes (actions and
+// notifications follow RecordOutcome), so another attempt is safe. cost and
+// sessionCost are what the backend had spent when it stopped, when known.
+// ErrConflict means the attempt no longer held the run.
+func (s *Store) HandBack(ctx context.Context, runID string, attempt int, cost, sessionCost *float64) error {
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := requeue(ctx, tx, runID, attempt); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE run_attempts SET outcome = 'handed_back', ended_at = now(),
+			cost_usd = $3, session_cost_usd = $4
+			WHERE run_id = $1 AND attempt = $2`, runID, attempt, cost, sessionCost)
+		return err
+	})
 }
 
-func requeue(ctx context.Context, tx pgx.Tx, runID string) error {
-	if _, err := tx.Exec(ctx, `UPDATE runs SET status = 'queued', worker = NULL, started_at = NULL, heartbeat_at = NULL
-		WHERE id = $1 AND status = 'running'`, runID); err != nil {
+func requeue(ctx context.Context, tx pgx.Tx, runID string, attempt int) error {
+	tag, err := tx.Exec(ctx, `UPDATE runs SET status = 'queued', worker = NULL, started_at = NULL, heartbeat_at = NULL
+		WHERE id = $1 AND status = 'running' AND attempt = $2`, runID, attempt)
+	if err != nil {
 		return err
 	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("requeue run %s attempt %d: %w (no longer its claim)", runID, attempt, ErrConflict)
+	}
 	return releaseMessages(ctx, tx, runID)
+}
+
+// endAttempt records how an attempt ended. An attempt claimed before
+// run_attempts existed has no row, which is not an error.
+func endAttempt(ctx context.Context, db execer, runID string, attempt int, outcome string) error {
+	_, err := db.Exec(ctx, `UPDATE run_attempts SET outcome = $3, ended_at = now()
+		WHERE run_id = $1 AND attempt = $2 AND outcome IS NULL`, runID, attempt, outcome)
+	return err
 }
 
 // releaseMessages hands a run's consumed messages back to the inbox, so the
@@ -365,17 +409,32 @@ func releaseMessages(ctx context.Context, db execer, runID string) error {
 	return err
 }
 
-// SetRunner records the backend and the spec a run executes under. The spec
-// can differ from the one it was enqueued with when configuration reloaded
-// while it waited; the row names the one it actually ran.
-func (s *Store) SetRunner(ctx context.Context, runID, kind, model, specSHA string) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE runs SET runner_kind = $2, model = NULLIF($3, ''), spec_sha = $4 WHERE id = $1`,
-		runID, kind, model, specSHA)
-	return err
+// SetRunner records the backend and the spec an attempt executes under,
+// on the run and on the attempt. The spec can differ from the one it was
+// enqueued with when configuration reloaded while it waited; the row names
+// the one it actually ran. ErrConflict means the attempt no longer holds
+// the run.
+func (s *Store) SetRunner(ctx context.Context, runID string, attempt int, kind, model, specSHA string) error {
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE runs SET runner_kind = $3, model = NULLIF($4, ''), spec_sha = $5
+			WHERE id = $1 AND status = 'running' AND attempt = $2`, runID, attempt, kind, model, specSHA)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("set runner of run %s attempt %d: %w (no longer its claim)", runID, attempt, ErrConflict)
+		}
+		_, err = tx.Exec(ctx, `UPDATE run_attempts SET runner_kind = $3, spec_sha = $4 WHERE run_id = $1 AND attempt = $2`,
+			runID, attempt, kind, specSHA)
+		return err
+	})
 }
 
 // RunResult is a finished run's outcome.
 type RunResult struct {
+	// Attempt is the attempt finishing the run; only the attempt holding
+	// the claim can.
+	Attempt   int
 	Status    string
 	Error     string
 	Summary   string
@@ -406,23 +465,32 @@ type execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-// finishRun is the one write of a run's final state. Only a running run can
-// finish, so a run the reaper already failed stays failed.
+// finishRun is the one write of a run's final state. Only the running
+// attempt that holds the claim can finish it, so a run the reaper already
+// failed stays failed, and an attempt that lost its claim to a newer one
+// writes nothing. The run's cost is every attempt's: this one's (r.CostUSD)
+// plus what earlier, interrupted attempts were recorded to have spent.
 func finishRun(ctx context.Context, db execer, runID string, r RunResult) error {
 	tag, err := db.Exec(ctx, `
 		UPDATE runs SET status = $2, finished_at = now(), error = NULLIF($3, ''),
 		       summary = NULLIF($4, ''), report = NULLIF($5, ''), output = $6, usage = $7,
-		       cost_usd = $8, session_id = NULLIF($9, ''), session_cost_usd = $10
-		WHERE id = $1 AND status = 'running'`,
+		       cost_usd = CASE WHEN $8::numeric IS NULL THEN NULL ELSE $8::numeric + COALESCE(
+		           (SELECT sum(a.cost_usd) FROM run_attempts a WHERE a.run_id = $1 AND a.attempt < $11), 0) END,
+		       session_id = NULLIF($9, ''), session_cost_usd = $10
+		WHERE id = $1 AND status = 'running' AND attempt = $11`,
 		runID, r.Status, r.Error, r.Summary, r.Report, nullJSON(r.Output), nullJSON(r.Usage), r.CostUSD, r.SessionID,
-		r.SessionCostUSD)
+		r.SessionCostUSD, r.Attempt)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("finish run %s: %w (no longer running)", runID, ErrConflict)
+		return fmt.Errorf("finish run %s attempt %d: %w (not its running claim)", runID, r.Attempt, ErrConflict)
 	}
-	return nil
+	_, err = db.Exec(ctx, `UPDATE run_attempts SET outcome = $3, ended_at = now(), cost_usd = $4, session_cost_usd = $5,
+		session_id = COALESCE(NULLIF($6, ''), session_id)
+		WHERE run_id = $1 AND attempt = $2 AND outcome IS NULL`,
+		runID, r.Attempt, r.Status, r.CostUSD, r.SessionCostUSD, r.SessionID)
+	return err
 }
 
 // Run is a run as the API reports it.
@@ -866,7 +934,7 @@ func (s *Store) DecideAction(ctx context.Context, id string, approve bool, by st
 // executing, never re-run (see FailOrphanedActions).
 func (s *Store) ClaimApprovedAction(ctx context.Context) (*Action, error) {
 	rows, err := s.Pool.Query(ctx, `
-		UPDATE actions SET status = 'executing'
+		UPDATE actions SET status = 'executing', executing_since = now()
 		WHERE id = (SELECT id FROM actions WHERE status = 'approved' ORDER BY decided_at LIMIT 1 FOR UPDATE SKIP LOCKED)
 		RETURNING `+actionCols)
 	if err != nil {
@@ -890,13 +958,17 @@ func (s *Store) FinishAction(ctx context.Context, id string, result json.RawMess
 	return err
 }
 
-// FailOrphanedActions fails actions left executing by a process that died.
-// Whether the side effect happened is unknown, so they are failed for a
-// person to check rather than retried: a retried webhook may act twice.
-func (s *Store) FailOrphanedActions(ctx context.Context) (int64, error) {
+// FailOrphanedActions fails actions left executing by a process that died:
+// those executing for longer than olderThan, which the caller sets above
+// the longest an execution may take, so an action another live process is
+// executing (two run at once during a deploy) is never touched. One claimed
+// before executing_since existed is timed from its decision. Whether the
+// side effect happened is unknown, so they are failed for a person to check
+// rather than retried: a retried webhook may act twice.
+func (s *Store) FailOrphanedActions(ctx context.Context, olderThan time.Duration) (int64, error) {
 	tag, err := s.Pool.Exec(ctx, `UPDATE actions SET status = 'failed', executed_at = now(),
 		error = 'interrupted during execution; the side effect may or may not have happened'
-		WHERE status = 'executing'`)
+		WHERE status = 'executing' AND COALESCE(executing_since, decided_at) < now() - $1::interval`, olderThan.String())
 	return tag.RowsAffected(), err
 }
 

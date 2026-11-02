@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/kensac/orbit/internal/runner"
@@ -68,18 +69,25 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 		}
 		return rc.Flush()
 	}
+	// continues is the earlier attempt the current one continues (it
+	// resumed that attempt's session), 0 for none; every status says it.
+	continues := 0
 	sendStatus := func(p *store.RunProgress) error {
-		return send("status", "", map[string]any{"status": p.Status, "attempt": p.Attempt})
+		m := map[string]any{"status": p.Status, "attempt": p.Attempt}
+		if continues > 0 {
+			m["continues"] = continues
+		}
+		return send("status", "", m)
 	}
-	// A reconnecting client names the last narration it has; within the
-	// same attempt, everything up to it is skipped. Skipped narration is
+	// A reconnecting client names the last narration it has; everything up
+	// to it in the narration it belongs to is skipped. Skipped narration is
 	// still read, so chunk separators come out exactly as in a full replay.
 	resume, resuming := parseEventID(r.Header.Get("Last-Event-ID"))
 
-	attempt, seq, status := p.Attempt, 0, p.Status
-	// wrote is whether this attempt has sent text yet: each text event is a
-	// chunk to append, and a new block of prose after an earlier one starts
-	// with a blank line, so the concatenation reads as paragraphs.
+	started, attempt, seq, status := false, 0, 0, ""
+	// wrote is whether this narration has sent text yet: each text event is
+	// a chunk to append, and a new block of prose after an earlier one
+	// starts with a blank line, so the concatenation reads as paragraphs.
 	wrote := false
 	// drain sends every event of the current attempt after seq.
 	drain := func(kind string) error {
@@ -95,7 +103,7 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 				seq = ev.Seq
 				for i, n := range runner.Narrate(kind, ev.Kind, ev.Payload) {
 					at := eventID{attempt, ev.Seq, i}
-					skip := resuming && resume.attempt == attempt && !resume.less(at)
+					skip := resuming && (attempt < resume.attempt || (attempt == resume.attempt && !resume.less(at)))
 					if n.Tool != nil {
 						if !skip {
 							err = send("tool", at.String(), n.Tool)
@@ -120,6 +128,48 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// follow switches to the run's latest attempt. An attempt that resumed
+	// the session of the one this stream was narrating continues that
+	// narration: the client keeps what it has. Any other is narrated from
+	// the start of its chain (the attempts it continues, oldest first), and
+	// the client starts over. It waits (ok false) while a new attempt has
+	// not yet decided whether it continues the last one.
+	follow := func(p *store.RunProgress) (ok bool, err error) {
+		chain, settled, err := s.Store.AttemptChain(r.Context(), id, p.Attempt)
+		if err != nil || !settled {
+			return false, err
+		}
+		prev := 0
+		if len(chain) > 1 {
+			prev = chain[len(chain)-2]
+		}
+		continues, status = prev, p.Status
+		if started && attempt != 0 && prev == attempt {
+			attempt, seq = p.Attempt, 0
+			return true, sendStatus(p)
+		}
+		if started {
+			// Starting over mid-stream: the client clears, so nothing it
+			// has is skipped.
+			resuming = false
+		} else if resuming && !slices.Contains(chain, resume.attempt) {
+			resuming = false
+		}
+		started, wrote = true, false
+		if err := sendStatus(p); err != nil {
+			return false, err
+		}
+		for _, a := range chain {
+			attempt, seq = a, 0
+			if a != p.Attempt {
+				if err := drain(p.RunnerKind); err != nil {
+					return false, err
+				}
+			}
+		}
+		attempt = p.Attempt
+		return true, nil
+	}
 	finish := func() {
 		run, err := s.Store.ThreadRunByID(r.Context(), id)
 		if err != nil {
@@ -128,15 +178,40 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = send("done", "", run)
 	}
+	// step reads the run once and sends what changed; end is true when the
+	// stream is over.
+	step := func(p *store.RunProgress) (end bool) {
+		if !started || p.Attempt != attempt {
+			ok, err := follow(p)
+			if err != nil {
+				return true
+			}
+			if !ok {
+				return false
+			}
+		}
+		// Events before status: a run's events are all written before its
+		// final state, so once the status read says final, this drain has
+		// everything.
+		if drain(p.RunnerKind) != nil {
+			return true
+		}
+		if p.Status != status {
+			status = p.Status
+			if sendStatus(p) != nil {
+				return true
+			}
+		}
+		if store.Terminal(status) {
+			finish()
+			return true
+		}
+		return false
+	}
 
-	if sendStatus(p) != nil || drain(p.RunnerKind) != nil {
+	if step(p) {
 		return
 	}
-	if store.Terminal(status) {
-		finish()
-		return
-	}
-
 	poll := time.NewTicker(orDefault(s.StreamPoll, streamPoll))
 	defer poll.Stop()
 	ping := time.NewTicker(orDefault(s.StreamPing, streamPing))
@@ -161,29 +236,7 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
-			if p.Attempt != attempt {
-				// A new claim: the earlier attempt's narration is
-				// abandoned, and this one is streamed from its start. The
-				// status event's attempt tells the client to start over.
-				attempt, seq, status, wrote = p.Attempt, 0, p.Status, false
-				if sendStatus(p) != nil {
-					return
-				}
-			}
-			// Events before status: a run's events are all written before
-			// its final state, so once the status read says final, this
-			// drain has everything.
-			if drain(p.RunnerKind) != nil {
-				return
-			}
-			if p.Status != status {
-				status = p.Status
-				if sendStatus(p) != nil {
-					return
-				}
-			}
-			if store.Terminal(status) {
-				finish()
+			if step(p) {
 				return
 			}
 		}

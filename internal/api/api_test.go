@@ -155,7 +155,7 @@ func TestApprovalPage(t *testing.T) {
 	srv, s, e := v.srv, v.s, v.e
 	id, _ := s.EnqueueRun(ctx, store.NewRun{Agent: "a", SpecSHA: e.Current().Config.Agents["a"].SHA, Trigger: "manual"})
 	c, _ := s.ClaimRun(ctx, "w")
-	ids, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Status: "succeeded"}, store.Outcome{
+	ids, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Attempt: 1, Status: "succeeded"}, store.Outcome{
 		Actions: []store.ProposedAction{{Type: "notify", Params: json.RawMessage(`{"channel":"c","title":"t","body":"b"}`), Reason: "because", Rule: "approve"}},
 	})
 	if err != nil || id == "" {

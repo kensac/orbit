@@ -148,7 +148,7 @@ func TestMessagesReachExactlyOneRunAndReturnOnFailure(t *testing.T) {
 	if len(again.Messages) != 0 {
 		t.Fatal("a consumed message was delivered twice")
 	}
-	if err := s.FinishRun(ctx, id, store.RunResult{Status: "failed", Error: "boom"}); err != nil {
+	if err := s.FinishRun(ctx, id, store.RunResult{Attempt: 1, Status: "failed", Error: "boom"}); err != nil {
 		t.Fatal(err)
 	}
 	id2 := manual(t, s, "a")
@@ -168,7 +168,7 @@ func TestOutcomeAndOpenQuestions(t *testing.T) {
 	id := manual(t, s, "a")
 	c, _ := s.ClaimRun(ctx, "w")
 	mem := "baseline: 2700"
-	ids, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Status: "succeeded", Summary: "ok"}, store.Outcome{
+	ids, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Attempt: 1, Status: "succeeded", Summary: "ok"}, store.Outcome{
 		Memory:    &mem,
 		Questions: []string{"Is the Enterprise charge a deductible?"},
 		Actions: []store.ProposedAction{
@@ -202,7 +202,7 @@ func TestOutcomeAndOpenQuestions(t *testing.T) {
 	if len(rc.Questions) != 1 {
 		t.Fatalf("open questions = %d, want 1", len(rc.Questions))
 	}
-	_ = s.FinishRun(ctx, next, store.RunResult{Status: "succeeded"})
+	_ = s.FinishRun(ctx, next, store.RunResult{Attempt: 1, Status: "succeeded"})
 	if _, err := s.SendToAgent(ctx, "a", "yes, a deductible", "me", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestActionDecisionsAndSingleExecution(t *testing.T) {
 	seed(t, s, "a")
 	manual(t, s, "a")
 	c, _ := s.ClaimRun(ctx, "w")
-	ids, _ := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Status: "succeeded"}, store.Outcome{
+	ids, _ := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Attempt: 1, Status: "succeeded"}, store.Outcome{
 		Actions: []store.ProposedAction{{Type: "notify", Params: json.RawMessage(`{}`), Rule: "approve"}},
 	})
 	if err := s.DecideAction(ctx, ids[0], true, "me"); err != nil {
@@ -238,8 +238,13 @@ func TestActionDecisionsAndSingleExecution(t *testing.T) {
 	if again, _ := s.ClaimApprovedAction(ctx); again != nil {
 		t.Fatal("an executing action was claimed twice")
 	}
+	// Another live instance may be executing it right now: within the
+	// bound it is left alone.
+	if n, err := s.FailOrphanedActions(ctx, time.Hour); err != nil || n != 0 {
+		t.Fatalf("an action executing now was failed: %d %v", n, err)
+	}
 	// A crash mid-execution fails it rather than running it again.
-	n, err := s.FailOrphanedActions(ctx)
+	n, err := s.FailOrphanedActions(ctx, 0)
 	if err != nil || n != 1 {
 		t.Fatalf("orphaned = %d %v", n, err)
 	}
@@ -256,7 +261,7 @@ func TestEventsAndArtifactsAreKeptPerAttempt(t *testing.T) {
 	if err := s.PutArtifact(ctx, id, c.Attempt, "in", "prompt.md", "text/markdown", []byte("p1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RequeueRun(ctx, id); err != nil {
+	if err := s.HandBack(ctx, id, 1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	c2, _ := s.ClaimRun(ctx, "w")
