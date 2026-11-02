@@ -181,6 +181,8 @@ func (s *Server) routes(internal bool) http.Handler {
 	s.skillsRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
+	// The signature is the credential (hooks.go); traefik routes /hooks/ past forward-auth.
+	mux.HandleFunc("POST /hooks/{agent}/{trigger}", s.hook)
 
 	if internal {
 		// Only the host's rollout reaches this listener; a person cannot
@@ -406,8 +408,15 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 		ClientMessageID string `json:"client_message_id"`
 		// Attachments are uploads of this conversation the message carries.
 		Attachments []string `json:"attachments"`
+		// Delivery is "queue" (the default) or "steer": into the reply
+		// being written, when one is.
+		Delivery string `json:"delivery"`
 	}
 	if !decode(w, r, 64<<10, &body, bodyRequired) {
+		return
+	}
+	if body.Delivery != "" && body.Delivery != store.DeliveryQueue && body.Delivery != store.DeliverySteer {
+		writeErr(w, http.StatusBadRequest, `delivery is "queue" or "steer"`)
 		return
 	}
 	if strings.TrimSpace(body.Body) == "" && len(body.Attachments) == 0 {
@@ -421,15 +430,16 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 	res, replayed, err := s.Store.PostMessageOnce(r.Context(), store.PostMessage{
 		Agent: a.Name, SpecSHA: a.SHA, Body: body.Body, Author: actor(r, body.Author), ReplyTo: body.ReplyTo,
 		Wake: wake, ClientID: body.ClientMessageID, ConversationID: conversationID, Attachments: body.Attachments,
+		Delivery: body.Delivery, Steerable: a.Chat,
 	})
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	if res.RunID != "" && !replayed {
+	if res.RunID != "" && !replayed && res.Delivered == store.DeliveredQueued {
 		s.Wake()
 	}
-	resp := map[string]any{"message_id": res.MessageID}
+	resp := map[string]any{"message_id": res.MessageID, "delivered": res.Delivered}
 	if res.RunID != "" {
 		resp["run_id"] = res.RunID
 	}

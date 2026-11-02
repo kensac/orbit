@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kensac/orbit/internal/actions"
@@ -404,7 +405,9 @@ type chatTurn struct {
 	harness                  *runner.Harness
 	emit                     func(string, any)
 	cancel                   <-chan struct{}
-	rec                      *recovery
+	// steer is where the attempt's poll looks for this turn's steer feed.
+	steer *atomic.Pointer[steerFeed]
+	rec   *recovery
 	// extra is the system prompt's memory-entry and skills sections.
 	extra string
 	// plugin is the skills plugin directory, when the run has skills.
@@ -453,6 +456,13 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	e.repoChatTools(a, chat)
 	chat.Interrupt = t.cancel
 	chat.Fresh = t.fresh
+	if t.steer != nil {
+		feed := newSteerFeed()
+		chat.Steer = feed.ch
+		chat.Steered = func(id string) { e.steered(ctx, c, feed, id, t.emit) }
+		t.steer.Store(feed)
+		defer t.steer.Store(nil)
+	}
 	if a.Sandbox != "" {
 		sb, err := e.sandboxPlan(d, a.Sandbox, c, t.workdir, t.home, t.plugin, t.emit)
 		if err != nil {

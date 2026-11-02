@@ -12,7 +12,7 @@ The model is the expensive, slow, non-deterministic part, so it gets only the pa
 ## One run
 
 ```
-trigger (schedule: cron or RRULE | manual | message | continue | task | delegation; a ticket's build runs its own path, below)
+trigger (schedule: cron or RRULE | webhook | manual | message | continue | task | delegation; a ticket's build runs its own path, below)
   -> runs row, status queued
   -> executor claims it (FOR UPDATE SKIP LOCKED; at most one running per agent, per conversation for a chat agent;
      a continuation not before its run_after)
@@ -23,7 +23,7 @@ trigger (schedule: cron or RRULE | manual | message | continue | task | delegati
   -> sources fetched by the harness, written to <workdir>/inputs/, stored as artifacts
   -> transforms run over sources, each output an input (a source only transforms read is withheld)
   -> repositories (repos): each fetched into orbit's mirror, its tree at the ref's commit under inputs/repos/<name>, _repos.json an input
-  -> gates (scheduled runs, no message waiting): one that finds nothing to judge ends the run skipped
+  -> gates (scheduled and webhook runs, no message waiting): one that finds nothing to judge ends the run skipped
   -> runner called with: system contract, prompt, workdir, tools, output schema
   -> output validated against the contract
   -> RecordOutcome, one transaction: run succeeded, memory version, questions, actions
@@ -109,7 +109,8 @@ A chat agent is a plain Claude Code session, as a person's own terminal is: the 
 - **The workspace** is the conversation's directory (`<data>/conversations/<id>/work`, HOME beside it), kept between messages. After every run its files (without `inputs/` and `.orbit/`) are stored as a snapshot (`workspaces`, every one kept, a new row only when the tar changed or the newest is a person's); a host whose copy is not the newest snapshot restores it before the run (`workspace.sha256` marks which it has). So a conversation continues on any host, and `GET /conversations/{id}/files` and the workspace API read the snapshot, not a host's disk. A person's edit through the workspace API is a snapshot of its own (`source: person`), refused while a run of the conversation is running; the next turn is told by code which files the person changed, and starts a new live process (a new sandbox) from their version, resuming the session ([workspace.md](workspace.md)).
 - **Sessions and the live process** work as for any session agent (below), keyed by the conversation; the built-in has `resume` for a day and `live` for 10 minutes.
 - **Instructions.** A chat run answering its person's message treats their message as the instruction: `mcp__orbit__act` executes an action whose rule is `auto` or `approve` during the turn (`Store.StartActionNow`, then the executor, then `FinishAction`), with the turn's workspace (`runner.WorkspaceOf`: the sandbox's `/work` over attach, or the workdir), and records `instructed_by`. Unattended runs keep their rules. An action executed later by the action loop gets the conversation's stored workspace.
-- **Stop.** `POST /runs/{id}/cancel` on a running run sets `cancel_requested_at`; the attempt polls it (`engine.cancelPoll`, 2 s) and, for a chat turn, sends the CLI an `interrupt` control request, which ends the turn with a result; the run ends `cancelled` with the reply so far.
+- **Stop.** `POST /runs/{id}/cancel` on a running run sets `cancel_requested_at`; the attempt polls it (`engine.cancelPoll`, 2 s) and, for a chat turn, sends the CLI an `interrupt` control request (with `cancel_queued` when the init frame advertises `interrupt_cancel_queued_v1`, so steer messages still queued go with it), which ends the turn with a result; the run ends `cancelled` with the reply so far.
+- **Steering a running reply.** A message posted with `delivery: "steer"` while the conversation's chat run works is stored waiting with `delivery = 'steer'`, and wakes no run (`store.steerTarget` locks the running run FOR SHARE, so a run finishing at that moment either sees the message or the message is queued). The attempt running the turn reads waiting steer messages with the same poll as Stop (`PendingSteers`), from the database, so it works across instances and rollouts, and the runner writes each into the turn as a user message whose uuid is the message id (`runner/steer.go`). The CLI folds a message written during a tool call into that turn when the call's result goes back, and one written after the last tool call starts a turn of its own after the result (`claudeproto.TestRealCLISteer`, 2.1.316), so the runner writes only while a top-level tool call is in flight; a message still unwritten when the turn ends is the next run's. When the CLI's `command_lifecycle` frame says `started`, the message is `steered_into` the run (and read by it, `message_reads`) and the journal gets a `steer` item. When the result arrives, every message written and not started is withdrawn (`cancel_async_message`; an interrupt's receipt counts): a confirmed withdrawal leaves it waiting, and an unknown outcome closes the live process (it may still run there) and leaves it waiting too. The run's end (`finishRun`, every way a run ends) queues a run for any waiting steer message of its conversation unless one is queued, so a steer the turn did not take is still answered. A steer with no run running, to an agent that is not a chat agent, or with attachments, is queued as `delivery: "queue"` would be, and the answer says so.
 - **Sandboxed** (`sandbox: workstation | build`, needs sandboxd: `sandbox:` or `build:` in orbit.yaml). The CLI runs in a sandboxd container (The build sandbox, below) created from the workspace's tar, attached with `sh -c 'CLAUDE_CONFIG_DIR=/work/.orbit/claude exec claude ...'` (the environment a caller may set is the credential alone, which sandboxd turns into a credential proxy token) and `--permission-mode bypassPermissions`: the container is the boundary. The profile is sandboxd's choice of box, named at create (`?profile=`): `workstation` gives the session Claude Code's full tool set (no `--tools` list), a HOME kept with the workspace (`/work/.orbit/home`, stored beside it as `box-home/` without `.cache`, with `~/.local/bin`, `~/go/bin` and an npm prefix on `PATH` so user installs persist) and egress to any public host through sandboxd's workstation proxy (`ORBIT_SANDBOX_WORKSTATION_PROXY`, an `orbit egress` with the allowlist `*`, on the profile's own internal network, `ORBIT_SANDBOX_WORKSTATION_NETWORK`, which no build joins); `build` gives the tools the agent names and the build allowlist. A later workstation tier (root inside, a docker daemon of its own, stronger isolation) is another profile behind the same name. The conversation's session transcripts ride into the tar under `.orbit/claude/projects/-work/` and come back to HOME after every turn, with the workspace (`Archive`), so resume, the session store and recovery work unchanged. A live sandbox stays up with its process (`session.live`, inside the sandbox's one-hour lifetime); files a later message brings (uploads, inputs) are pushed into it with `tar -x` over an attach of their own. When sandboxd is full (429), idle live sandboxes are closed and the create retried once. The built-in `orbit` is a `workstation` whenever orbit.yaml names sandboxd, and then needs the `sandbox` capability; without sandboxd it runs on orbit's host with read-only file tools, the web and subagents.
 
 ## orbit inside the CLI: tools and hooks (claude-code)
@@ -311,7 +312,11 @@ Everything a person or an agent wrote is searchable (`Store.Search`, `GET /searc
 
 - **Scheduling:** one leader by advisory lock. A fire is enqueued at most once
   (`runs_one_per_fire`). After downtime, each trigger runs once for its newest
-  missed fire; a trigger that has never fired is not backfilled.
+  missed fire; a trigger that has never fired is not backfilled. A fire
+  claimed past its trigger's grace (`spec.MissedGraceFor`: the time to its
+  next fire, at most an hour, or `missed_grace`) ends `skipped`, gate
+  `missed`, instead of running late.
+- **Webhooks:** a signed delivery to `/hooks/{agent}/{trigger}` (`internal/api/hooks.go`, verified by `internal/webhook`) is enqueued with its body in one transaction, at most once per delivery id (`webhook_deliveries_once`), so a sender's retry or a second instance starts nothing new. The body is the run's `webhook` source, read from the database, so any host can run it.
 - **Low-priority work waits for the subscription.** With
   `defer_low_priority`, the scheduler's leader holds the scheduled runs of
   `priority: low` agents in the queue (`run_after`, recorded in
@@ -366,6 +371,7 @@ for twice. The rollout contract is in docs/agents/deployment.md.
   action is failed as orphaned only after `engine.OrphanAfter` executing, so
   neither instance fails the other's. Metrics are per instance except
   `orbit_queued` and `orbit_pending`, read from the shared database.
+- **Schema in the overlap.** The new instance migrates at start while the old one keeps running, so every migration is expand-only (store.md). `orbit preflight` checks that against the live database before a rollout starts the new image, and CI runs the previous release on each change's schema (`deploy/compat.sh`).
 - **Readiness.** `/readyz` is 200 while the instance takes new work, 503
   while it drains or cannot reach the database; `/healthz` stays liveness
   (the image's HEALTHCHECK). traefik routes by `/readyz`.
@@ -485,6 +491,5 @@ ticket loop, every 30 s: checks green -> github:merge proposed (approve for orbi
 
 The direction, so changes now do not close it off:
 
-- **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)).
-- **Event triggers** from webhooks (a ticket assigned, a comment).
+- **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)); agents already take webhook triggers (Reliability, Webhooks).
 - **The workspace**: an IDE in the portfolio chat over files, terminals and git in a conversation's snapshot or an agent's box ([workspace.md](workspace.md)).
