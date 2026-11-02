@@ -99,6 +99,10 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
   The system prompt tells the model to compute every figure with them. Both
   read only under the workdir, and append each result to a ledger in the run's
   state directory.
+  `mcp__orbit__search` is full-text search over the agent's own history
+  (below): the tool server asks the engine over a per-agent unix socket
+  (`engine/search.go`), the engine fills in the agent, and its results are
+  not ledgered, since an earlier run's words back no figure.
 - **Hooks** (`orbit hook`, from `--settings`; with `--setting-sources ""` no
   other hook is loaded, so `disableAllHooks` is on whenever orbit has none):
   PreToolUse on Read, Glob and Grep denies a path that leaves the workdir after
@@ -200,6 +204,10 @@ the admin read side, computed from stored rows and the configuration in
 force: subscription windows from the newest `rate_limit_event` Claude Code
 wrote into a run's stream (what it last reported, not a live query), exact
 cost sums, the queue, running runs and next fires. `/mcp` serves the same reads and writes as MCP tools (`internal/api/mcp.go`, stateless Streamable HTTP), with an OAuth proxy in front of authentik for clients that need dynamic registration (`oauth.go`). Contract: docs/api.md.
+
+## Search
+
+Everything a person or an agent wrote is searchable (`Store.Search`, `GET /search`, the `search` MCP tool, and in a run `mcp__orbit__search`): people's messages, agents' questions, run reports and errors, the prose a backend narrated, each tool call's input, and memory versions. `search_docs` holds one document per piece with a stored `tsvector` (English, a GIN index), derived by triggers on the source tables (the `search` migration, which also backfills), so a worker or the previous release indexes what it writes without knowing search exists. Queries are `websearch_to_tsquery`, ranked by `ts_rank_cd` normalised by length, with `ts_headline` snippets whose matches are split out in code, never as markup in the text. Tool results are not indexed: they are inputs, already in artifacts, and would drown every query.
 
 ## Reliability
 

@@ -90,6 +90,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/runs/{id}/artifacts", s.listArtifacts)
 	api("GET /api/v1/runs/{id}/deliveries", s.listDeliveries)
 	api("GET /api/v1/artifacts/{id}", s.getArtifact)
+	api("GET /api/v1/search", s.searchHTTP)
 	api("GET /api/v1/usage", s.usage)
 	api("GET /api/v1/health", s.health)
 	api("GET /api/v1/actions", s.listActions)

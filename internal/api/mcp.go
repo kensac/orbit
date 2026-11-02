@@ -43,6 +43,7 @@ func (s *Server) mcpHandler(internal bool) http.Handler {
 			"(approve_action / reject_action).",
 	})
 	s.addMCPTools(srv)
+	s.addSearchTool(srv)
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: false})
 	return mcpauth.RequireBearerToken(s.mcpVerify(internal), &mcpauth.RequireBearerTokenOptions{

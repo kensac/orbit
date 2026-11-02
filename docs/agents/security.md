@@ -51,6 +51,13 @@ more than its agent's rules allow.
   gains no reach it lacked (it could already Read those files). The hook fails
   closed: an event it cannot parse is denied. Hooks come only from orbit's
   `--settings`; a workdir's `.claude/settings.json` is never read.
+- **The search tool** (`mcp__orbit__search`) holds no database credential:
+  the tool server asks the engine over a unix socket (`--search`, a 0600
+  file under the temp directory) that the engine serves for one agent, and
+  the engine sets the agent on every query, so a run finds only its own
+  agent's records, which it could already have been shown. Results are
+  past writing, so they are data like any input, and they never back a
+  figure (they are kept out of the tool ledger).
 
 ## What the model can cause
 
