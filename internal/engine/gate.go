@@ -94,6 +94,34 @@ func (e *Engine) skip(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 		return err
 	}
 	metrics.RunSkipped(a.Name, g.gate)
+	if g.gate == store.GateMissed {
+		// The agent did no work, so it is not a success for staleness.
+		metrics.RunMissed(a.Name, time.Since(start))
+		return nil
+	}
 	metrics.RunFinished(a.Name, store.StatusSkipped, runnerKind(snap, a), time.Since(start), nil)
 	return nil
+}
+
+// missed is the verdict on a schedule fire claimed later than its grace (spec.MissedGraceFor): the run ends skipped, gate missed, before anything is read or fetched. Only a first attempt is judged: a later one continues work an attempt that started in time began.
+func missed(a *spec.Agent, c *store.ClaimedRun, now time.Time) *gateSkip {
+	if c.Trigger != "schedule" || c.ScheduledFor == nil || c.TriggerIndex == nil || c.Attempt != 1 {
+		return nil
+	}
+	i := *c.TriggerIndex
+	if i < 0 || i >= len(a.Triggers) || a.Triggers[i].IsWebhook() {
+		// The trigger changed since the fire; its grace is unknown, so the run goes ahead.
+		return nil
+	}
+	loc, err := time.LoadLocation(a.Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	grace := spec.MissedGraceFor(a.Triggers[i], loc, *c.ScheduledFor)
+	late := now.Sub(*c.ScheduledFor)
+	if late <= grace {
+		return nil
+	}
+	return &gateSkip{gate: store.GateMissed, summary: fmt.Sprintf("the fire at %s was claimed %s late, past its grace of %s",
+		c.ScheduledFor.In(loc).Format("2006-01-02 15:04 MST"), late.Round(time.Second), grace)}
 }

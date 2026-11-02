@@ -246,7 +246,7 @@ func (s *Store) Health(ctx context.Context) (*Health, error) {
 			FROM agents a
 			JOIN LATERAL (
 			    SELECT r.id::text, r.finished_at FROM runs r
-			    WHERE r.agent = a.name AND r.status IN ('succeeded', 'skipped')
+			    WHERE r.agent = a.name AND r.status IN ('succeeded', 'skipped') AND r.gate IS DISTINCT FROM 'missed'
 			    ORDER BY r.finished_at DESC LIMIT 1
 			) ls ON true
 			WHERE a.present`)

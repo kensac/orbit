@@ -408,7 +408,7 @@ The final answer is `done.report`, not the concatenated `text`: `text` is what t
 - `output` is the backend's raw structured output and `usage` its token usage, as it reported them. `cost_usd` is every attempt's cost together.
 - `session_id` is the backend session the run ended in. `session_mode` (`fresh`, `resumed`, `live`), `session_parent` (the run whose session it continued) and `session_depth` are set for an agent with a session.
 - `run_after`, `continues` (the run that asked) and `chain` (its place in the chain, from 1) are set on a `continue` run.
-- `gate` names what ended a `skipped` run.
+- `gate` names what ended a `skipped` run: an agent's gate (`unchanged`, `items_above`, `precheck`), `missed` (a schedule fire claimed past its trigger's `missed_grace`), `pushed` (a build), or a learning run's `learn:nothing-new`.
 - `steps` is the number of tool calls in the latest attempt's timeline, counted as a thread's run item counts it.
 
 An attempt (`store.Attempt`), oldest first:
@@ -1096,7 +1096,7 @@ The run's `prompt` is the trigger's prompt followed by `Webhook <trigger>: deliv
   `engine.StaleAfter` (300 s).
 - `agents` is every agent in the configuration in force, by name.
   `last_success` is its newest succeeded or skipped run (a gate finding
-  nothing to judge is not a stale agent), `null` if none.
+  nothing to judge is not a stale agent; a fire skipped as `missed` did nothing, so it is not counted), `null` if none.
   `next_fires` is each schedule trigger's next fire after now, read in the
   agent's timezone, soonest first, in UTC; `[]` for a disabled agent or one
   without triggers. A fire is enqueued by the scheduler's leader, so it is

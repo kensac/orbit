@@ -120,6 +120,8 @@ A skipped run counts as a success for staleness (docs/agents/store.md).
 
 Every kind takes `prompt`, the reason for the wake. `schedule` and `rrule` go through the same scheduler (one fire per trigger and time, `runs_one_per_fire`; after downtime only the newest missed fire), and an ended series never fires again.
 
+**Missed fires.** A fire that starts too late is not run hours late: a schedule run claimed more than its trigger's `missed_grace` after its fire time (after downtime, or behind a long queue) ends `skipped` with gate `missed`, before anything is read or fetched, and notifies nothing. The default grace is the time from that fire to the trigger's next one, at most an hour (`spec.DefaultMissedGraceMax`): a five-minute trigger's fire may start up to five minutes late, a daily one's up to an hour. Set `missed_grace` (1m to 168h) for a job that must still run late, such as a monthly close. Only a run's first attempt is judged; a missed fire is no success for staleness.
+
 ## Webhooks
 
 A webhook trigger starts a run when a sender (GitHub, anything speaking Standard Webhooks) POSTs a signed delivery to `/hooks/<agent>/<webhook>` (docs/api.md, Webhooks). Its secret is an environment variable `orbit.yaml` binds, like a credential, to the agents that may name it, with the sender's signature scheme:

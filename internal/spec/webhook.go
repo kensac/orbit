@@ -105,6 +105,9 @@ func (c *Config) validateWebhookTrigger(a *Agent, i int, t Trigger) []error {
 	case !slices.Contains(ws.Agents, a.Name):
 		at("secret %s is not bound to this agent (webhook_secrets.%s.agents)", t.Secret, t.Secret)
 	}
+	if t.MissedGrace != 0 {
+		at("missed_grace is for a schedule trigger: a delivery runs when it arrives")
+	}
 	if t.MaxBytes < 0 || t.MaxBytes > MaxWebhookMaxBytes {
 		at("max_bytes must be between 0 (the default, %d) and %d", DefaultWebhookMaxBytes, MaxWebhookMaxBytes)
 	}
