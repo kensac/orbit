@@ -171,7 +171,7 @@ the chat. Failures and pending approvals of unattended runs always notify.
 
 ## Memory topics
 
-`topics: [finance]` names the shared memory topics whose entries every run of the agent reads, beside the profile's and its own (docs/ARCHITECTURE.md, Memory entries). A topic exists as soon as an entry or an agent names it; the API can attach more (`PUT /agents/{name}/topics/{topic}`).
+`topics: [finance]` names the shared memory topics whose entries every run of the agent reads, beside the profile's and its own (docs/ARCHITECTURE.md, Memory entries). `topics: ["*"]` (alone) is every topic, as the built-in `orbit` agent has it. A topic exists as soon as an entry or an agent names it; the API can attach more (`PUT /agents/{name}/topics/{topic}`).
 
 ## Hooks
 

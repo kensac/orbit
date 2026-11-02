@@ -110,10 +110,8 @@ func handle(id json.RawMessage, method string, params json.RawMessage, root, sta
 		}
 		if search != "" {
 			tools = append(tools, map[string]any{
-				"name": "search",
-				"description": "Full-text search over your own earlier work: your runs' reports and errors, what you wrote " +
-					"while working, your tool calls' inputs, your person's messages, your questions and your memory. " +
-					"Ranked best first, matches marked «like this», each with its run and conversation.",
+				"name":        "search",
+				"description": SearchDescription,
 				"inputSchema": SearchSchema,
 			})
 		}

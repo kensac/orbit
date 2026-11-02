@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/actions"
+	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/spec"
@@ -173,7 +174,8 @@ func chatContract(a *spec.Agent, types []actions.Type, profile string) string {
 	fmt.Fprintf(&b, `orbit's tools:
 - %s: replace your memory, the one document every conversation of yours starts with, with the complete new content. Keep it short: facts and preferences you will need next time.
 - %s: ask the person something only they can answer, when you must stop and wait for it. Otherwise just ask in your reply.
-`, runner.ToolName("remember"), runner.ToolName("ask"))
+- %s: full-text search over your earlier conversations and work, and the memory entries you read.
+`, runner.ToolName("remember"), runner.ToolName("ask"), runner.ToolName("search"))
 	if len(types) > 0 {
 		fmt.Fprintf(&b, "- %s: do something outside this session. Each type has a rule: auto runs when your reply is sent, approve waits for the person's approval (and runs at once when they asked for it in this conversation).\n\nAction types:\n", runner.ToolName("act"))
 		for _, t := range types {
@@ -259,6 +261,8 @@ func (e *Engine) chatTools(a *spec.Agent, types []actions.Type, memoryMax int, s
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{"question": map[string]any{"type": "string"}},
 				"required": []string{"question"}}},
 	}
+	// Search is served here, in orbit's process, with the store: a chat run has no harness tool server.
+	tools = append(tools, runner.ChatTool{Name: "search", Description: harness.SearchDescription, InputSchema: harness.SearchSchema})
 	if len(types) > 0 {
 		tools = append(tools, runner.ChatTool{Name: "act", Description: "Do something outside this session: one action of an enabled type, " +
 			"its params as that type's schema says (listed in your instructions).",
@@ -266,7 +270,19 @@ func (e *Engine) chatTools(a *spec.Agent, types []actions.Type, memoryMax int, s
 				"type": map[string]any{"type": "string", "enum": names}, "params": map[string]any{"type": "object"},
 				"reason": map[string]any{"type": "string"}}, "required": []string{"type", "params", "reason"}}})
 	}
-	call := func(_ context.Context, name string, args json.RawMessage) (string, bool) {
+	call := func(ctx context.Context, name string, args json.RawMessage) (string, bool) {
+		if name == "search" {
+			req, err := harness.DecodeSearchRequest(args)
+			var res map[string]any
+			if err == nil {
+				res, err = e.searchFor(ctx, a.Name, req)
+			}
+			if err != nil {
+				return err.Error(), true
+			}
+			b, _ := json.Marshal(res)
+			return string(b), false
+		}
 		st.mu.Lock()
 		defer st.mu.Unlock()
 		switch name {

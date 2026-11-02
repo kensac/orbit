@@ -98,12 +98,18 @@ func (e *Engine) serveSearch(ln net.Listener, agent string) {
 // Markdown reports (often already bold) do not use.
 func (e *Engine) searchFor(ctx context.Context, agent string, req harness.SearchRequest) (map[string]any, error) {
 	loc := time.UTC
+	q := store.SearchQuery{Q: req.Q, Agent: agent, ConversationID: req.ConversationID, Limit: req.Limit}
 	if a, ok := e.Current().Config.Agents[agent]; ok {
 		if l, err := time.LoadLocation(a.Timezone); err == nil {
 			loc = l
 		}
+		// The entries the agent reads are its to search too: the profile's and its topics'.
+		topics, err := e.agentTopics(ctx, a)
+		if err != nil {
+			return nil, err
+		}
+		q.EntryProfile, q.EntryTopics = true, topics
 	}
-	q := store.SearchQuery{Q: req.Q, Agent: agent, ConversationID: req.ConversationID, Limit: req.Limit}
 	if q.Limit <= 0 {
 		q.Limit = searchDefault
 	}

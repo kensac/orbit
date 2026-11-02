@@ -276,6 +276,9 @@ func TestLoadAllMergesTheDatabaseAndBuiltins(t *testing.T) {
 	if b := cfg.Agents["b"]; b.Origin != OriginDatabase || b.Version != 3 || b.IsEnabled() || b.Runner != "r" {
 		t.Fatalf("b = %+v: defaults apply to database agents", b)
 	}
+	if o := cfg.Agents[BuiltinName]; o == nil || !o.ReadsAllTopics() {
+		t.Fatal("the builtin does not read every topic")
+	}
 	if o := cfg.Agents[BuiltinName]; o == nil || o.Origin != OriginBuiltin || o.Runner != "r" {
 		t.Fatalf("builtin = %+v", o)
 	}
@@ -294,6 +297,9 @@ func TestLoadAllMergesTheDatabaseAndBuiltins(t *testing.T) {
 }
 
 func TestContextFieldsAreValidatedAtLoad(t *testing.T) {
+	if _, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\ntopics: [\"*\"]\n"})); err != nil {
+		t.Fatalf("every topic: %v", err)
+	}
 	good := "topics: [finance]\nskills: [close]\nlearn: {idle: 1h}\nhooks:\n  - {event: PreToolUse, matcher: WebFetch, deny: no}\n  - {event: Stop, say: check}\n  - {event: PostToolUse, run: [gofmt, -l, .], timeout: 5s}\n"
 	if _, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\n" + good})); err != nil {
 		t.Fatalf("good: %v", err)
@@ -301,6 +307,7 @@ func TestContextFieldsAreValidatedAtLoad(t *testing.T) {
 	for _, bad := range []string{
 		"topics: [Finance]",
 		"topics: [a, a]",
+		`topics: ["*", a]`,
 		"skills: [Bad]",
 		"learn: {idle: 1m}",
 		"learn: {runner: ghost}",

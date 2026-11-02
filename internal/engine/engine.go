@@ -540,7 +540,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	var known string
 	if rec == nil {
-		if known, inputs, err = e.knownInput(ctx, c, knownEntries, workdir, inputsDir, inputs); err != nil {
+		if known, inputs, err = e.knownInput(ctx, e.Searchable(a), c, knownEntries, workdir, inputsDir, inputs); err != nil {
 			return nil, nil, err
 		}
 	}

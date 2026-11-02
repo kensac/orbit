@@ -150,7 +150,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `wake_on_message` | bool | `false` | A person's message starts a run (the API's `wake` overrides it per message). |
 | `session` | map | absent | Keep the Claude Code session between runs (below). |
 | `verify` | list: `figures` | none | Every money amount in the summary, title and report must trace to an input or a query or calc result. |
-| `topics` | list of names | none | Shared memory topics every run reads, beside the profile's and its own. |
+| `topics` | list of names | none | Shared memory topics every run reads, beside the profile's and its own; `["*"]` (alone) is every topic. |
 | `skills` | list of names | none | Skills from orbit's library the agent runs with; an unknown one is skipped and shown as `missing`. |
 | `learn` | map | on | Learning runs over quiet conversations (below). |
 | `hooks` | list | none | Claude Code hooks for the agent's runs, beside orbit's own; claude-code only, at most 20 (below). |
