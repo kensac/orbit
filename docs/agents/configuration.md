@@ -74,6 +74,13 @@ a result of orbit's query or calc tool (docs/ARCHITECTURE.md). Use it for
 agents whose reports are numbers; prose with incidental amounts from the
 charter or memory gets those amounts sent back and then noted.
 
+## Notifications
+
+`notify.when` (`always`, `agent`: when the run asks, or `never`) applies to
+unattended runs: schedule, manual, continue, build. A run answering a
+person's message never notifies, whatever it says: the person is reading
+the chat. Failures and pending approvals of unattended runs always notify.
+
 ## Changing a running deployment
 
 orbit polls its config directory and reloads on any content change. A change

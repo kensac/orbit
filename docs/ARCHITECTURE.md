@@ -29,7 +29,7 @@ trigger (schedule | manual | message | continue)
   -> runner called with: system contract, prompt, workdir, tools, output schema
   -> output validated against the contract
   -> RecordOutcome, one transaction: run succeeded, memory version, questions, actions
-  -> notifications: the report, then one per action waiting for approval
+  -> notifications (unattended runs only): the report, then one per action waiting for approval
   -> action loop executes approved actions (auto ones arrive approved by rule)
 ```
 
@@ -157,6 +157,15 @@ to Codex or to a plain API call is one line in its spec.
 | `claude-code` | `claude -p --output-format stream-json --json-schema` | `CLAUDE_CODE_OAUTH_TOKEN` (subscription, `claude setup-token`) or `ANTHROPIC_API_KEY` | Read/Glob/Grep in the workdir, plus the agent's `tools` |
 | `codex` | `codex exec --json --output-schema -s read-only` | `CODEX_API_KEY` / `OPENAI_API_KEY` / `CODEX_HOME` | its read-only sandbox; agent `tools` refused |
 | `anthropic` | Messages API, schema as a forced tool | `api_key_env` | none; inputs inlined (bounded) |
+
+## Notifications
+
+Channels are for runs nobody is watching. A run a person's message woke
+(trigger `message`) notifies nothing: its reply, questions, pending
+approvals and failure are in the conversation they are reading
+(`engine.Attended`). Schedule, manual, continue and build runs deliver per
+the agent's `notify.when`, and always their failures and the approvals
+they wait on.
 
 ## Memory, questions, messages
 
