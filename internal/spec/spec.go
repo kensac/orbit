@@ -70,6 +70,23 @@ type Deployment struct {
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
 	// Credentials are the variables a source may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
 	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
+	// Board tunes GET /board (docs/api.md, The board).
+	Board *Board `yaml:"board,omitempty" json:"board,omitempty"`
+}
+
+// Board tunes the board of every open conversation.
+type Board struct {
+	// Idle is how long a conversation with nothing waiting stays on the
+	// board after its last activity (default store.DefaultBoardIdle, 30m).
+	Idle Duration `yaml:"idle,omitempty" json:"idle,omitempty"`
+}
+
+// BoardIdle is board.idle, or 0 for the default.
+func (d Deployment) BoardIdle() time.Duration {
+	if d.Board == nil {
+		return 0
+	}
+	return time.Duration(d.Board.Idle)
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -777,6 +794,9 @@ func (c *Config) Validate() error {
 				errs = append(errs, fmt.Errorf("github: repository %q is not owner/name", r))
 			}
 		}
+	}
+	if d.Board != nil && d.Board.Idle < 0 {
+		errs = append(errs, fmt.Errorf("board.idle must not be negative"))
 	}
 	for _, ch := range d.Defaults.Channels {
 		if _, ok := d.Channels[ch]; !ok {

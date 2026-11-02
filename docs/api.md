@@ -176,7 +176,10 @@ conversation is never deleted, only archived.
   "id": "uuid", "agent": "finance", "title": "How much on Uber Eats in October?",
   "is_default": false, "archived": false,
   "created_at": "...", "last_activity_at": "...", "needs_input": true,
-  "ticket_id": null}],
+  "ticket_id": null, "task_id": null, "purpose": null,
+  "last_run": {"id": "uuid", "status": "running", "trigger": "message",
+               "created_at": "...", "finished_at": null, "summary": null},
+  "read_through": "..."}],
  "has_more": false, "next_before": null}
 ```
 
@@ -186,6 +189,7 @@ thread: `next_before` is an opaque cursor, `null` exactly when `has_more`
 is false; `limit` defaults to 50, at most 200. `needs_input` is true while
 one of its questions is open or one of its runs' actions is pending.
 `ticket_id` is set when the conversation is a ticket's (below), `task_id` when it is a delegated task's own (Delegation, below); a task conversation's open questions are to the delegating agent, so they do not set `needs_input`.
+`last_run` is the conversation's newest run (`id`, `status`, `trigger`, `created_at`, `finished_at`, `summary`; the last two `null` until it has them), `null` before its first, so a list shows which conversations are working. `read_through` is how far the person has read it (The board, below), `null` before they first did.
 
 `POST /agents/{name}/conversations`
 
@@ -224,6 +228,51 @@ characters (400 otherwise). The default conversation cannot be archived
 `POST /conversations/{id}/messages` takes and returns exactly what
 `POST /agents/{name}/messages` does (below), in that conversation.
 
+## The board
+
+Every open conversation's state at a glance, for a sidebar or a status page, without opening each thread.
+
+`GET /board?idle=<bool>&limit=<n>`
+
+```json
+{"rows": [{
+  "conversation_id": "uuid", "agent": "finance", "title": "How much on Uber Eats in October?",
+  "is_default": false, "ticket_id": null,
+  "task": {"id": "uuid", "status": "blocked", "parent_conversation_id": "uuid"},
+  "state": "needs_you",
+  "preview": {"from": "agent", "text": "October: $212 across 9 orders", "at": "..."},
+  "last_activity_at": "...", "age_seconds": 340, "read_through": "...",
+  "last_run": {"id": "uuid", "status": "succeeded", "trigger": "message", "created_at": "...", "finished_at": "...", "summary": "..."},
+  "counts": {"approvals": 1, "questions": 0, "decisions": 0, "tasks": 0, "unread": 1}}],
+ "as_of": "...", "idle_after_seconds": 1800}
+```
+
+- **Rows** are the conversations that are not archived (a learning conversation is), delegated tasks' conversations included, newest activity first; at most `limit` (default 200, at most 500).
+- **`state`** is derived by code (`store.BoardState`) from the counts and runs, the first that holds:
+  - `needs_you`: an approval, a question to the person, or a decision (a task's `task:decision`, a ticket plan to approve) is open, or the row's task is `blocked`.
+  - `working`: a run is running, or queued and due (a `continue` waiting for its `run_after` is not), or the row's task is `working` or `needs_input` (asking its delegating agent).
+  - `failed`: the newest run failed, finished after `read_through` or active within the idle window.
+  - `done_unread`: a run finished (`succeeded`, `skipped` or `failed`) after `read_through`.
+  - `read`: none of these, with activity within the idle window.
+  - `idle`: none of these, quiet for `board.idle` (orbit.yaml, default 30 minutes; `idle_after_seconds`). Left out unless `idle=1`.
+- **`counts`**: `approvals` are the pending actions of its runs other than task decisions; `questions` its open questions to the person (a task conversation's are to its delegating agent, so `0`); `decisions` pending `task:decision` actions plus a ticket plan to approve; `tasks` the tasks it delegated that are not over; `unread` the runs that finished after `read_through`.
+- **`preview`** is the newest prose: a message (`from` is `person`, or `agent` for a question or a delegating agent's brief) or a finished run's summary (its report without one), on one line, at most 140 characters, cut at a word. `null` for a conversation with neither.
+- `task` is set for a delegated task's conversation (Delegation, below); `age_seconds` is `as_of` minus `last_activity_at`; `last_run` is as in the conversation list.
+
+**Read points.** `POST /conversations/{id}/read` `{"through": "optional RFC 3339 time"}` moves the conversation's `read_through` to `through` (default now), never past now and never back: `200 {"conversation_id": "uuid", "read_through": "..."}`, `404` for an unknown conversation. The body is optional. A thread fetched with `mark_read=1` does the same with the time it was read. A client marks a conversation read while the person is looking at it, with the time of the newest item it showed.
+
+**The change feed.** `GET /events` is Server-Sent Events of small change records, so a client that shows every conversation keeps one stream open instead of one per run:
+
+| event | id | data | meaning |
+|---|---|---|---|
+| `ready` | the cursor | `{"cursor": "...", "resumed": true}` | first on every connection |
+| `change` | its cursor | `{"kind": "run", "conversation": "uuid", "run": "uuid", "cursor": "..."}` | something changed; read what it names again |
+
+- `kind` is `run` (a run created, or its status moved), `message` (a message written), `attention` (an attention row opened or dismissed), `action` (an action proposed or decided), `task` (a task created or moved; sent for the task's conversation and for the delegating one) or `conversation` (created, renamed, archived, or its read point moved). `run` is `null` when the record has none.
+- **Resume.** A client that reconnects with `Last-Event-ID` (or `?cursor=`) set to the last id it received gets every record after it, from any instance: `ready` says `resumed: true`. Without one, with an id that is not a cursor, or more than 1000 records behind, the feed starts at the newest record and `ready` says `resumed: false`: read `GET /board` again, then follow the changes.
+- Records are written by database triggers, so every writer is covered; a record appears once its transaction is older than every transaction still open, so one committed late is delivered late, never skipped. The feed is read every second; `: ping` every 15 s. It never ends on its own; reconnect after a deploy.
+- A record carries no content: a client reads the board, a thread or a run's stream for that.
+
 ## Uploads
 
 Files a person gives an agent, as Claude Code takes a file: uploaded into a conversation, then carried by a message. The run that reads the message finds each file in its working directory at `uploads/<name>` and is told so in its prompt (`attached: uploads/<name> (<type>, <n> bytes)`); an image is readable with Claude Code's `Read`, as a picture. A file is at most 64 MiB (`store.MaxUploadBytes`), and kept whole (`uploads`).
@@ -261,8 +310,8 @@ A thread is the person's messages, the agent's questions, and every run
 (whatever its trigger) of one conversation. An agent's reply is its run's
 `report`, plus any `questions` it asked.
 
-`GET /conversations/{id}/thread?before=<cursor>&limit=<n>`, and
-`GET /agents/{name}/thread?before=<cursor>&limit=<n>` for the default
+`GET /conversations/{id}/thread?before=<cursor>&limit=<n>&mark_read=<bool>`, and
+`GET /agents/{name}/thread?before=<cursor>&limit=<n>&mark_read=<bool>` for the default
 conversation:
 
 ```json
@@ -288,9 +337,11 @@ conversation:
    "body": "<a question>", "run_id": "uuid", "open": true}
  ],
  "has_more": true,
- "next_before": "opaque-cursor"}
+ "next_before": "opaque-cursor",
+ "read_through": "..."}
 ```
 
+- **Read point.** `read_through` beside `items` is the conversation's read point as it was before this request (`null` before the person first read it): a client draws its "New" divider above the first item after it. With `mark_read=1` the request also moves the read point to when the page was read (`POST /conversations/{id}/read`, The board).
 - **Order and paging.** Items are oldest first, totally ordered by (`at`, a
   run before a message at the same instant, `id`). A page is the newest
   `limit` items before `before`; omit `before` for the newest page. To page

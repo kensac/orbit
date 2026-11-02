@@ -90,6 +90,9 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/conversations/{id}", s.getConversation)
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
+	api("POST /api/v1/conversations/{id}/read", s.markRead)
+	api("GET /api/v1/board", s.board)
+	api("GET /api/v1/events", s.events)
 	api("POST /api/v1/conversations/{id}/messages", s.conversationMessage)
 	api("GET /api/v1/conversations/{id}/tasks", s.conversationTasks)
 	api("GET /api/v1/conversations/{id}/tasks/stream", s.streamTasks)
@@ -271,37 +274,31 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 // thread serves an agent's default conversation, a page at a time
 // (store.Thread).
 func (s *Server) thread(w http.ResponseWriter, r *http.Request) {
-	servePage(w, r, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
-		return s.Store.Thread(r.Context(), r.PathValue("name"), before, limit)
-	})
+	id, err := s.Store.DefaultConversationID(r.Context(), r.PathValue("name"))
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	s.serveThread(w, r, id)
 }
 
-// servePage is the one way a thread page is served, whichever conversation:
-// the before cursor and limit in, items, has_more and next_before out.
-func servePage(w http.ResponseWriter, r *http.Request, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) {
+// pageParams reads a thread page's before cursor and limit, answering 400
+// for either that does not parse.
+func pageParams(w http.ResponseWriter, r *http.Request) (*store.ThreadCursor, int, bool) {
 	var before *store.ThreadCursor
 	if b := r.URL.Query().Get("before"); b != "" {
 		c, err := store.ParseThreadCursor(b)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, "before: "+err.Error())
-			return
+			return nil, 0, false
 		}
 		before = c
 	}
 	var limit int
 	if !queryInt(w, r, "limit", &limit) {
-		return
+		return nil, 0, false
 	}
-	page, err := fetch(before, limit)
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	resp := map[string]any{"items": orEmpty(page.Items), "has_more": page.HasMore, "next_before": nil}
-	if page.HasMore {
-		resp["next_before"] = page.NextBefore
-	}
-	respond(w, resp, nil)
+	return before, limit, true
 }
 
 func (s *Server) memoryHistory(w http.ResponseWriter, r *http.Request) {

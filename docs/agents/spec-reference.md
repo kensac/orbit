@@ -17,6 +17,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `credentials` | map of variable to credential | none | The variables sources may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
+| `board` | map | absent | Tunes `GET /board` (below). |
 
 ### `defaults`
 
@@ -126,6 +127,12 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `username_env` | env var | required | IMAP user. |
 | `password_env` | env var | required | IMAP password. |
 | `mailbox` | string | `INBOX` | Folder read. Every unseen mail in it is read and marked seen, so it must be orbit's own. |
+
+### `board`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `idle` | duration | `30m` | How long a conversation with nothing waiting stays on the board after its last activity; after it the row is `idle`, left out unless asked for (docs/api.md, The board). |
 
 ## Agent
 
