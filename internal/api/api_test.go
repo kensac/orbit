@@ -66,7 +66,7 @@ github: {app_id: 1, private_key_env: GH_KEY, repositories: [kensac/orbit]}
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &engine.Engine{Store: s, Secret: []byte(token), Client: http.DefaultClient, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	e := &engine.Engine{Store: s, ConfigDir: dir, Secret: []byte(token), Client: http.DefaultClient, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Env: func(string) (string, bool) { return "", false }}
 	if err := e.SetConfig(cfg); err != nil {
 		t.Fatal(err)
