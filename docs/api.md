@@ -196,6 +196,33 @@ characters (400 otherwise). The default conversation cannot be archived
 `POST /conversations/{id}/messages` takes and returns exactly what
 `POST /agents/{name}/messages` does (below), in that conversation.
 
+## Uploads
+
+Files a person gives an agent, as Claude Code takes a file: uploaded into a conversation, then carried by a message. The run that reads the message finds each file in its working directory at `uploads/<name>` and is told so in its prompt (`attached: uploads/<name> (<type>, <n> bytes)`); an image is readable with Claude Code's `Read`, as a picture. A file is at most 64 MiB (`store.MaxUploadBytes`), and kept whole (`uploads`).
+
+`POST /conversations/{id}/uploads` takes `multipart/form-data` with one file (the field `file`, or the first part with a file name) and returns `201`:
+
+```json
+{"upload": {"id": "uuid", "name": "receipt.png", "media_type": "image/png",
+            "bytes": 48213, "sha256": "hex", "created_at": "..."}}
+```
+
+- `name` is the file's base name, without path or control characters, at most 200 bytes. A name already taken in the conversation is numbered: `receipt (2).png`. The stored name is the one returned.
+- `media_type` is the part's `Content-Type`, sniffed from the content when it is absent or `application/octet-stream`.
+
+`POST /conversations/{id}/uploads/url` `{"name": "video.mp4", "media_type": "video/mp4", "bytes": 52428800}` returns a signed URL for a file larger than a proxy in front of orbit accepts:
+
+```json
+{"url": "https://orbit.kanishksachdev.com/api/v1/uploads/signed?...", "method": "PUT",
+ "headers": {"Content-Type": "video/mp4"}, "expires_at": "...", "max_bytes": 52428800}
+```
+
+The browser sends the file as the body of a `PUT` to `url`, with no `Authorization` header: the URL's signature (HMAC under a key derived from `ORBIT_API_TOKEN`) is the credential, and it names one conversation, the name, the type, `bytes` as the most it accepts, the person it was issued to, and an expiry 15 minutes ahead (`api.UploadURLTTL`). The answer is `201` with the same `{"upload": ...}` as above. A URL uploads once: a second `PUT` is `409`. A body larger than `bytes` is `413`, an altered or expired URL `403`. It needs `public_url` in `orbit.yaml` (`503` without it).
+
+`GET /conversations/{id}/uploads/{upload}` is the file: its `media_type` as `Content-Type`, `Content-Disposition: inline` for an image (not SVG) and `attachment` for everything else, with `nosniff` and a CSP that runs nothing.
+
+A message carries uploads with `attachments` (below): ids of uploads of the same conversation, at most 20; one from another conversation is a `400`. A message with attachments may have an empty `body`.
+
 ## A conversation's thread
 
 A thread is the person's messages, the agent's questions, and every run
@@ -210,7 +237,9 @@ conversation:
 {"items": [
   {"kind": "message", "id": "uuid", "at": "...", "from": "person",
    "body": "How much did I spend on Uber Eats?", "author": "kanishk",
-   "run_id": "uuid-of-run-that-read-it"},
+   "run_id": "uuid-of-run-that-read-it",
+   "attachments": [{"id": "uuid", "name": "receipt.png", "media_type": "image/png",
+                    "bytes": 48213, "sha256": "hex", "created_at": "..."}]},
   {"kind": "run", "id": "uuid", "at": "...", "trigger": "message",
    "status": "succeeded", "attempt": 1,
    "started_at": "...", "finished_at": "...", "steps": 4,
@@ -236,7 +265,7 @@ conversation:
   200, and a larger value is clamped.
 - **Messages.** `from` is `person` (to the agent) or `agent` (a question it
   asked). `author` is the person who wrote it (absent for questions).
-  `reply_to`, when set, is the message it answers. `run_id` is the run that
+  `reply_to`, when set, is the message it answers. `attachments` are the uploads it carries (Uploads, above), in order; always an array. `run_id` is the run that
   read a person's message (`null` until one starts) or the run that asked a
   question.
 - **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again) `build` (a ticket's build run, docs/tickets.md) or `learn` (a learning run, below; only in an agent's learning conversation). `status` is
@@ -272,6 +301,7 @@ conversation:
 
 ```json
 {"body": "text", "reply_to": "optional message id", "wake": true,
+ "attachments": ["optional upload ids"],
  "client_message_id": "optional, minted by the client"}
 ```
 
