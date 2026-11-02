@@ -12,6 +12,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kensac/orbit/internal/credproxy"
 	"github.com/kensac/orbit/internal/sandbox"
 )
 
@@ -37,13 +39,27 @@ type fakeDocker struct {
 	tamper func(*containerState)
 	// extra is added to every readback.
 	extra []entry
+	// names maps container names to ids (a create with ?name=).
+	names map[string]string
+	// createQueries are the query strings of every create.
+	createQueries []string
+	// ttys are the running fake TTY processes by pid; resizes are what
+	// each exec was resized to.
+	ttys    map[int]net.Conn
+	resizes map[string][]string
+	nextPid int
+	// sessions are the tmux sessions has-session reports alive.
+	sessions map[string]bool
+	exits    map[string]int
 }
 
 type fakeContainer struct {
 	spec    containerCreate
 	labels  map[string]string
 	running bool
-	files   []entry
+	// health is the healthcheck status; "" is a container without one.
+	health string
+	files  []entry
 }
 
 func newID() string {
@@ -59,7 +75,7 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		_ = json.NewEncoder(w).Encode(dockerInfo{SecurityOptions: []string{"name=seccomp,profile=builtin"}})
 	})
 	mux.HandleFunc("GET "+p+"/networks/{name}", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(networkState{Name: r.PathValue("name"), Internal: r.PathValue("name") == "orbit-sandbox"})
+		_ = json.NewEncoder(w).Encode(networkState{Name: r.PathValue("name"), Internal: r.PathValue("name") == "orbit-sandbox" || r.PathValue("name") == "orbit-workstation"})
 	})
 	mux.HandleFunc("GET "+p+"/images/", func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, testImage+"/json") {
@@ -85,6 +101,18 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		id := newID()
 		f.mu.Lock()
 		f.created = append(f.created, spec)
+		f.createQueries = append(f.createQueries, r.URL.RawQuery)
+		if n := r.URL.Query().Get("name"); n != "" {
+			if f.names == nil {
+				f.names = map[string]string{}
+			}
+			if _, taken := f.names[n]; taken {
+				f.mu.Unlock()
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			f.names[n] = id
+		}
 		f.containers[id] = &fakeContainer{spec: spec, labels: spec.Labels}
 		f.mu.Unlock()
 		w.WriteHeader(http.StatusCreated)
@@ -93,6 +121,9 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 	get := func(w http.ResponseWriter, id string) *fakeContainer {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if n, ok := f.names[id]; ok {
+			id = n
+		}
 		c := f.containers[id]
 		if c == nil {
 			w.WriteHeader(http.StatusNotFound)
@@ -107,7 +138,15 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		}
 		var st containerState
 		st.ID = r.PathValue("id")
+		f.mu.Lock()
+		if n, ok := f.names[st.ID]; ok {
+			st.ID = n
+		}
+		f.mu.Unlock()
 		st.Config.User = c.spec.User
+		st.Config.Image = c.spec.Image
+		st.Created = "2026-11-02T00:00:00Z"
+		st.HostConfig.Binds = c.spec.HostConfig.Binds
 		st.Config.Labels = c.labels
 		h := c.spec.HostConfig
 		st.HostConfig.Privileged = h.Privileged
@@ -121,12 +160,19 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		pl := h.PidsLimit
 		st.HostConfig.PidsLimit = &pl
 		for _, m := range h.Mounts {
-			st.Mounts = append(st.Mounts, struct {
-				Type        string `json:"Type"`
-				Destination string `json:"Destination"`
-			}{m.Type, m.Target})
+			st.Mounts = append(st.Mounts, mountState{Type: m.Type, Name: m.Source, Destination: m.Target})
 		}
 		st.State.Running = c.running
+		if c.health != "" {
+			st.State.Health = &struct {
+				Status string `json:"Status"`
+			}{c.health}
+		}
+		if c.running {
+			st.NetworkSettings.Networks = map[string]struct {
+				IPAddress string `json:"IPAddress"`
+			}{h.NetworkMode: {IPAddress: "10.250.251.7"}}
+		}
 		if f.tamper != nil {
 			f.tamper(&st)
 		}
@@ -182,12 +228,33 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 			w.WriteHeader(http.StatusNoContent)
 		}
 	})
+	mux.HandleFunc("POST "+p+"/containers/{id}/stop", func(w http.ResponseWriter, r *http.Request) {
+		if c := get(w, r.PathValue("id")); c != nil {
+			f.mu.Lock()
+			c.running = false
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		}
+	})
+	mux.HandleFunc("POST "+p+"/exec/{id}/resize", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		if f.resizes == nil {
+			f.resizes = map[string][]string{}
+		}
+		f.resizes[r.PathValue("id")] = append(f.resizes[r.PathValue("id")], r.URL.Query().Get("w")+"x"+r.URL.Query().Get("h"))
+		f.mu.Unlock()
+	})
 	mux.HandleFunc("DELETE "+p+"/containers/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("force") != "true" || r.URL.Query().Get("v") != "true" {
 			t.Errorf("remove without force and v: %s", r.URL.RawQuery)
 		}
 		if c := get(w, r.PathValue("id")); c != nil {
 			f.mu.Lock()
+			for n, id := range f.names {
+				if id == r.PathValue("id") {
+					delete(f.names, n)
+				}
+			}
 			delete(f.containers, r.PathValue("id"))
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
@@ -234,7 +301,17 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		if r.Header.Get("Upgrade") != "tcp" {
 			t.Error("exec start without upgrade")
 		}
-		_, _ = io.Copy(io.Discard, r.Body)
+		var start struct {
+			Tty         bool  `json:"Tty"`
+			ConsoleSize []int `json:"ConsoleSize"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&start)
+		f.mu.Lock()
+		e := f.execs[r.PathValue("id")]
+		f.mu.Unlock()
+		if start.Tty != e.Tty {
+			t.Errorf("exec started with Tty %v, created with %v", start.Tty, e.Tty)
+		}
 		conn, buf, err := w.(http.Hijacker).Hijack()
 		if err != nil {
 			t.Error(err)
@@ -243,6 +320,14 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		defer conn.Close()
 		_, _ = buf.WriteString("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
 		_ = buf.Flush()
+		if e.Tty {
+			f.fakeTTY(r.PathValue("id"), conn, buf.Reader)
+			return
+		}
+		if len(e.Cmd) > 0 && (e.Cmd[0] == "tmux" || e.Cmd[0] == "kill") {
+			f.fakeCommand(r.PathValue("id"), e.Cmd)
+			return
+		}
 		in, _ := io.ReadAll(buf.Reader)
 		frame := func(stream byte, p []byte) {
 			var h [8]byte
@@ -255,7 +340,13 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		frame(2, []byte("bye"))
 	})
 	mux.HandleFunc("GET "+p+"/exec/{id}/json", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(execState{Running: false, ExitCode: 7})
+		f.mu.Lock()
+		code, ok := f.exits[r.PathValue("id")]
+		f.mu.Unlock()
+		if !ok {
+			code = 7
+		}
+		_ = json.NewEncoder(w).Encode(execState{Running: false, ExitCode: code})
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -295,7 +386,8 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	dir := socketDir(t)
-	fd := &fakeDocker{containers: map[string]*fakeContainer{}, volumes: map[string]map[string]string{}, execs: map[string]execCreate{}}
+	fd := &fakeDocker{containers: map[string]*fakeContainer{}, volumes: map[string]map[string]string{}, execs: map[string]execCreate{},
+		names: map[string]string{}, ttys: map[int]net.Conn{}, sessions: map[string]bool{}, exits: map[string]int{}, nextPid: 41}
 	serveUnix(t, filepath.Join(dir, "docker.sock"), fd.handler(t))
 	cfg := testConfig()
 	cfg.Docker = filepath.Join(dir, "docker.sock")
@@ -335,6 +427,8 @@ func TestServerFlow(t *testing.T) {
 	running := h.fd.containers[cr.ID].running
 	h.fd.mu.Unlock()
 	want := containerSpec(testConfig(), "run-1", time.Now())
+	// A copy: the fake container shares the created spec's label map.
+	created.Labels = maps.Clone(created.Labels)
 	created.Labels[LabelExpires], want.Labels[LabelExpires] = "", ""
 	if gb, wb := mustJSON(t, created), mustJSON(t, want); gb != wb {
 		t.Fatalf("docker received a different spec:\n%s\nwant\n%s", gb, wb)
@@ -354,10 +448,17 @@ func TestServerFlow(t *testing.T) {
 	if code != 7 || stdout.String() != "ping" || stderr.String() != "bye" {
 		t.Fatalf("attach: code %d stdout %q stderr %q", code, stdout.String(), stderr.String())
 	}
+	// The process gets a token in the credential's place, sealed for this sandbox's address and expiry.
 	h.fd.mu.Lock()
 	for _, e := range h.fd.execs {
-		if e.User != "10001:10001" || e.Privileged || e.WorkingDir != "/work" || len(e.Env) != 1 || e.Env[0] != "CLAUDE_CODE_OAUTH_TOKEN=tok" {
+		if e.User != "10001:10001" || e.Privileged || e.WorkingDir != "/work" || len(e.Env) != 1 || !strings.HasPrefix(e.Env[0], "CLAUDE_CODE_OAUTH_TOKEN=orbit-cp1.") {
 			t.Fatalf("exec spec %+v", e)
+		}
+		sealer, _ := credproxy.NewSealer(testConfig().CredProxyKey)
+		g, err := sealer.Open(strings.TrimPrefix(e.Env[0], "CLAUDE_CODE_OAUTH_TOKEN="))
+		if err != nil || g.Credential != "tok" || g.Kind != credproxy.KindOAuth || g.Addr.String() != "10.250.251.7" ||
+			!g.Expires.Equal(cr.ExpiresAt) || g.Sandbox != cr.ID || g.RunID != "run-1" {
+			t.Fatalf("grant %+v, %v", g, err)
 		}
 	}
 	h.fd.mu.Unlock()
@@ -568,6 +669,10 @@ func TestCheckRefusesOpenNetwork(t *testing.T) {
 	if err := h.srv.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "not internal") {
 		t.Fatalf("check on a non-internal network: %v", err)
 	}
+	h.srv.cfg.Network, h.srv.cfg.WorkstationProxy, h.srv.cfg.WorkstationNetwork = "orbit-sandbox", "orbit-egress-open:3128", "open-ish"
+	if err := h.srv.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "open-ish is not internal") {
+		t.Fatalf("check on a non-internal workstation network: %v", err)
+	}
 }
 
 func bufioReader(c net.Conn) *bufio.Reader { return bufio.NewReader(c) }
@@ -577,14 +682,55 @@ func TestProfiles(t *testing.T) {
 	if _, err := s.profile("workstation"); err == nil {
 		t.Fatal("an unconfigured workstation profile was accepted")
 	}
-	s.cfg.WorkstationProxy = "orbit-egress-open:3128"
-	for name, want := range map[string]string{"": "orbit-egress:3128", "build": "orbit-egress:3128", "workstation": "orbit-egress-open:3128"} {
+	s.cfg.Network, s.cfg.WorkstationProxy, s.cfg.WorkstationNetwork = "orbit-sandbox", "orbit-egress-open:3128", "orbit-workstation"
+	for name, want := range map[string][2]string{
+		"":            {"orbit-egress:3128", "orbit-sandbox"},
+		"build":       {"orbit-egress:3128", "orbit-sandbox"},
+		"workstation": {"orbit-egress-open:3128", "orbit-workstation"},
+	} {
 		cfg, err := s.profile(name)
-		if err != nil || cfg.Proxy != want {
-			t.Errorf("%q: %q %v, want %q", name, cfg.Proxy, err, want)
+		if err != nil || cfg.Proxy != want[0] || cfg.Network != want[1] {
+			t.Errorf("%q: %q on %q, %v, want %v", name, cfg.Proxy, cfg.Network, err, want)
 		}
+	}
+	s.cfg.CredProxy, s.cfg.WorkstationCredProxy = "10.251.0.3:3129", "10.251.1.3:3129"
+	if b, _ := s.profile("build"); b.CredProxy != "10.251.0.3:3129" {
+		t.Errorf("build credproxy %q", b.CredProxy)
+	}
+	if w, _ := s.profile("workstation"); w.CredProxy != "10.251.1.3:3129" {
+		t.Errorf("workstation credproxy %q", w.CredProxy)
 	}
 	if _, err := s.profile("root"); err == nil {
 		t.Fatal("an unknown profile was accepted")
+	}
+}
+
+// TestWorkstationOwnNetwork: a workstation sandbox joins its own network with the open proxy, never the builds' network, so no build shares a network with that proxy.
+func TestWorkstationOwnNetwork(t *testing.T) {
+	h := newHarness(t)
+	h.srv.cfg.WorkstationProxy, h.srv.cfg.WorkstationNetwork = "orbit-egress-open:3128", "orbit-workstation"
+	ctx := context.Background()
+	if err := h.srv.Check(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range []string{sandbox.ProfileBuild, sandbox.ProfileWorkstation} {
+		if _, err := h.client.CreateProfile(ctx, "run-"+profile, profile, workTar(t)); err != nil {
+			t.Fatalf("%s: %v", profile, err)
+		}
+	}
+	h.fd.mu.Lock()
+	defer h.fd.mu.Unlock()
+	got := map[string]string{}
+	for _, c := range h.fd.created {
+		proxy := ""
+		for _, e := range c.Env {
+			if v, ok := strings.CutPrefix(e, "HTTPS_PROXY="); ok {
+				proxy = v
+			}
+		}
+		got[c.Labels[LabelRunID]] = c.HostConfig.NetworkMode + " " + proxy
+	}
+	if got["run-build"] != "orbit-sandbox http://orbit-egress:3128" || got["run-workstation"] != "orbit-workstation http://orbit-egress-open:3128" {
+		t.Fatalf("networks and proxies: %v", got)
 	}
 }

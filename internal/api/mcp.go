@@ -84,7 +84,8 @@ type mcpListAgentsIn struct{}
 type mcpListConversationsIn struct {
 	Agent    string `json:"agent" jsonschema:"the agent's name, from list_agents"`
 	Archived bool   `json:"archived,omitempty" jsonschema:"list archived conversations instead"`
-	Limit    int    `json:"limit,omitempty" jsonschema:"at most this many, newest activity first (default 50)"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"at most this many, newest activity first (default 50, at most 200)"`
+	Before   string `json:"before,omitempty" jsonschema:"next_before from a previous page, to page back"`
 }
 
 type mcpCreateConversationIn struct {
@@ -112,15 +113,24 @@ type mcpReadThreadIn struct {
 	ConversationID string `json:"conversation_id,omitempty" jsonschema:"read this conversation"`
 	Limit          int    `json:"limit,omitempty" jsonschema:"the newest this many items (default 20, at most 200)"`
 	Before         string `json:"before,omitempty" jsonschema:"next_before from a previous page, to page back"`
+	Unfold         bool   `json:"unfold,omitempty" jsonschema:"list every skipped run instead of folding a streak of identical skips into its newest"`
 }
 
 type mcpListActionsIn struct {
 	Agent  string `json:"agent,omitempty" jsonschema:"only this agent's"`
 	Status string `json:"status,omitempty" jsonschema:"pending (default), approved, rejected, denied, executing, executed, failed, or all"`
+	RunID  string `json:"run_id,omitempty" jsonschema:"only this run's proposals"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"at most this many, newest first (default 100, at most 500)"`
+	Before string `json:"before,omitempty" jsonschema:"next_before from a previous page, to page back"`
 }
 
 type mcpDecideIn struct {
 	ActionID string `json:"action_id" jsonschema:"the action's id, from list_actions or a reply"`
+}
+
+type mcpApproveIn struct {
+	ActionID string `json:"action_id" jsonschema:"the action's id, from list_actions or a reply"`
+	Always   bool   `json:"always,omitempty" jsonschema:"also let this agent do this type of action without asking from now on (a new, revertible version of the agent)"`
 }
 
 func (s *Server) addMCPTools(srv *mcp.Server) {
@@ -138,7 +148,7 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 					continue
 				}
 				m := map[string]any{"name": a.Name, "enabled": a.Enabled, "needs_input": a.NeedsInput,
-					"open_questions": a.Unread, "pending_actions": a.Pending, "last_run": a.LastRun}
+					"open_questions": a.Unread, "pending_actions": a.Pending, "last_run": a.LastRun, "agent_status": a.AgentStatus}
 				if sa, ok := cfg.Agents[a.Name]; ok {
 					m["description"] = sa.Description
 				}
@@ -149,11 +159,11 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 
 	mcp.AddTool(srv, &mcp.Tool{Name: "list_conversations", Description: "List one agent's conversations, newest activity first."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in mcpListConversationsIn) (*mcp.CallToolResult, any, error) {
-			page, err := s.Store.ListConversations(ctx, in.Agent, in.Archived, nil, in.Limit)
+			out, err := s.conversationPage(ctx, in.Agent, in.Archived, in.Before, in.Limit)
 			if err != nil {
 				return nil, nil, mcpErr(err)
 			}
-			return mcpJSON(map[string]any{"conversations": orEmpty(page.Conversations), "has_more": page.HasMore})
+			return mcpJSON(out)
 		})
 
 	mcp.AddTool(srv, &mcp.Tool{Name: "create_conversation", Description: "Open a new conversation with an agent, " +
@@ -250,34 +260,26 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "read_thread", Description: "Read a conversation: the person's messages, the agent's " +
 		"questions, and every run's report and proposed actions, oldest first."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in mcpReadThreadIn) (*mcp.CallToolResult, any, error) {
-			var before *store.ThreadCursor
-			if in.Before != "" {
-				c, err := store.ParseThreadCursor(in.Before)
-				if err != nil {
-					return nil, nil, fmt.Errorf("before: %w", err)
-				}
-				before = c
-			}
 			limit := in.Limit
 			if limit <= 0 {
 				limit = mcpThreadLimit
 			}
-			var page *store.ThreadPage
-			var err error
+			var fetch func(*store.ThreadCursor, int) (*store.ThreadPage, error)
 			switch {
 			case in.ConversationID != "":
-				page, err = s.Store.ConversationThread(ctx, in.ConversationID, before, limit)
+				fetch = func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
+					return s.Store.ConversationThread(ctx, in.ConversationID, before, limit)
+				}
 			case in.Agent != "":
-				page, err = s.Store.Thread(ctx, in.Agent, before, limit)
+				fetch = func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
+					return s.Store.Thread(ctx, in.Agent, before, limit)
+				}
 			default:
 				return nil, nil, errors.New("give agent or conversation_id")
 			}
+			out, err := threadPage(in.Before, limit, !in.Unfold, fetch)
 			if err != nil {
 				return nil, nil, mcpErr(err)
-			}
-			out := map[string]any{"items": orEmpty(page.Items), "has_more": page.HasMore}
-			if page.HasMore {
-				out["next_before"] = page.NextBefore
 			}
 			return mcpJSON(out)
 		})
@@ -292,23 +294,18 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 			case "all":
 				status = ""
 			}
-			acts, err := s.Store.ListActions(ctx, in.Agent, status, 0)
+			out, err := s.actionPage(ctx, store.ActionFilter{Agent: in.Agent, Status: status, RunID: in.RunID, Limit: in.Limit}, in.Before)
 			if err != nil {
 				return nil, nil, mcpErr(err)
 			}
-			return mcpJSON(map[string]any{"actions": orEmpty(acts)})
+			return mcpJSON(out)
 		})
 
 	decide := func(approve bool) mcp.ToolHandlerFor[mcpDecideIn, any] {
 		return func(ctx context.Context, req *mcp.CallToolRequest, in mcpDecideIn) (*mcp.CallToolResult, any, error) {
-			by := mcpPerson(req)
-			if by == "" {
-				by = "operator"
-			}
-			if err := s.Store.DecideAction(ctx, in.ActionID, approve, by); err != nil {
+			if err := s.decideAction(ctx, in.ActionID, approve, mcpPerson(req), ""); err != nil {
 				return nil, nil, mcpErr(err)
 			}
-			s.Wake()
 			a, err := s.Store.GetAction(ctx, in.ActionID)
 			if err != nil {
 				return nil, nil, mcpErr(err)
@@ -316,8 +313,25 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 			return mcpJSON(map[string]any{"action": a})
 		}
 	}
-	mcp.AddTool(srv, &mcp.Tool{Name: "approve_action", Description: "Approve an action an agent proposed; orbit executes it."},
-		decide(true))
+	mcp.AddTool(srv, &mcp.Tool{Name: "approve_action", Description: "Approve an action an agent proposed; orbit executes it. always: true also makes the type auto for that agent."},
+		func(ctx context.Context, req *mcp.CallToolRequest, in mcpApproveIn) (*mcp.CallToolResult, any, error) {
+			if !in.Always {
+				return decide(true)(ctx, req, mcpDecideIn{ActionID: in.ActionID})
+			}
+			by := mcpPerson(req)
+			if by == "" {
+				by = "operator"
+			}
+			out, err := s.approveAlways(ctx, in.ActionID, by, "")
+			if err != nil {
+				return nil, nil, mcpErr(err)
+			}
+			a, err := s.Store.GetAction(ctx, in.ActionID)
+			if err != nil {
+				return nil, nil, mcpErr(err)
+			}
+			return mcpJSON(map[string]any{"action": a, "always": out["always"]})
+		})
 	mcp.AddTool(srv, &mcp.Tool{Name: "reject_action", Description: "Reject an action an agent proposed; it never executes."},
 		decide(false))
 }
@@ -436,13 +450,8 @@ func mcpJSON(v any) (*mcp.CallToolResult, any, error) {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(b)}}}, nil, nil
 }
 
-// mcpErr words a store error for a model, as respondStatus does for HTTP.
+// mcpErr words an error for a model exactly as the HTTP API words it (errorStatus).
 func mcpErr(err error) error {
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return errors.New("not found")
-	case errors.Is(err, store.ErrConflict):
-		return errors.New("no longer in a state that allows this")
-	}
-	return err
+	_, msg := errorStatus(err)
+	return errors.New(msg)
 }

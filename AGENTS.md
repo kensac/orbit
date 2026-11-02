@@ -46,27 +46,43 @@ is the design; the topic documents below are the rules for changing it.
 ## Repository map
 
 - `cmd/orbit/`: the binary: `serve` (control: scheduler, executors, action loop, outbox delivery, drain, reaper, config reload and sync, HTTP), `worker` (executors only, specs from the database; `worker.go`), and operator commands.
+- `cmd/orbitctl/`: the terminal client (chat, conversations, approvals) with authentik device-code sign-in.
+- `cmd/orbiteval/`: checks saved run results against reference properties and reports regressions and cost.
 - `internal/spec/`: configuration loading and validation (`orbit.yaml`,
   `agents/*.yaml`).
 - `internal/engine/`: one run end to end, and the output contract
   (`contract.go`: the schema and the prompts).
 - `internal/runner/`: model backends: `claude-code`, `codex`, `anthropic`.
-- `internal/claudeproto/`: Claude Code's stream-json protocol (turns, control requests both ways, permission answers recorded before they are sent, the transport's flags, the child's credential scrub), written against the Agent SDK's wire format, not the SDK.
+- `internal/claudeproto/`: Claude Code's stream-json protocol (turns, control requests both ways, messages written mid-turn with their uuid and lifecycle, withdrawing a queued one, interrupt receipts, init capabilities, permission answers recorded before they are sent, the transport's flags, the child's credential scrub), written against the Agent SDK's wire format, not the SDK.
+- `internal/journal/`: a run's typed record (prose, thinking, tool calls, diffs, plans, approvals, questions, turns) that clients render.
+- `internal/harness/`: code the model's process runs: the `orbit mcp` tool server and the `orbit hook` command.
 - `internal/sources/`: inputs the harness fetches (`http`, `prometheus`, `file`).
 - `internal/transforms/`: coded reducers over a source before the model sees it.
 - `internal/actions/`: action types, their parameter schemas and executors.
 - `internal/notify/`: channels (`ntfy`, `smtp`, `webhook`, `log`).
+- `internal/mail/`: the mailbox: reply addresses that name a conversation, and the poller that turns mail into messages.
 - `internal/push/`: Web Push of attention rows to registered devices (title and link only, bursts folded); `internal/webpush/`: the RFC 8291 encryption and VAPID signing it sends with.
 - `internal/scheduler/`: schedule triggers to queued runs, one leader.
+- `internal/rrule/`: the RFC 5545 recurrence subset schedules use beyond cron.
 - `internal/store/`: every database read and write; `migrations/` is the schema.
+- `internal/testdb/`: a freshly migrated database per test from `ORBIT_TEST_DATABASE_URL`.
+- `internal/secret/`: every signing and sealing key, derived from the operator token by purpose (security.md).
 - `internal/api/`: JSON API, the run and approval pages, `/healthz`, `/readyz`, `/metrics`.
+- `internal/auth/`: verification of the authentik JWTs `/api/v1` accepts.
+- `internal/client/`: the API client `orbitctl` uses, including device-code sign-in.
+- `internal/metrics/`: the Prometheus surface.
+- `internal/github/`: orbit's only access to GitHub, as one GitHub App with per-operation installation tokens.
+- `internal/claudeimport/`, `internal/frontmatter/`: reading Claude Code's on-disk memory and skills (and their YAML headers) into orbit's shapes for `orbit import`.
+- `internal/eval/`: deterministic checks over saved run results, used by `orbiteval`.
 - `examples/`: a complete configuration, loaded by tests and `make validate`.
 - `internal/build/`: the build runner (tool policy, stdio permission
   protocol, diff policy, commit, push, PR); `internal/tickets/`: the ticket
   loop that carries a ticket from approved to done.
-- `internal/sandboxd/`, `internal/egress/`, `internal/sandbox/`: the build
-  sandbox service (the only holder of a docker socket), its egress proxy,
+  `internal/build/buildtest/` holds the fake sandboxd and fake CLI build tests run against.
+- `internal/sandboxd/`, `internal/egress/`, `internal/credproxy/`, `internal/sandbox/`: the build
+  sandbox service (the only holder of a docker socket), its egress proxy, the credential proxy that keeps the backend credential out of every sandbox,
   and orbit's client for it.
+- `internal/workspace/`: packs and unpacks a chat conversation's workspace as a tar, for its sandbox and the snapshot kept after each run.
 - `deploy/`: the image (`Dockerfile`), the build sandbox's image
   (`build.Dockerfile`), an agent's workstation box image (`workstation.Dockerfile`, its files in `workstation/`) and the pinned agent CLIs (`cli/`).
 

@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -206,6 +207,53 @@ func TestGitHubBlock(t *testing.T) {
 	}
 }
 
+func TestReposAreReadRepositoriesOnly(t *testing.T) {
+	orbit := `
+defaults: {runner: r, channels: [c]}
+runners: {r: {kind: claude-code}, a: {kind: anthropic, api_key_env: K}}
+channels: {c: {kind: log}}
+github: {app_id: 7, private_key_env: K, repositories: [kensac/orbit], read_repositories: [kensac/orbit, kensac/homelab-config, other/orbit]}
+`
+	bad := `name: m
+charter: x
+runner: a
+repos:
+  - {repo: kensac/orbit, ref: main}
+  - {repo: kensac/secret}
+  - {repo: other/orbit}
+  - {repo: kensac/homelab-config, ref: "--upload-pack=x"}
+`
+	_, err := Load(write(t, map[string]string{"orbit.yaml": orbit, "agents/m.yaml": bad}))
+	for _, want := range []string{
+		"kensac/secret is not in github.read_repositories",
+		`a second repository named "orbit"`,
+		`ref "--upload-pack=x" is not a branch`,
+		`needs "github" in needs`,
+		"an anthropic runner reads no files",
+	} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %v, want %q", err, want)
+		}
+	}
+	good := "name: m\ncharter: x\nneeds: [github]\nrepos: [{repo: kensac/homelab-config, ref: main}, {repo: kensac/orbit}]\n"
+	cfg, err := Load(write(t, map[string]string{"orbit.yaml": orbit, "agents/m.yaml": good}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agents["m"].Repos[0].Name() != "homelab-config" {
+		t.Fatal("a repository's directory is its name")
+	}
+	// Reading a repository grants nothing to act on it.
+	if cfg.Deployment.AllowsRepo("kensac/homelab-config") || !cfg.Deployment.AllowsRead("kensac/homelab-config") {
+		t.Fatal("read_repositories must not widen repositories")
+	}
+	noGitHub := "name: m\ncharter: x\nneeds: [github]\nrepos: [{repo: kensac/orbit}]\n"
+	if _, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/m.yaml": noGitHub})); err == nil ||
+		!strings.Contains(err.Error(), "not in github.read_repositories") {
+		t.Fatalf("repos without a github block = %v", err)
+	}
+}
+
 const buildBase = `
 defaults: {runner: r, channels: [c]}
 runners: {r: {kind: claude-code}, x: {kind: codex}}
@@ -384,5 +432,118 @@ func TestAPrecheckIsForFileAgentsOnly(t *testing.T) {
 		Spec: []byte(`{"name":"b","charter":"y","gates":[{"kind":"precheck","command":"cat /proc/1/environ"}]}`)}})
 	if err == nil || !strings.Contains(err.Error(), "only an agent in the configuration files") {
 		t.Fatalf("a database agent's precheck = %v", err)
+	}
+}
+
+func TestWebhookTriggersAreBoundToTheirSecrets(t *testing.T) {
+	hooks := "\nwebhook_secrets:\n  HOOK_GH: {scheme: github, agents: [a]}\n  HOOK_STD: {scheme: standard, agents: [b]}\n"
+	load := func(agent string) error {
+		_, err := Load(write(t, map[string]string{"orbit.yaml": base + hooks, "agents/a.yaml": "name: a\ncharter: x\n" + agent}))
+		return err
+	}
+	ok := "triggers: [{webhook: issues, secret: HOOK_GH, max_bytes: 4096}, {schedule: \"0 9 * * *\"}]\nsources: [{name: event, kind: webhook}]\n"
+	if err := load(ok); err != nil {
+		t.Fatal(err)
+	}
+	for bad, want := range map[string]string{
+		"triggers: [{webhook: issues}]":                                                                  "needs a secret",
+		"triggers: [{webhook: issues, secret: NOPE}]":                                                    "NOPE is not in orbit.yaml's webhook_secrets",
+		"triggers: [{webhook: issues, secret: HOOK_STD}]":                                                "HOOK_STD is not bound to this agent",
+		"triggers: [{webhook: Issues, secret: HOOK_GH}]":                                                 `webhook "Issues" must match`,
+		"triggers: [{webhook: issues, secret: HOOK_GH, schedule: \"@daily\"}]":                           "takes no schedule",
+		"triggers: [{webhook: i, secret: HOOK_GH}, {webhook: i, secret: HOOK_GH}]":                       "named by trigger 0 already",
+		"triggers: [{webhook: issues, secret: HOOK_GH, max_bytes: 999999999}]":                           "max_bytes must be between",
+		"triggers: [{schedule: \"@daily\", secret: HOOK_GH}]":                                            "secret and max_bytes are for a webhook trigger",
+		"sources: [{name: e, kind: webhook}]":                                                            "needs a webhook trigger",
+		"triggers: [{webhook: i, secret: HOOK_GH}]\nsources: [{name: e, kind: webhook, url: http://x/}]": "takes no url",
+	} {
+		if err := load(bad); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err = %v, want %q", bad, err, want)
+		}
+	}
+	_, err := Load(write(t, map[string]string{"orbit.yaml": base + "\nwebhook_secrets:\n  bad-name: {scheme: gitlab, agents: []}\n"}))
+	for _, want := range []string{`webhook secret "bad-name": the name is an environment variable`, "scheme must be one of", "agents must name"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want %q", err, want)
+		}
+	}
+	// A webhook trigger has no schedule, so the scheduler passes it by.
+	if _, err := TriggerSchedule(Trigger{Webhook: "issues"}, time.UTC); !errors.Is(err, ErrWebhookTrigger) {
+		t.Fatalf("TriggerSchedule(webhook) = %v", err)
+	}
+}
+
+func TestMissedGraceDefaultsToThePeriodUpToAnHour(t *testing.T) {
+	at := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		t    Trigger
+		want time.Duration
+	}{
+		{Trigger{Schedule: "*/5 * * * *"}, 5 * time.Minute},
+		{Trigger{Schedule: "0 9 * * *"}, time.Hour},
+		{Trigger{Schedule: "0 9 * * *", MissedGrace: Duration(3 * time.Hour)}, 3 * time.Hour},
+		{Trigger{RRule: "FREQ=MINUTELY;INTERVAL=20", Start: "2026-11-02T09:00"}, 20 * time.Minute},
+		{Trigger{RRule: "FREQ=DAILY;COUNT=1", Start: "2026-11-02T09:00"}, time.Hour},
+	} {
+		if got := MissedGraceFor(c.t, time.UTC, at); got != c.want {
+			t.Errorf("%+v: grace %s, want %s", c.t, got, c.want)
+		}
+	}
+	load := func(trig string) error {
+		_, err := Load(write(t, map[string]string{"orbit.yaml": base + "\nwebhook_secrets: {H: {scheme: github, agents: [a]}}\n",
+			"agents/a.yaml": "name: a\ncharter: x\ntriggers: [" + trig + "]\n"}))
+		return err
+	}
+	if err := load(`{schedule: "@daily", missed_grace: 6h}`); err != nil {
+		t.Fatal(err)
+	}
+	for bad, want := range map[string]string{
+		`{schedule: "@daily", missed_grace: 10s}`:   "missed_grace must be between 1m0s and 168h0m0s",
+		`{webhook: w, secret: H, missed_grace: 1h}`: "missed_grace is for a schedule trigger",
+	} {
+		if err := load(bad); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", bad, err, want)
+		}
+	}
+}
+
+func TestTimezonesAreParsedOnceAndCheckedAtLoad(t *testing.T) {
+	cfg, err := Load(write(t, map[string]string{"orbit.yaml": "timezone: Europe/Berlin\n" + base,
+		"agents/a.yaml": "name: a\ncharter: x\ntimezone: America/New_York\ntriggers: []\n",
+		"agents/b.yaml": "name: b\ncharter: x\ntriggers: []\n"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Agents["a"].Location().String(); got != "America/New_York" {
+		t.Errorf("agent a location = %s", got)
+	}
+	if got := cfg.Agents["b"].Location().String(); got != "Europe/Berlin" {
+		t.Errorf("agent b location = %s, want the deployment's zone", got)
+	}
+	if got := cfg.Deployment.Location().String(); got != "Europe/Berlin" {
+		t.Errorf("deployment location = %s", got)
+	}
+	if got := (&Agent{}).Location(); got != time.UTC {
+		t.Errorf("an unvalidated agent reads as %s, want UTC", got)
+	}
+
+	_, err = Load(write(t, map[string]string{"orbit.yaml": "timezone: Mars/Olympus\n" + base,
+		"agents/a.yaml": "name: a\ncharter: x\ntimezone: Moon/Tranquility\ntriggers: []\n"}))
+	for _, want := range []string{"orbit.yaml timezone", "Mars/Olympus", `agent "a": timezone`, "Moon/Tranquility"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to name %q", err, want)
+		}
+	}
+}
+
+func TestRunURL(t *testing.T) {
+	for public, want := range map[string]string{
+		"":                           "",
+		"https://orbit.example.com":  "https://orbit.example.com/ui/runs/r-1",
+		"https://example.com/orbit/": "https://example.com/orbit/ui/runs/r-1",
+	} {
+		if got := (Deployment{PublicURL: public}).RunURL("r-1"); got != want {
+			t.Errorf("RunURL under %q = %q, want %q", public, got, want)
+		}
 	}
 }
