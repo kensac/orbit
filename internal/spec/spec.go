@@ -63,6 +63,12 @@ type Deployment struct {
 	Build *Build `yaml:"build,omitempty" json:"build,omitempty"`
 	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
+	// UsagePoll polls the subscription's usage windows (usage.go). Without
+	// it /usage shows only what runs' streams reported.
+	UsagePoll *UsagePoll `yaml:"usage_poll,omitempty" json:"usage_poll,omitempty"`
+	// DeferLowPriority holds the scheduled runs of priority: low agents
+	// while a subscription window is nearly spent (internal/usage).
+	DeferLowPriority bool `yaml:"defer_low_priority,omitempty" json:"defer_low_priority,omitempty"`
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -177,6 +183,10 @@ type Agent struct {
 	// claims a run only when its ORBIT_CAPABILITIES cover every one; an
 	// agent with none runs anywhere (docs/ARCHITECTURE.md, Worker fleet).
 	Needs []string `yaml:"needs,omitempty" json:"needs,omitempty"`
+	// Priority is normal (the default) or low: a low agent's scheduled runs
+	// wait while the subscription is nearly spent, when the deployment sets
+	// defer_low_priority.
+	Priority string `yaml:"priority,omitempty" json:"priority,omitempty"`
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
@@ -520,6 +530,7 @@ func (c *Config) applyDefaults() {
 		d.Defaults.Timeout = Duration(15 * time.Minute)
 	}
 	c.applyMailDefaults()
+	c.applyUsageDefaults()
 	if d.Defaults.MemoryMaxBytes == 0 {
 		// About 4k tokens: memory rides in every prompt, so it must stay a
 		// small fraction of the context the run needs for its inputs.
@@ -637,6 +648,7 @@ func (c *Config) Validate() error {
 	}
 	errs = append(errs, c.validateBuild()...)
 	errs = append(errs, c.validateMail()...)
+	errs = append(errs, c.validateUsage()...)
 	return errors.Join(errs...)
 }
 

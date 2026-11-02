@@ -652,12 +652,20 @@ Full-text search across everything orbit stores, ranked best first.
  "from": "2026-10-03", "to": "2026-11-01",
  "subscription": {
    "windows": [
+     {"window": "five_hour", "status": null, "utilization": 0.42,
+      "resets_at": "2026-11-01T19:00:00Z", "expired": false,
+      "observed_at": "...", "source": "poll", "run_id": null},
      {"window": "seven_day", "status": "allowed", "utilization": 0.14,
       "resets_at": "2026-11-08T12:00:00Z", "expired": false,
-      "observed_at": "...", "run_id": "uuid"}],
+      "observed_at": "...", "source": "stream", "run_id": "uuid"}],
    "overage": {"status": "rejected", "resets_at": null,
                "disabled_reason": "org_level_disabled", "in_use": false,
-               "observed_at": "...", "run_id": "uuid"}},
+               "observed_at": "...", "run_id": "uuid"},
+   "poll": {"enabled": true, "every": "5m0s", "last_at": "...", "last_ok_at": "...", "last_error": null}},
+ "deferral": {"enabled": true, "threshold": 0.8,
+              "held": [{"run_id": "uuid", "agent": "digest", "first_at": "...", "last_at": "...", "times": 3,
+                        "window": "five_hour", "utilization": 0.86, "threshold": 0.8, "source": "poll",
+                        "observed_at": "...", "held_until": "..."}]},
  "cost": {
    "total": {"api_equivalent_usd": 1.234567, "runs": 42, "runs_with_cost": 40,
              "by_status": {"queued": 0, "running": 1, "succeeded": 38, "failed": 3, "cancelled": 0, "skipped": 0}},
@@ -666,13 +674,9 @@ Full-text search across everything orbit stores, ranked best first.
    "by_day": [{"date": "2026-10-03", "api_equivalent_usd": 0.000000, "runs": 0}]}}
 ```
 
-- **Subscription windows are what Claude Code last reported, not a live
-  query.** The CLI writes a `rate_limit_event` into a run's stream when its
-  rate-limit information changes; orbit stores it in the run's events
-  (`GET /runs/{id}/events`), and this reads the newest one per window from
-  runs created in the last 8 days (`store.RateLimitLookback`: the longest
-  window, `seven_day`, and a day). No Claude Code run, no observation: a
-  window absent from the list was not reported in that time.
+- **Each window is the freshest of two readings, and says which.** `source: "stream"`: the CLI writes a `rate_limit_event` into a run's stream when its rate-limit information changes; orbit stores it in the run's events (`GET /runs/{id}/events`), and this reads the newest one per window from runs created in the last 8 days (`store.RateLimitLookback`: the longest window, `seven_day`, and a day); `run_id` is that run. `source: "poll"`: with `usage_poll` configured, control asks the endpoint Claude Code's own `/usage` reads every few minutes and keeps each answer; this reads the newest successful one from the same 8 days (`run_id` and `status` are `null`: the endpoint reports neither). **The poll is best effort**: the endpoint is undocumented, its shape is the one Claude Code caches from it, and a poll that fails is recorded (`poll.last_error`) while the windows keep the last good reading. Of the two, the one observed later wins (`observed_at`); a tie goes to the stream. A window absent from the list was reported by neither in that time.
+- `poll` is the poller's state: `enabled` (and `every`) as configured, `last_at` the newest poll of any outcome, `last_ok_at` the newest successful one, `last_error` the newest poll's error when it failed, else `null`.
+- `deferral` is low-priority holding (`defer_low_priority`; docs/agents/configuration.md): `enabled`, `threshold` (`usage.DeferLowAbove`, a fraction like `utilization`) and `held`, the scheduled runs held now, oldest hold first: when first and last held, how many times, and the window, reading and source behind the latest hold, and `held_until`, when it is judged again.
 - `window` is the CLI's name for it (`five_hour`, `seven_day`,
   `seven_day_opus`, `seven_day_sonnet`, ...). `status` is `allowed`,
   `allowed_warning` or `rejected`. `utilization` is the fraction of the
@@ -680,7 +684,7 @@ Full-text search across everything orbit stores, ranked best first.
   `resets_at` is when the window resets, `null` when not reported.
   `expired` is true once `resets_at` has passed: the window has reset since
   the observation, so its `utilization` is out of date. `observed_at` is when
-  orbit stored the event and `run_id` the run whose stream carried it.
+  orbit stored the event or made the poll. The endpoint reports percent; it is divided by 100, so both sources are fractions.
 - The CLI's line names one window at top level (`rateLimitType`) and lists
   windows in `unifiedWindows`; each window is taken from the newest event
   that mentions it, and within one event the `unifiedWindows` entry wins.
@@ -722,12 +726,12 @@ Full-text search across everything orbit stores, ranked best first.
 {"checked_at": "...",
  "config": {"valid": true, "loaded_at": "...",
             "last_error": null, "last_error_at": null},
- "queue": {"due": 0, "waiting_continuations": 1, "oldest_due_at": null},
+ "queue": {"due": 0, "waiting_continuations": 1, "deferred": 0, "oldest_due_at": null},
  "running": [{"run_id": "uuid", "agent": "finance", "worker": "orbit/0",
               "attempt": 1, "started_at": "...", "heartbeat_at": "...",
               "heartbeat_age_seconds": 12.4}],
  "pending_actions": 2,
- "agents": [{"name": "finance", "enabled": true, "timezone": "America/New_York",
+ "agents": [{"name": "finance", "enabled": true, "priority": "normal", "timezone": "America/New_York",
              "last_success": {"run_id": "uuid", "finished_at": "..."},
              "next_fires": [{"trigger_index": 0, "schedule": "0 8 * * *",
                              "at": "2026-11-02T13:00:00Z"}]}]}
@@ -741,12 +745,12 @@ Full-text search across everything orbit stores, ranked best first.
   `loaded_at`); `null` when none failed.
 - `queue.due` counts queued runs an executor may claim now (behind a running
   run of the same agent, too); `waiting_continuations` counts `continue` runs
-  whose `run_after` is still ahead. `oldest_due_at` is the oldest due run's
+  whose `run_after` is still ahead, and `deferred` scheduled runs held back while the subscription is nearly spent (`/usage` `deferral.held` lists them). `oldest_due_at` is the oldest due run's
   `created_at`.
 - `running` lists running runs, oldest first. `heartbeat_age_seconds` is
   measured by the database clock (`checked_at`); a run is requeued past
   `engine.StaleAfter` (300 s).
-- `agents` is every agent in the configuration in force, by name.
+- `agents` is every agent in the configuration in force, by name, with its `priority` (`normal` or `low`).
   `last_success` is its newest succeeded or skipped run (a gate finding
   nothing to judge is not a stale agent), `null` if none.
   `next_fires` is each schedule trigger's next fire after now, read in the

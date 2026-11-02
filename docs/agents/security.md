@@ -59,6 +59,8 @@ more than its agent's rules allow.
   past writing, so they are data like any input, and they never back a
   figure (they are kept out of the tool ledger).
 
+- **The usage poller** (`usage_poll`) is orbit's own code on control, outside any run: it reads the subscription's OAuth token from orbit's environment and sends it only to the configured URL. The token never reaches a model, a sample or a log line (an error records the status and a clipped body).
+
 ## What the model can cause
 
 Only actions its spec enables, through executors here, to destinations in

@@ -52,6 +52,7 @@ import (
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/tickets"
+	subusage "github.com/kensac/orbit/internal/usage"
 )
 
 // revision is set at build time (-ldflags -X main.revision=<sha>).
@@ -456,6 +457,19 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			(&mail.Poller{
 				Store: s, Config: func() *spec.Config { return eng.Current().Config }, Secret: []byte(token),
 				Env: os.LookupEnv, Log: log.With("component", "mail"), Wake: nudge,
+			}).Run(claimCtx)
+		}()
+
+		// The usage poller is best effort and off without usage_poll; it
+		// stops with claims, and two instances share one poll per interval
+		// (subusage.Poller.maybePoll).
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			(&subusage.Poller{
+				Store: s, Client: &http.Client{}, Env: os.LookupEnv, Worker: eng.Worker, Version: revision,
+				Config: func() *spec.Deployment { return &eng.Current().Config.Deployment },
+				Log:    log.With("component", "usage"),
 			}).Run(claimCtx)
 		}()
 
