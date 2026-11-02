@@ -27,6 +27,22 @@ An agent changes agents with the `agent:define` action (`internal/engine/define.
 
 Database and built-in agents are held to what orbit.yaml offers (`spec.validateTrust`): no `file` source, no `${VAR}` that is not in `credentials:`, without a `sandbox`, only the tools in `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite), no precheck and no `run` hook. A spec breaking one fails validation, naming it.
 
+### Saving a conversation as an agent
+
+`agent:save {name, description, charter, starters}` (the built-in `orbit` has it, `approve`) turns the conversation it is proposed in into a new agent (`internal/engine/save.go`). The model writes only those words; everything that decides the agent's reach comes from the conversation's record (`store.ConversationFacts`) and is no broader than what happened there:
+
+- `tools`: the tools its runs called (orbit's own `mcp__` tools are given to every run and are not listed). Without a sandbox, a tool outside `spec.UnsandboxedTools` is dropped; with one, the new agent gets the same `sandbox` and `needs`.
+- `sources`: the pages fetched with WebFetch, as `http` sources named by host (at most 5; a URL with `${` or `{{` is skipped).
+- `actions`: each type a person approved in the conversation (not one a rule approved), as `approve`, never `auto`. Delegation's types are left out: the record does not say which targets were meant.
+- `triggers`: every `schedule:add` proposed in the conversation that no person rejected, compiled as `schedule:add` compiles it; a `schedule:add` in the same reply with `agent` set to the new name becomes its schedule instead of an action of its own.
+- `runner`, `chat`, `session` and `timezone` from the agent it was saved from, `wake_on_message: true`, and the model's `starters`.
+
+It is proposed as an `agent:define` with `rule: "approve"`, whatever the agent's rules, so a person approves the whole agent, seen as a dry-run diff (`preview`, docs/api.md, Actions). A name already in use is refused at once.
+
+### Approve and always allow
+
+A person approving any action can also make its type `auto` for that agent ("approve and always allow", docs/api.md, Actions): a new revertible version, like an API change.
+
 ## Secrets
 
 Never in YAML. Channels name variables with `*_env`; source urls, headers, query
@@ -184,6 +200,19 @@ sources:
 - GitHub's `ping` (sent when a hook is created) is answered `200` without a run. A disabled agent refuses deliveries (`409`), and a secret unset in the environment is `503`, never an unauthenticated route.
 
 A database agent may have a webhook trigger only under a secret bound to its name, and adding one widens it (waits for a person). Binding a name no agent has yet lets whoever defines that agent receive the deliveries.
+
+`paused: true` stops a trigger firing; with `paused_until` (a local time, as `start`) it fires again from then, and the fires in between are skipped, not caught up (`spec.TriggerSchedule` applies it, so the scheduler, `next_fires` and validation agree).
+
+### Changing schedules by talking
+
+The actions `schedule:add`, `schedule:pause`, `schedule:resume` and `schedule:remove` change a database or built-in agent's triggers without rewriting its spec (`internal/actions/schedule.go`, `internal/engine/schedule.go`): each applies as the next version through `agent:define`'s path (`DefineAgent`, with the run and the person it answered, refused if the agent changed since the action read it), so it is listed in the agent's definitions and reverted like any version. The target is the agent itself, or one it may delegate to (`agent`).
+
+- `schedule:add {when, prompt}`: `when` is the person's words, compiled by `internal/scheduletext` in the agent's timezone: `daily`, `every day`, `every weekday`, `every monday` (any full weekday), `every other monday`, `the 1st` or `the 1st of every month` (any ordinal), each `at` a time (`8` and `8:00` are the 24-hour clock, `9am` and `9:30pm` explicit). A cron expression is accepted as written. Anything else is refused with what is supported.
+- `schedule:pause {trigger, until}`: `trigger` is the index `next_fires` reports (absent: every trigger); `until` is `tomorrow`, a weekday (`monday`, `next monday`: the next one after today), a date (`2026-11-09`, `nov 9`), any of those `at` a time, a local `2026-11-09T08:00`, or `in N hours|days|weeks`. A date alone is its midnight. Absent, the pause lasts until resumed.
+- `schedule:resume {trigger}`, `schedule:remove {trigger}` (later indexes move down one).
+- `run:now {agent, prompt}` starts a manual run; it changes no spec. A run that no person's message woke cannot start its own agent (that is `continue`, which is bounded).
+
+The model never computes a time. Each proposal is compiled when it is made: a phrase code cannot read, or a trigger that is not there, is denied at once with the reason, and a chat agent's `act` call answers with the compiled rule and the next three fires for it to tell the person (the action's result, when it executes during the turn). The executed action's `result` echoes the same (`rule`, `timezone`, `triggers`, `paused_until`, `next_fires` as local times, `version`), and a pending one shows it as `preview` (docs/api.md, Actions). In a run answering the person's message an `approve` rule on these applies directly, as delegation's does; unattended runs follow the rules as written. The built-in `orbit` has all five under `approve`.
 
 ## Templates in sources
 

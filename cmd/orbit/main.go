@@ -4,6 +4,7 @@
 //	orbit serve              control: API, scheduler, delivery, actions, config sync, and executors
 //	orbit worker             executors only: claim and run what this host's capabilities cover
 //	orbit migrate            apply database migrations and exit
+//	orbit restore-check [--expect FILE]   read a restored orbit-db read only (deploy/restore-drill.sh)
 //	orbit preflight [--config DIR]   check this binary can migrate the database and the running one survives it, changing nothing
 //	orbit validate [dir]     load and check a configuration directory
 //	orbit run <agent> [prompt]   queue a manual run (a running serve picks it up)
@@ -85,6 +86,8 @@ func main() {
 		err = preflightCmd(ctx, os.Args[2:])
 	case "validate":
 		err = validate(os.Args[2:])
+	case "restore-check":
+		err = restoreCheckCmd(ctx, os.Args[2:])
 	case "run":
 		err = enqueue(ctx, os.Args[2:])
 	case "approve", "reject":
@@ -160,7 +163,7 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | restore-check [--expect file] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
 	os.Exit(2)
 }
 
@@ -503,7 +506,8 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
 			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher,
-			Boxes: boxClient(func() spec.Deployment { return eng.Current().Config.Deployment }), WorkspaceOrigins: auth.SplitList(os.Getenv("ORBIT_WORKSPACE_ORIGINS"))}
+			WorkspaceGroup: strings.TrimSpace(os.Getenv("ORBIT_WORKSPACE_GROUP")),
+			Boxes:          boxClient(func() spec.Deployment { return eng.Current().Config.Deployment }), WorkspaceOrigins: auth.SplitList(os.Getenv("ORBIT_WORKSPACE_ORIGINS"))}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		// Bind before any executor starts: an instance that cannot serve

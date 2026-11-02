@@ -57,6 +57,8 @@ type ThreadMessage struct {
 	// RunID is the run that holds it (person; nil while it waits for a
 	// run) or asked it (agent).
 	RunID *string `json:"run_id"`
+	// SteeredInto is the run whose turn in progress took it (delivery steer).
+	SteeredInto *string `json:"steered_into,omitempty"`
 	// Reads are the attempts that read a person's message, oldest first;
 	// a handed-back one has ReleasedAt set (message_reads).
 	Reads []MessageRead `json:"reads,omitempty"`
@@ -399,7 +401,7 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 			rows, err := tx.Query(ctx, `
 				SELECT id::text, created_at, direction, body, author, reply_to::text,
 				       CASE WHEN `+waitingMessage+` THEN NULL ELSE run_id::text END,
-				       CASE WHEN direction = 'from_agent' THEN (`+openQuestion+`) END,
+				       CASE WHEN direction = 'from_agent' THEN (`+openQuestion+`) END, steered_into::text,
 				       (SELECT json_agg(json_build_object('run_id', x.run_id, 'attempt', x.attempt,
 				                                          'read_at', x.read_at, 'released_at', x.released_at)
 				                        ORDER BY x.read_at, x.attempt)
@@ -412,7 +414,7 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 				m := ThreadMessage{Kind: "message"}
 				var dir string
 				var reads []byte
-				if err := rows.Scan(&m.ID, &m.At, &dir, &m.Body, &m.Author, &m.ReplyTo, &m.RunID, &m.Open, &reads); err != nil {
+				if err := rows.Scan(&m.ID, &m.At, &dir, &m.Body, &m.Author, &m.ReplyTo, &m.RunID, &m.Open, &m.SteeredInto, &reads); err != nil {
 					rows.Close()
 					return err
 				}

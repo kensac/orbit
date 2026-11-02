@@ -41,7 +41,7 @@ type fakeRunner struct {
 	// seen, when set, is called with the request while the run's workdir
 	// exists.
 	seen func(runner.Request)
-	// events are emitted before the result, as the CLI streams them.
+	// events are emitted after the first, as the CLI's stream would (tool calls the journal records).
 	events []runner.Event
 	// said are assistant lines emitted before the output.
 	said []string
