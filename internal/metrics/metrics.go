@@ -55,7 +55,51 @@ var (
 	Queued = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "orbit_runs_queued", Help: "Runs due and waiting for an executor (a continuation counts once it is due).",
 	})
+	// QueuedOldest is how long the oldest due queued run has waited: a queue nothing drains (no executor can claim it) grows this while orbit_runs_queued may stay small.
+	QueuedOldest = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "orbit_runs_queued_oldest_age_seconds", Help: "Seconds the oldest due queued run has waited since it became due; 0 when none is waiting.",
+	})
+	credentialExpiry = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "orbit_credential_expiry_timestamp_seconds", Help: "Unix time a credential stops working, as orbit.yaml's expires: records it.",
+	}, []string{"credential"})
+	// sandboxdReady has no labels; a vector so that it is absent when no sandboxd is configured.
+	sandboxdReady = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "orbit_sandboxd_ready", Help: "1 if sandboxd answered its readiness probe ready, 0 if not or unreachable.",
+	}, nil)
+	egressReady = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "orbit_egress_ready", Help: "1 if sandboxd reports the egress proxy container running (and healthy, with a healthcheck), by proxy host.",
+	}, []string{"proxy"})
 )
+
+// SetExpiries replaces the credential expiry series with exp, so a removed entry stops being exported.
+func SetExpiries(exp map[string]time.Time) {
+	credentialExpiry.Reset()
+	for name, t := range exp {
+		credentialExpiry.WithLabelValues(name).Set(float64(t.Unix()))
+	}
+}
+
+// SetSandbox records one probe of sandboxd: whether it is ready, and each egress proxy's readiness as sandboxd reported it, keyed by proxy host (nil when sandboxd did not answer, which exports none).
+func SetSandbox(ready bool, egress map[string]bool) {
+	sandboxdReady.WithLabelValues().Set(gauge(ready))
+	egressReady.Reset()
+	for proxy, ok := range egress {
+		egressReady.WithLabelValues(proxy).Set(gauge(ok))
+	}
+}
+
+// ClearSandbox removes the sandbox series: no sandboxd is configured.
+func ClearSandbox() {
+	sandboxdReady.Reset()
+	egressReady.Reset()
+}
+
+func gauge(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
+}
 
 // RunFinished records one run's end.
 func RunFinished(agent, status, runner string, d time.Duration, cost *float64) {
