@@ -194,10 +194,7 @@ func (e *Engine) learn(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 	if !said {
 		return nil, nil, nil, nil, nil, gateNothingNew, nil
 	}
-	loc, _ := time.LoadLocation(a.Timezone)
-	if loc == nil {
-		loc = time.UTC
-	}
+	loc := a.Location()
 	text, _ := packConversation(items, loc, learnBudget, learnItemMax)
 	topics, err := e.agentTopics(ctx, a)
 	if err != nil {

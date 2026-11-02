@@ -36,7 +36,7 @@ func (s *Store) Conversation(ctx context.Context, agent, excludeRun string, limi
 		    SELECT m.created_at AS at, 'message' AS kind, COALESCE(m.run_id::text, '') AS run_id, 
 		           CASE WHEN m.author LIKE 'agent:%' THEN m.author ELSE '' END AS summary, m.body
 		    FROM messages m
-		    WHERE m.agent = $1 AND m.direction = 'to_agent' AND m.run_id IS NOT NULL AND m.run_id <> $2
+		    WHERE m.agent = $1 AND m.direction = 'to_agent' AND m.run_id <> $2 AND NOT (`+waitingMessage+`)
 		      AND m.conversation_id = (SELECT conversation_id FROM me)
 		  UNION ALL
 		    SELECT q.created_at, 'question', q.run_id::text, '', q.body

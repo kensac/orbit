@@ -59,6 +59,7 @@ is the design; the topic documents below are the rules for changing it.
 - `internal/push/`: Web Push of attention rows to registered devices (title and link only, bursts folded); `internal/webpush/`: the RFC 8291 encryption and VAPID signing it sends with.
 - `internal/scheduler/`: schedule triggers to queued runs, one leader.
 - `internal/store/`: every database read and write; `migrations/` is the schema.
+- `internal/secret/`: every signing and sealing key, derived from the operator token by purpose (security.md).
 - `internal/api/`: JSON API, the run and approval pages, `/healthz`, `/readyz`, `/metrics`.
 - `examples/`: a complete configuration, loaded by tests and `make validate`.
 - `internal/build/`: the build runner (tool policy, stdio permission
