@@ -157,6 +157,11 @@ type Agent struct {
 	// money amount in the summary and report must be in the inputs or in a
 	// result of orbit's query or calc tool.
 	Verify []string `yaml:"verify,omitempty" json:"verify,omitempty"`
+	// Needs names the capabilities a host must have to run this agent
+	// ("docker-network:hetzner", "sure", "browser", "sandbox"). A worker
+	// claims a run only when its ORBIT_CAPABILITIES cover every one; an
+	// agent with none runs anywhere (docs/ARCHITECTURE.md, Worker fleet).
+	Needs []string `yaml:"needs,omitempty" json:"needs,omitempty"`
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
@@ -290,8 +295,11 @@ func (a *Agent) RuleFor(actionType string) Rule {
 }
 
 var (
-	nameRE   = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
-	envRefRE = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
+	nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	// CapabilityRE is a capability's shape: a name, optionally qualified
+	// (docker-network:hetzner).
+	CapabilityRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}(:[a-z0-9][a-z0-9._-]{0,62})?$`)
+	envRefRE     = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
 	// RepoRE is GitHub's owner/name shape.
 	RepoRE    = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
 	cronParse = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
@@ -579,6 +587,16 @@ func (c *Config) validateAgent(a *Agent) []error {
 		if !slices.Contains(verifyChecks, v) {
 			at("verify: unknown check %q (want one of %v)", v, verifyChecks)
 		}
+	}
+	seenNeed := map[string]bool{}
+	for _, n := range a.Needs {
+		if !CapabilityRE.MatchString(n) {
+			at("needs: %q is not a capability (want name or name:qualifier, lower case)", n)
+		}
+		if seenNeed[n] {
+			at("needs: %q is listed twice", n)
+		}
+		seenNeed[n] = true
 	}
 	if ss := a.Session; ss != nil {
 		rs := c.Deployment.Runners[a.Runner]

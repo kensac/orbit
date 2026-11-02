@@ -265,6 +265,12 @@ const MaxAttempts = 3
 // "nothing running" true under concurrency: a second claimer for the same
 // agent fails the index and tries the next row.
 func (s *Store) ClaimRun(ctx context.Context, worker string) (*ClaimedRun, error) {
+	return s.ClaimRunFor(ctx, Claim{Worker: worker, Any: true, Builds: true})
+}
+
+// claim is ClaimRun with filter (SQL over the candidate q, using $2 to $4)
+// narrowing the candidates (ClaimRunFor).
+func (s *Store) claim(ctx context.Context, worker, filter string, args ...any) (*ClaimedRun, error) {
 	for try := 0; try < 5; try++ {
 		var c ClaimedRun
 		err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -276,11 +282,12 @@ func (s *Store) ClaimRun(ctx context.Context, worker string) (*ClaimedRun, error
 				    WHERE q.status = 'queued'
 				      AND (q.run_after IS NULL OR q.run_after <= now())
 				      AND NOT EXISTS (SELECT 1 FROM runs b WHERE b.agent = q.agent AND b.status = 'running')
+				      `+filter+`
 				    ORDER BY q.created_at
 				    LIMIT 1
 				    FOR UPDATE SKIP LOCKED
 				)
-				RETURNING id::text, attempt, agent, spec_sha, trigger, prompt, chain, conversation_id::text`, worker).
+				RETURNING id::text, attempt, agent, spec_sha, trigger, prompt, chain, conversation_id::text`, append([]any{worker}, args...)...).
 				Scan(&c.ID, &c.Attempt, &c.Agent, &c.SpecSHA, &c.Trigger, &c.Prompt, &c.Chain, &c.ConversationID); err != nil {
 				return err
 			}
