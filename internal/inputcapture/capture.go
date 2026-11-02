@@ -102,7 +102,7 @@ func Capture(ctx context.Context, f Fetcher, run string, attempt int, target str
 	if e != nil {
 		return m, e
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	m = Manifest{Version: 1, RunID: run, Attempt: attempt, Inputs: []Input{}, Limits: "Only direction=in inputs/ artifacts from the selected attempt. Recorded memory may be included when stored under inputs/. Historical charter, non-input memory, messages, skills, session state, output and withheld sources are not separately captured. Separate API reads are not an atomic snapshot. This fixture does not reproduce a complete model request or run a backend."}
 	defer func() {
 		data, _ := json.MarshalIndent(m, "", "  ")
