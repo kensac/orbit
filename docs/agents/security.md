@@ -167,7 +167,7 @@ without docker):
   unit tests pin the full create document and reject any container the
   daemon made differently (`verifyCreated`). The API answers "no such
   sandbox" for any container without sandboxd's label, including every
-  other container on oci.
+  other container on its host.
 - Lifetime: PID 1 is `sleep 1h`, so the kernel ends every process at
   expiry; the reaper removes the container 30 minutes later. At most two
   exist at once, each limited to 6 GiB of memory (tmpfs included), 2 CPUs
@@ -185,14 +185,14 @@ without docker):
   diff is reviewed, until the credential proxy keeps the token out) and the
   diff policy's exact-match scan before anything is committed. Treat every
   allowlisted host as a channel for anything the sandbox holds.
-- **The kernel is shared** with oci. A container escape is root on oci,
-  which runs CI runners and holds less than hetzner; `ORBIT_SANDBOX_RUNTIME=
+- **The kernel is shared** with the host, hetzner today. A container escape is root on hetzner,
+  which holds every other secret in the fleet; `ORBIT_SANDBOX_RUNTIME=
   runsc` (gVisor) narrows this where installed.
-- **`/work` has no disk quota**: a sandbox can fill oci's docker volume
+- **`/work` has no disk quota**: a sandbox can fill the host's docker volume
   until its lifetime ends. The readback refuses more than 256 MiB.
-- **sandboxd holds the docker socket**, so a bug in it is root on oci. Its
-  surface is the four handlers and `docker.go`; it listens only on the
-  tailnet address or a unix socket (`validListen` refuses every interface)
+- **sandboxd holds the docker socket**, so a bug in it is root on its host. Its
+  surface is the four handlers and `docker.go`; it listens only on one address (on hetzner, an internal docker network only orbit shares)
+  or a unix socket (`validListen` refuses every interface)
   and requires the token on every request.
 - **A dropped attach does not stop the process**; the lifetime or a destroy
   does.

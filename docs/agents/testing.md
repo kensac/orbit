@@ -3,6 +3,7 @@
 - **Database tests run against real Postgres.** `make testdb-up` starts this
   checkout's own container; `internal/testdb` creates a fresh database per
   test. Without `ORBIT_TEST_DATABASE_URL` they skip locally and fail under CI.
+  `make test` uses `ORBIT_TEST_DATABASE_URL` from the environment when set (CI sets it, so an unreachable server fails the run), else this checkout's container when it is running, else none, and says so. `make check-sandbox` always skips them and drops `-race` (it needs cgo), for the build sandbox; a green sandbox run is not a green `make check`.
 - **Runners are tested with fake CLIs** (`runner_test.go`): a script that
   records its argv, environment and stdin. That is where "the model never
   sees orbit's secrets" is enforced. A fake live CLI answers one result per
