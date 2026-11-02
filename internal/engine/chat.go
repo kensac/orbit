@@ -375,6 +375,8 @@ type chatTurn struct {
 	extra string
 	// plugin is the skills plugin directory, when the run has skills.
 	plugin string
+	// repos is what the agent's repositories add (repos.go), or nil.
+	repos *repoRun
 }
 
 // errCancelled is a run a person stopped; Execute records it cancelled.
@@ -396,6 +398,9 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	}
 	system += t.extra
 	prompt := chatPrompt(a, t.now, t.run, t.rc, t.convo)
+	if t.repos != nil {
+		prompt += t.repos.prompt
+	}
 	if t.rec != nil {
 		prompt = recoveryPrompt(t.rec, t.rc, t.now.Location())
 	}
@@ -406,6 +411,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	}
 	st := &chatState{}
 	chat := e.chatTools(a, t.types, d.Defaults.MemoryMaxBytes, st)
+	e.repoChatTools(a, chat)
 	chat.Interrupt = t.cancel
 	if a.Sandbox != "" {
 		sb, err := e.sandboxPlan(d, a.Sandbox, c, t.workdir, t.home, t.plugin, t.emit)
@@ -420,6 +426,9 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 		}
 		for _, in := range t.inputs {
 			chat.Push = append(chat.Push, in.Path)
+		}
+		if t.repos != nil {
+			chat.Push = append(chat.Push, t.repos.files...)
 		}
 	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))

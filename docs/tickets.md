@@ -327,7 +327,8 @@ The permission sets are named in code, one per use:
 
 | use | permissions |
 |---|---|
-| reading run (clone a repository for an agent to read) | `contents: read` |
+| reading (a build's clone, a fetch into the mirror of a repository an agent reads) | `contents: read` |
+| an agent's `pr_list` and `pr_view` (docs/api.md, Repositories) | `pull_requests: read`, `checks: read`, `statuses: read` |
 | build delivery (push `orbit/*`, open the PR, close it on abandon) | `contents: write`, `pull_requests: write` |
 | merge (read the PR and its checks, update the body, merge) | `contents: write`, `pull_requests: write`, `checks: read`, `statuses: read` |
 | failure report (read failing checks and their job logs) | `checks: read`, `actions: read` |

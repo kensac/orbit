@@ -51,7 +51,7 @@ func (e *Engine) executeBuild(ctx, actx context.Context, snap *Snapshot, a *spec
 		metrics.RunFinished(c.Agent, "failed", kind, time.Since(start), cost)
 		e.deliver(ctx, snap, a, &c.ID, nil, "failure", notify.Message{
 			Title: a.Name + " build failed", Body: err.Error(), Priority: notify.High,
-			Tags: []string{"orbit", "warning"}, Link: e.runLink(snap, c.ID),
+			Tags: []string{"orbit", "warning"}, Link: snap.Config.Deployment.RunURL(c.ID),
 		})
 		return nil
 	}
