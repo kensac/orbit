@@ -11,6 +11,7 @@
 //	orbit drain              tell the local server to drain (a deploy replacing it)
 //	orbit import claude-memory <dir> --scope <s> [--apply]   seed memory entries through the API
 //	orbit import skills <dir> [--attach <agent>] [--apply]   seed the skills library through the API
+//	orbit sync claude [--memory-dir <dir>] [--apply <digest>]   write orbit's skills and memory entries into Claude Code's files
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
 //	orbit hook --root <dir> --state <dir> [--figures]   orbit's hook, run by Claude Code
 //	orbit agent-hook --root <dir> --def <hook>   one of an agent's own hooks, run by Claude Code
@@ -90,6 +91,8 @@ func main() {
 		err = drainCmd()
 	case "import":
 		err = importCmd(ctx, os.Args[2:])
+	case "sync":
+		err = syncCmd(ctx, os.Args[2:], os.Stdout)
 	case "mcp", "hook":
 		err = harnessCmd(os.Args[1], os.Args[2:])
 	case "agent-hook":
@@ -152,7 +155,7 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills <dir> | sync claude | version | mcp | hook | tls-cert | sandboxd | egress")
 	os.Exit(2)
 }
 
