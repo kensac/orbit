@@ -559,7 +559,12 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	} else if len(a.Hooks) > 0 {
 		emit("orbit.hooks_skipped", map[string]any{"reason": "the agent's hooks need claude-code with orbit's harness binary"})
 	}
-	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, hr != nil && !chat, inputs)
+	withTool := hr != nil && !chat
+	var builtin []store.Skill
+	if withTool {
+		builtin = builtinSkills(types)
+	}
+	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, withTool, builtin, inputs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -567,9 +572,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
 			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec,
-			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny), plugin: skillsPlugin, repos: repoRun, skills: skills})
+			extra: entriesContract(topics, false) + skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny), plugin: skillsPlugin, repos: repoRun, skills: skills})
 	}
-	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
+	via := len(builtin) > 0
+	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr, via)
 	if tk != nil {
 		system += ticketContract(tk, planning)
 	}
@@ -579,7 +585,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if known != "" {
 		system += knownContract
 	}
-	system += entriesContract(topics)
+	system += entriesContract(topics, via)
 	system += skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny)
 	delegated, err := e.Store.ConversationTasks(ctx, c.ConversationID, c.ID)
 	if err != nil {

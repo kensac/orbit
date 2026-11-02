@@ -27,6 +27,8 @@ import (
 type Type struct {
 	Name        string
 	Description string
+	// Brief, when set, is what a run with orbit's built-in skills is told in its place: the type in a line, the skill named in its description holding the rest.
+	Brief string
 	// ParamsSchema is the JSON Schema of params, shown to the agent and
 	// enforced before the action is stored.
 	ParamsSchema map[string]any
@@ -259,7 +261,8 @@ const MaxContinueChain = 12
 
 func continueType() Type {
 	return Type{
-		Name: "continue",
+		Name:  "continue",
+		Brief: "Be woken again after_minutes from now, with note as what your next run is told (the orbit-continuations skill says how).",
 		Description: fmt.Sprintf("Be woken again after_minutes from now (%d to %d) to carry on a longer task. "+
 			"note is what your next run is told: what you were doing and what to do next. "+
 			"At most %d continuations in a row; one waits at a time.",
