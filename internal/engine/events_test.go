@@ -16,8 +16,7 @@ func TestEventEmitterSerializesCompleteWrites(t *testing.T) {
 	var active atomic.Int32
 	var ordered []int
 	var payloads []string
-	var events *eventEmitter
-	events = &eventEmitter{capture: true, persist: func(seq int, kind string, payload []byte) error {
+	events := &eventEmitter{capture: true, persist: func(seq int, kind string, payload []byte) error {
 		if active.Add(1) != 1 {
 			t.Error("overlapping persistence calls")
 		}
