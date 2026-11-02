@@ -134,8 +134,8 @@ func TestRealCLIChatSteer(t *testing.T) {
 	defer cancel()
 	res, err := r.Run(ctx, Request{Workdir: work, System: "Answer briefly.", Tools: []string{"Bash"},
 		Session: &Session{Home: filepath.Join(dir, "home"), KeepDays: 1},
-		Chat: &Chat{Steer: steer, Steered: func(s string) { mu.Lock(); steered = append(steered, s); mu.Unlock() }},
-		Prompt: "Run the shell command `sleep 5; echo one` with the Bash tool, then reply with exactly what it printed."}, emit)
+		Chat:    &Chat{Steer: steer, Steered: func(s string) { mu.Lock(); steered = append(steered, s); mu.Unlock() }},
+		Prompt:  "Run the shell command `sleep 5; echo one` with the Bash tool, then reply with exactly what it printed."}, emit)
 	if err != nil {
 		t.Fatal(err)
 	}
