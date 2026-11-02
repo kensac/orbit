@@ -3,7 +3,7 @@
 A deployment is a directory: `orbit.yaml` plus `agents/<name>.yaml`
 (`examples/` is complete and loaded by tests). Unknown fields fail the load;
 so does any invalid cross-reference. `orbit validate <dir>` checks a
-directory and lists the environment variables it references.
+directory and lists the environment variables it references. Every field, its type and default is in [spec-reference.md](spec-reference.md); this file is the rules behind them.
 
 ## Agent names
 
@@ -118,7 +118,7 @@ timezone. An unknown `{{name}}` fails the fetch.
 Each kind is listed once in `internal/spec` (`channelKinds`, `sourceKinds`,
 `runnerKinds`) and implemented once in its package. Add both, plus the
 validation of its required fields, plus a test, plus the table in
-docs/ARCHITECTURE.md. A kind validation accepts that no package implements
+docs/ARCHITECTURE.md and the kind's row in spec-reference.md. A kind validation accepts that no package implements
 fails at runtime, not at load.
 
 ## Chat agents
@@ -160,6 +160,28 @@ the chat. Failures and pending approvals of unattended runs always notify.
 ## Memory topics
 
 `topics: [finance]` names the shared memory topics whose entries every run of the agent reads, beside the profile's and its own (docs/ARCHITECTURE.md, Memory entries). A topic exists as soon as an entry or an agent names it; the API can attach more (`PUT /agents/{name}/topics/{topic}`).
+
+## Hooks
+
+`hooks` adds Claude Code hooks to an agent's runs (claude-code runners only; at most 20), beside orbit's own path guard and figure check. Each names an `event` (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `Stop`), for a tool event optionally a `matcher` (tool names joined by `|`, as Claude Code reads them), and exactly one of:
+
+- `say: <text>` (at most 2 KB): tells the model the text as context at that event; at `Stop`, sends the model back once with it (a second stop in the same turn passes, so it cannot loop).
+- `deny: <reason>` (`PreToolUse` only): refuses the matching tool with the reason, which the model reads.
+- `run: [argv]` with `timeout` (default 10s, at most 1m): runs the command, no shell, with the event's JSON on stdin, in the run's workdir, with an environment of only `PATH`, `HOME` (the workdir) and `LANG`, killed with its process group at the timeout. Its stdout, stderr and exit code go to Claude Code as a command hook's do (exit 2 blocks, with stderr shown to the model).
+
+```yaml
+hooks:
+  - event: UserPromptSubmit
+    say: Lead every report with the total.
+  - event: PreToolUse
+    matcher: WebFetch
+    deny: This agent works from its inputs only.
+  - event: PostToolUse
+    matcher: Write|Edit
+    run: [gofmt, -l, .]
+```
+
+orbit's binary runs each (`orbit agent-hook`, its definition a flag orbit writes), so a hook is in the run's arguments: a changed hook starts a new live process. `SessionStart` fires once per Claude Code process, so in a live process not for every run.
 
 ## Skills
 
