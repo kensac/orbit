@@ -18,7 +18,10 @@ var ctx = context.Background()
 func setup(t *testing.T, schedule string) (*Scheduler, *store.Store, *spec.Config) {
 	t.Helper()
 	s := testdb.New(t)
-	a := &spec.Agent{Name: "a", Charter: "x", Timezone: "America/New_York", Triggers: []spec.Trigger{{Schedule: schedule, Prompt: "wake"}}, SHA: "sha-a"}
+	a := &spec.Agent{Name: "a", Charter: "x", Triggers: []spec.Trigger{{Schedule: schedule, Prompt: "wake"}}, SHA: "sha-a"}
+	if err := a.SetTimezone("America/New_York"); err != nil {
+		t.Fatal(err)
+	}
 	cfg := &spec.Config{Agents: map[string]*spec.Agent{"a": a}}
 	b, _ := json.Marshal(a)
 	if err := s.SyncAgents(ctx, map[string]store.AgentSpec{"a": {SHA: "sha-a", JSON: b, Enabled: true}}); err != nil {
