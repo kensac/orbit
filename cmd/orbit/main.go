@@ -545,6 +545,8 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			t := time.NewTicker(30 * time.Second)
 			defer t.Stop()
 			last := configHash(dir) + definitionGeneration(life, s)
+			// Learning runs are enqueued here, on every serving instance (runs_one_learning keeps each one once).
+			var lastLearn time.Time
 			for {
 				select {
 				case <-life.Done():
@@ -563,6 +565,14 @@ func serve(ctx context.Context, log *slog.Logger) error {
 					log.Warn("failed runs whose worker was lost", "runs", failed)
 				}
 				failOrphanedActions(life, s, log)
+				if !drain.Draining() && time.Since(lastLearn) >= engine.LearnEvery {
+					lastLearn = time.Now()
+					if err := eng.EnqueueLearning(life); err != nil {
+						log.Error("learning", "err", err)
+					} else {
+						nudge()
+					}
+				}
 				refreshGauges(life, s, log)
 				if h := configHash(dir) + definitionGeneration(life, s); h != last {
 					if err := reloadNow(life); err != nil {

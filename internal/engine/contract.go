@@ -38,6 +38,11 @@ type Output struct {
 	// planTicket is the ticket a non-empty Plan is for, set by the engine,
 	// never read from the output.
 	planTicket string
+	// Entries are memory entry writes (entries.go).
+	Entries []OutputEntry `json:"entries"`
+	// known and topics are the entries the run was shown and the topics it reads, set by the engine to resolve Entries.
+	known  []store.Entry
+	topics []string
 }
 
 // summaryMax keeps a summary to one notification title line.

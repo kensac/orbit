@@ -239,7 +239,7 @@ conversation:
   `reply_to`, when set, is the message it answers. `run_id` is the run that
   read a person's message (`null` until one starts) or the run that asked a
   question.
-- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again) or `build` (a ticket's build run, docs/tickets.md). `status` is
+- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again) `build` (a ticket's build run, docs/tickets.md) or `learn` (a learning run, below; only in an agent's learning conversation). `status` is
   `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
   ended without a backend call because a gate, code, found nothing to judge;
   `gate` names it, and is `null` for every other status). `attempt` counts
@@ -501,7 +501,9 @@ transition the ticket's state does not allow is 409.
 
 `GET /agents/{name}/memory?limit=`: the agent's memory versions, newest
 first, `{"versions": [{"id": 12, "run_id": "uuid", "content": "<markdown>",
-"created_at": "..."}]}`. `limit` defaults to 20; the maximum is 200.
+"created_at": "...", "author": null, "restored_from": null}]}`. `limit` defaults to 20; the maximum is 200. `author` is the person who wrote a version through the API (`null` for a run's, whose `run_id` is set); `restored_from` is the version a restore copied.
+
+`POST /agents/{name}/memory` writes the next version: `{"content": "<markdown>"}`, or `{"restore": <version id>}` to copy an earlier version of this agent's memory. Exactly one of the two (400 otherwise); `content` at most the deployment's `memory_max_bytes` (400); an unknown version or one of another agent is 404. Returns `201 {"version": {...}}`, shaped as above. The author is the token's person (with the operator token, the body's `author`). Nothing is replaced: the new version is the newest, every earlier one stays.
 
 ## Memory entries
 
@@ -535,13 +537,24 @@ An entry:
 
 Nothing is deleted. Every change is a new version, kept:
 
-- `GET /memory/entries?scope=&topic=&agent=&type=&status=&q=&limit=`: `{"entries": [...]}`, current versions, by scope (profile, topics, agents), then name, then most recently changed. `topic` or `agent` (not both) selects one place. `status` is `active` (default), `retired` or `all`; `q` matches key, title, description, body, why and how_to_apply, case-insensitively. `limit` defaults to 200, at most 1000.
+- `GET /memory/entries?scope=&topic=&agent=&type=&status=&q=&run_id=&limit=`: `{"entries": [...]}`, current versions, by scope (profile, topics, agents), then name, then most recently changed. `topic` or `agent` (not both) selects one place. `status` is `active` (default), `retired` or `all`; `q` matches key, title, description, body, why and how_to_apply, case-insensitively. `run_id` selects entries that run wrote a version of. `limit` defaults to 200, at most 1000.
 - `POST /memory/entries` `{"scope", "topic"|"agent", "key"?, "type", "title", "description"?, "body", "why"?, "how_to_apply"?, "note"?}`: `201 {"entry": ...}`. An explicit `key` already used in the scope is 409; an `agent` that is not configured is 400. Unknown fields are 400.
 - `GET /memory/entries/{id}`: `{"entry": <current>, "versions": [...]}`, every version newest first.
 - `PATCH /memory/entries/{id}` `{"version"?, "type"?, "title"?, "description"?, "body"?, "why"?, "how_to_apply"?, "status"?, "note"?}`: the next version, with absent fields kept. `version` is the version the client read; another current one is 409, so two edits never silently overwrite each other (omit it to write regardless). `status: "active"` restores a retired entry (clearing `superseded_by`). An edit that changes nothing writes no version and returns the current one.
+- `POST /memory/entries/{id}/restore` `{"restore": <version>, "version"?, "note"?}`: the next version, a copy of an earlier one's content and status (and its `superseded_by` while that entry is still active). `restore` must be an earlier version (400); `version` is as for `PATCH`. `note` defaults to `restored version <n>`.
 - `POST /memory/entries/{id}/retire` `{"version"?, "superseded_by"?, "note"?}`: the next version, retired. `superseded_by` must be another, active entry (400 otherwise). This is how an entry is deleted.
 - `POST /memory/import` `{"dry_run": bool, "entries": [<entry as for create, key optional>], "note"?}`: matches each by scope and key. A new key creates an entry, a known one gets a new version when its content differs or it was retired, an identical one is left alone, so an import can be repeated. `{"dry_run", "results": [{"scope", "topic"|"agent", "key", "outcome": "created"|"updated"|"unchanged", "id", "version"}]}`, in request order. All of it is one transaction: one invalid entry fails the whole import (400, naming its index). `dry_run` reports and writes nothing (`id` is absent for an entry it would create). At most 500 entries. `orbit import claude-memory` calls this (deployment.md).
 - `GET /memory/topics`: `{"topics": [{"name", "entries", "agents"}]}` by name: every topic that holds entries or is read by an agent. `entries` counts its active entries; `agents` are the agents that read it, from their spec or attached.
+
+### Entries agents write
+
+An agent writes entries itself, without approval: every run's output carries `entries` (docs/ARCHITECTURE.md, Memory entries), applied with the run's outcome as versions with `source: "learned"`, `source_run_id` the run and `source_conversation_id` its conversation. A person reverts one with `restore` or `retire` above. A write the store refuses (a stale version, a key taken, an invalid field, a ref the run was not shown) is skipped and the rest apply. Each run's writes and what became of them are its `entries.json` artifact (`GET /runs/{id}/artifacts`): `[{"op", "ref", "title", "result": {"outcome": "written"|"unchanged"|"refused", "error", "id", "key", "version"}}]`, in output order.
+
+### Learning runs
+
+After a conversation goes quiet, orbit runs a short learning pass over it (trigger `learn`) that reads what was said since the last pass and writes entries the same way. It runs in the agent's **learning conversation**: one per agent, `purpose: "learning"`, titled `Learning`, archived, so it is listed only with `archived=true`; its thread is every learning run, each report listing the writes it made. Conversations carry `purpose` (`null` for a person's). Nothing a learning run does appears in the conversation it read.
+
+`POST /conversations/{id}/learn` queues a learning run of that conversation now, whatever the quiet, through its newest message from the person: `202 {"run_id": "uuid"}`. 409 when the conversation has no message from the person or a learning run for that point exists already (learned, or tried); 400 for the learning conversation itself.
 
 ### What an agent reads
 

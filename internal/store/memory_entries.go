@@ -329,6 +329,8 @@ type EntryFilter struct {
 	Status string
 	// Query matches the key, title, description, body, why and how_to_apply, case-insensitively, as a substring.
 	Query string
+	// RunID selects entries a run wrote a version of.
+	RunID string
 	Limit int
 }
 
@@ -358,9 +360,10 @@ func (s *Store) ListEntries(ctx context.Context, f EntryFilter) ([]Entry, error)
 		FROM memory_entries e JOIN memory_entry_versions v ON v.entry_id = e.id AND v.version = e.current_version
 		WHERE ($1 = '' OR e.scope = $1) AND ($2 = '' OR e.owner = $2) AND ($3 = '' OR v.type = $3)
 		  AND ($4 = '' OR v.status = $4)
+		  AND ($7 = '' OR EXISTS (SELECT 1 FROM memory_entry_versions w WHERE w.entry_id = e.id AND w.source_run = NULLIF($7, '')::uuid))
 		  AND ($5 = '' OR strpos(lower(e.key || ' ' || v.title || ' ' || v.description || ' ' || v.body || ' ' || v.why || ' ' || v.how_to_apply), lower($5)) > 0)
 		ORDER BY array_position(ARRAY['profile', 'topic', 'agent'], e.scope), e.owner, v.created_at DESC, e.key
-		LIMIT $6`, f.Scope, f.Owner, f.Type, status, f.Query, f.Limit)
+		LIMIT $6`, f.Scope, f.Owner, f.Type, status, f.Query, f.Limit, f.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -620,4 +623,37 @@ func isUUIDText(s string) bool {
 		}
 	}
 	return true
+}
+
+// RestoreEntry writes the next version of an entry as a copy of an earlier one (its content and status; superseded_by too when that entry is still active), so reverting an edit is a version like any other. expect is as for UpdateEntry.
+func (s *Store) RestoreEntry(ctx context.Context, id string, version, expect int, p Provenance) (*Entry, error) {
+	var out *Entry
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := validProvenance(p); err != nil {
+			return err
+		}
+		cur, err := lockEntry(ctx, tx, id, expect)
+		if err != nil {
+			return err
+		}
+		if version <= 0 || version >= cur.Version {
+			return fmt.Errorf("%w: restore names an earlier version, 1 to %d", ErrInvalid, cur.Version-1)
+		}
+		old, err := entryAt(ctx, tx, id, version)
+		if err != nil {
+			return err
+		}
+		by := old.SupersededBy
+		if by != nil {
+			if e, err := entryAt(ctx, tx, *by, 0); err != nil || e.Status != "active" {
+				by = nil
+			}
+		}
+		if p.Note == "" {
+			p.Note = fmt.Sprintf("restored version %d", version)
+		}
+		out, err = writeNext(ctx, tx, cur, old.Status, old.EntryFields, by, p)
+		return err
+	})
+	return out, err
 }
