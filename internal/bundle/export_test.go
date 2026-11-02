@@ -259,7 +259,7 @@ func TestVerifyTampering(t *testing.T) {
 	if _, err := Export(context.Background(), c, "assistant", source); err != nil {
 		t.Fatal(err)
 	}
-	for _, kind := range []string{"hash", "unsafe", "unlisted", "duplicate-member", "duplicate-reference", "negative-size", "oversized-size", "fileless", "trailing-manifest"} {
+	for _, kind := range []string{"hash", "unsafe", "unlisted", "duplicate-member", "duplicate-reference", "negative-size", "oversized-size", "fileless", "trailing-manifest", "unknown-manifest-field", "inconsistent-coverage", "duplicate-completeness", "duplicate-resource-key", "escaped-duplicate-key", "duplicate-identity-key", "invalid-manifest-utf8", "manifest-nesting-limit"} {
 		t.Run(kind, func(t *testing.T) {
 			target := filepath.Join(dir, kind+".zip")
 			extra := ""
@@ -278,6 +278,23 @@ func TestVerifyTampering(t *testing.T) {
 				}
 				if name == "manifest.json" {
 					switch kind {
+					case "invalid-manifest-utf8":
+						b = bytes.Replace(b, []byte(`"name": "assistant"`), []byte("\"name\": \"assista\xffnt\""), 1)
+					case "manifest-nesting-limit":
+						value := strings.Repeat("[", 65) + "0" + strings.Repeat("]", 65)
+						b = bytes.Replace(b, []byte(`"name": "assistant"`), []byte(`"id":`+value+`,"name":"assistant"`), 1)
+					case "duplicate-completeness":
+						b = bytes.Replace(b, []byte(`"backup_complete": false`), []byte(`"backup_complete": true,"backup_complete": false`), 1)
+					case "escaped-duplicate-key":
+						b = bytes.Replace(b, []byte(`"backup_complete": false`), []byte(`"backup_complete": true,"backup_\u0063omplete": false`), 1)
+					case "duplicate-resource-key":
+						b = bytes.Replace(b, []byte(`"coverage": "current"`), []byte(`"coverage": "error","coverage": "current"`), 1)
+					case "duplicate-identity-key":
+						b = bytes.Replace(b, []byte(`"name": "assistant"`), []byte(`"name": "other","name": "assistant"`), 1)
+					case "unknown-manifest-field":
+						b = bytes.Replace(b, []byte(`"format_version"`), []byte(`"unknown":true,"format_version"`), 1)
+					case "inconsistent-coverage":
+						b = bytes.Replace(b, []byte(`"coverage": "current"`), []byte(`"coverage": "partial"`), 1)
 					case "trailing-manifest":
 						b = append(b, []byte(` {}`)...)
 					case "duplicate-reference", "negative-size", "oversized-size", "fileless":
@@ -304,6 +321,9 @@ func TestVerifyTampering(t *testing.T) {
 			}, extra)
 			if err := Verify(target); err == nil {
 				t.Fatal("tampered archive accepted")
+			}
+			if m, err := Inspect(target); err == nil || m.FormatVersion != 0 || m.Resources != nil {
+				t.Fatalf("inspection exposed invalid manifest: %+v, %v", m, err)
 			}
 		})
 	}
@@ -439,5 +459,30 @@ func TestOversizedTLSResponseRetainsPartialManifest(t *testing.T) {
 	}
 	if err := Verify(target); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInspectCoverage(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprint(partial), func(t *testing.T) {
+			c, _ := apiFixture(t, partial)
+			target := filepath.Join(t.TempDir(), "export.zip")
+			want, err := Export(context.Background(), c, "assistant", target)
+			if partial != errors.Is(err, ErrIncomplete) || (err != nil && !errors.Is(err, ErrIncomplete)) {
+				t.Fatal(err)
+			}
+			got, err := Inspect(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantJSON, _ := json.Marshal(want)
+			gotJSON, _ := json.Marshal(got)
+			if !bytes.Equal(wantJSON, gotJSON) {
+				t.Fatal("inspection changed manifest")
+			}
+			if got.BackupComplete || got.ConsistentSnapshot || got.ResourceCoverageComplete == partial {
+				t.Fatalf("misleading completeness: %+v", got)
+			}
+		})
 	}
 }

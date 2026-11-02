@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/workspace"
 )
@@ -41,8 +42,12 @@ const (
 	snapshotCacheBytes = 2 * workspace.MaxBytes
 )
 
-// backendSnapshot is the backend every workspace has today.
-const backendSnapshot = "snapshot"
+// The backends (docs/workspace.md, Where files and shells live): a
+// conversation's stored snapshots, or an agent's box.
+const (
+	backendSnapshot = "snapshot"
+	backendBox      = "box"
+)
 
 // capabilities is what a client may show for a workspace: the backend's
 // abilities, narrowed by the person's (docs/api.md, Finding a workspace).
@@ -58,6 +63,10 @@ type capabilities struct {
 // snapshotCapabilities are the snapshot backend's: reads only, until its
 // writes and change stream are built.
 var snapshotCapabilities = capabilities{Read: true, Presets: []string{}}
+
+// boxCapabilities are a box's: terminals only, until `orbit box` serves its
+// files, git and watcher.
+var boxCapabilities = capabilities{Terminals: true, Presets: []string{sandbox.TTYShell, sandbox.TTYClaude}}
 
 type asOfDoc struct {
 	SnapshotID int64     `json:"snapshot_id"`
@@ -256,7 +265,6 @@ func (s *Server) allow(w http.ResponseWriter, r *http.Request, workspaceID, clas
 // workspaceRoutes adds the workspace API.
 func (s *Server) workspaceRoutes(api func(string, http.HandlerFunc)) {
 	api("GET /api/v1/conversations/{id}/workspace", s.conversationWorkspace)
-	api("GET /api/v1/agents/{name}/workspace", s.agentWorkspace)
 	api("GET /api/v1/workspaces/{id}/tree", s.readRoute(s.workspaceTree))
 	api("GET /api/v1/workspaces/{id}/stat", s.readRoute(s.workspaceStat))
 	api("GET /api/v1/workspaces/{id}/files", s.readRoute(s.workspaceRead))
@@ -295,16 +303,17 @@ func (s *Server) conversationWorkspace(w http.ResponseWriter, r *http.Request) {
 	s.serveConversationWorkspace(w, r, c)
 }
 
-// agentWorkspace is GET /agents/{name}/workspace: on the snapshot backend,
-// the workspace of the agent's default conversation, where its agent-level
-// routes speak.
-func (s *Server) agentWorkspace(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	if _, ok := s.Engine.Current().Config.Agents[name]; !ok {
-		wsFail(w, store.ErrNotFound)
+// snapshotAgentWorkspace is GET /agents/{name}/workspace for an agent
+// without a box (agentWorkspace, terminals.go): the workspace of its
+// default conversation, where its agent-level routes speak.
+func (s *Server) snapshotAgentWorkspace(w http.ResponseWriter, r *http.Request, name string) {
+	id, err := s.Store.DefaultConversationID(r.Context(), name)
+	if errors.Is(err, store.ErrNotFound) {
+		// An agent that has never spoken has no default conversation, so
+		// no workspace yet.
+		respond(w, map[string]any{"workspace": nil}, nil)
 		return
 	}
-	id, err := s.Store.DefaultConversationID(r.Context(), name)
 	if err != nil {
 		wsFail(w, err)
 		return
