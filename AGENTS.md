@@ -50,6 +50,7 @@ is the design; the topic documents below are the rules for changing it.
   (`contract.go`: the schema and the prompts).
 - `internal/runner/`: model backends: `claude-code`, `codex`, `anthropic`.
 - `internal/sources/`: inputs the harness fetches (`http`, `prometheus`, `file`).
+- `internal/transforms/`: coded reducers over a source before the model sees it.
 - `internal/actions/`: action types, their parameter schemas and executors.
 - `internal/notify/`: channels (`ntfy`, `smtp`, `webhook`, `log`).
 - `internal/scheduler/`: schedule triggers to queued runs, one leader.
