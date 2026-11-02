@@ -382,25 +382,14 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 	}
 
-	seq := 0
 	figures := a.Verifies("figures")
-	var transcript [][]byte // the backend's message lines, for the figure check
-	// The runner's stream and the hook listener both emit; seq is shared.
-	var emitMu sync.Mutex
+	events := e.events(ctx, c, log, figures)
 	emit := func(kind string, payload any) {
-		emitMu.Lock()
-		defer emitMu.Unlock()
 		b, ok := payload.([]byte)
 		if !ok {
 			b, _ = json.Marshal(payload)
 		}
-		if figures && (kind == "assistant" || kind == "user") {
-			transcript = append(transcript, b)
-		}
-		seq++
-		if err := e.Store.AppendEvent(context.WithoutCancel(ctx), c.ID, c.Attempt, seq, kind, b); err != nil {
-			log.Warn("append event", "err", err)
-		}
+		events.emit(kind, b)
 	}
 
 	if c.Attempt > 1 && claudeCode {
@@ -642,7 +631,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		for _, in := range inputs {
 			backed.AddJSON(in.Content)
 		}
-		for _, t := range harness.OrbitToolResults(transcript) {
+		for _, t := range harness.OrbitToolResults(events.messages()) {
 			backed.AddText(t)
 		}
 		if missing := backed.Unbacked(harness.ReportText(res.Output)); len(missing) > 0 {
