@@ -58,11 +58,15 @@ func (s *Store) MarkSteered(ctx context.Context, runID string, attempt int, mess
 	})
 }
 
-// wakeForSteers queues a run for the steer messages a finishing run's turn did not take, unless the conversation already has one queued, which reads them.
+// wakeForSteers queues a run for the steer messages a finishing run's turn did not take, unless the conversation already has one queued, which reads them. It is the run queueing them would have woken: a person's message wakes a 'message' run (attended), and a parent agent's alone (task:message, MessageTask) a 'task' run, so a parent's steer never runs as a person's instruction.
 func wakeForSteers(ctx context.Context, tx pgx.Tx, runID string) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO runs (agent, spec_sha, trigger, conversation_id)
-		SELECT r.agent, r.spec_sha, 'message', r.conversation_id FROM runs r
+		SELECT r.agent, r.spec_sha,
+		       CASE WHEN EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = r.conversation_id
+		                         AND m.delivery = 'steer' AND (m.author IS NULL OR m.author NOT LIKE '`+AgentAuthorPrefix+`%') AND `+waitingMessage+`)
+		            THEN 'message' ELSE 'task' END,
+		       r.conversation_id FROM runs r
 		WHERE r.id = $1
 		  AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = r.conversation_id
 		              AND m.delivery = 'steer' AND `+waitingMessage+`)
