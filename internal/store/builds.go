@@ -24,6 +24,12 @@ const (
 	BuildPurposeFix = "fix"
 )
 
+// FromPRHead reports whether a build of purpose starts from the PR's head
+// (a fix, a revise) rather than the default branch.
+func FromPRHead(purpose string) bool {
+	return purpose == BuildPurposeFix || purpose == BuildPurposeRevise
+}
+
 // ErrBusy is a ticket that cannot start its build or merge because another
 // ticket of the same repository is building or merging
 // (tickets_one_building, tickets_one_merging). It waits; nothing failed.
@@ -42,14 +48,16 @@ type StartBuild struct {
 }
 
 // StartBuild enqueues a build run and moves its ticket to building in one
-// transaction: from approved for a build, from review for a fix. The run is
+// transaction: from approved for a build, from review for a fix or a
+// revise. A build and a revise are given every review comment submitted
+// and not yet delivered (a revise needs one); a fix only fixes. The run is
 // in the ticket's conversation when the build agent is the ticket's agent,
 // and in the build agent's default conversation otherwise (a run is always
 // in a conversation of its own agent). ErrBusy means another ticket of the
 // repository is building; ErrConflict that the ticket is not where the
 // purpose starts.
 func (s *Store) StartBuild(ctx context.Context, b StartBuild) (string, error) {
-	from := map[string]string{BuildPurposeBuild: TicketApproved, BuildPurposeFix: TicketReview}[b.Purpose]
+	from := map[string]string{BuildPurposeBuild: TicketApproved, BuildPurposeFix: TicketReview, BuildPurposeRevise: TicketReview}[b.Purpose]
 	if from == "" {
 		return "", fmt.Errorf("%w: build purpose %q", ErrInvalid, b.Purpose)
 	}
@@ -85,6 +93,15 @@ func (s *Store) StartBuild(ctx context.Context, b StartBuild) (string, error) {
 		if _, err := tx.Exec(ctx, `INSERT INTO ticket_builds (run_id, ticket_id, purpose, plan_version, failure)
 			VALUES ($1, $2, $3, $4, $5)`, runID, b.TicketID, b.Purpose, *plan, nullJSON(b.Failure)); err != nil {
 			return err
+		}
+		if b.Purpose != BuildPurposeFix {
+			n, err := giveComments(ctx, tx, b.TicketID, runID)
+			if err != nil {
+				return err
+			}
+			if n == 0 && b.Purpose == BuildPurposeRevise {
+				return fmt.Errorf("ticket %s has no review comment waiting: %w", b.TicketID, ErrConflict)
+			}
 		}
 		err = setStatus(ctx, tx, b.TicketID, from, TicketBuilding, "orbit", TicketUpdate{},
 			map[string]any{"run": runID, "purpose": b.Purpose})
@@ -142,13 +159,14 @@ func (s *Store) LatestBuild(ctx context.Context, ticketID string) (*Build, error
 	return collectBuild(rows)
 }
 
-// FixesSinceBuild counts the fix runs since the ticket's newest build run:
-// the attempts spent on its current PR's checks.
+// FixesSinceBuild counts the fix runs since the ticket's newest build or
+// revise run: the attempts spent on the checks of what a person last asked
+// for.
 func (s *Store) FixesSinceBuild(ctx context.Context, ticketID string) (int, error) {
 	var n int
 	err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM ticket_builds
 		WHERE ticket_id = $1 AND purpose = 'fix'
-		  AND created_at > COALESCE((SELECT max(created_at) FROM ticket_builds WHERE ticket_id = $1 AND purpose = 'build'), '-infinity')`,
+		  AND created_at > COALESCE((SELECT max(created_at) FROM ticket_builds WHERE ticket_id = $1 AND purpose IN ('build', 'revise')), '-infinity')`,
 		ticketID).Scan(&n)
 	return n, err
 }

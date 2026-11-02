@@ -39,6 +39,7 @@ an agent's beliefs changed.
   `building` in one transaction; `FinishBuild` and `FailBuild` finish the
   run and move the ticket together. `build_decisions` and `build_sandboxes`
   rows are written only by the attempt holding the run's claim.
+- review comment: `draft -> submitted -> delivered`, or `withdrawn` (a draft) or `superseded` (an edit, a new row). The status is derived (`commentSelect`): `message_id` says submitted, a succeeded or skipped run in `ticket_build_comments` says delivered. `StartBuild` gives a build every comment still waiting, in its transaction.
 
 - attention (`attention`): written with its thing (`newAttention`: `finishRun` for a failure, `insertAction` for a pending approval, `RecordOutcome` for a question, `proposePlan` for a plan, `Delegate` for a task's decision), one row per `key`; open is computed from the thing (`attentionOpen`), never stored, so no decision path has to remember to close it. `pushed_at` is set once by `ClaimPush`; `dismissed_at` once by a person.
 - push subscriptions (`push_subscriptions`): revoked, never deleted; the same endpoint subscribing again revives its row.
