@@ -218,9 +218,7 @@ type TicketFilter struct {
 
 // ListTickets returns tickets newest first.
 func (s *Store) ListTickets(ctx context.Context, f TicketFilter) ([]Ticket, error) {
-	if f.Limit <= 0 || f.Limit > 500 {
-		f.Limit = 50
-	}
+	f.Limit = clampLimit(f.Limit, 50, 500)
 	rows, err := s.Pool.Query(ctx, `SELECT `+ticketCols+` FROM tickets
 		WHERE ($1 = '' OR status = $1) AND ($2 = '' OR agent = $2)
 		  AND ($3::timestamptz IS NULL OR created_at < $3)
