@@ -441,7 +441,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			(&tickets.Loop{
 				Store: s, Config: func() *spec.Config { return eng.Current().Config }, Env: os.LookupEnv,
 				Client: &http.Client{Timeout: 2 * time.Minute}, Revision: revision, Log: log.With("component", "tickets"),
-				Approval: eng.NotifyApproval, Wake: nudge,
+				Approval: eng.NotifyApproval, Wake: nudge, Restack: eng.Builder.Restack,
 			}).Run(claimCtx)
 		}()
 
