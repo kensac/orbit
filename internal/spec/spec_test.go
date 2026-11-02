@@ -99,6 +99,21 @@ func TestTransformsAreValidatedAtLoad(t *testing.T) {
 	}
 }
 
+func TestGatesAreValidatedAtLoad(t *testing.T) {
+	for _, bad := range []string{
+		"[{kind: sometimes}]",
+		"[{kind: unchanged, n: 3}]",
+		"[{kind: items_above, input: ghost}]",
+		"[{kind: items_above, input: s, n: -1}]",
+	} {
+		_, err := Load(write(t, map[string]string{"orbit.yaml": base,
+			"agents/a.yaml": "name: a\ncharter: x\nsources: [{name: s, kind: file, path: /x}]\ngates: " + bad + "\n"}))
+		if err == nil || !strings.Contains(err.Error(), "gate 0") {
+			t.Errorf("%s: err = %v", bad, err)
+		}
+	}
+}
+
 func TestUnknownFieldsAndMismatchedNamesFail(t *testing.T) {
 	if _, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\ntriggerz: []\n"})); err == nil {
 		t.Error("an unknown field must fail the load, not be ignored")

@@ -149,9 +149,12 @@ type Agent struct {
 	// Transforms run over sources before the model sees them; each output
 	// is an input of its own (internal/transforms).
 	Transforms []Transform `yaml:"transforms,omitempty" json:"transforms,omitempty"`
-	Tools      []string    `yaml:"tools,omitempty" json:"tools,omitempty"`
-	Actions    ActionSet   `yaml:"actions,omitempty" json:"actions,omitempty"`
-	Notify     NotifySpec  `yaml:"notify,omitempty" json:"notify,omitempty"`
+	// Gates end a scheduled run without a backend call when code finds
+	// nothing to judge; the run is skipped, naming the gate.
+	Gates   []Gate     `yaml:"gates,omitempty" json:"gates,omitempty"`
+	Tools   []string   `yaml:"tools,omitempty" json:"tools,omitempty"`
+	Actions ActionSet  `yaml:"actions,omitempty" json:"actions,omitempty"`
+	Notify  NotifySpec `yaml:"notify,omitempty" json:"notify,omitempty"`
 	// MessagesTrigger starts a run when a person sends the agent a message.
 	MessagesTrigger bool `yaml:"wake_on_message,omitempty" json:"wake_on_message,omitempty"`
 	// Session keeps the backend's conversation between runs (claude-code
@@ -234,6 +237,21 @@ type Transform struct {
 	// KeepSource hands the source to the model as well.
 	KeepSource bool `yaml:"keep_source,omitempty" json:"keep_source,omitempty"`
 }
+
+// Gate is a check, in code, that ends a scheduled run as skipped before
+// any backend call. Kinds: unchanged (every input the model would see is
+// byte for byte what the agent's newest succeeded run saw, under the same
+// spec) and items_above (Input, a source or transform, has at most N
+// records at Items: nothing to review).
+type Gate struct {
+	Kind  string `yaml:"kind" json:"kind"`
+	Input string `yaml:"input,omitempty" json:"input,omitempty"`
+	Items string `yaml:"items,omitempty" json:"items,omitempty"`
+	N     int    `yaml:"n,omitempty" json:"n,omitempty"`
+}
+
+// GateKinds lists every gate kind.
+var GateKinds = []string{"unchanged", "items_above"}
 
 // Withheld reports whether the model is not shown source: a transform reads
 // it and none keeps it.
@@ -612,6 +630,23 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		if err != nil {
 			at("transform %q: %v", t.Name, err)
+		}
+	}
+	for i, g := range a.Gates {
+		switch g.Kind {
+		case "unchanged":
+			if g.Input != "" || g.Items != "" || g.N != 0 {
+				at("gate %d: unchanged takes no input, items or n", i)
+			}
+		case "items_above":
+			if !seen[g.Input] {
+				at("gate %d: input %q is not a source or transform of this agent", i, g.Input)
+			}
+			if g.N < 0 {
+				at("gate %d: n must be at least 0", i)
+			}
+		default:
+			at("gate %d: unknown kind %q (want one of %v)", i, g.Kind, GateKinds)
 		}
 	}
 	for typ, rule := range a.Actions {
