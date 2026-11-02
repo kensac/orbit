@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kensac/orbit/internal/credproxy"
 	"github.com/kensac/orbit/internal/sandbox"
 )
 
@@ -24,16 +25,23 @@ import (
 type Server struct {
 	cfg Config
 	d   *Docker
-	log *slog.Logger
-	now func() time.Time
+	// sealer turns a backend credential into a credproxy token; nil (a key Validate would refuse) refuses every attach that carries one.
+	sealer *credproxy.Sealer
+	log    *slog.Logger
+	now    func() time.Time
 	// mu serializes creates, so MaxSandboxes holds between the count and
 	// the create.
 	mu sync.Mutex
+	// boxMu serializes box creates, starts and stops.
+	boxMu sync.Mutex
+	// host and arch are the docker host's, from Check, for BoxStatus.
+	host, arch string
 }
 
 // New returns a server for cfg, which must have passed Validate.
 func New(cfg Config, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, d: NewDocker(cfg.Docker), log: log, now: time.Now}
+	sealer, _ := credproxy.NewSealer(cfg.CredProxyKey)
+	return &Server{cfg: cfg, d: NewDocker(cfg.Docker), log: log, now: time.Now, sealer: sealer}
 }
 
 // Check verifies the host before serving: the daemon has seccomp on, the
@@ -56,38 +64,59 @@ func (s *Server) Check(ctx context.Context) error {
 	if !seccomp {
 		return errors.New("docker has no seccomp profile; refusing to run build containers")
 	}
-	if s.cfg.Runtime != "" {
-		if _, ok := info.Runtimes[s.cfg.Runtime]; !ok {
-			return fmt.Errorf("docker has no runtime %q", s.cfg.Runtime)
+	s.host, s.arch = info.Name, info.Architecture
+	for _, rt := range []string{s.cfg.Runtime, s.cfg.BoxRuntime} {
+		if rt == "" {
+			continue
+		}
+		if _, ok := info.Runtimes[rt]; !ok {
+			return fmt.Errorf("docker has no runtime %q", rt)
 		}
 	}
-	n, err := s.d.network(ctx, s.cfg.Network)
-	if err != nil {
-		return fmt.Errorf("network %s: %w", s.cfg.Network, err)
+	nets := []string{s.cfg.Network}
+	if s.cfg.WorkstationNetwork != "" {
+		nets = append(nets, s.cfg.WorkstationNetwork)
 	}
-	if !n.Internal {
-		return fmt.Errorf("network %s is not internal: a build container on it could reach anything; create it with internal: true", s.cfg.Network)
+	for _, name := range nets {
+		n, err := s.d.network(ctx, name)
+		if err != nil {
+			return fmt.Errorf("network %s: %w", name, err)
+		}
+		if !n.Internal {
+			return fmt.Errorf("network %s is not internal: a sandbox on it could reach anything; create it with internal: true", name)
+		}
 	}
-	ok, err := s.d.imageExists(ctx, s.cfg.Image)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		s.log.Info("pulling build image", "image", s.cfg.Image)
-		if err := s.d.pull(ctx, s.cfg.Image); err != nil {
+	for _, img := range []string{s.cfg.Image, s.cfg.BoxImage} {
+		if img == "" {
+			continue
+		}
+		ok, err := s.d.imageExists(ctx, img)
+		if err != nil {
 			return err
+		}
+		if !ok {
+			s.log.Info("pulling image", "image", img)
+			if err := s.d.pull(ctx, img); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-// Handler serves the four operations, each behind the token.
+// Handler serves the sandbox and box operations, each behind the token.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+sandbox.PathSandboxes, s.create)
 	mux.HandleFunc("POST "+sandbox.PathSandboxes+"/{id}/attach", s.attach)
 	mux.HandleFunc("GET "+sandbox.PathSandboxes+"/{id}/archive", s.archive)
 	mux.HandleFunc("DELETE "+sandbox.PathSandboxes+"/{id}", s.destroy)
+	mux.HandleFunc("GET "+sandbox.PathBoxes+"/{name}", s.boxGet)
+	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}", s.boxEnsure)
+	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/stop", s.boxStop)
+	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/tty", s.tty)
+	mux.HandleFunc("GET "+sandbox.PathBoxes+"/{name}/sessions/{session}", s.sessionExists)
+	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/sessions/{session}/kill", s.sessionKill)
 	return s.auth(mux)
 }
 
@@ -154,7 +183,10 @@ func (s *Server) profile(name string) (Config, error) {
 		if cfg.WorkstationProxy == "" {
 			return cfg, errors.New("the workstation profile is not configured here (ORBIT_SANDBOX_WORKSTATION_PROXY)")
 		}
-		cfg.Proxy = cfg.WorkstationProxy
+		cfg.Proxy, cfg.Network = cfg.WorkstationProxy, cfg.WorkstationNetwork
+		if cfg.WorkstationCredProxy != "" {
+			cfg.CredProxy = cfg.WorkstationCredProxy
+		}
 	default:
 		return cfg, fmt.Errorf("unknown profile %q", name)
 	}
@@ -324,6 +356,12 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	env, err := s.sealCredentials(c, ar.Env)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ar.Env = env
 	// The body is fully read before the connection is hijacked, so what
 	// follows on it is the process's stdin and nothing else.
 	if _, err := io.Copy(io.Discard, body); err != nil {
@@ -525,7 +563,7 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 		_ = srv.Shutdown(sctx)
 	}()
-	s.log.Info("sandboxd: serving", "listen", s.cfg.Listen, "image", s.cfg.Image, "network", s.cfg.Network)
+	s.log.Info("sandboxd: serving", "listen", s.cfg.Listen, "image", s.cfg.Image, "network", s.cfg.Network, "credproxy", s.cfg.CredProxy, "box_image", s.cfg.BoxImage, "box_runtime", s.cfg.BoxRuntime)
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

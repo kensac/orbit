@@ -50,7 +50,10 @@ log "migrated"
 out=$(docker run --rm "${common[@]}" "$image" validate /config) || fail "orbit validate /config"
 echo "$out"
 envs=()
-for v in $(sed -n 's/^environment referenced: //p' <<<"$out" | tr -d ','); do envs+=(-e "$v=smoke"); done
+for v in $(sed -n 's/^environment referenced: //p' <<<"$out" | tr -d ','); do
+  # Only variable names: an entry can read "A or B".
+  [[ $v =~ ^[A-Z_][A-Z0-9_]*$ ]] && envs+=(-e "$v=smoke")
+done
 
 docker run -d --name "$id-orbit" "${common[@]}" "${envs[@]}" \
   -e "ORBIT_API_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" \

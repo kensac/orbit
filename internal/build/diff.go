@@ -247,6 +247,8 @@ func (d Diff) Paths() []string {
 // they are. The backend credential itself is matched exactly as well.
 var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{20,}`),
+	// A credential proxy token (internal/credproxy): what a sandbox holds in the backend credential's place, the credential sealed under a key the sandbox never sees.
+	regexp.MustCompile(`orbit-cp1\.[A-Za-z0-9_-]{20,}`),
 	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{30,}`),
 	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{30,}`),
 	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`),
