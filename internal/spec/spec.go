@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -51,6 +52,8 @@ type Config struct {
 type Deployment struct {
 	// Timezone schedules are read in unless an agent names its own.
 	Timezone string `yaml:"timezone" json:"timezone"`
+	// loc is Timezone parsed; set by Validate, which rejects a zone that does not parse.
+	loc *time.Location
 	// PublicURL is where a person reaches the API (links in notifications).
 	PublicURL string                `yaml:"public_url" json:"public_url"`
 	Defaults  Defaults              `yaml:"defaults" json:"defaults"`
@@ -95,6 +98,22 @@ type GitHub struct {
 // AllowsRepo reports whether repo is one orbit may act on.
 func (d Deployment) AllowsRepo(repo string) bool {
 	return d.GitHub != nil && slices.Contains(d.GitHub.Repositories, repo)
+}
+
+// Location is the deployment's Timezone, parsed once when the configuration was validated; UTC before that.
+func (d Deployment) Location() *time.Location {
+	if d.loc == nil {
+		return time.UTC
+	}
+	return d.loc
+}
+
+// RunURL is a run's page under PublicURL, the link notifications and search results carry; "" when no public URL is configured, since a relative link is useless in a notification.
+func (d Deployment) RunURL(runID string) string {
+	if d.PublicURL == "" {
+		return ""
+	}
+	return strings.TrimRight(d.PublicURL, "/") + "/ui/runs/" + url.PathEscape(runID)
 }
 
 // AllowsRead reports whether repo is one an agent may read.
@@ -226,6 +245,8 @@ type Agent struct {
 	// delegateTargets is Delegates resolved against the configuration,
 	// sorted; set by Validate.
 	delegateTargets []string
+	// loc is Timezone parsed; set by Validate, which rejects a zone that does not parse.
+	loc *time.Location
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
@@ -554,6 +575,24 @@ func (a *Agent) RuleFor(actionType string) Rule {
 	return RuleDeny
 }
 
+// Location is the agent's Timezone, parsed once when the configuration was validated. An agent that was never validated (built in code, not loaded) reads as UTC.
+func (a *Agent) Location() *time.Location {
+	if a.loc == nil {
+		return time.UTC
+	}
+	return a.loc
+}
+
+// SetTimezone sets Timezone and the Location it parses to, refusing a zone the system's tz database does not have.
+func (a *Agent) SetTimezone(name string) error {
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return err
+	}
+	a.Timezone, a.loc = name, loc
+	return nil
+}
+
 // DelegateTargets is the agents this one may delegate to, sorted: Delegates
 // with "*" resolved against the configuration it was validated in.
 func (a *Agent) DelegateTargets() []string { return a.delegateTargets }
@@ -755,10 +794,12 @@ func (c *Config) applyDefaults() {
 // schedules, timezones and action types.
 func (c *Config) Validate() error {
 	var errs []error
-	d := c.Deployment
-	if _, err := time.LoadLocation(d.Timezone); err != nil {
+	if loc, err := time.LoadLocation(c.Deployment.Timezone); err != nil {
 		errs = append(errs, fmt.Errorf("orbit.yaml timezone: %w", err))
+	} else {
+		c.Deployment.loc = loc
 	}
+	d := c.Deployment
 	for name, ch := range d.Channels {
 		if !nameRE.MatchString(name) {
 			errs = append(errs, fmt.Errorf("channel %q: invalid name", name))
@@ -860,18 +901,14 @@ func (c *Config) validateAgent(a *Agent) []error {
 	if strings.TrimSpace(a.Charter) == "" {
 		at("charter is required")
 	}
-	if _, err := time.LoadLocation(a.Timezone); err != nil {
+	if err := a.SetTimezone(a.Timezone); err != nil {
 		at("timezone: %v", err)
 	}
 	if _, ok := c.Deployment.Runners[a.Runner]; !ok {
 		at("unknown runner %q", a.Runner)
 	}
-	loc, err := time.LoadLocation(a.Timezone)
-	if err != nil {
-		loc = time.UTC
-	}
 	for i, t := range a.Triggers {
-		if _, err := TriggerSchedule(t, loc); err != nil {
+		if _, err := TriggerSchedule(t, a.Location()); err != nil {
 			at("trigger %d: %v", i, err)
 		}
 	}
