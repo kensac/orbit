@@ -223,3 +223,43 @@ func TestAnInterruptedBuildsSandboxIsDestroyedBeforeTheNext(t *testing.T) {
 		t.Fatalf("ticket %s", tk.Status)
 	}
 }
+
+func TestAStackedBuildStartsFromTheTicketBelow(t *testing.T) {
+	b := newBuildEnv(t)
+	below, run := b.queueBuild(t, writeStep("/work/hello.txt", "hi\n"))
+	c, _ := b.s.ClaimRun(ctx, "w")
+	if err := b.e.Execute(ctx, c); err != nil || c.ID != run {
+		t.Fatal(err)
+	}
+	parent, _ := b.s.GetTicket(ctx, below)
+	sha := b.e.Current().Config.Agents["orbit"].SHA
+	r, _, err := b.s.CreateTicket(ctx, store.NewTicket{Kind: "request", Title: "On top", Body: "next", Agent: "orbit",
+		SpecSHA: sha, Repo: "kensac/orbit", StackOn: below})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, _ := json.Marshal(map[string]any{"steps": []map[string]any{writeStep("/work/next.txt", "next\n")}})
+	_, _ = b.s.ProposePlan(ctx, r.TicketID, "", "Add next.txt.\n\nFAKE-SCRIPT: "+string(script))
+	_, _ = b.s.ApprovePlan(ctx, r.TicketID, 1, "kanishk", "")
+	childRun, err := b.s.StartBuild(ctx, store.StartBuild{TicketID: r.TicketID, Agent: "orbit", SpecSHA: sha, Purpose: "build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ = b.s.ClaimRun(ctx, "w")
+	if c == nil || c.ID != childRun {
+		t.Fatalf("claimed %+v, want the stacked build %s", c, childRun)
+	}
+	if err := b.e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	child, _ := b.s.GetTicket(ctx, r.TicketID)
+	if child.Status != store.TicketReview || child.BaseSHA == nil || *child.BaseSHA != *parent.HeadSHA {
+		run, _ := b.s.GetRun(ctx, c.ID)
+		t.Fatalf("child = %+v (error %v), run error %v, want it based on %s", child, child.Error, run.Error, *parent.HeadSHA)
+	}
+	b.gh.Mu.Lock()
+	defer b.gh.Mu.Unlock()
+	if last := b.gh.Created[len(b.gh.Created)-1]; last["base"] != *parent.Branch || !strings.Contains(last["body"].(string), "Stacked on #7") {
+		t.Fatalf("the stacked PR = %v", last)
+	}
+}
