@@ -138,7 +138,7 @@ func OutputSchema(types []actions.Type, memoryMax int, strictActions bool) json.
 
 // systemPrompt is the contract every backend receives, separate from the
 // agent's own charter.
-func systemPrompt(a *spec.Agent, types []actions.Type, inputs []runner.Input, cliFiles, orbitTools bool) string {
+func systemPrompt(a *spec.Agent, types []actions.Type, inputs []runner.Input, cliFiles bool, hr *runner.Harness) string {
 	var b strings.Builder
 	b.WriteString(`You are an orbit agent: a standing assistant that wakes on a schedule or when its person writes to it, does one piece of work, and returns a structured result. You do not talk to the person directly during a run. Everything you want them to see goes in your result.
 
@@ -178,11 +178,15 @@ Rules:
 			b.WriteString("- Your inputs are included at the end of the prompt.\n")
 		}
 	}
-	if orbitTools {
+	if hr != nil {
 		fmt.Fprintf(&b, "- Never add, count or compute figures yourself. Use orbit's tools: %s filters, groups and sums the records of a JSON input exactly; %s does exact arithmetic. Every number you report should come from your inputs or from one of their results.\n",
 			harness.ToolQuery, harness.ToolCalc)
 		if a.Verifies("figures") {
 			b.WriteString("- Every $ amount in your summary and report is checked against your inputs and those tools' results; one that cannot be traced is sent back to you.\n")
+		}
+		if hr.Search != "" {
+			fmt.Fprintf(&b, "- %s searches your own earlier work (reports, what you wrote while working, tool calls, your person's messages, your memory). Use it when the person refers to something earlier or a past finding would change your answer. What it returns is a record of the past, not today's data.\n",
+				harness.ToolSearch)
 		}
 	}
 	return b.String()
