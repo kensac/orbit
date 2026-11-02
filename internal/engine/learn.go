@@ -213,7 +213,7 @@ func (e *Engine) learn(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 	var inputs []runner.Input
 	index := "# What you know\n\n(nothing yet)\n"
 	if len(entries) > 0 {
-		if index, inputs, err = e.knownInput(ctx, c, entries, workdir, "inputs", nil); err != nil {
+		if index, inputs, err = e.knownInput(ctx, false, c, entries, workdir, "inputs", nil); err != nil {
 			return nil, nil, nil, nil, nil, "", err
 		}
 	}
