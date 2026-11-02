@@ -120,7 +120,7 @@ func (s *Scheduler) catchUp(ctx context.Context, cfg *spec.Config) error {
 		if !a.IsEnabled() {
 			continue
 		}
-		loc, _ := time.LoadLocation(a.Timezone)
+		loc := a.Location()
 		for i, t := range a.Triggers {
 			sched, err := spec.TriggerSchedule(t, loc)
 			if err != nil {
@@ -159,7 +159,7 @@ func (s *Scheduler) Tick(ctx context.Context, cfg *spec.Config, since, now time.
 		if !a.IsEnabled() {
 			continue
 		}
-		loc, _ := time.LoadLocation(a.Timezone)
+		loc := a.Location()
 		for i, t := range a.Triggers {
 			sched, err := spec.TriggerSchedule(t, loc)
 			if err != nil {
