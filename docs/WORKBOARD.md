@@ -17,7 +17,8 @@ A self-hosted Go service on Kanishk's server (hetzner) that runs Claude Code on 
 | Memory | typed memory entries at profile, topic and agent scope with every version kept; agents write their own; a learning pass over quiet conversations; `orbit import claude-memory` | #28 #44 |
 | Tickets and builds | tickets on conversations, GitHub App tokens (App `orbit-kensac`, id 5571920), the build runner (sandboxed Claude Code, orbit commits and pushes), the ticket loop, `github:merge` gated on green checks | #9 #14 #17 |
 | Sandbox | `orbit sandboxd` (one locked-down container per build or workspace), `orbit egress` (allowlist proxy, never GitHub), the build image | #15 |
-| Operations | seamless upgrades (readiness, drain, resuming interrupted attempts), the worker fleet (capabilities, control vs worker, sessions across hosts), usage and health APIs | #11 #16 #25 |
+| Operations | seamless upgrades (readiness, drain, resuming interrupted attempts), the worker fleet (capabilities, control vs worker, sessions across hosts), usage and health APIs, a live subscription usage poller and deferring `priority: low` scheduled runs | #11 #16 #25 #55 |
+| Search | full-text search across messages, reports, narration, tool calls and memory (Postgres tsvector, trigger-derived), `GET /search`, the `search` MCP tool and in-run `mcp__orbit__search` | #42 |
 | Surfaces | thread and SSE API with authentik JWT auth, MCP server with OAuth proxy, mail (replies continue a conversation), uploads | #4 #21 #31 #45 |
 | Hygiene | API fixes, exact documented shapes, reserved agent names, migration uniqueness | #18 #19 #26 #29 #30 #40 |
 
@@ -29,7 +30,6 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 |---|---|---|
 | General `orbit` agent: a plain Claude Code session per conversation in a sandboxed persistent workspace, owner messages as instructions, agent self-edit (`agent:define`), uploads/files endpoints for the chat, stopping a running reply | #47, branch general-agent work | the chat UI already calls the endpoints described in docs/api.md |
 | Orchestration: `delegate`, task DAGs, mailboxes, decision gates, wakeups | #46 delegation | |
-| Search across everything stored, plus a live usage poller and deferring low-priority runs | #42 search | |
 | Attention events, inbox API, Web Push (portfolio PWA) | #41 orbit-push-attention | the portfolio is already a PWA |
 | Skills library (versioned, real Claude Code skills per run, agents writing their own), memory restore endpoint, per-agent hooks | #49 context-skills | |
 | Hook-driven live agent status | #37 agent-status | |
