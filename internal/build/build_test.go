@@ -364,3 +364,31 @@ func TestTrustBoundary(t *testing.T) {
 		t.Fatal("only orbit's own repository has orbit's trust boundary")
 	}
 }
+
+func TestARevisionCommitsOnTopOfThePRWithItsComments(t *testing.T) {
+	w := newWorld(t)
+	if _, err := w.runner.Run(ctx, w.job("77777777-7777-4777-8777-777777777777", write("/work/hello.txt", "hi\n")), w.deps()); err != nil {
+		t.Fatal(err)
+	}
+	first := w.remoteBranch()
+	rev := w.job("88888888-8888-4888-8888-888888888888", write("/work/hello.txt", "hello\n"))
+	rev.Purpose, rev.Review = "revise", json.RawMessage(`[{"path":"hello.txt","start_line":1,"end_line":1,"body":"say hello"}]`)
+	res, err := w.runner.Run(ctx, rev, w.deps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := runGit(t, w.bare, "log", "-1", "--format=%P", "refs/heads/orbit/3f2a9c1e")
+	if res.HeadSHA == first || parent != first || res.BaseSHA != "" || res.PRNumber != 7 {
+		t.Fatalf("revise = %+v, parent %s, first %s", res, parent, first)
+	}
+	if !strings.Contains(strings.Join(w.sb.Attaches()[1].Argv, " "), "applies a person's review comments") {
+		t.Fatal("the revision's system prompt says what it is for")
+	}
+	p := userPrompt(rev)
+	if !strings.Contains(p, "# Review comments") || !strings.Contains(p, `<orbit-data name="review.json">`) || !strings.Contains(p, "say hello") {
+		t.Fatalf("prompt = %s", p)
+	}
+	if fix := userPrompt(Job{Purpose: "fix", Failure: json.RawMessage(`[]`)}); strings.Contains(fix, "# Review comments") {
+		t.Fatal("a fix carries no review")
+	}
+}

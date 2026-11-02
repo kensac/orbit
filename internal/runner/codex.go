@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/spec"
 )
 
@@ -72,7 +73,7 @@ func (c *codex) Run(ctx context.Context, req Request, emit func(Event)) (*Result
 	var usage json.RawMessage
 	var threadID, failure string
 	stderr, runErr := runCLI(ctx, c.bin, args, childEnv(home, c.getenv, codexAuthEnv...), req.Workdir, prompt, func(line []byte) {
-		kind := eventKind(line)
+		kind := claudeproto.ParseLine(line).Kind
 		emit(Event{Kind: kind, Payload: line})
 		var e struct {
 			ThreadID string          `json:"thread_id"`
