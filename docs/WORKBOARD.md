@@ -1,6 +1,6 @@
 # Workboard
 
-The shared map of orbit's work for every coding agent: Claude Code sessions and Codex. Read [AGENTS.md](../AGENTS.md) first; this file says what exists, who is working on what right now, and what is free to take. Update it in the same PR as your work (move your item, add what you learned). Last full refresh: 2026-11-02.
+The shared map of orbit's work for every coding agent: Claude Code sessions and Codex. Read [AGENTS.md](../AGENTS.md) first; this file says what exists, who is working on what right now, and what is free to take. Update it in the same PR as your work (move your item, add what you learned). Last full refresh: 2026-11-02. The ordered plan is [ROADMAP.md](ROADMAP.md).
 
 ## What orbit is
 
