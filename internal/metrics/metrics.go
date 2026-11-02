@@ -23,7 +23,7 @@ var (
 		Name: "orbit_run_cost_usd_total", Help: "Cost the backend reported, by agent and runner kind. Subscription runs report an equivalent API cost.",
 	}, []string{"agent", "runner"})
 	lastSuccess = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "orbit_agent_last_success_timestamp_seconds", Help: "Unix time of the agent's last run that succeeded or was skipped by a gate.",
+		Name: "orbit_agent_last_success_timestamp_seconds", Help: "Unix time of the agent's last run that succeeded or was skipped by a gate (a fire skipped as missed is not counted).",
 	}, []string{"agent"})
 	skipped = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "orbit_runs_skipped_total", Help: "Runs a gate ended without a backend call, by agent and gate.",
@@ -71,8 +71,14 @@ func RunFinished(agent, status, runner string, d time.Duration, cost *float64) {
 	}
 }
 
-// RunSkipped records which gate ended a run; RunFinished is still called
-// with status skipped.
+// RunMissed records a schedule fire skipped as missed: a skipped run that, unlike a gate's, is no success.
+func RunMissed(agent string, d time.Duration) {
+	runs.WithLabelValues(agent, "skipped").Inc()
+	runDuration.WithLabelValues(agent).Observe(d.Seconds())
+}
+
+// RunSkipped records which gate ended a run; RunFinished (or RunMissed) is
+// still called with status skipped.
 func RunSkipped(agent, gate string) {
 	skipped.WithLabelValues(agent, gate).Inc()
 }

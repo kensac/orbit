@@ -184,6 +184,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `webhook` | `^[a-z][a-z0-9-]{0,62}$` | | A signed delivery to `POST /hooks/<agent>/<webhook>` starts a run (configuration.md, Webhooks); unique per agent. |
 | `secret` | variable | required with `webhook` | The signing secret: one of `webhook_secrets`, listing this agent. |
 | `max_bytes` | int | `1048576` (1 MiB) | `webhook` only: the largest body accepted, at most 8 MiB; a larger one is `413`. |
+| `missed_grace` | duration, `1m` to `168h` | the time to the trigger's next fire, at most `1h` | `schedule` and `rrule` only: a fire claimed later than this is skipped as `missed` instead of run (configuration.md, Triggers). |
 
 ### `sources[]`
 

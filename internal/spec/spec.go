@@ -397,6 +397,8 @@ type Trigger struct {
 	Secret string `yaml:"secret,omitempty" json:"secret,omitempty"`
 	// MaxBytes bounds a delivery's body; a larger one is refused.
 	MaxBytes int64 `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
+	// MissedGrace is how late a schedule fire may start; a later one is skipped as missed (MissedGraceFor).
+	MissedGrace Duration `yaml:"missed_grace,omitempty" json:"missed_grace,omitempty"`
 }
 
 // Schedule is when a trigger fires: the first fire strictly after a time,
@@ -947,6 +949,9 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		if t.Secret != "" || t.MaxBytes != 0 {
 			at("trigger %d: secret and max_bytes are for a webhook trigger", i)
+		}
+		if g := time.Duration(t.MissedGrace); g != 0 && (g < MinMissedGrace || g > MaxMissedGrace) {
+			at("trigger %d: missed_grace must be between %s and %s", i, MinMissedGrace, MaxMissedGrace)
 		}
 		if _, err := TriggerSchedule(t, a.Location()); err != nil {
 			at("trigger %d: %v", i, err)

@@ -311,7 +311,10 @@ Everything a person or an agent wrote is searchable (`Store.Search`, `GET /searc
 
 - **Scheduling:** one leader by advisory lock. A fire is enqueued at most once
   (`runs_one_per_fire`). After downtime, each trigger runs once for its newest
-  missed fire; a trigger that has never fired is not backfilled.
+  missed fire; a trigger that has never fired is not backfilled. A fire
+  claimed past its trigger's grace (`spec.MissedGraceFor`: the time to its
+  next fire, at most an hour, or `missed_grace`) ends `skipped`, gate
+  `missed`, instead of running late.
 - **Webhooks:** a signed delivery to `/hooks/{agent}/{trigger}` (`internal/api/hooks.go`, verified by `internal/webhook`) is enqueued with its body in one transaction, at most once per delivery id (`webhook_deliveries_once`), so a sender's retry or a second instance starts nothing new. The body is the run's `webhook` source, read from the database, so any host can run it.
 - **Low-priority work waits for the subscription.** With
   `defer_low_priority`, the scheduler's leader holds the scheduled runs of

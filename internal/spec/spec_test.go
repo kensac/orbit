@@ -473,6 +473,40 @@ func TestWebhookTriggersAreBoundToTheirSecrets(t *testing.T) {
 	}
 }
 
+func TestMissedGraceDefaultsToThePeriodUpToAnHour(t *testing.T) {
+	at := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		t    Trigger
+		want time.Duration
+	}{
+		{Trigger{Schedule: "*/5 * * * *"}, 5 * time.Minute},
+		{Trigger{Schedule: "0 9 * * *"}, time.Hour},
+		{Trigger{Schedule: "0 9 * * *", MissedGrace: Duration(3 * time.Hour)}, 3 * time.Hour},
+		{Trigger{RRule: "FREQ=MINUTELY;INTERVAL=20", Start: "2026-11-02T09:00"}, 20 * time.Minute},
+		{Trigger{RRule: "FREQ=DAILY;COUNT=1", Start: "2026-11-02T09:00"}, time.Hour},
+	} {
+		if got := MissedGraceFor(c.t, time.UTC, at); got != c.want {
+			t.Errorf("%+v: grace %s, want %s", c.t, got, c.want)
+		}
+	}
+	load := func(trig string) error {
+		_, err := Load(write(t, map[string]string{"orbit.yaml": base + "\nwebhook_secrets: {H: {scheme: github, agents: [a]}}\n",
+			"agents/a.yaml": "name: a\ncharter: x\ntriggers: [" + trig + "]\n"}))
+		return err
+	}
+	if err := load(`{schedule: "@daily", missed_grace: 6h}`); err != nil {
+		t.Fatal(err)
+	}
+	for bad, want := range map[string]string{
+		`{schedule: "@daily", missed_grace: 10s}`:   "missed_grace must be between 1m0s and 168h0m0s",
+		`{webhook: w, secret: H, missed_grace: 1h}`: "missed_grace is for a schedule trigger",
+	} {
+		if err := load(bad); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", bad, err, want)
+		}
+	}
+}
+
 func TestTimezonesAreParsedOnceAndCheckedAtLoad(t *testing.T) {
 	cfg, err := Load(write(t, map[string]string{"orbit.yaml": "timezone: Europe/Berlin\n" + base,
 		"agents/a.yaml": "name: a\ncharter: x\ntimezone: America/New_York\ntriggers: []\n",
