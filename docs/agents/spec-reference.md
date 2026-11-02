@@ -91,6 +91,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `commands` | list of argv prefixes | required | What a build's Bash calls may start with (`go test`, `make check`), plain words only. |
 | `protected` | list of globs | none | Paths a build may not change (`**` for any depth); `.github/**` always is. |
 | `max_diff_lines` | int | `2000` | Added plus deleted lines a build may produce, at most 20000. |
+| `trusted_scripts` | list of sha256 (lower-case hex) | none | The setup and cleanup scripts in the repository's `.orbit/build.yaml` a person reviewed; any other script fails the build. |
 
 ### `sandbox` (orbit.yaml)
 
