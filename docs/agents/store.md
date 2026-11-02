@@ -29,6 +29,7 @@ an agent's beliefs changed.
 - attempt (`run_attempts`, one per claim, written in `ClaimRun`'s
   transaction): open, then `succeeded | failed | skipped` with its run, `handed_back`
   (`HandBack`) or `lost` (`ReapStale`).
+- message read (`message_reads`, one per attempt that read a person's message, written in `StartRunContext`'s transaction): open, then `released_at` when the attempt hands the message back (`releaseMessages`: a failure, a requeue). At most one is open per message (`message_reads_one_holder`); a message with none open waits for the next run (`waitingMessage`). `messages.run_id` names the last run that read it and is never cleared by this image; the previous image, during a deploy, still clears it on a hand-back and writes no read row, and `waitingMessage` and `releaseMessages` account for both.
 - action: `pending -> approved | rejected`, `approved -> executing ->
   executed | failed`; `denied` and rule-approved are set at creation.
 - ticket: `ticketEdges` in `tickets.go` is the table (diagram in
