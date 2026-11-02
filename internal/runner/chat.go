@@ -58,6 +58,17 @@ type Chat struct {
 	// Interrupt, when closed, interrupts the turn (a person pressed stop):
 	// the CLI ends it with a result, and the run reports Interrupted.
 	Interrupt <-chan struct{}
+	// Fresh is a workspace a person changed since the last turn: a live
+	// process (its sandbox's copy of the workspace, or a cwd the restore
+	// replaced) is not reused, and the session resumes in a new one
+	// started from the workdir as it is now.
+	Fresh bool
+	// Steer carries the person's messages for the turn while it runs
+	// (steer.go); nil for none.
+	Steer <-chan SteerMessage
+	// Steered is told each steer message the turn took: from then on the
+	// turn answers it.
+	Steered func(id string)
 }
 
 // SandboxClient is sandboxd's four operations (*sandbox.Client).
@@ -201,7 +212,10 @@ func contains(list []string, s string) bool {
 // chatProc is a CLI a chat run talks to: on this host, or in a sandbox.
 type chatProc interface {
 	Turn(ctx context.Context, prompt string, emit func(claudeproto.Line)) (*claudeproto.Result, error)
-	Interrupt(ctx context.Context) error
+	Interrupt(ctx context.Context, cancelQueued bool) (*claudeproto.InterruptReceipt, error)
+	SendUUID(text, uuid string) error
+	CancelQueued(ctx context.Context, uuid string) (bool, error)
+	Capable(name string) bool
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
@@ -351,7 +365,9 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	var p *liveProc
 	mode, parent := "fresh", resume
 	if sess != nil && sess.Live != nil {
-		if p = sess.Live.take(sess.Key, key, resume); p != nil {
+		if req.Chat.Fresh {
+			sess.Live.discard(sess.Key)
+		} else if p = sess.Live.take(sess.Key, key, resume); p != nil {
 			mode = "live"
 		}
 	}
@@ -397,25 +413,57 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	p.tools.set(req.Chat, ws)
 	defer p.tools.set(nil, nil)
 
-	interrupted := false
+	var (
+		imu     sync.Mutex
+		stopped bool
+		receipt *claudeproto.InterruptReceipt
+	)
 	turnCtx, endTurn := context.WithCancel(ctx)
 	defer endTurn()
 	if req.Chat.Interrupt != nil {
 		go func() {
 			select {
 			case <-req.Chat.Interrupt:
-				interrupted = true
+				imu.Lock()
+				stopped = true
+				imu.Unlock()
 				ictx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
 				defer cancel()
-				if err := p.proc.Interrupt(ictx); err != nil {
+				// Stop means stop: steer messages still queued go with the turn.
+				r, err := p.proc.Interrupt(ictx, p.proc.Capable(claudeproto.CapInterruptCancelQueued))
+				if err != nil {
 					endTurn()
 				}
+				imu.Lock()
+				receipt = r
+				imu.Unlock()
 			case <-turnCtx.Done():
 			}
 		}()
 	}
-	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) { emit(Event{Kind: l.Kind, Payload: l.Raw}) })
+	var steer *steering
+	if req.Chat.Steer != nil {
+		steer = newSteering(p.proc, req.Chat, emit)
+		go steer.feed(turnCtx, req.Chat.Steer)
+	}
+	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) {
+		if steer != nil {
+			steer.observe(l)
+		}
+		emit(Event{Kind: l.Kind, Payload: l.Raw})
+	})
 	endTurn()
+	imu.Lock()
+	interrupted, rec := stopped, receipt
+	imu.Unlock()
+	// Every steer the turn did not take is withdrawn; one that may still
+	// run means this process cannot be kept.
+	clean := true
+	if steer != nil {
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
+		clean = err != nil || steer.finish(wctx, rec)
+		cancel()
+	}
 	if sb, ok := p.proc.(*sandboxProc); ok {
 		// The workspace comes back after every turn, a failed one too:
 		// what the agent wrote is the person's.
@@ -440,6 +488,10 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	if res.IsError && !interrupted {
 		dropOrKill(sess, p)
 		return out, fmt.Errorf("%w: claude-code %s/%s: %s", ErrBackend, res.Subtype, res.TerminalReason, firstLine(res.Failure()))
+	}
+	if !clean {
+		dropOrKill(sess, p)
+		return out, nil
 	}
 	if interrupted || sess == nil || sess.Live == nil || res.SessionID == "" || (!sess.Open && mode != "live") {
 		p.proc.Close(claudeproto.CloseGrace)
