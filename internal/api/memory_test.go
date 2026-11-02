@@ -1,9 +1,12 @@
 package api_test
 
 import (
+	"maps"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/kensac/orbit/internal/spec"
 )
 
 func TestMemoryEntriesAPI(t *testing.T) {
@@ -60,6 +63,24 @@ func TestMemoryEntriesAPI(t *testing.T) {
 	}
 	if code, out := call(t, "GET", pub+"/memory/topics", tok, ""); code != 200 || out["topics"].([]any)[0].(map[string]any)["entries"].(float64) != 1 {
 		t.Fatalf("topics = %d %v", code, out)
+	}
+	// The built-in orbit agent reads every topic, from its spec.
+	old := v.e.Current().Config
+	cfg := *old
+	cfg.Agents = maps.Clone(old.Agents)
+	for _, b := range spec.Builtins(cfg.Deployment) {
+		cfg.Agents[b.Name] = b
+	}
+	if err := v.e.SetConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	code, out = call(t, "GET", pub+"/agents/orbit/context", tok, "")
+	if code != 200 || out["entries"].(float64) != 1 || len(out["topics"].([]any)) != 1 ||
+		out["topics"].([]any)[0].(map[string]any)["name"] != "finance" || out["topics"].([]any)[0].(map[string]any)["from"].([]any)[0] != "spec" {
+		t.Fatalf("orbit's context = %d %v", code, out)
+	}
+	if _, out := call(t, "GET", pub+"/memory/topics", tok, ""); strings.Join(strs(out["topics"].([]any)[0].(map[string]any)["agents"]), ",") != "a,orbit" {
+		t.Fatalf("finance's agents = %v", out)
 	}
 	if code, _ := call(t, "DELETE", pub+"/agents/a/topics/finance", tok, ""); code != 200 {
 		t.Fatalf("detach = %d", code)
@@ -159,4 +180,12 @@ func TestLearnNowAPI(t *testing.T) {
 	if cs := out["conversations"].([]any); len(cs) != 1 || cs[0].(map[string]any)["purpose"] != "learning" {
 		t.Fatalf("archived = %v", out)
 	}
+}
+
+func strs(v any) []string {
+	var out []string
+	for _, x := range v.([]any) {
+		out = append(out, x.(string))
+	}
+	return out
 }

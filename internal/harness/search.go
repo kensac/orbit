@@ -35,6 +35,11 @@ type SearchResponse struct {
 	Error  string         `json:"error,omitempty"`
 }
 
+// SearchDescription is the tool's description, as both the harness's tool server and a chat run's tools give it.
+const SearchDescription = "Full-text search over your own earlier work: your runs' reports and errors, what you wrote " +
+	"while working, your tool calls' inputs, your person's messages, your questions and your memory, and the memory entries you read " +
+	"(your own, your person's profile, your topics'). Ranked best first, matches marked «like this», each with its run and conversation."
+
 // SearchSchema is the tool's input schema.
 var SearchSchema = map[string]any{
 	"type":                 "object",
@@ -44,7 +49,7 @@ var SearchSchema = map[string]any{
 		"q": map[string]any{"type": "string",
 			"description": `what to find: words, "a quoted phrase", "or" between alternatives, -word to exclude`},
 		"kind": map[string]any{"type": "string",
-			"description": "comma list of message (your person's), question (yours), report, error, narration (what you wrote while working), tool_call (a tool's input), memory (your memory document), memory_entry (a fact you keep)"},
+			"description": "comma list of message (your person's), question (yours), report, error, narration (what you wrote while working), tool_call (a tool's input), memory (your memory document), memory_entry (an entry you read: a fact about your person or their world)"},
 		"conversation_id": map[string]any{"type": "string", "description": "only this conversation's"},
 		"from":            map[string]any{"type": "string", "description": "on or after: YYYY-MM-DD, or an RFC 3339 time"},
 		"to":              map[string]any{"type": "string", "description": "up to: YYYY-MM-DD (that day included), or an RFC 3339 time"},
@@ -86,17 +91,22 @@ func Search(socket string, req SearchRequest) (map[string]any, error) {
 	return resp.Result, nil
 }
 
-// ReadSearchRequest reads one request line, for the engine's side.
-func ReadSearchRequest(conn net.Conn) (SearchRequest, error) {
+// DecodeSearchRequest reads one search's arguments, refusing a field the schema does not have.
+func DecodeSearchRequest(b []byte) (SearchRequest, error) {
 	var req SearchRequest
-	line, err := bufio.NewReader(io.LimitReader(conn, 64<<10)).ReadBytes('\n')
-	if err != nil {
-		return req, err
-	}
-	dec := json.NewDecoder(bytes.NewReader(line))
+	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		return req, fmt.Errorf("search: %w", err)
 	}
 	return req, nil
+}
+
+// ReadSearchRequest reads one request line, for the engine's side.
+func ReadSearchRequest(conn net.Conn) (SearchRequest, error) {
+	line, err := bufio.NewReader(io.LimitReader(conn, 64<<10)).ReadBytes('\n')
+	if err != nil {
+		return SearchRequest{}, err
+	}
+	return DecodeSearchRequest(line)
 }
