@@ -54,6 +54,9 @@ type Request struct {
 	Chat *Chat
 	// SkillsPlugin is a plugin directory holding the run's skills (engine/skills.go), loaded with --plugin-dir; claude-code only.
 	SkillsPlugin string
+	// Stall, when set, watches a chat or live turn for a stall (stall.go):
+	// such a turn ends with ErrStalled. claude-code only.
+	Stall *Stall
 }
 
 // Harness is orbit's own code inside the CLI's process tree.

@@ -251,3 +251,65 @@ func TestAMessageOnTheOtherInstanceResumesTheConversationsSession(t *testing.T) 
 		t.Fatalf("on b: resume %q key %q", fr.got.Session.Resume, fr.got.Session.Key)
 	}
 }
+
+func TestAStalledTurnHandsTheRunBackToContinueItsSession(t *testing.T) {
+	fr := &fakeRunner{output: goodOutput, stalls: 1}
+	e, s, _ := harness(t, fr)
+	c := claim(t, e, s)
+	if err := e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	first := fr.got
+	if first.Stall == nil || first.Stall.After != 10*time.Minute {
+		t.Fatalf("stall = %+v, want the default watchdog", first.Stall)
+	}
+	if open, err := first.Stall.ToolOpen(ctx); err != nil || open {
+		t.Fatalf("tool open = %v %v", open, err)
+	}
+	run, _ := s.GetRun(ctx, c.ID)
+	at := attempts(t, s, c.ID)
+	if run.Status != "queued" || len(at) != 1 || *at[0].Outcome != "handed_back" || *at[0].SessionID != "session-1" {
+		t.Fatalf("after the stall: run %s, attempts %+v", run.Status, at)
+	}
+	if _, err := os.Stat(first.Workdir); err != nil {
+		t.Fatalf("the stalled attempt's workdir is gone: %v", err)
+	}
+
+	c2, err := s.ClaimRun(ctx, "test")
+	if err != nil || c2 == nil || c2.ID != c.ID {
+		t.Fatalf("claim = %+v %v", c2, err)
+	}
+	if err := e.Execute(ctx, c2); err != nil {
+		t.Fatal(err)
+	}
+	got := fr.got
+	if c2.Attempt != 2 || got.Session == nil || got.Session.Resume != "session-1" ||
+		!strings.Contains(got.Prompt, "orbit interrupted it") || strings.Contains(got.Prompt, "restarted") {
+		t.Fatalf("attempt %d resumed %+v with:\n%s", c2.Attempt, got.Session, got.Prompt)
+	}
+	if run, _ = s.GetRun(ctx, c.ID); run.Status != "succeeded" {
+		t.Fatalf("run %s", run.Status)
+	}
+}
+
+func TestARunThatStallsOnEveryAttemptFails(t *testing.T) {
+	fr := &fakeRunner{output: goodOutput, stalls: store.MaxAttempts}
+	e, s, _ := harness(t, fr)
+	c := claim(t, e, s)
+	id := c.ID
+	for i := 1; i <= store.MaxAttempts; i++ {
+		if i > 1 {
+			var err error
+			if c, err = s.ClaimRun(ctx, "test"); err != nil || c == nil || c.ID != id {
+				t.Fatalf("claim %d = %+v %v", i, c, err)
+			}
+		}
+		if err := e.Execute(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run, _ := s.GetRun(ctx, id)
+	if run.Status != "failed" || run.Error == nil || !strings.Contains(*run.Error, "stalled") || !strings.Contains(*run.Error, "attempt 3 of 3") {
+		t.Fatalf("run %s: %v", run.Status, run.Error)
+	}
+}

@@ -420,3 +420,32 @@ func TestUpcastKeepsNewerRowsAsStored(t *testing.T) {
 		t.Fatal("a version 0 row read without error")
 	}
 }
+
+func TestAStalledTurnIsInterruptedWhateverEndedIt(t *testing.T) {
+	// The interrupt's result closed the turn first; the watchdog's event
+	// after it says the turn did not finish its work.
+	m := &memJournal{}
+	m.feed(t, 1, `{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"}]}}`,
+		`{"type":"result","subtype":"error_during_execution","is_error":true}`,
+		`orbit.stalled {"idle_ms":600000,"stall_ms":600000}`)
+	var tb Turn
+	m.latest(t, "turn:1.1", &tb)
+	if tb.State != TurnInterrupted || tb.Reason != ReasonStalled || tb.Outcome != "" || tb.CompletedAt == nil {
+		t.Fatalf("turn = %+v", tb)
+	}
+	// A kill left the turn open; the event closes it, and the attempt's
+	// end finds nothing open.
+	m = &memJournal{}
+	m.feed(t, 1, `{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"}]}}`,
+		`orbit.stalled {"idle_ms":600000,"stall_ms":600000}`)
+	m.latest(t, "turn:1.1", &tb)
+	if tb.State != TurnInterrupted || tb.Reason != ReasonStalled || m.state.OpenTurn != "" {
+		t.Fatalf("turn = %+v, open %q", tb, m.state.OpenTurn)
+	}
+	if ws, _ := Close(&m.state, "handed_back", t0.Add(time.Hour), m.look); ws != nil {
+		t.Fatalf("the hand-back closed the turn again: %+v", ws)
+	}
+	if !strings.Contains(m.dump(), `"code":"orbit.stalled"`) {
+		t.Fatalf("no status item for the event: %s", m.dump())
+	}
+}

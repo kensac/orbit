@@ -377,6 +377,8 @@ type chatTurn struct {
 	plugin string
 	// repos is what the agent's repositories add (repos.go), or nil.
 	repos *repoRun
+	// stall watches the turn (runner.Stall).
+	stall *runner.Stall
 }
 
 // errCancelled is a run a person stopped; Execute records it cancelled.
@@ -435,7 +437,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	defer cancel()
 	res, err := r.Run(runCtx, runner.Request{
 		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
-		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin,
+		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin, Stall: t.stall,
 	}, func(ev runner.Event) { t.emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))

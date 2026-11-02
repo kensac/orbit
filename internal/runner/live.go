@@ -163,6 +163,7 @@ func (l *Live) expire(p *liveProc) {
 // a sandbox (chat.go).
 type liveProcess interface {
 	Turn(ctx context.Context, prompt string, emit func(claudeproto.Line)) (*claudeproto.Result, error)
+	LastLine() time.Time
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
@@ -243,7 +244,14 @@ func (c *claudeCode) runLive(ctx context.Context, sess *Session, args, env []str
 		sess.Live.drop(p)
 		return nil, true, err
 	}
+	stopWatch := req.Stall.watch(ctx, p.proc, func(ctx context.Context) error { return p.proc.Interrupt(ctx) })
 	final, err = p.turn(ctx, req.Prompt, emit)
+	stopWatch()
+	if req.Stall.Fired() {
+		emit(req.Stall.event())
+		sess.Live.drop(p)
+		return nil, true, stallError(req.Stall)
+	}
 	if err != nil {
 		sess.Live.drop(p)
 		return nil, true, err

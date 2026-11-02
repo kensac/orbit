@@ -300,6 +300,11 @@ type SessionSpec struct {
 	// person's message started, and feeds the next runs into it instead of
 	// starting a process per run. Zero means no live process.
 	Live Duration `yaml:"live,omitempty" json:"live,omitempty"`
+	// Stall is how long a chat or live turn may go without a line from the
+	// CLI, while no tool call is running, before orbit interrupts it and
+	// hands the run back to continue the session (runner.Stall). Zero is
+	// DefaultSessionStall.
+	Stall Duration `yaml:"stall,omitempty" json:"stall,omitempty"`
 }
 
 // Hook is one Claude Code hook of an agent: at Event (and, for a tool event, a tool Matcher matches), orbit's hook binary does one thing: Say tells the model something (as context; at Stop it sends the model back once with it), Deny refuses the tool with a reason (PreToolUse), or Run runs a command with the event on stdin, in the run's workdir, with an empty environment but PATH, under Timeout.
@@ -360,6 +365,19 @@ const MaxSessionIdle = 24 * time.Hour
 // a resident CLI process; an hour covers a conversation with pauses, and
 // resume picks up after it closes.
 const MaxSessionLive = time.Hour
+
+// DefaultSessionStall is session.stall when a spec names none: a model
+// thinking or a reply streaming writes far more often, and the CLI's
+// keep_alive covers a quiet API call; a tool call, silent for as long as it
+// runs, is never a stall.
+const DefaultSessionStall = 10 * time.Minute
+
+// MinSessionStall and MaxSessionStall bound session.stall: under a minute a
+// slow first token is no stall; past a day the run's timeout is the bound.
+const (
+	MinSessionStall = time.Minute
+	MaxSessionStall = 24 * time.Hour
+)
 
 // Trigger is one way an agent wakes: a cron Schedule, or an RRule (RFC
 // 5545, internal/rrule) anchored at Start. Exactly one is set; the struct
@@ -555,6 +573,14 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 
 // Verifies reports whether the agent's spec names a check.
 func (a *Agent) Verifies(check string) bool { return slices.Contains(a.Verify, check) }
+
+// StallAfter is the agent's session.stall, or DefaultSessionStall.
+func (a *Agent) StallAfter() time.Duration {
+	if a.Session != nil && a.Session.Stall > 0 {
+		return time.Duration(a.Session.Stall)
+	}
+	return DefaultSessionStall
+}
 
 // IsEnabled reports whether the agent's triggers fire. Manual runs work
 // either way.
@@ -1170,6 +1196,9 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		if ss.Idle < 0 || time.Duration(ss.Idle) > MaxSessionIdle {
 			at("session.idle must be between 0 and %s", MaxSessionIdle)
+		}
+		if ss.Stall != 0 && (time.Duration(ss.Stall) < MinSessionStall || time.Duration(ss.Stall) > MaxSessionStall) {
+			at("session.stall must be between %s and %s", MinSessionStall, MaxSessionStall)
 		}
 		if ss.Live < 0 || time.Duration(ss.Live) > MaxSessionLive {
 			at("session.live must be between 0 and %s", MaxSessionLive)

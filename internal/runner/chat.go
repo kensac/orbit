@@ -204,6 +204,7 @@ type chatProc interface {
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
+	LastLine() time.Time
 }
 
 // chatTools routes a process's MCP requests to the turn in progress: a
@@ -369,7 +370,9 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			}
 		}()
 	}
+	stopWatch := req.Stall.watch(turnCtx, p.proc, func(ctx context.Context) error { return p.proc.Interrupt(ctx) })
 	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) { emit(Event{Kind: l.Kind, Payload: l.Raw}) })
+	stopWatch()
 	endTurn()
 	if sb, ok := p.proc.(*sandboxProc); ok {
 		// The workspace comes back after every turn, a failed one too:
@@ -377,6 +380,14 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		if serr := sb.sync(context.WithoutCancel(ctx)); serr != nil && err == nil {
 			err = fmt.Errorf("read the workspace back from the sandbox: %w", serr)
 		}
+	}
+	if req.Stall.Fired() {
+		// Whatever the interrupt left (a result, or a kill's end of
+		// stream), the turn did not finish its work: the next attempt
+		// continues the session.
+		emit(req.Stall.event())
+		dropOrKill(sess, p)
+		return nil, stallError(req.Stall)
 	}
 	if err != nil {
 		dropOrKill(sess, p)

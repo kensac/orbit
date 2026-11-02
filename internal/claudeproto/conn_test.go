@@ -434,3 +434,19 @@ func (w *logWriter) String() string {
 	defer w.mu.Unlock()
 	return w.b.String()
 }
+
+func TestLastLineCountsKeepAlives(t *testing.T) {
+	c := newCLI(t, Handler{})
+	if !c.conn.LastLine().IsZero() {
+		t.Fatal("a line before the CLI wrote one")
+	}
+	before := time.Now()
+	c.say(`{"type":"keep_alive"}`)
+	deadline := time.Now().Add(5 * time.Second)
+	for c.conn.LastLine().Before(before) {
+		if time.Now().After(deadline) {
+			t.Fatal("a keep_alive was not counted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

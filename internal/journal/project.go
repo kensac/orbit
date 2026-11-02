@@ -203,6 +203,11 @@ func (p *projector) event() {
 // ---------------------------------------------------------------- orbit
 
 func (p *projector) orbit() {
+	if p.ev.Kind == "orbit.stalled" {
+		p.stalled()
+		p.status()
+		return
+	}
 	if p.ev.Kind != "orbit.permission" {
 		p.status()
 		return
@@ -227,6 +232,30 @@ func (p *projector) orbit() {
 		ap.State = ApprovalAllowed
 	}
 	p.write(id, KindApproval, "", ap)
+}
+
+// stalled ends the attempt's latest turn as interrupted, reason stalled: the
+// watchdog writes its event after the turn's last line, so the turn may
+// already have closed on the result the interrupt produced, which is not the
+// turn finishing its work.
+func (p *projector) stalled() {
+	id := p.a.OpenTurn
+	if id == "" {
+		if p.a.Turns == 0 {
+			return
+		}
+		id = "turn:" + strconv.Itoa(p.ev.Attempt) + "." + strconv.Itoa(p.a.Turns)
+	}
+	var t Turn
+	if !p.latest(id, &t) {
+		t = Turn{StartedAt: p.ev.At}
+	}
+	at := p.ev.At
+	t.State, t.Outcome, t.Reason, t.CompletedAt = TurnInterrupted, "", ReasonStalled, &at
+	// The revision belongs to its own turn, as closeTurn's does.
+	p.a.OpenTurn = id
+	p.write(id, KindTurn, "", t)
+	p.a.OpenTurn = ""
 }
 
 // ---------------------------------------------------------------- claude code

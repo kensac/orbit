@@ -170,15 +170,19 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		log.Warn("attempt stopped: it lost its claim on the run", "attempt", c.Attempt)
 		return nil
 	}
-	if ctx.Err() != nil {
-		// orbit is stopping, not the run failing: give it back to the
-		// queue with what it spent, and the next attempt, here or on
-		// another instance, continues its session (planRecovery).
+	if ctx.Err() != nil || (errors.Is(err, runner.ErrStalled) && st.stalledBack(c.Attempt)) {
+		// orbit is stopping, or the turn stalled, not the run failing:
+		// give it back to the queue with what it spent, and the next
+		// attempt, here or on another instance, continues its session
+		// (planRecovery). A run stalled on its last attempt fails below.
 		cost, total := st.spent()
-		log.Info("handed back", "attempt", c.Attempt, "session", st.sessionID)
+		log.Info("handed back", "attempt", c.Attempt, "session", st.sessionID, "stalled", st.stalled)
 		// The next attempt may be claimed on another host.
 		e.saveSession(ctx, c, st.home, st.workdir, st.sessionID)
 		return e.Store.HandBack(context.WithoutCancel(ctx), c.ID, c.Attempt, cost, total)
+	}
+	if errors.Is(err, runner.ErrStalled) {
+		err = fmt.Errorf("%w (attempt %d of %d)", err, c.Attempt, store.MaxAttempts)
 	}
 	var sk *gateSkip
 	if errors.As(err, &sk) {
@@ -307,7 +311,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	home := filepath.Join(workdir, ".home")
 	inputsDir := "inputs"
-	keepScratch := func() bool { return ctx.Err() != nil }
+	keepScratch := func() bool { return ctx.Err() != nil || st.stalledBack(c.Attempt) }
 	withSession := a.Session != nil && a.Session.Resume && claudeCode
 	chat := a.Chat && claudeCode
 	if withSession || chat {
@@ -564,11 +568,18 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err != nil {
 		return nil, nil, err
 	}
+	var stall *runner.Stall
+	if claudeCode {
+		stall = &runner.Stall{After: a.StallAfter(), ToolOpen: func(ctx context.Context) (bool, error) {
+			return e.Store.ToolCallRunning(ctx, c.ID, c.Attempt)
+		}}
+	}
 	if chat {
-		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
+		out, res, err := e.chatTurn(ctx, snap, a, c, r, chatTurn{stall: stall, workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
 			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec,
 			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun})
+		return out, res, st.sawStall(err)
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
 	if tk != nil {
@@ -609,13 +620,13 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	defer cancel()
 	res, err := r.Run(runCtx, runner.Request{
 		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
-		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin,
+		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin, Stall: stall,
 	}, func(ev runner.Event) { emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
 	}
 	if err != nil {
-		return nil, res, err
+		return nil, res, st.sawStall(err)
 	}
 	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "out", "output.json", "application/json", res.Output); err != nil {
 		return nil, res, err

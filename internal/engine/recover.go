@@ -35,6 +35,22 @@ type attemptState struct {
 	cancelOnce sync.Once
 	// task is the task whose conversation the run is in, nil for none.
 	task *store.Task
+	// stalled is set when the backend ended the turn as stalled
+	// (runner.ErrStalled).
+	stalled bool
+}
+
+// sawStall records whether err is a stalled turn, and passes it on.
+func (st *attemptState) sawStall(err error) error {
+	st.stalled = errors.Is(err, runner.ErrStalled)
+	return err
+}
+
+// stalledBack is whether the attempt ends by handing its run back because
+// its turn stalled: on every attempt but the last (store.MaxAttempts), so a
+// run that stalls every time fails rather than looping.
+func (st *attemptState) stalledBack(attempt int) bool {
+	return st.stalled && attempt < store.MaxAttempts
 }
 
 // stop closes cancel once.
@@ -70,6 +86,8 @@ type recovery struct {
 	baseKnown bool
 	inputs    []store.StoredInput
 	seen      map[string]bool
+	// stalled is a previous attempt the stall watchdog ended.
+	stalled bool
 }
 
 // planRecovery decides whether this attempt continues the previous
@@ -117,6 +135,9 @@ func (e *Engine) planRecovery(ctx context.Context, a *spec.Agent, c *store.Claim
 	}
 
 	rec = &recovery{from: prev.Attempt, sessionID: *prev.SessionID, seen: map[string]bool{}}
+	if rec.stalled, err = e.Store.AttemptStalled(ctx, c.ID, prev.Attempt); err != nil {
+		return nil, "", err
+	}
 	// An attempt whose process died was costed by nobody; its transcript
 	// says what it spent when the CLI saved one (a SIGTERM does, a SIGKILL
 	// does not).
@@ -186,8 +207,12 @@ func restoreInputs(rec *recovery, workdir string) ([]runner.Input, error) {
 // the agent since.
 func recoveryPrompt(rec *recovery, rc *store.RunContext, loc *time.Location) string {
 	var b strings.Builder
-	b.WriteString("orbit was restarted while you were working on this run, so your previous turn was interrupted. " +
-		"Continue from exactly where you stopped: do not redo work already done above, your inputs are where they were, " +
+	if rec.stalled {
+		b.WriteString("Your previous turn wrote nothing for so long, with no tool running, that orbit interrupted it. ")
+	} else {
+		b.WriteString("orbit was restarted while you were working on this run, so your previous turn was interrupted. ")
+	}
+	b.WriteString("Continue from exactly where you stopped: do not redo work already done above, your inputs are where they were, " +
 		"and finish by returning the structured output as before.\n")
 	var fresh []store.Message
 	for _, m := range rc.Messages {

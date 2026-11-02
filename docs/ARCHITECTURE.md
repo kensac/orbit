@@ -92,6 +92,7 @@ so `ORBIT_DATA_DIR` must be a persistent volume for resume to survive a restart.
   carries that turn's own `structured_output` (verified on 2.1.316). Any
   failure, a crash, a timeout or a mismatch closes the process; at most
   `runner.MaxLive` (4) are open, the least recently used idle one closed first.
+- **Stall watchdog.** A chat or live turn is watched (`runner.Stall`): every line the CLI writes, `keep_alive` included (counted by `claudeproto.Conn` before it drops them), is a sign of life. With none for `session.stall` (default 10 minutes) and no tool call running in the attempt's journal (a tool may be silent for as long as it runs), orbit interrupts the turn, kills the process when the turn has not ended `claudeproto.CloseGrace` after the interrupt was sent, writes `orbit.stalled` (the journal ends that turn `interrupted` with `reason: stalled`) and hands the run back, so the next attempt continues the session, told why. On the last of `store.MaxAttempts` attempts the run fails instead. A one-shot process (no live process, not a chat) is bounded by the run's timeout alone.
 - **Recorded per run:** `session_mode` (fresh, resumed, live),
   `session_parent`, `session_depth`, `session_id`, and `session_cost_usd`. The
   CLI reports a cumulative cost per session (across turns, resumes and forks),
@@ -363,7 +364,7 @@ for twice. The rollout contract is in docs/agents/deployment.md.
   scheduler keeps leading through a drain (it only enqueues, and the ready
   instance claims). A second signal hands back at once.
 - **Hand-back without paying twice.** A run stopped mid-flight (the cap, a
-  second signal, a lost claim, a crash the reaper finds) is continued, not
+  second signal, a lost claim, a crash the reaper finds, a stalled turn) is continued, not
   restarted: the next attempt resumes the interrupted attempt's Claude Code
   session with `--resume <id> --fork-session` (never writing into it), on
   the inputs that attempt read (restored from its artifacts, not refetched),
