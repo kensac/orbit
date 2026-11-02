@@ -57,7 +57,7 @@ func Start(c Command, h Handler) (*Process, error) {
 	p.Conn = NewConn(stdout, stdin, h)
 	go func() {
 		// Wait closes stdout, so the stream ends first.
-		<-p.Conn.Done()
+		<-p.Done()
 		_ = cmd.Wait()
 		close(p.exited)
 	}()

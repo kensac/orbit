@@ -9,8 +9,8 @@ import (
 
 // The CLI's credentials. A subscription token (claude setup-token) and an API key are the two orbit hands a model; the others are listed so that none can ride along with them.
 const (
-	OAuthToken = "CLAUDE_CODE_OAUTH_TOKEN"
-	APIKey     = "ANTHROPIC_API_KEY"
+	OAuthToken = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // a variable's name, not a credential
+	APIKey     = "ANTHROPIC_API_KEY"       //nolint:gosec // a variable's name, not a credential
 )
 
 // authNames are every variable the CLI authenticates with. A child gets at most one of them.
