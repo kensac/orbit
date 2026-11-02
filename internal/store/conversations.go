@@ -62,6 +62,8 @@ type Conversation struct {
 	NeedsInput bool `json:"needs_input" db:"-"`
 	// TicketID is set when the conversation is a ticket's.
 	TicketID *string `json:"ticket_id"`
+	// Purpose is learning for the agent's learning conversation, where its learning runs are (archived); null for a person's.
+	Purpose *string `json:"purpose"`
 	// AgentStatus is the agent's status in this conversation
 	// (status.Aggregate over its current run).
 	AgentStatus status.Status `json:"agent_status" db:"-"`
@@ -78,7 +80,7 @@ func (c *Conversation) derive() {
 }
 
 var conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived, c.created_at, c.last_activity_at,
-	(SELECT t.id::text FROM tickets t WHERE t.conversation_id = c.id),
+	(SELECT t.id::text FROM tickets t WHERE t.conversation_id = c.id), c.purpose,
 	EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND ` + openQuestion + `),
 	EXISTS (SELECT 1 FROM actions x JOIN runs xr ON xr.id = x.run_id
 	        WHERE xr.conversation_id = c.id AND x.status = 'pending'),

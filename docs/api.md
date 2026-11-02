@@ -233,6 +233,7 @@ conversation:
   {"kind": "run", "id": "uuid", "at": "...", "trigger": "message",
    "status": "succeeded", "attempt": 1,
    "started_at": "...", "finished_at": "...", "steps": 4,
+   "turn": {"state": "completed", "outcome": "success", "started_at": "...", "completed_at": "..."},
    "summary": "...", "report": "<markdown>",
    "questions": [{"id": "uuid-of-the-question-message", "body": "...", "open": true}],
    "error": null, "cost_usd": 0.03, "gate": null,
@@ -258,14 +259,17 @@ conversation:
   `reply_to`, when set, is the message it answers. `run_id` is the run that
   read a person's message (`null` until one starts) or the run that asked a
   question.
-- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again) or `build` (a ticket's build run, docs/tickets.md). `status` is
+- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again) `build` (a ticket's build run, docs/tickets.md) or `learn` (a learning run, below; only in an agent's learning conversation). `status` is
   `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
   ended without a backend call because a gate, code, found nothing to judge;
   `gate` names it, and is `null` for every other status). `attempt` counts
   claims (0 while never started; a run interrupted by a deploy is claimed
   again). `started_at` is the latest attempt's start, `null` while queued.
   `finished_at` is `null` until final. `steps` is the number of tool calls in
-  the latest attempt, exactly the `tool` events its stream shows. `summary`,
+  the latest attempt's timeline, exactly the `tool` events its stream shows.
+  `turn` is the body of the newest revision of the timeline's latest journal
+  turn (`state`, `outcome`, ...; as in The journal), `null` before the
+  backend was called. `summary`,
   `report`, `error` and `cost_usd` are `null` when absent. `questions` and
   `actions` are always arrays.
 - **Questions** appear twice by design: in their run's `questions`, and as
@@ -313,51 +317,26 @@ message, in the default conversation: `202 {"run_id": "uuid"}`.
 
 ## Streaming a run
 
-`GET /runs/{id}/stream` is Server-Sent Events. Events, in order:
+`GET /runs/{id}/stream` is Server-Sent Events over the run's journal (Runs, events, artifacts: The journal): every row of the latest attempt's timeline, then each new row as it is written. Events, in order:
 
-| event | data | meaning |
-|---|---|---|
-| `status` | `{"status": "queued", "attempt": 0}` | sent first, then on every change |
-| `text` | `{"text": "..."}` | a new chunk of the agent's prose, to append to what came before |
-| `tool` | `{"name": "Read", "summary": "inputs/transactions.json"}` | the agent used a tool |
-| `agent_status` | an [agent status](#agent-status) | after every `status`, and on its own when it changes (the run's hooks report a wait, say) |
-| `done` | the run, identical to a thread run item (`kind: "run"`) | final; the stream ends |
+| event | id | data | meaning |
+|---|---|---|---|
+| `status` | none | `{"status": "running", "attempt": 2, "epoch": 1, "continues": 1}` | sent first, then on every change |
+| `item` | the row's cursor | a journal row, exactly as `GET /runs/{id}/journal` returns it | the timeline grew by one revision |
+| `text` | the row's cursor | `{"text": "..."}` | a new chunk of the agent's prose, to append to what came before |
+| `tool` | the row's cursor | `{"name": "Read", "summary": "inputs/transactions.json"}` | the agent called a tool |
+| `agent_status` | none | an [agent status](#agent-status) | after every `status`, and on its own when it changes (the run's hooks report a wait, say) |
+| `done` | none | the run, identical to a thread run item (`kind: "run"`) | final; the stream ends |
 
-- **`text`** chunks concatenate into the attempt's prose. Each is one block
-  of the agent's prose; every chunk after an attempt's first starts with a
-  blank line (`"\n\n"`), so a client appends them verbatim.
-- **`tool`** is one tool call; `summary` is one line (a file path relative to
-  the run's directory, a pattern, a command, a URL), at most 160 characters,
-  possibly empty. The call that returns the final answer is not shown.
-- **Replay and resume.** Without `Last-Event-ID`, the stream replays the
-  run's latest narration from its start (the latest attempt, preceded by
-  the attempts it continues; below), then follows live, so a client that
-  connects late gets everything. Every `text` and `tool` event has an `id`
-  (`<attempt>.<seq>.<index>`); a client that reconnects with `Last-Event-ID`
-  set to the last one it received gets only what followed it (a browser
-  `EventSource` does this itself), from any instance: the stream is read
-  from the database, so a reconnect that a deploy sends to the new instance
-  continues seamlessly. An id outside the latest narration, or one that
-  does not parse, means a full replay. `status` and `done` are sent again on
-  every connection and carry no id.
-- **Requeue.** A run handed back (a deploy's drain past its cap, a crash)
-  streams `status: queued`, then `status: running` with the next `attempt`.
-  When that status carries `"continues": <n>` and `n` is the attempt the
-  client was showing, the new attempt resumed that attempt's session: the
-  prose so far stands and the next `text` continues it (a chunk with its
-  `"\n\n"`). Without `continues`, the prose and tools shown so far belong to
-  an abandoned attempt: a client clears them, and the new attempt streams
-  from its start.
-- A heartbeat comment (`: ping`) is sent every 15 s. A finished run streams
-  its status, its replay and `done` at once.
-- The stream ends when the instance serving it exits (the end of a deploy's
-  drain); reconnect with `Last-Event-ID`.
+- **`item`** is the stream to render from: one per journal row, revisions included, so a client keeps the highest `revision` per `item_id` (a tool call's result, a plan's update and a turn's end arrive as new revisions of items it already has).
+- **`text` and `tool`** are the prose-only view of the same rows, for a client that shows a run as lines: `text` for the first revision of each `message` of role `assistant`, `tool` for the first revision of each `tool_call` (its `name` and `summary`). A row with one is sent as that event followed by its `item`, in one write, both with the row's id. `text` chunks concatenate into the timeline's prose: every chunk after the timeline's first starts with a blank line (`"\n\n"`), so a client appends them verbatim. A model's reasoning is a `thinking` item, not `text`.
+- **`status`** carries `epoch` once the run has started (absent while queued without an attempt), and `continues` when the attempt resumed an earlier attempt's session (the attempt it continues). When `epoch` changes from the one a client was showing, the run started over: what the client holds belongs to an abandoned timeline, so it clears, and the new timeline streams from its first row. When only `attempt` changes, the timeline goes on: the client keeps what it has, and the next rows continue it.
+- **Replay and resume.** Without `Last-Event-ID`, the stream replays the timeline from its first row, then follows live, so a client that connects late gets everything. A client that reconnects with `Last-Event-ID` set to the last id it received (a browser `EventSource` does this itself) gets only the rows after that cursor, from any instance: the stream is read from the database, so a reconnect that a deploy sends to the new instance continues seamlessly. A cursor into another timeline, past the timeline's last row, or an id that is not a cursor (such as the `<attempt>.<seq>.<index>` ids of earlier releases) means a full replay of the current timeline. `status` and `done` are sent again on every connection.
+- **Requeue.** A run handed back (a deploy's drain past its cap, a crash) streams `status: queued`, then `status: running` with the next `attempt`, and the interrupted turn as a new revision (`state: interrupted`, or `unverifiable` when its worker was lost).
+- A heartbeat comment (`: ping`) is sent every 15 s. A finished run streams its status, its replay and `done` at once.
+- The stream ends when the instance serving it exits (the end of a deploy's drain); reconnect with `Last-Event-ID`.
 
-Events come from the backend's stored transcript (`GET /runs/{id}/events`),
-turned into `text` and `tool` by code (`runner.Narrate`): Claude Code's text
-blocks and tool calls; Codex's reasoning, messages, commands, searches and
-file changes; the Messages API's text. The final answer is `done.report`, not
-the concatenated `text`: `text` is what the agent narrated while working.
+The final answer is `done.report`, not the concatenated `text`: `text` is what the agent narrated while working.
 
 ## Runs, events, artifacts
 
@@ -386,7 +365,7 @@ the concatenated `text`: `text` is what the agent narrated while working.
 - `session_id` is the backend session the run ended in. `session_mode` (`fresh`, `resumed`, `live`), `session_parent` (the run whose session it continued) and `session_depth` are set for an agent with a session.
 - `run_after`, `continues` (the run that asked) and `chain` (its place in the chain, from 1) are set on a `continue` run.
 - `gate` names what ended a `skipped` run.
-- `steps` is the number of tool calls in the latest attempt, counted as a thread's run item counts it.
+- `steps` is the number of tool calls in the latest attempt's timeline, counted as a thread's run item counts it.
 
 An attempt (`store.Attempt`), oldest first:
 
@@ -544,7 +523,9 @@ transition the ticket's state does not allow is 409.
 
 `GET /agents/{name}/memory?limit=`: the agent's memory versions, newest
 first, `{"versions": [{"id": 12, "run_id": "uuid", "content": "<markdown>",
-"created_at": "..."}]}`. `limit` defaults to 20; the maximum is 200.
+"created_at": "...", "author": null, "restored_from": null}]}`. `limit` defaults to 20; the maximum is 200. `author` is the person who wrote a version through the API (`null` for a run's, whose `run_id` is set); `restored_from` is the version a restore copied.
+
+`POST /agents/{name}/memory` writes the next version: `{"content": "<markdown>"}`, or `{"restore": <version id>}` to copy an earlier version of this agent's memory. Exactly one of the two (400 otherwise); `content` at most the deployment's `memory_max_bytes` (400); an unknown version or one of another agent is 404. Returns `201 {"version": {...}}`, shaped as above. The author is the token's person (with the operator token, the body's `author`). Nothing is replaced: the new version is the newest, every earlier one stays.
 
 ## Memory entries
 
@@ -578,13 +559,24 @@ An entry:
 
 Nothing is deleted. Every change is a new version, kept:
 
-- `GET /memory/entries?scope=&topic=&agent=&type=&status=&q=&limit=`: `{"entries": [...]}`, current versions, by scope (profile, topics, agents), then name, then most recently changed. `topic` or `agent` (not both) selects one place. `status` is `active` (default), `retired` or `all`; `q` matches key, title, description, body, why and how_to_apply, case-insensitively. `limit` defaults to 200, at most 1000.
+- `GET /memory/entries?scope=&topic=&agent=&type=&status=&q=&run_id=&limit=`: `{"entries": [...]}`, current versions, by scope (profile, topics, agents), then name, then most recently changed. `topic` or `agent` (not both) selects one place. `status` is `active` (default), `retired` or `all`; `q` matches key, title, description, body, why and how_to_apply, case-insensitively. `run_id` selects entries that run wrote a version of. `limit` defaults to 200, at most 1000.
 - `POST /memory/entries` `{"scope", "topic"|"agent", "key"?, "type", "title", "description"?, "body", "why"?, "how_to_apply"?, "note"?}`: `201 {"entry": ...}`. An explicit `key` already used in the scope is 409; an `agent` that is not configured is 400. Unknown fields are 400.
 - `GET /memory/entries/{id}`: `{"entry": <current>, "versions": [...]}`, every version newest first.
 - `PATCH /memory/entries/{id}` `{"version"?, "type"?, "title"?, "description"?, "body"?, "why"?, "how_to_apply"?, "status"?, "note"?}`: the next version, with absent fields kept. `version` is the version the client read; another current one is 409, so two edits never silently overwrite each other (omit it to write regardless). `status: "active"` restores a retired entry (clearing `superseded_by`). An edit that changes nothing writes no version and returns the current one.
+- `POST /memory/entries/{id}/restore` `{"restore": <version>, "version"?, "note"?}`: the next version, a copy of an earlier one's content and status (and its `superseded_by` while that entry is still active). `restore` must be an earlier version (400); `version` is as for `PATCH`. `note` defaults to `restored version <n>`.
 - `POST /memory/entries/{id}/retire` `{"version"?, "superseded_by"?, "note"?}`: the next version, retired. `superseded_by` must be another, active entry (400 otherwise). This is how an entry is deleted.
 - `POST /memory/import` `{"dry_run": bool, "entries": [<entry as for create, key optional>], "note"?}`: matches each by scope and key. A new key creates an entry, a known one gets a new version when its content differs or it was retired, an identical one is left alone, so an import can be repeated. `{"dry_run", "results": [{"scope", "topic"|"agent", "key", "outcome": "created"|"updated"|"unchanged", "id", "version"}]}`, in request order. All of it is one transaction: one invalid entry fails the whole import (400, naming its index). `dry_run` reports and writes nothing (`id` is absent for an entry it would create). At most 500 entries. `orbit import claude-memory` calls this (deployment.md).
 - `GET /memory/topics`: `{"topics": [{"name", "entries", "agents"}]}` by name: every topic that holds entries or is read by an agent. `entries` counts its active entries; `agents` are the agents that read it, from their spec or attached.
+
+### Entries agents write
+
+An agent writes entries itself, without approval: every run's output carries `entries` (docs/ARCHITECTURE.md, Memory entries), applied with the run's outcome as versions with `source: "learned"`, `source_run_id` the run and `source_conversation_id` its conversation. A person reverts one with `restore` or `retire` above. A write the store refuses (a stale version, a key taken, an invalid field, a ref the run was not shown) is skipped and the rest apply. Each run's writes and what became of them are its `entries.json` artifact (`GET /runs/{id}/artifacts`): `[{"op", "ref", "title", "result": {"outcome": "written"|"unchanged"|"refused", "error", "id", "key", "version"}}]`, in output order.
+
+### Learning runs
+
+After a conversation goes quiet, orbit runs a short learning pass over it (trigger `learn`) that reads what was said since the last pass and writes entries the same way. It runs in the agent's **learning conversation**: one per agent, `purpose: "learning"`, titled `Learning`, archived, so it is listed only with `archived=true`; its thread is every learning run, each report listing the writes it made. Conversations carry `purpose` (`null` for a person's). Nothing a learning run does appears in the conversation it read.
+
+`POST /conversations/{id}/learn` queues a learning run of that conversation now, whatever the quiet, through its newest message from the person: `202 {"run_id": "uuid"}`. 409 when the conversation has no message from the person or a learning run for that point exists already (learned, or tried); 400 for the learning conversation itself.
 
 ### What an agent reads
 
