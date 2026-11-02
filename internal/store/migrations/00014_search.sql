@@ -55,7 +55,7 @@ $$;
 -- +goose StatementEnd
 
 -- The searchable pieces of one transcript line, per backend's event kinds
--- (runner.Narrate reads the same shapes): Claude Code `assistant` and the
+-- (internal/journal projects the same lines): Claude Code `assistant` and the
 -- anthropic runner's `response` carry content blocks (text is prose,
 -- tool_use a call; the StructuredOutput and submit calls are the report,
 -- indexed from the run); codex `item.completed` carries prose and
