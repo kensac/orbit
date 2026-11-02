@@ -23,7 +23,7 @@ database agent of their name. Each instance reloads when the directory's
 content or the newest definition changes, so a definition written on one
 instance is in force on all within the 30 s poll.
 
-An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential, delegate target, need or webhook trigger it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily) waits for a person's approval whatever the rule.
+An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential, delegate target, need, connector or webhook trigger it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily) waits for a person's approval whatever the rule.
 
 Database and built-in agents are held to what orbit.yaml offers (`spec.validateTrust`): no `file` source, no `${VAR}` that is not in `credentials:`, without a `sandbox`, only the tools in `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite), no precheck and no `run` hook. A spec breaking one fails validation, naming it.
 
@@ -290,6 +290,30 @@ fails at runtime, not at load.
 
 `chat: true` (claude-code runners only) makes an agent a Claude Code session whose reply is its final message, with memory, questions and actions as orbit's tools (docs/ARCHITECTURE.md, Chat agents); each conversation gets its own workspace. `sandbox: workstation` (needs `chat`) runs it in a sandboxd container with Claude Code's full tool set, a kept home and egress to any public host; `sandbox: build` with the tools in its `tools` and the build allowlist; sandboxd is `sandbox: {sandboxd: <host:port | unix:/path>, token_env: ORBIT_SANDBOX_TOKEN}` in orbit.yaml, or the `build:` section's when there is no `sandbox:`. The CLI there needs `CLAUDE_CODE_OAUTH_TOKEN`. Give a sandboxed agent `needs: [sandbox]` so only hosts that reach sandboxd claim it (the built-in has it).
 
+## Connectors
+
+`connectors:` in `orbit.yaml` names MCP servers; an agent's `connectors: [<name>, ...]` gives its runs their tools, as `mcp__<name>__<tool>` (claude-code runners only; docs/ARCHITECTURE.md, Connectors). orbit is the gateway: it lists the tools before each run and makes every call itself with the connector's credential, so neither the CLI nor a sandbox ever holds one.
+
+```yaml
+credentials:
+  HOUSING_MCP_TOKEN: {url_prefix: https://housing.example.com/}
+connectors:
+  housing:
+    url: https://housing.example.com/mcp
+    description: NYC affordable-housing listings.
+    auth: {kind: header, header: Authorization, value: "Bearer ${HOUSING_MCP_TOKEN}"}
+    write_tools: [create_view, delete_view]
+  sheets:
+    url: https://sheets.example.com/mcp
+    auth: {kind: oauth}
+```
+
+- **Auth.** `none`; `header`, whose value may carry only `credentials:` variables bound to a prefix the connector's URL starts with (the same binding as a source's, checked at load and on every call; orbit follows no redirect); or `oauth`, where a person signs in once through `POST /api/v1/connectors/{name}/authorize` (docs/api.md, Connectors) and orbit keeps the token, sealed under `ORBIT_CONNECTOR_KEY` (at least 32 characters, on every host that calls the connector), a new version per sign-in and per refresh, none deleted. An oauth connector nobody has signed in is left out of runs, and the run's prompt says so.
+- **Rules.** A tool in `write_tools` waits for a person (`approve`); any other runs when called (`auto`), the server's `readOnlyHint` notwithstanding, since the deployment says what changes the world. An agent overrides one tool with `mcp:<connector>:<tool>: auto | approve | deny` in `actions`; `deny` is not offered at all. An `approve` call in a run answering its person's message is asked for in the chat: it becomes a pending action `connector:<connector>/<tool>` the person approves or rejects (`POST /actions/{id}/approve`), and the call runs once they approve, its result going back to the model in the same turn. In any other run it is recorded as that pending action and the model is told it waits; orbit executes it at most once after approval, from the action loop, with the result on the action. An `auto` call to a `write_tools` tool also leaves an executed action as its record. Unlike an `act` action in a chat, which a run answering its person executes on their message, a connector call waits for the person to approve its exact arguments even then: they never saw them. Approving with `always` (docs/api.md, Actions) sets that tool's `mcp:<connector>:<tool>` to `auto`.
+- **Results.** A result over 32 KiB is written into the attempt's inputs (`inputs/.../connectors/<connector>-<tool>-<n>.json`) and stored as an artifact; the model is given its path. Every call is an `orbit.connector` event with its bounded result.
+- **Hosts.** A worker that runs an agent with connectors needs their credentials (`ORBIT_CONNECTOR_KEY`, the header variables, a `client_secret_env`); give such an agent a capability only those hosts advertise (docs/agents/deployment.md, Capabilities). `orbit validate` lists the variables.
+- `transport: stdio` is refused: a local server would run in sandboxd, which is not built.
+
 ## Sessions and continuations
 
 `session` (claude-code runners only) is `{resume: true, idle: <=24h, live:
@@ -329,7 +353,7 @@ Another exception is a run that read a mail (`mail:`): its report, or a short no
 
 ## Hooks
 
-`hooks` adds Claude Code hooks to an agent's runs (claude-code runners only; at most 20), beside orbit's own path guard and figure check. Each names an `event` (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `Stop`), for a tool event optionally a `matcher` (tool names joined by `|`, as Claude Code reads them), and exactly one of:
+`hooks` adds Claude Code hooks to an agent's runs (claude-code runners only; at most 20), beside orbit's own path guard, figure check and pinned entries (UserPromptSubmit). Each names an `event` (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `Stop`), for a tool event optionally a `matcher` (tool names joined by `|`, as Claude Code reads them), and exactly one of:
 
 - `say: <text>` (at most 2 KB): tells the model the text as context at that event; at `Stop`, sends the model back once with it (a second stop in the same turn passes, so it cannot loop).
 - `deny: <reason>` (`PreToolUse` only): refuses the matching tool with the reason, which the model reads.

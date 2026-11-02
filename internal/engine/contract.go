@@ -58,6 +58,8 @@ type Output struct {
 	// task is the task whose conversation the run is in, set by the
 	// engine.
 	task *store.Task
+	// connectorCalls are connector calls the run recorded for approval (connectors.go), each already a pending action; set by the engine, never read from the output.
+	connectorCalls []pendingCall
 }
 
 // OutputQuestion is one of a run's questions: a plain string, or {"question", "fields"} with a form the person fills in (forms.Field), which the thread exposes and a channel renders as a numbered list.

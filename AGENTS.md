@@ -57,6 +57,7 @@ is the design; the topic documents below are the rules for changing it.
 - `internal/journal/`: a run's typed record (prose, thinking, tool calls, diffs, plans, approvals, questions, turns) that clients render.
 - `internal/harness/`: code the model's process runs: the `orbit mcp` tool server and the `orbit hook` command.
 - `internal/sources/`: inputs the harness fetches (`http`, `prometheus`, `loki`, `github`, `file`).
+- `internal/connectors/`: orbit's MCP client for connectors (streamable HTTP, header and OAuth credentials, sealed tokens); the engine's gateway is `internal/engine/connectors.go`.
 - `internal/transforms/`: coded reducers over a source before the model sees it.
 - `internal/actions/`: action types, their parameter schemas and executors.
 - `internal/notify/`: channels (`ntfy`, `smtp`, `webhook`, `log`).

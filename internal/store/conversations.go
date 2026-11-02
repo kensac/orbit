@@ -78,6 +78,11 @@ type Conversation struct {
 	OpenQuestion  bool      `json:"-"`
 	PendingAction bool      `json:"-"`
 	CurrentRun    *RunFacts `json:"-"`
+	// LastRun is the conversation's newest run, null before its first.
+	LastRun *RunSummary `json:"last_run"`
+	// ReadThrough is how far the person has read it (MarkRead); null
+	// before they first did.
+	ReadThrough *time.Time `json:"read_through"`
 }
 
 // derive fills the fields computed from the scanned ones.
@@ -93,7 +98,11 @@ var conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived, 
 	EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND ` + personQuestion + `),
 	EXISTS (SELECT 1 FROM actions x JOIN runs xr ON xr.id = x.run_id
 	        WHERE xr.conversation_id = c.id AND x.status = 'pending'),
-	` + currentRun("c.agent", "sr.conversation_id = c.id")
+	` + currentRun("c.agent", "sr.conversation_id = c.id") + `,
+	(SELECT json_build_object('id', r.id, 'status', r.status, 'trigger', r.trigger, 'created_at', r.created_at,
+	                          'finished_at', r.finished_at, 'summary', r.summary)
+	 FROM runs r WHERE r.conversation_id = c.id ORDER BY r.created_at DESC, r.id DESC LIMIT 1),
+	c.read_through`
 
 // GetConversation returns one conversation.
 func (s *Store) GetConversation(ctx context.Context, id string) (*Conversation, error) {
