@@ -291,7 +291,7 @@ type queryer interface {
 
 // entryAt reads an entry at a version, 0 meaning its current one.
 func entryAt(ctx context.Context, q queryer, id string, version int) (*Entry, error) {
-	if !isUUIDText(id) {
+	if !IsUUID(id) {
 		return nil, ErrNotFound
 	}
 	e, err := scanEntry(q.QueryRow(ctx, `SELECT `+entryCols+`
@@ -342,10 +342,7 @@ const (
 
 // ListEntries returns the entries that match f, by scope (profile, topics, agents), owner, then most recently changed.
 func (s *Store) ListEntries(ctx context.Context, f EntryFilter) ([]Entry, error) {
-	if f.Limit <= 0 {
-		f.Limit = DefaultEntryLimit
-	}
-	f.Limit = min(f.Limit, MaxEntryLimit)
+	f.Limit = clampLimit(f.Limit, DefaultEntryLimit, MaxEntryLimit)
 	status := f.Status
 	switch status {
 	case "":
@@ -492,7 +489,7 @@ func equalPtr(a, b *string) bool { return (a == nil) == (b == nil) && (a == nil 
 
 // lockEntry reads an entry's current version for update and checks the version the caller expects.
 func lockEntry(ctx context.Context, tx pgx.Tx, id string, expect int) (*Entry, error) {
-	if !isUUIDText(id) {
+	if !IsUUID(id) {
 		return nil, ErrNotFound
 	}
 	var current int
@@ -605,8 +602,8 @@ func (s *Store) ImportEntries(ctx context.Context, entries []NewEntry, p Provena
 	return results, err
 }
 
-// isUUIDText reports whether s is a UUID in canonical form, so a malformed id is not found rather than a database error.
-func isUUIDText(s string) bool {
+// IsUUID reports whether s is a UUID in its canonical text form, so an id that cannot name a row is caught before Postgres's uuid cast fails on it.
+func IsUUID(s string) bool {
 	if len(s) != 36 {
 		return false
 	}

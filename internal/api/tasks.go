@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/kensac/orbit/internal/store"
 )
 
 // Delegated tasks (docs/api.md, Delegation): a conversation's tasks, one
@@ -14,7 +16,7 @@ import (
 
 func (s *Server) conversationTasks(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !isUUID(id) {
+	if !store.IsUUID(id) {
 		writeErr(w, http.StatusBadRequest, "not a valid id")
 		return
 	}
@@ -28,7 +30,7 @@ func (s *Server) conversationTasks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !isUUID(id) {
+	if !store.IsUUID(id) {
 		writeErr(w, http.StatusBadRequest, "not a valid id")
 		return
 	}
@@ -38,7 +40,7 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) cancelTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !isUUID(id) {
+	if !store.IsUUID(id) {
 		writeErr(w, http.StatusBadRequest, "not a valid id")
 		return
 	}
@@ -46,7 +48,7 @@ func (s *Server) cancelTask(w http.ResponseWriter, r *http.Request) {
 		Reason string `json:"reason"`
 		By     string `json:"by"`
 	}
-	if !decodeBody(w, r, &body) {
+	if !decode(w, r, 64<<10, &body, bodyOptional) {
 		return
 	}
 	if err := s.Store.CancelTask(r.Context(), id, "", strings.TrimSpace(body.Reason), decider(r, body.By)); err != nil {
@@ -72,7 +74,7 @@ const taskStreamPoll = time.Second
 // rows, as a run's stream does.
 func (s *Server) streamTasks(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !isUUID(id) {
+	if !store.IsUUID(id) {
 		writeErr(w, http.StatusBadRequest, "not a valid id")
 		return
 	}
