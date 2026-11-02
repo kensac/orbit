@@ -151,3 +151,75 @@ func TestRerunningChecksOverTheAPI(t *testing.T) {
 		t.Fatalf("get = %v", r)
 	}
 }
+
+func TestReviewCommentsOverTheAPI(t *testing.T) {
+	v := newEnv(t, nil)
+	kanishk := v.person("kanishk")
+	u := v.srv.URL + "/api/v1/tickets"
+	_, r := call(t, "POST", u, kanishk, `{"kind":"request","title":"t","body":"b","agent":"a","repo":"kensac/orbit","wake":false}`)
+	id := r["ticket_id"].(string)
+	if code, _ := call(t, "POST", u+"/"+id+"/comments", kanishk, `{"path":"a.go","start_line":1,"end_line":1,"body":"x"}`); code != 409 {
+		t.Fatalf("a comment with no PR = %d", code)
+	}
+	_, _ = v.s.ProposePlan(ctx, id, "", "plan")
+	_, _ = v.s.ApprovePlan(ctx, id, 1, "kanishk", "")
+	a := v.e.Current().Config.Agents["a"]
+	run, _ := v.s.StartBuild(ctx, store.StartBuild{TicketID: id, Agent: "a", SpecSHA: a.SHA, Purpose: store.BuildPurposeBuild})
+	c, _ := v.s.ClaimRun(ctx, "w")
+	pr := 7
+	if err := v.s.FinishBuild(ctx, run, store.RunResult{Attempt: c.Attempt, Summary: "built"},
+		store.TicketUpdate{Branch: "orbit/x", PRNumber: &pr, HeadSHA: "1111111111111111111111111111111111111111"}); err != nil {
+		t.Fatal(err)
+	}
+	if code, r := call(t, "POST", u+"/"+id+"/comments", kanishk, `{"path":"../x","start_line":1,"end_line":1,"body":"x"}`); code != 400 || !contains(r["error"], "clean path") {
+		t.Fatalf("bad path = %d %v", code, r)
+	}
+	code, r := call(t, "POST", u+"/"+id+"/comments", kanishk, `{"path":"a.go","start_line":2,"end_line":4,"body":"tighten this","author":"mallory"}`)
+	cm, _ := r["comment"].(map[string]any)
+	if code != 201 || cm["status"] != "draft" || cm["author"] != "kanishk" {
+		t.Fatalf("add = %d %v", code, r)
+	}
+	cid := cm["id"].(string)
+	code, r = call(t, "POST", u+"/"+id+"/comments/"+cid+"/edit", kanishk, `{"start_line":2,"end_line":5,"body":"tighten this, and test it"}`)
+	if v2, _ := r["comment"].(map[string]any); code != 201 || v2["supersedes"] != cid || v2["path"] != "a.go" {
+		t.Fatalf("edit = %d %v", code, r)
+	}
+	if code, _ := call(t, "POST", u+"/"+id+"/comments/"+cid+"/withdraw", kanishk, ""); code != 409 {
+		t.Fatalf("withdraw a superseded version = %d", code)
+	}
+	if code, _ := call(t, "POST", u+"/"+id+"/comments/not-a-uuid/withdraw", kanishk, ""); code != 400 {
+		t.Fatalf("withdraw a bad id = %d", code)
+	}
+	code, r = call(t, "POST", u+"/"+id+"/review", kanishk, `{"body":"One thing.","client_request_id":"rv"}`)
+	if code != 201 || r["comments"] != float64(1) || r["message_id"] == nil {
+		t.Fatalf("submit = %d %v", code, r)
+	}
+	if code, _ := call(t, "POST", u+"/"+id+"/review", kanishk, `{}`); code != 400 {
+		t.Fatalf("a review with nothing to send = %d", code)
+	}
+	_, r = call(t, "GET", u+"/"+id+"/comments", kanishk, "")
+	cs := r["comments"].([]any)
+	if len(cs) != 2 || cs[0].(map[string]any)["status"] != "superseded" || cs[1].(map[string]any)["status"] != "submitted" {
+		t.Fatalf("comments = %v", cs)
+	}
+}
+
+func TestFilingAStackedTicket(t *testing.T) {
+	v := newEnv(t, nil)
+	kanishk := v.person("kanishk")
+	u := v.srv.URL + "/api/v1/tickets"
+	_, r := call(t, "POST", u, kanishk, `{"kind":"request","title":"below","body":"b","agent":"a","repo":"kensac/orbit","wake":false}`)
+	below := r["ticket_id"].(string)
+	code, r := call(t, "POST", u, kanishk, `{"kind":"request","title":"above","body":"b","agent":"a","repo":"kensac/orbit","wake":false,"stack_on":"`+below+`"}`)
+	if code != 201 {
+		t.Fatalf("stacked = %d %v", code, r)
+	}
+	if _, g := call(t, "GET", u+"/"+r["ticket_id"].(string), kanishk, ""); g["ticket"].(map[string]any)["stack_on"] != below {
+		t.Fatalf("get = %v", g)
+	}
+	for _, bad := range []string{"00000000-0000-0000-0000-000000000000", "not-a-uuid"} {
+		if code, r := call(t, "POST", u, kanishk, `{"kind":"request","title":"x","body":"b","agent":"a","repo":"kensac/orbit","stack_on":"`+bad+`"}`); code != 400 {
+			t.Errorf("stack_on %s = %d %v", bad, code, r)
+		}
+	}
+}

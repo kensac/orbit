@@ -18,9 +18,11 @@ This document is the design. What exists today:
 | the `github:` block in `orbit.yaml` | **Built** | `internal/spec` |
 | the `plan` output field and `ticket.json` input; a plan stored with its run's outcome | **Built**, unit-tested | `internal/engine/ticket.go`, `store.RecordOutcome` |
 | the `build:` section of `orbit.yaml` | **Built**, unit-tested | `internal/spec/build.go` |
-| the build runner: clone, sandbox, the CLI under orbit's permission handler, readback, diff policy, commit, push, PR; decisions and sandboxes recorded per attempt | **Built**; tested against a fake sandboxd and a fake GitHub, with a real git remote; the permission protocol **seen** against the real CLI 2.1.316 (`TestRealCLIPermissionProtocol`); the whole run against a real sandboxd and docker in CI (`TestIntegrationBuild`) | `internal/build`, `internal/engine/build.go`, `internal/store/builds.go`, `migrations/00007_builds.sql` |
+| the build runner: clone (from the checkout pool), trusted setup and cleanup scripts, sandbox, the CLI under orbit's permission handler, readback, diff policy, commit, push, PR; decisions and sandboxes recorded per attempt | **Built**; tested against a fake sandboxd and a fake GitHub, with a real git remote; the permission protocol **seen** against the real CLI 2.1.316 (`TestRealCLIPermissionProtocol`); the whole run against a real sandboxd and docker in CI (`TestIntegrationBuild`) | `internal/build`, `internal/engine/build.go`, `internal/store/builds.go`, `migrations/00007_builds.sql` |
 | the ticket loop: build enqueue, PR and checks polling, proposing the merge, reruns of failed jobs (its own and a person's), fix attempts with the failure report, done on deploy, reconciliation, closing an abandoned ticket's PR, the self-hosting rules | **Built**, tested against a fake GitHub and real Postgres | `internal/tickets` |
-| review comments; `skipped` as a run status for gates | not built | specified below |
+| review comments: drafts, edits as new versions, one structured message per review, the revise build that applies them, delivered when it succeeds | **Built**, tested against real Postgres and a fake GitHub | `internal/store/reviews.go`, `internal/api/reviews.go`, `migrations/20261102032212_review_comments.sql` |
+| stacked tickets: built on the ticket below, merge held, restacked by code onto its new head and onto the default branch once it merges | **Built**; the restack against a real git remote, the loop against a fake GitHub and real Postgres | `internal/tickets/stack.go`, `internal/build/restack.go` |
+| `skipped` as a run status for gates | **Built** for a build that redelivers an earlier attempt's push | `store.FinishBuild` |
 
 Nothing has run against the real GitHub API yet; the fake
 (`internal/github/githubtest`) follows GitHub's documented shapes. No
@@ -63,7 +65,7 @@ Nothing about a thread is built twice. What tickets add is the lifecycle:
 | `tickets` | one row per ticket: kind, title, the agent discussing it, the target repository, status, the approved plan, the branch, PR and merge commit, and `conversation_id` (unique: one ticket per conversation) | the lifecycle has states no conversation has |
 | `ticket_events` | every transition: from, to, who, when, detail | the history of a ticket is a record, never overwritten (a `tickets.status` alone would lose it) |
 | `ticket_plans` | every plan version an agent proposed, and which one was approved | a plan is approved by version; a later plan must never inherit an earlier approval |
-| `ticket_review_comments` | line comments on a PR's diff and the message that delivered them | a comment is anchored to a file and lines, and delivered exactly once (Lifecycle) |
+| `ticket_review_comments`, `ticket_build_comments` | line comments on a PR's diff, the message that carried them, and the build runs given them | a comment is anchored to a file, lines and a commit, and delivered exactly once (Lifecycle) |
 
 **Scoping** is the conversation's: two tickets with the same agent never see
 each other's words, and ticket work never touches the agent's other
@@ -114,7 +116,8 @@ request:
    +------ open (plan revised)   failed  (fix) failed  failed       |
    +------------------------------ failed (person reopens to discuss)
   approved <- failed (person retries the build with the same plan)
-  review <- failed (person reruns the PR's failed checks)
+  review <- failed (person reruns the PR's failed checks, or submits a review)
+  review -> building (a revise applies a submitted review)
   review, failed -> merged (reconciliation: GitHub says the PR merged)
   any state before merged -> abandoned
 ```
@@ -125,7 +128,7 @@ request:
 | `planned` | a plan version waits for the person | the person approving that version (`approved`) or replying, which reopens it (`open`) |
 | `approved` | the approved plan waits for a build run | the harness enqueuing the build run (`building`) |
 | `building` | the build run is working in its sandbox | the harness opening the PR (`review`), or the build failing (`failed`) |
-| `review` | the PR is open; checks are running | the gate seeing every required check green (`merging`), a check failing (a fix, `building`, or `failed` once `tickets.MaxFixAttempts` fixes are spent), the PR merged by a person on GitHub (`merged`) |
+| `review` | the PR is open; checks are running | a submitted review (a revise, `building`), the gate seeing every required check green (`merging`), a check failing (a fix, `building`, or `failed` once `tickets.MaxFixAttempts` fixes are spent), the PR merged by a person on GitHub (`merged`) |
 | `merging` | a `github:merge` action exists | the action executing (`merged`), failing (`failed`), or being rejected (`failed`) |
 | `merged` | the PR is merged; for orbit itself, the new revision is not yet running | deployment confirmed (`done`) |
 | `done`, `abandoned` | terminal | nothing |
@@ -199,14 +202,13 @@ A fix run (`ticket_builds.purpose = fix`, `review -> building`) gets exactly tha
 
 **Rerunning checks by hand.** `POST /tickets/{id}/checks/rerun` records a request (`ticket_check_reruns`, one waiting per ticket) on a PR in `review` or `failed`; the loop carries it out on its next tick: it reruns the failed Actions jobs at the head the request named and moves a failed ticket back to `review` in the same transaction as the request's outcome (`store.FinishRerun`, the only way along `failed -> review`). A PR that closed or whose head moved answers the request with why, and the ticket stays.
 
-**Review comments.** A person can review the PR's diff in orbit: line
-comments `{path, start_line, end_line, body}` are stored as
-`ticket_review_comments` rows, and submitting the review sends them to the
-ticket's thread as one structured message (each comment with its file and
-line range), which wakes the next run. A comment records the message that
-carried it; it counts as delivered once the run that consumed that message
-succeeded, and a failed run hands the message back like any other, so a
-comment is never lost and never sent twice. An edited comment is a new row.
+**Review comments.** A person reviews the PR's diff in orbit (`internal/store/reviews.go`, the API below):
+
+- **Drafts.** A comment is `{path, start_line, end_line, body}` on the ticket's PR at its current head (`head_sha` is recorded with it; lines `0` and `0` mean the whole file), allowed while the ticket is `building`, `review`, `merging` or `failed`. A path must be clean and inside the repository; a body is at most 8 KB. A draft can be withdrawn; nothing is deleted.
+- **Edits are new rows.** Editing writes a new draft that `supersedes` the old version, which keeps its state: a submitted one is no longer given to any build, a delivered one stays delivered. A version is edited at most once.
+- **Submit.** `POST /tickets/{id}/review` sends every draft to the ticket's thread as one message (`store.FormatReview`: the PR and commit, the person's note, then each comment with its file and lines and its body quoted line by line, so nothing in a body can pass for another comment), in one transaction with each draft's `message_id`. Allowed on a PR in `review` or `failed`; a failed ticket goes back to `review` with it, and a failed ticket with submitted comments still waiting may be resubmitted with no new draft.
+- **Apply.** The loop, seeing submitted comments waiting on a ticket in review, starts a revise build (`ticket_builds.purpose = revise`, `review -> building`) before it looks at the checks, so nothing is merged past a person's review. `StartBuild` records every waiting comment as given to the run (`ticket_build_comments`) and marks their messages read by it. A revise starts from the PR's head, commits on top of it, and gets the comments as `review.json` with instructions to apply each and to leave, and explain, one the plan does not cover. A retried build from the default branch is given waiting comments too; a fix is not.
+- **Delivered once.** A comment is `delivered` once a run given it succeeded (or was skipped redelivering that run's push); until then every later build is given it again, so a comment is never lost and never applied twice. Statuses: `draft`, `submitted`, `delivered`, `superseded`, `withdrawn`, derived from the rows, never stored.
 
 **Prechecks are gates.** Before any build or retry run calls the backend,
 tested Go predicates decide whether there is work: the PR already merged,
@@ -214,6 +216,14 @@ the branch already at the approved plan's result, the checks already green.
 A run a gate ends is recorded with its own status, `skipped`, naming the
 gate, not as `succeeded`: a run that judged nothing must be distinguishable
 from one that did.
+
+**Stacked tickets.** A request filed with `stack_on` (another request of the same repository, not yet merged, done or abandoned) builds on that ticket's work instead of the default branch (`internal/tickets/stack.go`, `build.Runner.Restack`):
+
+- **Build.** It waits in `approved` until the ticket below it has a PR (`review`, `merging`) or no longer needs one (`merged`, `done`, `abandoned`). The build starts from the ticket below's branch head while that PR is open, records it as `base_sha`, and opens its PR against that branch, saying so in the body; otherwise it builds from the default branch like any ticket. The branch stays `orbit/<its own id>`.
+- **Following the ticket below.** While the PR below is open, this ticket's merge is held, however green its checks. When the ticket below gets a new head (a fix, a revise), this branch is restacked onto it: code replays the ticket's own commits (`base_sha..head_sha`) with `git rebase --onto`, in orbit's own clone, and force-pushes the one refspec a build may push. No model is involved, and the diff policy is not run again: the replayed commits are the ones it passed, and a conflict aborts the rebase and pushes nothing.
+- **After it merges.** Once the ticket below is `merged`, `done` or `abandoned`, the branch is restacked onto the default branch and the PR retargeted to it (`SetPRBase`); from then on it is reviewed, checked, fixed and merged like any other ticket, and `tickets_one_merging` still lets one merge through at a time.
+- **Conflicts.** A replay that conflicts fails the ticket, naming the files; retrying rebuilds it from its plan on the new base.
+- Every restack is a `ticket_events` row from `review` to `review` with its `restacked` detail (`store.Restacked`, guarded on the head it started from). A crash between the push and that row leaves the PR's head ahead of the ticket's, which the loop reads as a head that moved, and fails the ticket for a person; retrying rebuilds it.
 
 **Reconciliation.** A crash can separate a side effect from its row: the
 merge succeeded on GitHub but `FinishAction` never ran, so the action is
@@ -231,6 +241,7 @@ reconciles at a time, stopped by a drain) holds no state between ticks:
 | `approved` | | enqueues the build (waits while the repository has one building) |
 | `building` | the build run failed or was cancelled without moving it (the reaper ran out of attempts) | `failed` with the run's error |
 | `review` | PR merged / closed / head moved off what orbit built | `merged` / `failed` / `failed` |
+| `review` | a submitted review waits | a revise (`building`) |
 | `review` | checks green at the head orbit built | proposes `github:merge` (`merging`); waits while another ticket of the repository merges |
 | `review` | a check failed | a rerun (once per head), then a fix (`building`), or `failed` after `MaxFixAttempts` or when the base fails it too |
 | `merging` | the action executed | `merged` with its merge commit |
@@ -238,6 +249,8 @@ reconciles at a time, stopped by a drain) holds no state between ticks:
 | `failed` (reached merging) | the PR merged | `merged` |
 | `review`, `failed` | a person's rerun request waits | reruns the failed jobs; `failed` -> `review` |
 | `merged` | another repository / orbit runs the merge commit or a descendant | `done` |
+| `approved`, stacked | the ticket below has no PR yet | waits |
+| `review`, stacked | the ticket below has a new head / merged, done or abandoned / still open | restacks onto it / restacks onto the default branch and retargets the PR / holds the merge |
 | `abandoned` with an open PR | | closes the PR, keeps the branch |
 
 ## API
@@ -254,13 +267,18 @@ same id for a different request is a 409.
 
 | method | path | body | result |
 |---|---|---|---|
-| `POST` | `/tickets` | `{"kind": "request", "title": "...", "body": "...", "agent": "orbit", "repo": "kensac/orbit", "wake": true, "client_request_id": "..."}` | `201 {"ticket_id", "conversation_id", "message_id", "run_id"}` |
+| `POST` | `/tickets` | `{"kind": "request", "title": "...", "body": "...", "agent": "orbit", "repo": "kensac/orbit", "wake": true, "client_request_id": "...", "stack_on": "optional ticket id"}` | `201 {"ticket_id", "conversation_id", "message_id", "run_id"}`; 400 for a `stack_on` that is not an unmerged request of the same repository |
 | `GET` | `/tickets?status=&agent=&before=&limit=` | | `{"tickets": [...]}`, newest first |
 | `GET` | `/tickets/{id}` | | `{"ticket", "plans", "events", "reruns"}` |
 | `POST` | `/tickets/{id}/plans/{version}/approve` | `{"client_request_id"}` | `{"ok": true}`; 409 unless it is the newest plan of a `planned` ticket |
 | `POST` | `/tickets/{id}/abandon` | `{"reason"}` | `{"ok": true}`; 409 once merged or terminal |
 | `POST` | `/tickets/{id}/retry` | | `{"ok": true}`; `failed -> approved` |
 | `POST` | `/tickets/{id}/reopen` | | `{"ok": true}`; `failed -> open` |
+| `GET` | `/tickets/{id}/comments` | | `{"comments": [...]}`, every version, oldest first, each with its `status` |
+| `POST` | `/tickets/{id}/comments` | `{"path", "start_line", "end_line", "body"}` | `201 {"comment"}`, a draft; 400 for a path outside the repository or a bad range; 409 without a PR |
+| `POST` | `/tickets/{id}/comments/{comment}/edit` | `{"start_line", "end_line", "body"}` | `201 {"comment"}`, the new version; 409 for a withdrawn or already edited one |
+| `POST` | `/tickets/{id}/comments/{comment}/withdraw` | | `{"ok": true}`; 409 unless it is a draft |
+| `POST` | `/tickets/{id}/review` | `{"body", "client_request_id"}` | `201 {"message_id", "comments"}`; 400 with nothing to send; 409 unless the PR is in `review` or `failed` |
 | `POST` | `/tickets/{id}/checks/rerun` | | `202 {"rerun": {...}}`; the loop reruns the PR's failed checks; 409 without a PR in `review` or `failed`, or while one waits |
 
 A ticket's thread and its messages are its conversation's:
@@ -276,9 +294,11 @@ in `orbit.yaml`. A ticket in the API:
  "conversation_id": "uuid",
  "repo": "kensac/orbit", "status": "review", "author": "kanishk",
  "approved_plan": 2, "branch": "orbit/3f2a9c1e", "pr_number": 41,
- "head_sha": "...", "merge_sha": null, "error": null,
+ "head_sha": "...",
  "created_at": "...", "updated_at": "..."}
 ```
+
+Fields not yet set (`merge_sha`, `error`, `stack_on`, ...) are omitted, not `null`; the full shape is in docs/api.md, Tickets.
 
 ## GitHub access: one App, per-run tokens
 
@@ -336,14 +356,16 @@ ticket approved
      approved -> building, in one transaction (one building ticket per
      repository: tickets_one_building)
   -> an executor claims it like any run; the engine hands it to internal/build
-  -> orbit: mint contents:read token, clone the repo at the default branch's
-     head (base_sha), revoke the token
+  -> orbit: mint contents:read token, take the ticket's kept clone (or a spare
+     one) and fetch the default branch's head (base_sha) into it, revoke the
+     token; read .orbit/build.yaml and refuse a script it does not trust
   -> orbit: tar the checkout (without credentials), ask the sandbox launcher
-     for a container with that tar at /work
+     for a container with that tar at /work; run the trusted setup script
   -> orbit: start the CLI inside it, speak its stream-json protocol over the
      container's stdio, answer every permission request with code (below)
   -> model finishes with its build output (summary, PR title, PR body, notes)
-  -> orbit: fetch /work back as a tar, destroy the container
+  -> orbit: run the trusted cleanup script, fetch /work back as a tar,
+     destroy the container
   -> orbit: in its own clone, replace the tree with the fetched files, compute
      the diff against base_sha, enforce the diff policy, store the diff as an
      artifact
@@ -355,7 +377,7 @@ ticket approved
 The build run is a run of the agent `build.agent` names. It is in the
 ticket's conversation when that agent is the ticket's, and in the build
 agent's default conversation otherwise (a run is always in a conversation
-of its own agent). It reads no messages and writes no memory.
+of its own agent). It reads no messages (the review messages whose comments it is given are marked read by it, so the discussion agent does not answer them too) and writes no memory.
 
 **Attempts.** A build run is claimed, heartbeated and fenced like any run:
 its permission decisions (`build_decisions`) and its sandboxes
@@ -371,6 +393,23 @@ by an earlier attempt that died after the push) does not call the model:
 it reopens the PR from that commit's message (a gate, recorded as the
 `orbit.gate` event; until runs have a `skipped` status the run is
 `succeeded` with the gate in its report).
+
+### The checkout pool
+
+orbit keeps its own clones in `build.Pool` (`<data>/checkouts`): one per ticket, reused by every build of the ticket (the build, its fixes and revisions) and removed when the ticket is done or abandoned, and one spare per build repository at the default branch's head, which the ticket loop tops up each tick and a ticket's first build takes. A clone is self-contained (its own `.git`, never a git worktree pointing at a shared store), because the sandbox gets the whole tree with `.git`. Before each use it is checked out with `--force` and cleaned with `clean -ffdx`, so nothing an earlier attempt left carries over; only orbit's git writes its `.git`, since the readback drops every `.git`. Tokens stay in git's environment, never on disk. `build.ConversationKey` names a clone per conversation for an agent that reads a repository across one conversation's runs.
+
+### Setup and cleanup scripts
+
+A repository may name two scripts in `.orbit/build.yaml` (`build.Scripts`, strict YAML, at most 64 KB):
+
+```yaml
+setup: |          # after the checkout is unpacked, before the CLI starts
+  go mod download
+cleanup: |        # after the CLI finished, before orbit reads the tree back
+  rm -f coverage.out
+```
+
+Each runs in the sandbox with `sh -c`, with sandboxd's fixed environment and not even the backend credential, at most 10 minutes; its exit status, duration and the end of its output are an `orbit.build` event, and a non-zero exit fails the build. **A script runs only when its exact text is trusted**: its sha256 (`build.ScriptHash`) is in the repository's `trusted_scripts` in `orbit.yaml`. Code reads the file from the commit the build starts at; any script whose hash is not listed fails the build before a sandbox exists, naming the hash, so a script a person changed, or one an earlier build changed on the PR's branch, waits for a person to read it and add its hash. `.orbit/` is not protected by default: the trust list, not the path, is what stops a changed script from running.
 
 ### Isolation: one container per build run, started by a launcher
 
@@ -412,10 +451,7 @@ addresses only, and nothing else. It refuses to load an allowlist naming
 GitHub: the checkout is already inside, and a sandbox that cannot reach
 GitHub cannot push even with a token it found.
 
-**Where it runs.** sandboxd can run on any docker host orbit reaches over
-the tailnet; the default is oci (Open decisions). oci (the ARM CI host, already running CI runners and nothing
-public) is the better home than hetzner, which holds every other secret in
-the fleet: a container escape there reaches far less.
+**Where it runs.** sandboxd can run on any docker host orbit reaches; today it runs on hetzner beside orbit, reached over an internal docker network (docs/agents/deployment.md). Workstation sandboxes are planned for hetzner and oci. A container escape on hetzner reaches every other secret in the fleet; on oci (the ARM CI host, running CI runners and nothing public) it would reach far less.
 
 **Alternatives considered.** Rootless podman inside orbit's container needs
 user namespaces and `/dev/fuse` that docker's default seccomp profile
@@ -510,7 +546,7 @@ deterministic:
 | tool | allowed when |
 |---|---|
 | `Edit`, `Write` | the path resolves inside `/work`, outside `.git/`, and outside the repository's protected paths (configuration; for orbit: `.github/**`, `deploy/**`) |
-| `Bash` | the command parses (a POSIX shell parser, not a regex) into simple commands joined by `&&`, `\|\|`, `;` or `\|`, with no command or process substitution, no backgrounding, redirections only to files inside `/work` or `/dev/null`, and every command's argv prefix on the repository's list (for orbit: `go build`, `go test`, `go vet`, `gofmt`, `make check`, `make fmt`, `make test`, `git status`, `git diff`, `git log`, `git show`, `ls`, `rg`) |
+| `Bash` | the command parses (a POSIX shell parser, not a regex) into simple commands joined by `&&`, `\|\|`, `;` or `\|`, with no command or process substitution, no backgrounding, redirections only to files inside `/work` or `/dev/null`, and every command's argv prefix on the repository's list (for orbit: `go build`, `go test`, `go vet`, `gofmt`, `make check`, `make check-sandbox`, `make fmt`, `make test`, `git status`, `git diff`, `git log`, `git show`, `ls`, `rg`) |
 | anything else | never |
 
 A denial's message tells the model what is allowed, so it adapts instead of
@@ -526,6 +562,8 @@ process outside the container, which nothing inside can reach or alter. This lis
 is **not** the security boundary. `go test` and `make check` run code the
 model wrote, which can do anything the container allows. The boundary is
 the container, its network, and the absence of secrets in it.
+
+**Checks inside the sandbox.** The build container has no Postgres and no C compiler, so `make check` cannot pass there (`go test -race` needs cgo, and database tests need a server). A build of orbit runs `make check-sandbox` instead: the same format, vet, staticcheck, prose and example-config gates, and `go test ./...` without `-race`, with database tests skipping. CI's `check` job runs the full `make check` gates against Postgres on the PR before the merge.
 
 ### What the CLI's own sandbox does and does not guarantee
 
@@ -658,7 +696,7 @@ changes:
   ticket per repository).
 - **orbit cannot fix a broken orbit.** If the new revision does not start,
   no orbit run can revert it; recovery is the person rolling hetzner's pin
-  back. The build run's `make check` and the image build in CI are the only
+  back. The build run's checks and CI (its `check` job and the image build) are the only
   gates before that, which is why the merge stays `approve`.
 
 ## Open decisions
@@ -669,7 +707,7 @@ confirmed them.
 - **Which check conclusions pass.** Default: a required check passes only
   on `success`; with no required checks, `success`, `skipped` and
   `neutral` pass and anything else blocks. Owner to confirm.
-- **Where sandboxd runs.** Default: oci (above). Owner to confirm.
+- **Where sandboxd runs.** Today: hetzner (above). Moving it to oci, where an escape reaches less, is the owner's call.
 - **Which PRs orbit merges.** Default: only its own `orbit/*` branches in
   the same repository, not Renovate's or anyone else's. Owner to confirm.
 - **Keeping the backend credential out of the build container** (the
@@ -701,10 +739,11 @@ build:
   author: "orbit-kensac[bot] <351241810+orbit-kensac[bot]@users.noreply.github.com>"
   repositories:
     kensac/orbit:
-      commands: [go build, go test, go vet, gofmt, make check, make fmt, make test,
+      commands: [go build, go test, go vet, gofmt, make check, make check-sandbox, make fmt, make test,
                  git status, git diff, git log, git show, ls, rg]
       protected: ["deploy/**"]         # .github/** and .gitmodules always are
       max_diff_lines: 2000             # the default
+      trusted_scripts: []              # sha256 of each reviewed .orbit/build.yaml script
 ```
 
 Validated at load (`internal/spec/build.go`): the github block exists,
@@ -756,5 +795,5 @@ An agent may merge only once its spec names the rule:
 request and the CI check (`check` for orbit), and leave the App off the
 bypass list.
 
-**The build runner** needs sandboxd and egress on oci and the `build:`
+**The build runner** needs sandboxd and egress and the `build:`
 section on hetzner: the steps are in docs/agents/deployment.md.

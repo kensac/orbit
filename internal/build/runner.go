@@ -46,10 +46,20 @@ type Job struct {
 	PlanVersion int
 	// Ticket is the ticket as data for the prompt (ticket.json).
 	Ticket json.RawMessage
-	// Purpose is "build" (from the default branch) or "fix" (on top of the
-	// PR's head, with Failure).
+	// Purpose is "build" (from the default branch), "fix" (on top of the
+	// PR's head, with Failure) or "revise" (on top of the PR's head, with
+	// Review).
 	Purpose string
 	Failure json.RawMessage
+	// Review is the review comments the run is given (review.json), as
+	// the person wrote them; empty when none waits.
+	Review json.RawMessage
+	// StackBranch, for a ticket stacked on another whose PR is open, is
+	// that ticket's branch: a build starts from its head and opens its PR
+	// against it. Empty builds from the default branch.
+	StackBranch string
+	// StackPR is that ticket's PR, named in this one's body.
+	StackPR int
 	Policy  spec.BuildRepo
 	// Model and MaxTurns are the build agent's runner's; Timeout its.
 	Model    string
@@ -124,6 +134,9 @@ type Runner struct {
 	// CloneURL is where a repository is fetched from and pushed to;
 	// https://github.com/<repo>.git by default (tests point it elsewhere).
 	CloneURL func(repo string) string
+	// Pool, when set, keeps one clone per ticket and spare ones; nil makes
+	// a fresh clone per attempt.
+	Pool *Pool
 }
 
 // trustGlobs are the paths of orbit's own repository whose change alters
@@ -152,6 +165,10 @@ func TrustBoundary(repo string, paths []string) []string {
 	}
 	return out
 }
+
+// fromPRHead reports whether a build of purpose starts from the PR's head,
+// as store.FromPRHead does: a fix and a revise commit on top of it.
+func fromPRHead(purpose string) bool { return purpose == "fix" || purpose == "revise" }
 
 func (r *Runner) cloneURL(repo string) string {
 	if r.CloneURL != nil {
@@ -194,13 +211,18 @@ func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
 	if bin == "" {
 		bin = "git"
 	}
-	top := git{bin: bin, dir: work, home: filepath.Join(work, "home")}
-	if _, err := top.run(ctx, nil, "init", "--quiet", "repo"); err != nil {
-		return nil, err
-	}
-	g := git{bin: bin, dir: filepath.Join(work, "repo"), home: top.home}
-	if _, err := g.run(ctx, nil, "remote", "add", "origin", r.cloneURL(j.Repo)); err != nil {
-		return nil, err
+	home := filepath.Join(work, "home")
+	var g git
+	if r.Pool != nil {
+		// The ticket's clone, kept between its builds, or a spare one.
+		if g, err = r.Pool.Acquire(ctx, TicketKey(j.TicketID), j.Repo, home); err != nil {
+			return nil, err
+		}
+	} else {
+		g = git{bin: bin, dir: filepath.Join(work, "repo"), home: home}
+		if err := initClone(ctx, bin, g.dir, home, r.cloneURL(j.Repo)); err != nil {
+			return nil, err
+		}
 	}
 
 	read, err := d.App.Token(ctx, j.Repo, github.ReadContents)
@@ -232,24 +254,40 @@ func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
 	}
 
 	start := defSHA
-	if j.Purpose == "fix" {
+	if fromPRHead(j.Purpose) {
 		if branchSHA == "" {
 			return nil, fmt.Errorf("the PR's branch %s is gone; retry the ticket to build it again", branch)
 		}
 		start = branchSHA
+	} else if j.StackBranch != "" {
+		if err := g.fetch(ctx, read.GitAuthEnv(), "refs/heads/"+j.StackBranch, "refs/orbit/base"); err != nil {
+			return nil, fmt.Errorf("the branch %s this ticket stacks on: %w", j.StackBranch, err)
+		}
+		sha, err := g.run(ctx, nil, "rev-parse", "refs/orbit/base")
+		if err != nil {
+			return nil, err
+		}
+		start, res.BaseSHA = strings.TrimSpace(sha), strings.TrimSpace(sha)
 	} else {
 		if err := g.fetch(ctx, read.GitAuthEnv(), "refs/heads/"+defBranch, "refs/orbit/base"); err != nil {
 			return nil, err
 		}
 		res.BaseSHA = defSHA
 	}
-	if _, err := g.run(ctx, nil, "checkout", "--quiet", "--detach", start); err != nil {
+	if err := g.prepare(ctx, start); err != nil {
 		return nil, err
 	}
 	revokeRead()
+	scripts, err := readScripts(g.dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := scripts.trusted(j.Repo, j.Policy.TrustedScripts); err != nil {
+		return nil, err
+	}
 	d.emit("orbit.build", map[string]any{"step": "checkout", "repo": j.Repo, "start": start, "purpose": j.Purpose, "branch": branch})
 
-	out, cost, err := r.sandboxed(ctx, j, d, g)
+	out, cost, err := r.sandboxed(ctx, j, d, g, scripts)
 	if out == nil {
 		return nil, err
 	}
@@ -294,7 +332,7 @@ type costs struct {
 // sandboxed runs the CLI in a fresh sandbox over the clone's tree and
 // writes the sandbox's tree back into the clone. The sandbox is destroyed
 // whatever happens. out is nil when the model never produced a result.
-func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git) (*Output, costs, error) {
+func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git, scripts Scripts) (*Output, costs, error) {
 	tree, err := packTree(g.dir)
 	if err != nil {
 		return nil, costs{}, err
@@ -346,6 +384,11 @@ func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git) (*Output, 
 	}
 	defer destroy()
 	d.emit("orbit.build", map[string]any{"step": "sandbox", "id": cr.ID, "expires_at": cr.ExpiresAt})
+	if scripts.Setup != "" {
+		if err := runScript(ctx, sb, cr.ID, "setup", scripts.Setup, d); err != nil {
+			return nil, costs{}, err
+		}
+	}
 
 	policy := Policy{Root: sandbox.WorkDir, Protected: j.Policy.Protected, Commands: j.Policy.Argv()}
 	binary := r.Binary
@@ -395,6 +438,11 @@ func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git) (*Output, 
 			return &out, c, err
 		}
 	}
+	if scripts.Cleanup != "" {
+		if err := runScript(ctx, sb, cr.ID, "cleanup", scripts.Cleanup, d); err != nil {
+			return &out, c, err
+		}
+	}
 	rc, err := sb.Archive(ctx, cr.ID)
 	if err != nil {
 		return &out, c, fmt.Errorf("read the sandbox's tree back: %w", err)
@@ -416,7 +464,7 @@ func (r *Runner) redeliver(ctx context.Context, j Job, d Deps, g git, res *Resul
 		return nil, err
 	}
 	res.HeadSHA, res.BaseSHA = head, strings.Fields(parent + " ")[0]
-	if j.Purpose == "fix" {
+	if fromPRHead(j.Purpose) {
 		res.BaseSHA = ""
 	}
 	if names, err := g.run(ctx, nil, "diff", "--name-only", "-z", res.HeadSHA+"^", res.HeadSHA); err == nil {
@@ -452,7 +500,11 @@ func (r *Runner) deliver(ctx context.Context, j Job, d Deps, g git, res *Result,
 		return fmt.Errorf("find the PR: %w", err)
 	}
 	if pr == nil {
-		pr, err = c.CreatePR(ctx, j.Repo, github.NewPR{Title: title, Head: res.Branch, Base: defBranch, Body: full})
+		base := defBranch
+		if j.StackBranch != "" {
+			base = j.StackBranch
+		}
+		pr, err = c.CreatePR(ctx, j.Repo, github.NewPR{Title: title, Head: res.Branch, Base: base, Body: full})
 		if err != nil {
 			return fmt.Errorf("open the PR: %w", err)
 		}
@@ -499,6 +551,9 @@ func PRBody(model string, j Job, trust []string) string {
 	var b strings.Builder
 	b.WriteString(strings.TrimSpace(github.ScrubAttribution(model)))
 	fmt.Fprintf(&b, "\n\n---\n\nBuilt by orbit from ticket `%s` (%q), plan version %d.", j.TicketID, j.Title, j.PlanVersion)
+	if j.StackPR > 0 {
+		fmt.Fprintf(&b, "\n\nStacked on #%d: this PR's base is that one's branch until it merges; then orbit moves this branch onto the default branch, and only then merges it.", j.StackPR)
+	}
 	if len(trust) > 0 {
 		fmt.Fprintf(&b, "\n\n**Trust boundary:** this change touches what orbit itself may do: %s. Review those files before approving the merge.",
 			"`"+strings.Join(trust, "`, `")+"`")
