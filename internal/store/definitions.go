@@ -21,16 +21,25 @@ type AgentDefinition struct {
 	Change    string          `json:"change"`
 	Author    *string         `json:"author"`
 	CreatedAt time.Time       `json:"created_at"`
+	// RunID is the run of the agent that made the change (agent:define),
+	// null for a change a person made through the API.
+	RunID *string `json:"run_id"`
+	// EditedBy names the editor: the agent (by name) when RunID is set,
+	// else the person (author), else "operator".
+	EditedBy string `json:"edited_by"`
+	// Reverts is the version a revert restored.
+	Reverts *int `json:"reverts,omitempty"`
 }
 
-const definitionCols = `id, name, version, spec, enabled, archived, change, author, created_at`
+const definitionCols = `id, name, version, spec, enabled, archived, change, author, created_at, run_id::text,
+	COALESCE((SELECT r.agent FROM runs r WHERE r.id = agent_definitions.run_id), author, 'operator'), reverts`
 
 // ActiveDefinitions returns the newest version of every agent defined in
 // the database that is not archived, by name: the definitions in force.
 func (s *Store) ActiveDefinitions(ctx context.Context) ([]AgentDefinition, error) {
 	rows, err := s.Pool.Query(ctx, `SELECT `+definitionCols+` FROM (
 		    SELECT DISTINCT ON (name) * FROM agent_definitions ORDER BY name, version DESC
-		) d WHERE NOT archived ORDER BY name`)
+		) agent_definitions WHERE NOT archived ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -62,6 +71,20 @@ func (s *Store) DefinitionHistory(ctx context.Context, name string) ([]AgentDefi
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[AgentDefinition])
 }
 
+// Definition returns one version of name.
+func (s *Store) Definition(ctx context.Context, name string, version int) (*AgentDefinition, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT `+definitionCols+` FROM agent_definitions
+		WHERE name = $1 AND version = $2`, name, version)
+	if err != nil {
+		return nil, err
+	}
+	d, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByPos[AgentDefinition])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return &d, err
+}
+
 // DefinitionGeneration is the newest definition's id (0 for none): it
 // changes whenever any definition does, so each instance polls it to
 // reload what another instance's API wrote.
@@ -81,6 +104,10 @@ type NewDefinition struct {
 	// Change is create, update, enable, disable or archive.
 	Change string
 	Author string
+	// RunID is the agent's run, when an agent makes the change.
+	RunID string
+	// Reverts is the version a revert restores.
+	Reverts int
 	// After is the version this change follows: 0 for a create (the name
 	// is new, or its newest version archived it), else the newest version
 	// the caller read. A concurrent change makes it stale: ErrConflict.
@@ -113,9 +140,9 @@ func (s *Store) PutDefinition(ctx context.Context, d NewDefinition) (*AgentDefin
 		case d.Change != "create" && d.After != latest:
 			return fmt.Errorf("agent %q changed since version %d (now %d): %w", d.Name, d.After, latest, ErrConflict)
 		}
-		rows, err := tx.Query(ctx, `INSERT INTO agent_definitions (name, version, spec, enabled, archived, change, author)
-			VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, '')) RETURNING `+definitionCols,
-			d.Name, latest+1, []byte(d.Spec), d.Enabled, d.Archived, d.Change, d.Author)
+		rows, err := tx.Query(ctx, `INSERT INTO agent_definitions (name, version, spec, enabled, archived, change, author, run_id, reverts)
+			VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, '')::uuid, NULLIF($9, 0)) RETURNING `+definitionCols,
+			d.Name, latest+1, []byte(d.Spec), d.Enabled, d.Archived, d.Change, d.Author, d.RunID, d.Reverts)
 		if err != nil {
 			return err
 		}
@@ -127,4 +154,16 @@ func (s *Store) PutDefinition(ctx context.Context, d NewDefinition) (*AgentDefin
 		return err
 	})
 	return out, err
+}
+
+// RunInstructor is the person a run answered: the author of the newest
+// message it read, "" for a run no person's message woke.
+func (s *Store) RunInstructor(ctx context.Context, runID string) (string, error) {
+	var who *string
+	err := s.Pool.QueryRow(ctx, `SELECT author FROM messages WHERE run_id = $1 AND direction = 'to_agent'
+		ORDER BY created_at DESC LIMIT 1`, runID).Scan(&who)
+	if errors.Is(err, pgx.ErrNoRows) || who == nil {
+		return "", nil
+	}
+	return *who, err
 }

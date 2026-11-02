@@ -53,6 +53,17 @@ func TestDefiningAnAgentThroughTheAPI(t *testing.T) {
 	if got := v.e.Current().Config.Agents["news"].Charter; got != "Read the news, briefly." {
 		t.Fatalf("charter = %q", got)
 	}
+	if def := body["definition"].(map[string]any); def["edited_by"] != "kanishk" || def["run_id"] != nil {
+		t.Fatalf("a person's change: %v", def)
+	}
+	// A revert is a new version with the earlier spec.
+	code, body = call(t, "POST", u+"/news/definitions/1/revert", who, "")
+	if code != 200 || body["definition"].(map[string]any)["version"].(float64) != 3 || body["definition"].(map[string]any)["reverts"].(float64) != 1 {
+		t.Fatalf("revert = %d %v", code, body)
+	}
+	if got := v.e.Current().Config.Agents["news"].Charter; got != "Read the news." {
+		t.Fatalf("reverted charter = %q", got)
+	}
 	if code, _ := call(t, "PUT", u+"/a", who, `{"spec": {"charter": "y"}}`); code != 409 {
 		t.Fatalf("updating a file agent = %d", code)
 	}
@@ -68,7 +79,7 @@ func TestDefiningAnAgentThroughTheAPI(t *testing.T) {
 		t.Fatalf("archive = %d", code)
 	}
 	code, body = call(t, "GET", u+"/news/definitions", who, "")
-	if vs, _ := body["versions"].([]any); code != 200 || len(vs) != 5 {
+	if vs, _ := body["versions"].([]any); code != 200 || len(vs) != 6 {
 		t.Fatalf("history = %d %v: every version is kept", code, body)
 	}
 	if code, _ := call(t, "PUT", u+"/news", who, `{"spec": {"charter": "z"}}`); code != 404 {
@@ -76,7 +87,7 @@ func TestDefiningAnAgentThroughTheAPI(t *testing.T) {
 	}
 	// The name can be defined again after archiving: a new version.
 	if code, body := call(t, "POST", u, who, `{"spec": {"name": "news", "charter": "Back."}}`); code != 201 ||
-		body["definition"].(map[string]any)["version"].(float64) != 6 {
+		body["definition"].(map[string]any)["version"].(float64) != 7 {
 		t.Fatalf("re-create = %d %v", code, body)
 	}
 }

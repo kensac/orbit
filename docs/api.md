@@ -114,7 +114,8 @@ returns `201`:
  "spec": {"name": "news", "...": "the agent as loaded, defaults applied"},
  "definition": {"id": 7, "name": "news", "version": 1, "spec": {"...": "as stored"},
                 "enabled": true, "archived": false, "change": "create",
-                "author": "kanishk", "created_at": "..."},
+                "author": "kanishk", "created_at": "...",
+                "run_id": null, "edited_by": "kanishk"},
  "next_fires": [{"trigger_index": 0, "schedule": "0 8 * * *", "at": "..."}],
  "agent": {"name": "news", "origin": "database", "version": 1, "...": "as in GET /agents"}}
 ```
@@ -125,7 +126,9 @@ returns `201`:
   stored on the definition, not in `spec`.
 - A name already defined in the database (and not archived) is `409`; an
   archived name may be created again, as its next version.
-- `author` is the token's person (`null` with the operator token).
+- `author` is the token's person (`null` with the operator token). For a change an agent made (`agent:define`, below), it is the person whose message the agent was answering (`null` for an unattended run).
+- `run_id` is the run of the agent that made the change, `null` for a change made through this API. `edited_by` names the editor: the agent's name when `run_id` is set, else `author`, else `operator`.
+- `change` is `create`, `update`, `enable`, `disable`, `archive` or `revert`; a revert also carries `reverts`, the version it restored.
 
 `PUT /agents/{name}` `{"spec": {...}, "dry_run": false}` replaces the spec
 with a new version: `200`, the same shape (`change: "update"`). `spec.name`
@@ -137,6 +140,10 @@ the same spec, `200` in the same shape. An archived agent is no longer
 configured (`present: false` in the list); its runs and conversations stay
 readable. Changing an archived agent is `404`; a file or built-in agent is
 `409`.
+
+`POST /agents/{name}/definitions/{version}/revert` puts an earlier version back: a new version with that version's spec and enabled state (`change: "revert"`, `reverts: <version>`), `200` in the same shape. A version that archived the agent cannot be reverted to (`400`); an archived agent is `404`.
+
+**Agents change agents.** An agent whose rules enable `agent:define` (the built-in `orbit` does, `auto`) proposes `{"spec": {...}}`: a whole agent, as `POST /agents` takes it, for a new agent or one already defined in the database or built in, itself included. Executed, it goes through the same validation and is stored as the next version with the run as `run_id`. A file agent cannot be changed this way (the action fails, naming why).
 
 `GET /agents/{name}/definitions` is `{"name": "news", "origin":
 "database", "versions": [<definition>, ...]}`, newest first (empty for a

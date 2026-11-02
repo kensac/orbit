@@ -11,7 +11,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -51,10 +50,6 @@ type Server struct {
 	// internal listener's POST /api/v1/drain starts it. Nil is never
 	// draining.
 	Drain *engine.Drain
-	// Reload puts the configuration and the database's agent definitions
-	// in force after the API changes a definition. Nil reloads through
-	// Engine.Reload alone (tests).
-	Reload func(context.Context) error
 	// OAuth, when set, serves the authorization server MCP clients sign in through (oauth.go) on the public listener. Without it /mcp still takes an authentik token from a client that has one.
 	OAuth *OAuthProxy
 }
@@ -82,6 +77,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/agents/{name}/disable", s.setAgentState("disable"))
 	api("POST /api/v1/agents/{name}/archive", s.setAgentState("archive"))
 	api("GET /api/v1/agents/{name}/definitions", s.agentDefinitions)
+	api("POST /api/v1/agents/{name}/definitions/{version}/revert", s.revertAgent)
 	api("GET /api/v1/agents/{name}/thread", s.thread)
 	api("GET /api/v1/agents/{name}/conversations", s.listConversations)
 	api("POST /api/v1/agents/{name}/conversations", s.createConversation)
