@@ -29,11 +29,15 @@ trap cleanup EXIT
 
 docker network create "$id" >/dev/null
 docker run -d --name "$id-db" --network "$id" -e POSTGRES_USER=orbit -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=orbit "$PG_IMAGE" >/dev/null
+# Over TCP: the image's first-start init runs a temporary server on the unix
+# socket only, which answers pg_isready and then restarts.
+pg_ready() { docker exec "$id-db" pg_isready -h 127.0.0.1 -U orbit -d orbit >/dev/null 2>&1; }
+ready=
 for _ in $(seq 60); do
-  docker exec "$id-db" pg_isready -U orbit -d orbit >/dev/null 2>&1 && break
+  if pg_ready; then ready=1; break; fi
   sleep 1
 done
-docker exec "$id-db" pg_isready -U orbit -d orbit >/dev/null || fail "postgres never became ready"
+[ -n "$ready" ] || fail "postgres never became ready"
 
 common=(--network "$id" -e "ORBIT_DATABASE_URL=postgres://orbit:smoke@$id-db:5432/orbit?sslmode=disable" -v "$PWD/examples:/config:ro")
 
@@ -50,7 +54,10 @@ log "migrated"
 out=$(docker run --rm "${common[@]}" "$image" validate /config) || fail "orbit validate /config"
 echo "$out"
 envs=()
-for v in $(sed -n 's/^environment referenced: //p' <<<"$out" | tr -d ','); do envs+=(-e "$v=smoke"); done
+for v in $(sed -n 's/^environment referenced: //p' <<<"$out" | tr -d ','); do
+  # Only variable names: an entry can read "A or B".
+  [[ $v =~ ^[A-Z_][A-Z0-9_]*$ ]] && envs+=(-e "$v=smoke")
+done
 
 docker run -d --name "$id-orbit" "${common[@]}" "${envs[@]}" \
   -e "ORBIT_API_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" \
