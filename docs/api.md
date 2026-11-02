@@ -609,7 +609,7 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
  "report": {"run_id": "uuid", "summary": "...", "report": "<markdown>"},
  "error": null, "run_id": "uuid", "run_status": "succeeded",
  "outcome": "succeeded", "outcome_reason": null,
- "attempt": 2, "failures": 1,
+ "attempt": 2, "failures": 1, "stalled_at": null,
  "attempts": [{"attempt": 1, "agent": "researcher", "conversation_id": "uuid", "brief": "Find the facts.",
                "error": "the agent could not do the work: ...", "finished_at": "...", "retry_action_id": "uuid"}],
  "questions": [{"id": "uuid", "body": "Which year?", "open": true}],
@@ -620,6 +620,7 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
 - `depends_on` is the keys of tasks in the same batch (`action_id`) it waits for. `decision` is `null` without one; otherwise approve or reject its `action_id` like any action (`POST /actions/{id}/approve`), and the task starts or is cancelled within seconds.
 - `outcome` and `outcome_reason` are what the newest run in its conversation said of its work: `outcome` is `succeeded`, `failed` (it could not do the work; the task fails) or `blocked` (it cannot go on until something outside its reach changes; the task needs input), `outcome_reason` why, or `null` when it gave none. Both are `null` while that run has not finished, and for a run that gave no outcome (a chat turn, which counts as succeeded).
 - `attempt` is its current attempt: 1, and one more for each `task:retry` of the delegating agent, which reopens a failed task on the same row, with a new brief or another agent (`agent` and `conversation_id` are then the current attempt's). `attempts` are the attempts a retry ended, oldest first, as they were then. `failures` counts attempts that failed by the agent's work (not a run lost with its worker); from 3 a retry waits for a person's approval, which shows as a pending `task:retry` action.
+- `stalled_at` is set while the task is open in a batch none of whose open tasks can move (each waits only on a failed dependency, or on a decision pending longer than `defaults.decision_stall`) and the delegating agent was woken for it, once; `null` otherwise.
 - `run_id` and `run_status` are the newest run in its conversation; stream it with `/runs/{id}/stream` to show the task's work as it happens. `fresh` is a worker started from its agent's spec without its memory. `depth` is 1 for a task a top-level conversation delegated.
 
 `POST /tasks/{id}/cancel` `{"reason": "optional"}`: `200 {"cancelled": true}`, `409` when the task is already over. Its queued runs are cancelled (a running one finishes, unheeded) and its dependents with it. The canceller is the token's person (with the operator token, `"by"` names it).

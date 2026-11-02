@@ -93,6 +93,9 @@ type Task struct {
 	// Failures how many of its attempts failed by its agent's work.
 	Attempt  int `json:"attempt"`
 	Failures int `json:"failures"`
+	// StalledAt is set while it is one of a stalled batch's open tasks the
+	// parent was woken for (ReconcileTasks).
+	StalledAt *time.Time `json:"stalled_at"`
 	// Attempts are the attempts a retry ended, oldest first.
 	Attempts []TaskAttempt `json:"attempts"`
 	// Questions are its agent's open questions, to the parent.
@@ -151,7 +154,7 @@ const taskSelect = `
 	                 WHERE x.task_id = t.id), '{}'),
 	       da.id::text, da.reason, da.status, da.decided_by,
 	       t.report, t.error, lr.id, lr.status, lr.outcome, NULLIF(lr.outcome_reason, ''),
-	       t.attempt, t.failures,
+	       t.attempt, t.failures, t.stalled_at,
 	       COALESCE((SELECT json_agg(json_build_object('attempt', a.attempt, 'agent', a.agent, 'conversation_id', a.conversation_id,
 	                     'brief', a.brief, 'error', a.error, 'finished_at', a.finished_at, 'retry_action_id', a.retry_action_id) ORDER BY a.attempt)
 	                 FROM task_attempts a WHERE a.task_id = t.id), '[]'),
@@ -170,7 +173,7 @@ func scanTask(row pgx.Row) (*Task, error) {
 	var report, attempts, questions []byte
 	if err := row.Scan(&t.ID, &t.Key, &t.Agent, &t.ConversationID, &t.ParentAgent, &t.ParentConversationID,
 		&t.ParentRunID, &t.ActionID, &t.Brief, &t.Fresh, &t.Depth, &t.Status, &t.DependsOn,
-		&decID, &decQ, &decStatus, &decBy, &report, &t.Error, &t.RunID, &t.RunStatus, &t.Outcome, &t.OutcomeReason, &t.Attempt, &t.Failures, &attempts, &questions,
+		&decID, &decQ, &decStatus, &decBy, &report, &t.Error, &t.RunID, &t.RunStatus, &t.Outcome, &t.OutcomeReason, &t.Attempt, &t.Failures, &t.StalledAt, &attempts, &questions,
 		&t.CreatedAt, &t.UpdatedAt, &t.FinishedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -725,10 +728,11 @@ const briefDepMax = 8 << 10
 //
 // A task needing input or failed is due to its parent at once, so it can
 // answer, retry or reroute while the task's siblings run; any other
-// finished one when its whole batch is over. A parent conversation with a
+// finished one when its whole batch is over; a stalled batch's open tasks
+// once per stall (markStalled). A parent conversation with a
 // due task and no run since gets one delegation run, and never more than
 // one waiting (runs_one_delegation).
-func (s *Store) ReconcileTasks(ctx context.Context) (*Reconciled, error) {
+func (s *Store) ReconcileTasks(ctx context.Context, decisionStall time.Duration) (*Reconciled, error) {
 	res := &Reconciled{}
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var got bool
@@ -763,6 +767,9 @@ func (s *Store) ReconcileTasks(ctx context.Context) (*Reconciled, error) {
 				return err
 			}
 		}
+		if err := markStalled(ctx, tx, decisionStall); err != nil {
+			return err
+		}
 		// A due task a parent run has started since is told; one with a
 		// queued run in its parent conversation will be.
 		if _, err := tx.Exec(ctx, `UPDATE tasks t SET report_due_at = NULL
@@ -786,6 +793,109 @@ func (s *Store) ReconcileTasks(ctx context.Context) (*Reconciled, error) {
 		return err
 	})
 	return res, err
+}
+
+// markStalled finds batches none of whose open tasks can move: each waits,
+// directly or through another open task, only on dependencies that failed,
+// or on a person's decision pending longer than decisionStall. Nothing but
+// the parent (a retry, a cancel) or a person will move them, so the
+// parent is woken, once per stall: their stalled_at records it, and is
+// cleared when a task can move again. A task working or needing input can
+// move (needing input was due to the parent already).
+func markStalled(ctx context.Context, tx pgx.Tx, decisionStall time.Duration) error {
+	type open struct {
+		ID, Action, Status string
+		StaleDecision      bool
+		Stalled            bool
+	}
+	rows, err := tx.Query(ctx, `SELECT t.id::text, t.action_id::text, t.status,
+		       COALESCE(a.status = 'pending' AND a.created_at < now() - $1::interval, false), t.stalled_at IS NOT NULL
+		FROM tasks t LEFT JOIN actions a ON a.id = t.decision_action_id
+		WHERE t.status NOT IN ('done', 'failed', 'cancelled')`, decisionStall.String())
+	if err != nil {
+		return err
+	}
+	list, err := pgx.CollectRows(rows, pgx.RowToStructByPos[open])
+	if err != nil || len(list) == 0 {
+		return err
+	}
+	rows, err = tx.Query(ctx, `SELECT x.task_id::text, x.depends_on::text FROM task_deps x
+		JOIN tasks t ON t.id = x.task_id JOIN tasks d ON d.id = x.depends_on
+		WHERE t.status = 'waiting' AND d.status NOT IN ('done', 'failed', 'cancelled')`)
+	if err != nil {
+		return err
+	}
+	type edge struct{ Task, Dep string }
+	edges, err := pgx.CollectRows(rows, pgx.RowToStructByPos[edge])
+	if err != nil {
+		return err
+	}
+	byID := map[string]*open{}
+	for i := range list {
+		byID[list[i].ID] = &list[i]
+	}
+	waitsOn := map[string][]string{}
+	for _, e := range edges {
+		waitsOn[e.Task] = append(waitsOn[e.Task], e.Dep)
+	}
+	// Dependencies are a DAG, so the recursion ends.
+	memo := map[string]bool{}
+	var movable func(id string) bool
+	movable = func(id string) bool {
+		if m, ok := memo[id]; ok {
+			return m
+		}
+		t := byID[id]
+		m := false
+		switch t.Status {
+		case TaskWorking, TaskNeedsInput:
+			m = true
+		case TaskBlocked:
+			m = !t.StaleDecision
+		case TaskWaiting:
+			for _, d := range waitsOn[id] {
+				if byID[d] != nil && movable(d) {
+					m = true
+					break
+				}
+			}
+		}
+		memo[id] = m
+		return m
+	}
+	stuck := map[string]bool{}
+	for _, t := range list {
+		stuck[t.Action] = true
+	}
+	for _, t := range list {
+		if movable(t.ID) {
+			stuck[t.Action] = false
+		}
+	}
+	var wake, clear []string
+	for _, t := range list {
+		switch {
+		case stuck[t.Action] && !t.Stalled:
+			wake = append(wake, t.ID)
+		case !stuck[t.Action] && t.Stalled:
+			clear = append(clear, t.ID)
+		}
+	}
+	if len(clear) > 0 {
+		if _, err := tx.Exec(ctx, `UPDATE tasks SET stalled_at = NULL WHERE id = ANY($1::uuid[])`, clear); err != nil {
+			return err
+		}
+	}
+	if len(wake) > 0 {
+		// The whole batch is marked, so a later reconcile does not wake for
+		// the tasks already reported.
+		if _, err := tx.Exec(ctx, `UPDATE tasks SET stalled_at = now(), report_due_at = now(), updated_at = now()
+			WHERE action_id IN (SELECT action_id FROM tasks WHERE id = ANY($1::uuid[]))
+			  AND status NOT IN ('done', 'failed', 'cancelled')`, wake); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // openTask is a task ReconcileTasks holds locked.
