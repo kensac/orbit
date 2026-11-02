@@ -327,6 +327,11 @@ func referencedEnv(cfg *spec.Config) []string {
 	if m := cfg.Deployment.Mail; m != nil {
 		refs[m.IMAP.UsernameEnv], refs[m.IMAP.PasswordEnv] = true, true
 	}
+	for _, c := range cfg.Deployment.Connectors {
+		for _, v := range connectorEnv(c) {
+			refs[v] = true
+		}
+	}
 	// A build or a sandboxed chat hands the sandbox the subscription token itself (engine.buildCredential), so these name it alone.
 	if b := cfg.Deployment.Build; b != nil {
 		refs[b.TokenEnv] = true
@@ -342,6 +347,18 @@ func referencedEnv(cfg *spec.Config) []string {
 	}
 	sort.Strings(env)
 	return env
+}
+
+// connectorEnv is the environment a connector's calls need: its header's credentials, a configured client's secret, and for oauth the key its tokens are sealed with.
+func connectorEnv(c spec.Connector) []string {
+	out := spec.EnvRefs(c.Auth.Value)
+	if c.Auth.ClientSecretEnv != "" {
+		out = append(out, c.Auth.ClientSecretEnv)
+	}
+	if c.AuthKind() == spec.ConnectorAuthOAuth {
+		out = append(out, spec.ConnectorKeyEnv)
+	}
+	return out
 }
 
 func enqueue(ctx context.Context, args []string) error {

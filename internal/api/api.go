@@ -183,6 +183,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	s.workspaceRoutes(api)
 	s.workspaceWriteRoutes(api, mux)
 	s.skillsRoutes(api)
+	s.connectorRoutes(api, mux)
 	s.sessionRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))

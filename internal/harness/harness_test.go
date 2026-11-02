@@ -432,6 +432,31 @@ func TestMCPRepositoryToolsAskTheEngineSocket(t *testing.T) {
 	}
 }
 
+func TestHookAddsPinnedEntriesToEveryPrompt(t *testing.T) {
+	state := t.TempDir()
+	o := HookOptions{Root: workdir(t), State: state}
+	prompt := `{"hook_event_name":"UserPromptSubmit","prompt":"hi"}`
+	if v := hook(t, o, prompt); len(v) != 0 {
+		t.Fatalf("no pinned file = %v, want nothing added", v)
+	}
+	if err := os.WriteFile(PinnedPath(state), []byte("Pinned rules:\n- No em dashes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		v := hook(t, o, prompt)
+		out, _ := v["hookSpecificOutput"].(map[string]any)
+		if out["hookEventName"] != "UserPromptSubmit" || out["additionalContext"] != "Pinned rules:\n- No em dashes" {
+			t.Fatalf("hook = %v", v)
+		}
+	}
+	if err := os.WriteFile(PinnedPath(state), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if v := hook(t, o, prompt); len(v) != 0 {
+		t.Fatalf("empty pinned file = %v", v)
+	}
+}
+
 func TestMCPPrometheusToolAsksTheEngineSocketAndIsLedgered(t *testing.T) {
 	sock := filepath.Join(os.TempDir(), fmt.Sprintf("orbit-test-prom-%d.sock", os.Getpid()))
 	_ = os.Remove(sock)

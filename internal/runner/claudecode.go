@@ -51,15 +51,20 @@ func (c *claudeCode) Model() string { return c.rs.Model }
 // hooks are orbit's own; with --setting-sources "" no other settings file
 // is read, so they are the only hooks the CLI runs, and with none
 // disableAllHooks stays on.
-func claudeSettings(keepDays int, hooks map[string]any) string {
-	s := map[string]any{
-		"permissions": map[string]any{
-			"deny": []string{
-				"Read(//proc/**)", "Read(//sys/**)", "Read(//run/**)", "Read(//etc/**)",
-				"Read(//config/**)", "Read(~/**)",
-			},
-			"defaultMode": "dontAsk",
+// ask are tools whose calls go to orbit's permission prompt (connector tools that wait for approval); with any, the mode is default, since dontAsk denies an ask rule unasked, and orbit's prompt denies anything else asked about.
+func claudeSettings(keepDays int, hooks map[string]any, ask []string) string {
+	perms := map[string]any{
+		"deny": []string{
+			"Read(//proc/**)", "Read(//sys/**)", "Read(//run/**)", "Read(//etc/**)",
+			"Read(//config/**)", "Read(~/**)",
 		},
+		"defaultMode": "dontAsk",
+	}
+	if len(ask) > 0 {
+		perms["defaultMode"], perms["ask"] = "default", ask
+	}
+	s := map[string]any{
+		"permissions":         perms,
 		"disableAllHooks":     len(hooks) == 0,
 		"includeCoAuthoredBy": false,
 		"cleanupPeriodDays":   keepDays,
@@ -83,8 +88,8 @@ const hookTimeout = 10
 
 // harnessHooks are the hooks orbit configures, all one command: a path
 // guard on the file tools, with Figures the figure check on the structured
-// output, and with Status every hook event posted to the run's status
-// listener. One PreToolUse entry for every tool keeps it one process per
+// output, the run's pinned entries on every prompt (UserPromptSubmit), and
+// with Status every hook event posted to the run's status listener. One PreToolUse entry for every tool keeps it one process per
 // event; the hook decides by tool name. Matchers are tool names joined by
 // |, or * for all. An agent's own hooks (spec hooks) follow orbit's on
 // their event.
@@ -120,6 +125,10 @@ func harnessHooks(h *Harness, workdir, home string) map[string]any {
 			out[ev] = entry(m)
 		}
 	}
+	// Every prompt gets the run's pinned entries (harness.PinnedPath) added as context, so they hold however far the session has compacted; status mode has the event already.
+	if _, ok := out["UserPromptSubmit"]; !ok {
+		out["UserPromptSubmit"] = entry("")
+	}
 	for _, ah := range h.AgentHooks {
 		timeout := hookTimeout
 		if ah.Def.Timeout > 0 {
@@ -137,21 +146,27 @@ func harnessHooks(h *Harness, workdir, home string) map[string]any {
 	return out
 }
 
-// harnessMCP is the --mcp-config that starts `orbit mcp` for the run.
-func harnessMCP(h *Harness, workdir, home string) string {
-	args := []string{"mcp", "--root", workdir, "--state", harness.StateDir(home)}
-	if h.Search != "" {
-		args = append(args, "--search", h.Search)
+// runMCP is the run's --mcp-config: `orbit mcp` for orbit's tools, and the run's connectors as SDK servers; empty when there is neither.
+func runMCP(h *Harness, conns *Connectors, workdir, home string) string {
+	servers := map[string]any{}
+	if h != nil {
+		args := []string{"mcp", "--root", workdir, "--state", harness.StateDir(home)}
+		if h.Search != "" {
+			args = append(args, "--search", h.Search)
+		}
+		if h.Repos != "" {
+			args = append(args, "--repos", h.Repos)
+		}
+		if h.Prometheus != "" {
+			args = append(args, "--prometheus", h.Prometheus)
+		}
+		servers[harness.MCPServer] = map[string]any{"type": "stdio", "command": h.Bin, "args": args}
 	}
-	if h.Repos != "" {
-		args = append(args, "--repos", h.Repos)
+	conns.addServers(servers)
+	if len(servers) == 0 {
+		return ""
 	}
-	if h.Prometheus != "" {
-		args = append(args, "--prometheus", h.Prometheus)
-	}
-	b, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{
-		harness.MCPServer: map[string]any{"type": "stdio", "command": h.Bin, "args": args},
-	}})
+	b, _ := json.Marshal(map[string]any{"mcpServers": servers})
 	return string(b)
 }
 
@@ -178,6 +193,7 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 		}
 		hooks = harnessHooks(req.Harness, req.Workdir, home)
 	}
+	allowed = append(allowed, req.Connectors.Allowed()...)
 	if req.SkillsPlugin != "" {
 		// Skills load from the plugin (setting sources are off, so no other skill is found) and run through the Skill tool, which in dontAsk mode runs only when allowed by name; orbit's skill tool serves their text.
 		tools = append(tools, "Skill")
@@ -192,10 +208,10 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 		"--tools", strings.Join(tools, ","),
 		"--strict-mcp-config",
 		"--setting-sources", "",
-		"--settings", claudeSettings(keepDays, hooks),
+		"--settings", claudeSettings(keepDays, hooks, req.Connectors.Ask()),
 	}
-	if req.Harness != nil {
-		args = append(args, "--mcp-config", harnessMCP(req.Harness, req.Workdir, home))
+	if mcp := runMCP(req.Harness, req.Connectors, req.Workdir, home); mcp != "" {
+		args = append(args, "--mcp-config", mcp)
 	}
 	if req.SkillsPlugin != "" {
 		args = append(args, "--plugin-dir", req.SkillsPlugin)
@@ -246,11 +262,7 @@ func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*R
 	args := c.baseArgs(req, home, keepDays)
 	env := c.env(home)
 	if sess == nil {
-		full, err := claudeproto.Args(claudeproto.Transport{Ephemeral: true}, args)
-		if err != nil {
-			return nil, err
-		}
-		final, err := c.oneShot(ctx, full, env, req, emit)
+		final, err := c.once(ctx, claudeproto.Transport{Ephemeral: true}, args, env, req, emit)
 		if final == nil {
 			return nil, err
 		}
@@ -306,11 +318,36 @@ func (c *claudeCode) resumed(ctx context.Context, sess *Session, args, env []str
 	if err := sess.Started(mode, sess.Resume); err != nil {
 		return nil, err
 	}
-	full, err := claudeproto.Args(claudeproto.Transport{Resume: sess.Resume}, args)
+	return c.once(ctx, claudeproto.Transport{Resume: sess.Resume}, args, env, req, emit)
+}
+
+// once runs one process for one turn: the prompt as plain text on stdin, or, for a run with connectors, as a stream-json message, so the control channel carries the connectors' calls and permission prompts.
+func (c *claudeCode) once(ctx context.Context, t claudeproto.Transport, args, env []string, req Request, emit func(Event)) ([]byte, error) {
+	if req.Connectors == nil {
+		full, err := claudeproto.Args(t, args)
+		if err != nil {
+			return nil, err
+		}
+		return c.oneShot(ctx, full, env, req, emit)
+	}
+	t.Stream, t.PermissionPrompt = true, len(req.Connectors.Ask()) > 0
+	full, err := claudeproto.Args(t, args)
 	if err != nil {
 		return nil, err
 	}
-	return c.oneShot(ctx, full, env, req, emit)
+	tools := &chatTools{}
+	tools.connectors(req.Connectors)
+	proc, err := claudeproto.Start(claudeproto.Command{Bin: c.bin, Args: full, Env: env, Dir: req.Workdir}, tools.handler())
+	if err != nil {
+		return nil, err
+	}
+	res, err := proc.Turn(ctx, req.Prompt, func(l claudeproto.Line) { emit(Event{Kind: l.Kind, Payload: l.Raw}) })
+	if err != nil {
+		proc.Kill()
+		return nil, err
+	}
+	proc.Close(claudeproto.CloseGrace)
+	return res.Raw, nil
 }
 
 // oneShot runs the CLI with the prompt on stdin and returns its result line,
