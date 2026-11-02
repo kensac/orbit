@@ -25,10 +25,7 @@ func NextFires(a *spec.Agent, now time.Time) []NextFire {
 	if a == nil || !a.IsEnabled() {
 		return out
 	}
-	loc, err := time.LoadLocation(a.Timezone)
-	if err != nil {
-		return out
-	}
+	loc := a.Location()
 	for i, t := range a.Triggers {
 		sched, err := spec.TriggerSchedule(t, loc)
 		if err != nil {
