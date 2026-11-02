@@ -65,6 +65,9 @@ type Loop struct {
 	// Wake nudges the executors and the action loop after an enqueue or
 	// an auto merge.
 	Wake func()
+	// Restack moves a stacked ticket's branch onto a new base
+	// (build.Runner.Restack); nil leaves stacked tickets waiting.
+	Restack func(ctx context.Context, app *github.App, r build.Restack) (*build.Restacked, error)
 }
 
 // Run ticks until ctx ends.
@@ -154,6 +157,9 @@ func (k *tick) reconcile(ctx context.Context, t *store.Ticket) error {
 	}
 	switch t.Status {
 	case store.TicketApproved:
+		if ready, err := k.stackReady(ctx, t); err != nil || !ready {
+			return err
+		}
 		return k.startBuild(ctx, t, store.BuildPurposeBuild, nil)
 	case store.TicketBuilding:
 		return k.building(ctx, t)
@@ -260,6 +266,10 @@ func (k *tick) review(ctx context.Context, t *store.Ticket) error {
 	case t.HeadSHA == nil || pr.Head.SHA != *t.HeadSHA:
 		return k.fail(ctx, t, fmt.Sprintf("PR #%d's head moved to %s after orbit built it; orbit merges only what it built", pr.Number, short(pr.Head.SHA)))
 	}
+	hold, moved, err := k.stacked(ctx, t, pr)
+	if err != nil || moved {
+		return err
+	}
 	// A person's submitted review comes before the checks: what they asked
 	// to change is built before anything is merged.
 	pending, err := k.l.Store.PendingReviewComments(ctx, t.ID)
@@ -284,6 +294,9 @@ func (k *tick) review(ctx context.Context, t *store.Ticket) error {
 	state, failing := github.Classify(required, runs, statuses)
 	switch state {
 	case github.ChecksGreen:
+		if hold {
+			return nil // stacked: it merges after the ticket below it
+		}
 		return k.proposeMerge(ctx, t, c, pr)
 	case github.ChecksFailed:
 		return k.checksFailed(ctx, t, c, pr, failing)

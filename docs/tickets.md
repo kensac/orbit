@@ -21,6 +21,7 @@ This document is the design. What exists today:
 | the build runner: clone, sandbox, the CLI under orbit's permission handler, readback, diff policy, commit, push, PR; decisions and sandboxes recorded per attempt | **Built**; tested against a fake sandboxd and a fake GitHub, with a real git remote; the permission protocol **seen** against the real CLI 2.1.316 (`TestRealCLIPermissionProtocol`); the whole run against a real sandboxd and docker in CI (`TestIntegrationBuild`) | `internal/build`, `internal/engine/build.go`, `internal/store/builds.go`, `migrations/00007_builds.sql` |
 | the ticket loop: build enqueue, PR and checks polling, proposing the merge, reruns of failed jobs (its own and a person's), fix attempts with the failure report, done on deploy, reconciliation, closing an abandoned ticket's PR, the self-hosting rules | **Built**, tested against a fake GitHub and real Postgres | `internal/tickets` |
 | review comments: drafts, edits as new versions, one structured message per review, the revise build that applies them, delivered when it succeeds | **Built**, tested against real Postgres and a fake GitHub | `internal/store/reviews.go`, `internal/api/reviews.go`, `migrations/20261102032212_review_comments.sql` |
+| stacked tickets: built on the ticket below, merge held, restacked by code onto its new head and onto the default branch once it merges | **Built**; the restack against a real git remote, the loop against a fake GitHub and real Postgres | `internal/tickets/stack.go`, `internal/build/restack.go` |
 | `skipped` as a run status for gates | **Built** for a build that redelivers an earlier attempt's push | `store.FinishBuild` |
 
 Nothing has run against the real GitHub API yet; the fake
@@ -216,6 +217,14 @@ A run a gate ends is recorded with its own status, `skipped`, naming the
 gate, not as `succeeded`: a run that judged nothing must be distinguishable
 from one that did.
 
+**Stacked tickets.** A request filed with `stack_on` (another request of the same repository, not yet merged, done or abandoned) builds on that ticket's work instead of the default branch (`internal/tickets/stack.go`, `build.Runner.Restack`):
+
+- **Build.** It waits in `approved` until the ticket below it has a PR (`review`, `merging`) or no longer needs one (`merged`, `done`, `abandoned`). The build starts from the ticket below's branch head while that PR is open, records it as `base_sha`, and opens its PR against that branch, saying so in the body; otherwise it builds from the default branch like any ticket. The branch stays `orbit/<its own id>`.
+- **Following the ticket below.** While the PR below is open, this ticket's merge is held, however green its checks. When the ticket below gets a new head (a fix, a revise), this branch is restacked onto it: code replays the ticket's own commits (`base_sha..head_sha`) with `git rebase --onto`, in orbit's own clone, and force-pushes the one refspec a build may push. No model is involved, and the diff policy is not run again: the replayed commits are the ones it passed, and a conflict aborts the rebase and pushes nothing.
+- **After it merges.** Once the ticket below is `merged`, `done` or `abandoned`, the branch is restacked onto the default branch and the PR retargeted to it (`SetPRBase`); from then on it is reviewed, checked, fixed and merged like any other ticket, and `tickets_one_merging` still lets one merge through at a time.
+- **Conflicts.** A replay that conflicts fails the ticket, naming the files; retrying rebuilds it from its plan on the new base.
+- Every restack is a `ticket_events` row from `review` to `review` with its `restacked` detail (`store.Restacked`, guarded on the head it started from). A crash between the push and that row leaves the PR's head ahead of the ticket's, which the loop reads as a head that moved, and fails the ticket for a person; retrying rebuilds it.
+
 **Reconciliation.** A crash can separate a side effect from its row: the
 merge succeeded on GitHub but `FinishAction` never ran, so the action is
 failed as orphaned. The ticket loop is idempotent and reads GitHub's state:
@@ -240,6 +249,8 @@ reconciles at a time, stopped by a drain) holds no state between ticks:
 | `failed` (reached merging) | the PR merged | `merged` |
 | `review`, `failed` | a person's rerun request waits | reruns the failed jobs; `failed` -> `review` |
 | `merged` | another repository / orbit runs the merge commit or a descendant | `done` |
+| `approved`, stacked | the ticket below has no PR yet | waits |
+| `review`, stacked | the ticket below has a new head / merged, done or abandoned / still open | restacks onto it / restacks onto the default branch and retargets the PR / holds the merge |
 | `abandoned` with an open PR | | closes the PR, keeps the branch |
 
 ## API
@@ -256,7 +267,7 @@ same id for a different request is a 409.
 
 | method | path | body | result |
 |---|---|---|---|
-| `POST` | `/tickets` | `{"kind": "request", "title": "...", "body": "...", "agent": "orbit", "repo": "kensac/orbit", "wake": true, "client_request_id": "..."}` | `201 {"ticket_id", "conversation_id", "message_id", "run_id"}` |
+| `POST` | `/tickets` | `{"kind": "request", "title": "...", "body": "...", "agent": "orbit", "repo": "kensac/orbit", "wake": true, "client_request_id": "...", "stack_on": "optional ticket id"}` | `201 {"ticket_id", "conversation_id", "message_id", "run_id"}`; 400 for a `stack_on` that is not an unmerged request of the same repository |
 | `GET` | `/tickets?status=&agent=&before=&limit=` | | `{"tickets": [...]}`, newest first |
 | `GET` | `/tickets/{id}` | | `{"ticket", "plans", "events", "reruns"}` |
 | `POST` | `/tickets/{id}/plans/{version}/approve` | `{"client_request_id"}` | `{"ok": true}`; 409 unless it is the newest plan of a `planned` ticket |
@@ -287,7 +298,7 @@ in `orbit.yaml`. A ticket in the API:
  "created_at": "...", "updated_at": "..."}
 ```
 
-Fields not yet set (`merge_sha`, `error`, ...) are omitted, not `null`; the full shape is in docs/api.md, Tickets.
+Fields not yet set (`merge_sha`, `error`, `stack_on`, ...) are omitted, not `null`; the full shape is in docs/api.md, Tickets.
 
 ## GitHub access: one App, per-run tokens
 
