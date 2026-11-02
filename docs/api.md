@@ -943,6 +943,16 @@ Nothing is deleted. Every change is a new version, kept:
 
 An agent writes entries itself, without approval: every run's output carries `entries` (docs/ARCHITECTURE.md, Memory entries), applied with the run's outcome as versions with `source: "learned"`, `source_run_id` the run and `source_conversation_id` its conversation. A person reverts one with `restore` or `retire` above. A write the store refuses (a stale version, a key taken, an invalid field, a ref the run was not shown) is skipped and the rest apply. Each run's writes and what became of them are its `entries.json` artifact (`GET /runs/{id}/artifacts`): `[{"op", "ref", "title", "result": {"outcome": "written"|"unchanged"|"refused", "error", "id", "key", "version"}}]`, in output order.
 
+### Remembering from a conversation
+
+A message from the person that starts with `/remember` writes an entry at once, in the run that reads it, and that run's reply says what was saved: `/remember [--agent | --topic <name>] [--feedback | --user | --project | --reference] <text>`.
+
+- **Place:** the profile; `--agent` is the conversation's agent's own; `--topic <name>` (or `--topic=<name>`) a topic the agent reads.
+- **Type:** the flag's, else inferred: a link or "can be found" is `reference`, "I am", "I live", "my job" `user`, "we", "our", a deadline `project`, anything else `feedback`.
+- **Entry:** title the text's first sentence (at most 80 bytes), body the whole text, `source: "person"`, `author` the message's, `source_run_id` and `source_conversation_id` the run and its conversation, `note` `/remember in a conversation`.
+- **Reply:** `Saved to memory: [<type>] <title> (<ref>), for every agent.` (or `for <agent> only.`, `for the agents that read <topic>.`); `Already in memory: ...` when the same text is in that place (nothing written); `Not saved: <why>.` for an unknown flag, no text, or a topic the agent does not read. A run woken only by `/remember` messages succeeds with that reply as its report and no backend call; with other messages beside them, the agent answers those and the confirmation follows its reply.
+- Messages an agent wrote (a task's) are never commands. The learning pass leaves `/remember` messages out.
+
 ### Learning runs
 
 After a conversation goes quiet, orbit runs a short learning pass over it (trigger `learn`) that reads what was said since the last pass and writes entries the same way. It runs in the agent's **learning conversation**: one per agent, `purpose: "learning"`, titled `Learning`, archived, so it is listed only with `archived=true`; its thread is every learning run, each report listing the writes it made. Conversations carry `purpose` (`null` for a person's). Nothing a learning run does appears in the conversation it read.
