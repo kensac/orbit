@@ -10,7 +10,8 @@ import (
 )
 
 // Two instances during a deploy: one leads, the other waits, and the lock
-// passes when the leader's process ends.
+// passes when the leader stops. A dropped connection passing it is
+// TestSchedulerLockGoesWithItsConnection in the store.
 func TestOneSchedulerLeadsAcrossInstances(t *testing.T) {
 	first, s, _ := setup(t, "0 9 * * *")
 	other, err := store.Open(ctx, s.Pool.Config().ConnString())
@@ -29,17 +30,16 @@ func TestOneSchedulerLeadsAcrossInstances(t *testing.T) {
 	defer cancel()
 	if conn, err := second.acquire(wait); !errors.Is(err, context.DeadlineExceeded) {
 		if conn != nil {
-			conn.Release()
+			conn.Release(ctx)
 		}
 		t.Fatalf("a second instance led beside the first: %v", err)
 	}
-	// The leader's process ends: its connection, and the lock, go.
-	lead.Hijack().Close(ctx)
+	lead.Release(ctx)
 	took, cancel2 := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel2()
 	conn, err := second.acquire(took)
 	if err != nil {
 		t.Fatalf("the waiting instance never took over: %v", err)
 	}
-	conn.Release()
+	conn.Release(ctx)
 }

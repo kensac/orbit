@@ -856,27 +856,18 @@ func configHash(dir string) string {
 }
 
 func seedMetrics(ctx context.Context, s *store.Store) error {
-	rows, err := s.Pool.Query(ctx, `SELECT agent, max(finished_at) FROM runs WHERE status IN ('succeeded', 'skipped') GROUP BY agent`)
+	last, err := s.LastSuccessTimes(ctx)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var agent string
-		var t time.Time
-		if err := rows.Scan(&agent, &t); err != nil {
-			return err
-		}
+	for agent, t := range last {
 		metrics.SeedLastSuccess(agent, t)
 	}
-	return rows.Err()
+	return nil
 }
 
 func refreshGauges(ctx context.Context, s *store.Store, log *slog.Logger) {
-	var pending, queued int
-	err := s.Pool.QueryRow(ctx, `SELECT
-		(SELECT count(*) FROM actions WHERE status = 'pending'),
-		(SELECT count(*) FROM runs WHERE status = 'queued' AND (run_after IS NULL OR run_after <= now()))`).Scan(&pending, &queued)
+	pending, queued, err := s.GaugeCounts(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Warn("gauges", "err", err)

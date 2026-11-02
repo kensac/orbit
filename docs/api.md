@@ -129,6 +129,7 @@ returns `201`:
 
 - `dry_run: true` validates and stores nothing: `200 {"valid": true,
   "spec": ..., "next_fires": [...]}` (no `definition`, no `agent`).
+- A change stored whose reload then failed on this instance is still a success, with `pending_reload`: the reason. The change is stored and valid; the config sync retries the reload until it is in force, so retrying the request would only store another version. `spec` is then the agent as validated (absent after an archive). An `agent:define` action's result carries the same `pending_reload`.
 - `spec.enabled` (default `true`) sets whether its schedules fire; it is
   stored on the definition, not in `spec`.
 - A name already defined in the database (and not archived) is `409`; an
