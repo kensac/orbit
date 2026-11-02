@@ -43,6 +43,11 @@ func TestSummarizeCarriesNoContent(t *testing.T) {
 	if Link("/orbit", q) != "/orbit/c/c2#message-m" || Link("/orbit", f) != "/orbit/c/c1" {
 		t.Fatalf("links %s %s", Link("/orbit", q), Link("/orbit", f))
 	}
+	pr := store.Attention{Key: "approval:p", Kind: store.AttentionPermission, Agent: "orbit", ConversationID: "c3", ApprovalID: ptr("p"),
+		Title: "orbit needs permission", Detail: "Bash"}
+	if p := summarize("/orbit", []store.Attention{pr}); p.URL != "/orbit/c/c3#approval-p" || p.Title != "orbit needs permission" || p.Tag != "approval:p" {
+		t.Fatalf("permission = %+v", p)
+	}
 }
 
 func TestAllowedEndpoint(t *testing.T) {
