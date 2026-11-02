@@ -227,7 +227,7 @@ without docker):
   allowlisted host as a channel for anything the sandbox holds.
 - **The kernel is shared** with the host, hetzner today. A container escape is root on hetzner,
   which holds every other secret in the fleet; `ORBIT_SANDBOX_RUNTIME=
-  runsc` (gVisor) narrows this where installed.
+  runsc` (gVisor) narrows this where installed; deployment.md, Box isolation on a host, is the planned layout (a second daemon whose only runtime is runsc, and nftables tables dropping what egress refuses).
 - **`/work` has no disk quota**: a sandbox can fill the host's docker volume
   until its lifetime ends. The readback refuses more than 256 MiB.
 - **sandboxd holds the docker socket**, so a bug in it is root on its host. Its
@@ -258,7 +258,7 @@ A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as 
 
 - **Data leaves.** The open web is the point: anything the box holds can be sent anywhere public.
 - **A non-TLS tunnel, or TLS on another port, is not inspected.** Plain HTTP over a CONNECT tunnel, or TLS to port 8443, can name a denied host in its own `Host` or server name if the address it reaches serves that host (a CDN). Denied hosts behind a CDN still enforce their own authentication (orbit's API checks an authentik token, authentik and Infisical their logins), which is what stands between a box and them there.
-- **The deny lists are configuration.** A fleet host's public address missing from `ORBIT_EGRESS_DENY_NETS` is reachable, with every public port on it (hetzner has no firewall); deployment.md lists what each host's egress must carry.
+- **The deny lists are configuration.** A fleet host's public address missing from `ORBIT_EGRESS_DENY_NETS` is reachable, with every public port on it (hetzner has no firewall); deployment.md lists what each host's egress must carry; the planned nftables tables (deployment.md, Box isolation on a host) drop the same ranges in the kernel for traffic that does not go through a proxy.
 - **Abuse from the fleet's address.** Traffic leaves from the host's public IP, so what a box sends is attributed to it.
 
 ## Build runs
