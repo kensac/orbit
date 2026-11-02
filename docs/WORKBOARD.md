@@ -40,7 +40,7 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | Hook-driven live agent status | #37 agent-status | |
 | Worktrees, review comments on PR diffs, stacked PRs, check reruns, RRULE schedules with a precheck | #32 #43 | |
 | Migration fix (duplicate version 14) | #50 | |
-| Delegation hardening: task outcomes (succeeded, failed, blocked), waking the parent at a task's failure, `task:retry` with a circuit breaker, a stall check for batches nothing can move | branches deleg-*, one PR per item, in order | claude-delegation |
+| Delegation hardening: task outcomes (succeeded, failed, blocked), waking the parent at a task's failure, `task:retry` with a circuit breaker, a stall check for batches nothing can move, `after` across batches | #92 #94 #99 #101 #112, branches deleg-*, merged in that order | claude-delegation. Next: `task:message` to a working task should steer its live run (a correction reaching the worker mid-turn) once the claudeproto steering work (#104) is merged; today it waits for the run's next turn |
 | Workspace: an IDE in the portfolio chat (explorer, editor, terminals with Claude Code (direct), diffs with line comments), one shell with the chat | #78 docs/workspace-contract (design); items below | design [docs/workspace.md](workspace.md), contract docs/api.md, Workspace (planned) |
 
 ### Workspace: implementation items, in order
