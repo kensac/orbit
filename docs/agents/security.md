@@ -51,6 +51,13 @@ more than its agent's rules allow.
   gains no reach it lacked (it could already Read those files). The hook fails
   closed: an event it cannot parse is denied. Hooks come only from orbit's
   `--settings`; a workdir's `.claude/settings.json` is never read.
+- **The search tool** (`mcp__orbit__search`) holds no database credential:
+  the tool server asks the engine over a unix socket (`--search`, a 0600
+  file under the temp directory) that the engine serves for one agent, and
+  the engine sets the agent on every query, so a run finds only its own
+  agent's records, which it could already have been shown. Results are
+  past writing, so they are data like any input, and they never back a
+  figure (they are kept out of the tool ledger).
 
 ## Memory entries a model writes
 
@@ -60,7 +67,7 @@ A run writes memory entries directly, and a learning run writes them from a conv
 
 Only actions its spec enables, through executors here, to destinations in
 configuration. `continue` can make an agent run again on its own, so it is
-bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body, never a URL or a header.
+bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body, never a URL or a header. `agent:define` lets a model rewrite an agent defined in the database, itself included: its charter, tools, sources and rules, so an agent with it enabled can widen any database agent's reach up to what orbit.yaml offers (endpoints, channels, repositories); never a file agent's, and never past the configuration. Every change is a version with its run, so it is seen and reverted through the API.
 `deny` is the default for every type an agent does not name, and denied
 types are not even offered.
 

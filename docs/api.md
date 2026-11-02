@@ -114,7 +114,8 @@ returns `201`:
  "spec": {"name": "news", "...": "the agent as loaded, defaults applied"},
  "definition": {"id": 7, "name": "news", "version": 1, "spec": {"...": "as stored"},
                 "enabled": true, "archived": false, "change": "create",
-                "author": "kanishk", "created_at": "..."},
+                "author": "kanishk", "created_at": "...",
+                "run_id": null, "edited_by": "kanishk"},
  "next_fires": [{"trigger_index": 0, "schedule": "0 8 * * *", "at": "..."}],
  "agent": {"name": "news", "origin": "database", "version": 1, "...": "as in GET /agents"}}
 ```
@@ -125,7 +126,9 @@ returns `201`:
   stored on the definition, not in `spec`.
 - A name already defined in the database (and not archived) is `409`; an
   archived name may be created again, as its next version.
-- `author` is the token's person (`null` with the operator token).
+- `author` is the token's person (`null` with the operator token). For a change an agent made (`agent:define`, below), it is the person whose message the agent was answering (`null` for an unattended run).
+- `run_id` is the run of the agent that made the change, `null` for a change made through this API. `edited_by` names the editor: the agent's name when `run_id` is set, else `author`, else `operator`.
+- `change` is `create`, `update`, `enable`, `disable`, `archive` or `revert`; a revert also carries `reverts`, the version it restored.
 
 `PUT /agents/{name}` `{"spec": {...}, "dry_run": false}` replaces the spec
 with a new version: `200`, the same shape (`change: "update"`). `spec.name`
@@ -137,6 +140,10 @@ the same spec, `200` in the same shape. An archived agent is no longer
 configured (`present: false` in the list); its runs and conversations stay
 readable. Changing an archived agent is `404`; a file or built-in agent is
 `409`.
+
+`POST /agents/{name}/definitions/{version}/revert` puts an earlier version back: a new version with that version's spec and enabled state (`change: "revert"`, `reverts: <version>`), `200` in the same shape. A version that archived the agent cannot be reverted to (`400`); an archived agent is `404`.
+
+**Agents change agents.** An agent whose rules enable `agent:define` (the built-in `orbit` does, `auto`) proposes `{"spec": {...}}`: a whole agent, as `POST /agents` takes it, for a new agent or one already defined in the database or built in, itself included. Executed, it goes through the same validation and is stored as the next version with the run as `run_id`. A file agent cannot be changed this way (the action fails, naming why).
 
 `GET /agents/{name}/definitions` is `{"name": "news", "origin":
 "database", "versions": [<definition>, ...]}`, newest first (empty for a
@@ -605,6 +612,7 @@ After a conversation goes quiet, orbit runs a short learning pass over it (trigg
 | `read_thread` | `agent` or `conversation_id`, `limit` (default 20), `before` | `items`, `has_more`, `next_before`, as a thread page |
 | `list_actions` | `agent`, `status` (default `pending`; `all`) | `actions` |
 | `approve_action`, `reject_action` | `action_id` | the decided `action`; a decided one is an error |
+| `search` | `q`, and as `GET /search`: `agent`, `conversation_id`, `run_id`, `kind`, `from`, `to`, `limit`, `offset` | as `GET /search` |
 
 - **Waiting.** `send_message` and `create_conversation` wait for the run they woke up to `wait_seconds` (default 45, at most 300; `-1` returns at once). A run still going when the wait ends is returned with its status and a `note` to call `wait_for_reply`. A message that woke no run (`wake_on_message` off) says so in `note`.
 - **Streaming.** When the call carries a `progressToken`, the wait sends the run's narration (the stream's `text` and `tool` events, a tool as `<name> <summary>`) as progress notifications on the call's response.
@@ -633,6 +641,36 @@ The access token is authentik's own (the `orbit-mcp` provider), so its issuer an
 | `ORBIT_MCP_REDIRECT_HOSTS` | comma list of hosts a client may redirect to (the host or a subdomain of it), default `claude.ai,claude.com`. Loopback is always allowed. |
 
 `ORBIT_OIDC_GROUP` is required with the issuer. The authentik provider needs the redirect URI `<public_url>/oauth/callback` (strict), the `openid`, `email`, `profile` and `offline_access` scope mappings (profile carries `preferred_username` and `groups`), the `authorization_code` and `refresh_token` grants, and the application bound to the group. traefik must route `/mcp`, `/.well-known/oauth-` and `/oauth/` past forward-auth, as it does `/api/`.
+
+## Search
+
+`GET /search?q=&agent=&conversation_id=&run_id=&kind=&from=&to=&limit=&offset=`
+
+Full-text search across everything orbit stores, ranked best first.
+
+```json
+{"query": "electricity bill",
+ "total": 3,
+ "results": [
+   {"kind": "report", "agent": "finance", "conversation_id": "uuid", "run_id": "uuid",
+    "attempt": 1, "seq": null, "message_id": null, "memory_version_id": null,
+    "entry_id": null, "entry_version": null, "scope": null, "owner": null, "title": null,
+    "author": null, "tool": null, "at": "...", "rank": 0.083,
+    "snippet": "The electricity bill rose because of a rate change ...",
+    "snippet_parts": [{"text": "The ", "match": false}, {"text": "electricity", "match": true},
+                      {"text": " ", "match": false}, {"text": "bill", "match": true},
+                      {"text": " rose because of a rate change ...", "match": false}],
+    "links": {"run": "/api/v1/runs/uuid", "run_page": "https://orbit.kanishksachdev.com/ui/runs/uuid",
+              "conversation": "/api/v1/conversations/uuid/thread"}}]}
+```
+
+- **`kind`** is what matched: `message` (a person's message to an agent; `author`, `message_id`), `question` (an agent's question; `message_id`, `run_id`), `report` (a run's summary and report), `error` (a failed run's error), `narration` (the prose a backend wrote while working, one transcript line; `attempt`, `seq` locate it in `GET /runs/{id}/events`), `tool_call` (one tool call's input as JSON, `tool` its name; tool results are not searched), `memory` (an agent's memory document; `memory_version_id`), `memory_entry` (a memory entry: `entry_id`, `entry_version`, `scope`, `owner`, `title`, and `agent` for an agent's own, `null` for a profile or topic entry). Of an agent's memory versions only the newest matching one is returned; a memory entry only as its current version, and never once retired. The `kind` parameter is a comma list of these.
+- **`q`** is web-search syntax: words (all must match, stemmed: `bills` finds `bill`), `"a quoted phrase"`, `or` between alternatives, `-word` to exclude. Required (`400` without one). A query of only stop words matches nothing.
+- **Ranking** is Postgres `ts_rank_cd` normalised by document length (`rank`, comparable only within one response), ties newest first. A memory entry's title weighs more than its body, and a tool's name more than its input.
+- **`snippet`** is up to two fragments of the matching text joined by ` ... `; `snippet_parts` is the same text split into runs, `match` true on matched words, so a client highlights without parsing markup (the text is never escaped or marked up).
+- **Filters:** `agent` (that agent's documents; a profile or topic entry belongs to none), `conversation_id`, `run_id` (a UUID, else `400`); `from` and `to` are a calendar day in the deployment's timezone (`to` includes its day) or an RFC 3339 time (`to` excluded), by the document's `at` (a message's or memory version's creation, a run's finish, a transcript line's time). `limit` defaults to 20, at most 100; `offset` pages, at most 1000. `total` counts every match within the filters, whatever the page.
+- **`links`** are where the result is read in full: the run (`run`, and `run_page` when `public_url` is set) and its conversation's thread. A memory version names its run's conversation when it has one.
+- Documents are derived by triggers as rows are written, and existing rows were indexed by the migration that added search, so a result is there as soon as its row is.
 
 ## Usage
 
