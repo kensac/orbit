@@ -470,16 +470,17 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"deliveries": orEmpty(d)}, err)
 }
 
+// getArtifact is GET /artifacts/{id}: the content, streamed from the store, with Range support.
 func (s *Server) getArtifact(w http.ResponseWriter, r *http.Request) {
-	b, mt, err := s.Store.GetArtifactContent(r.Context(), r.PathValue("id"))
+	a, b, err := s.Store.OpenArtifact(r.Context(), r.PathValue("id"))
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	w.Header().Set("Content-Type", mt)
+	w.Header().Set("Content-Type", a.MediaType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'")
-	_, _ = w.Write(b)
+	http.ServeContent(w, r, "", a.CreatedAt, b)
 }
 
 // ---------------------------------------------------------------- actions
