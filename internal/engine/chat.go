@@ -495,7 +495,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
 	}
 	if err != nil {
-		return nil, res, err
+		return nil, res, backendErr{err}
 	}
 	if len(res.Output) > 0 {
 		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "out", "output.json", "application/json", res.Output); err != nil {

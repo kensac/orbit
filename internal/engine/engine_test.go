@@ -75,11 +75,11 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 		}
 	}
 	emit(runner.Event{Kind: "assistant", Payload: []byte(`{"type":"assistant","session_id":"` + sid + `"}`)})
-	for _, l := range f.said {
-		emit(runner.Event{Kind: "assistant", Payload: []byte(l)})
-	}
 	for _, ev := range f.events {
 		emit(ev)
+	}
+	for _, l := range f.said {
+		emit(runner.Event{Kind: "assistant", Payload: []byte(l)})
 	}
 	if f.block != nil {
 		close(f.started)

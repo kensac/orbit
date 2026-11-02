@@ -1201,10 +1201,16 @@ A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main
               "heartbeat_age_seconds": 12.4,
               "agent_status": {"state": "working", "since": "...", "source": "hooks", "run_id": "uuid"}}],
  "pending_actions": 2,
+ "holds": [{"id": "uuid", "runner": "claude", "kind": "auth",
+            "reason": "claude-code success/: Not logged in · Please run /login",
+            "run_id": "uuid", "opened_at": "...", "resets_at": null,
+            "next_probe_at": "...", "probes": 2, "last_probe_at": "...",
+            "last_probe_error": "..."}],
  "agents": [{"name": "finance", "enabled": true, "priority": "normal", "timezone": "America/New_York",
              "last_success": {"run_id": "uuid", "finished_at": "..."},
              "next_fires": [{"trigger_index": 0, "schedule": "0 8 * * *",
-                             "at": "2026-11-02T13:00:00Z"}]}]}
+                             "at": "2026-11-02T13:00:00Z"}],
+             "held": false}]}
 ```
 
 - `config.valid` is false while the newest configuration on disk fails to
@@ -1220,7 +1226,8 @@ A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main
 - `running` lists running runs, oldest first. `heartbeat_age_seconds` is
   measured by the database clock (`checked_at`); a run is requeued past
   `engine.StaleAfter` (300 s).
-- `agents` is every agent in the configuration in force, by name, with its `priority` (`normal` or `low`).
+- `holds` lists the runners held now (docs/ARCHITECTURE.md, Reliability), by runner; `[]` when none. `kind` is `auth` (the backend refused orbit's credential) or `rate_limit` (a subscription window was rejected; `resets_at` is its reset when reported). While a runner is held, the unattended runs of every agent on it (schedule, webhook, continue, task, delegation, learn, build) wait queued; a person's message or manual run is not held. `next_probe_at` is when orbit tries the runner again (every 15 minutes, or at `resets_at`), `probes` how often it has, `last_probe_error` the newest probe's failure. A hold leaves the list when a probe or a person's run on the runner succeeds.
+- `agents` is every agent in the configuration in force, by name, with its `priority` (`normal` or `low`). `held` is true while its runner is held.
   `last_success` is its newest succeeded or skipped run (a gate finding
   nothing to judge is not a stale agent; a fire skipped as `missed` did nothing, so it is not counted), `null` if none.
   `next_fires` is each schedule trigger's next fire after now, read in the
