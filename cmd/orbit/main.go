@@ -614,6 +614,12 @@ func serve(ctx context.Context, log *slog.Logger) error {
 					log.Warn("failed runs whose worker was lost", "runs", failed)
 				}
 				failOrphanedActions(life, s, log)
+				if !drain.Draining() {
+					// A held runner is tried again here (engine/hold.go); a probe that succeeds wakes the executors.
+					if _, err := eng.ProbeHolds(life); err != nil {
+						log.Error("probe held runners", "err", err)
+					}
+				}
 				if !drain.Draining() && time.Since(lastLearn) >= engine.LearnEvery {
 					lastLearn = time.Now()
 					if err := eng.EnqueueLearning(life); err != nil {

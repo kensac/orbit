@@ -297,6 +297,7 @@ Everything a person or an agent wrote is searchable (`Store.Search`, `GET /searc
   next fire, at most an hour, or `missed_grace`) ends `skipped`, gate
   `missed`, instead of running late.
 - **Webhooks:** a signed delivery to `/hooks/{agent}/{trigger}` (`internal/api/hooks.go`, verified by `internal/webhook`) is enqueued with its body in one transaction, at most once per delivery id (`webhook_deliveries_once`), so a sender's retry or a second instance starts nothing new. The body is the run's `webhook` source, read from the database, so any host can run it.
+- **Backend holds** (`internal/engine/hold.go`): a run whose backend refused orbit (an auth failure such as `Not logged in` or a 401, or a `rate_limit_event` with a rejected window before the failure) fails and holds its runner (`backend_holds`, one open per runner): every unattended run of an agent on that runner waits queued (the claim skips it), and one notification says why, instead of each run failing and notifying. Only an error the runner returned counts, never a source's 401. Control probes a held runner with one minimal call every 15 minutes, or once a rejected window resets; a probe that succeeds, or a person's message or manual run on the runner that succeeds, closes the hold and wakes the executors. Fires that waited past their grace then end `missed`.
 - **Shutdown** is a drain (Upgrades, below): runs in progress finish under
   their own timeouts, and only past the drain's cap are they handed back.
   Nothing a run does outside its own rows happens before it finishes, so

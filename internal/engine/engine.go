@@ -187,6 +187,9 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		return e.cancelled(ctx, snap, a, c, start, cr.out, res)
 	}
 	if err != nil {
+		if h := e.holdFor(context.WithoutCancel(ctx), a, c, err); h != nil {
+			return e.failHeld(ctx, snap, a, c, start, err, res, h)
+		}
 		return e.fail(ctx, snap, a, c, start, err, res)
 	}
 	if st.keeps && res != nil {
@@ -194,7 +197,11 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		// conversation's next run, claimed on any host, finds it.
 		e.saveSession(ctx, c, st.home, st.workdir, res.SessionID)
 	}
-	return e.succeed(ctx, snap, a, c, start, out, res)
+	if err := e.succeed(ctx, snap, a, c, start, out, res); err != nil {
+		return err
+	}
+	e.personResumed(context.WithoutCancel(ctx), a, c)
+	return nil
 }
 
 // cancelPoll is how often a running attempt checks whether its person asked
@@ -620,7 +627,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
 	}
 	if err != nil {
-		return nil, res, err
+		return nil, res, backendErr{err}
 	}
 	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "out", "output.json", "application/json", res.Output); err != nil {
 		return nil, res, err

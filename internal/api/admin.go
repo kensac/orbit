@@ -94,6 +94,8 @@ type healthAgent struct {
 	Timezone    string               `json:"timezone"`
 	LastSuccess *store.LastSuccess   `json:"last_success"`
 	NextFires   []scheduler.NextFire `json:"next_fires"`
+	// Held is true while the agent's runner is held: its unattended runs wait queued.
+	Held bool `json:"held"`
 }
 
 // health serves GET /health: configuration, queue, running runs, pending
@@ -108,12 +110,21 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if s.ConfigState != nil {
 		cfgStatus = s.ConfigState.Status()
 	}
+	holds, err := s.Store.OpenHolds(r.Context())
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	held := map[string]bool{}
+	for _, hd := range holds {
+		held[hd.Runner] = true
+	}
 	cfg := s.Engine.Current().Config
 	now := time.Now()
 	agents := make([]healthAgent, 0, len(cfg.Agents))
 	for _, a := range cfg.Agents {
 		agents = append(agents, healthAgent{Name: a.Name, Enabled: a.IsEnabled(), Timezone: a.Timezone,
-			LastSuccess: h.LastSuccess[a.Name], NextFires: scheduler.NextFires(a, now)})
+			LastSuccess: h.LastSuccess[a.Name], NextFires: scheduler.NextFires(a, now), Held: held[a.Runner]})
 	}
 	sort.Slice(agents, func(i, j int) bool { return agents[i].Name < agents[j].Name })
 	respond(w, map[string]any{
@@ -122,6 +133,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		"queue":           h.Queue,
 		"running":         h.Running,
 		"pending_actions": h.PendingActions,
+		"holds":           holds,
 		"agents":          agents,
 	}, nil)
 }

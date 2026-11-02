@@ -22,8 +22,27 @@ func searchedRun(t *testing.T, s *store.Store, agent string, events []string, su
 	if err != nil || c == nil || c.ID != id {
 		t.Fatalf("claim: %v %v", c, err)
 	}
+	return finishSearchedRun(t, s, agent, id, c.Attempt, events, summary, report, memory)
+}
+
+// claimAtOldSchema claims run id as ClaimRun would, in SQL a schema before the newest has: the claim's own query reads tables added later (backend_holds).
+func claimAtOldSchema(t *testing.T, s *store.Store, id string) int {
+	t.Helper()
+	var attempt int
+	if err := s.Pool.QueryRow(ctx, `UPDATE runs SET status = 'running', worker = 'w', started_at = now(), heartbeat_at = now(),
+		attempt = attempt + 1 WHERE id = $1 RETURNING attempt`, id).Scan(&attempt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO run_attempts (run_id, attempt, worker) VALUES ($1, $2, 'w')`, id, attempt); err != nil {
+		t.Fatal(err)
+	}
+	return attempt
+}
+
+func finishSearchedRun(t *testing.T, s *store.Store, agent, id string, attempt int, events []string, summary, report, memory string) string {
+	t.Helper()
 	for i, ev := range events {
-		if err := s.AppendEvent(ctx, id, c.Attempt, i+1, "assistant", []byte(ev)); err != nil {
+		if err := s.AppendEvent(ctx, id, attempt, i+1, "assistant", []byte(ev)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -31,7 +50,7 @@ func searchedRun(t *testing.T, s *store.Store, agent string, events []string, su
 	if memory != "" {
 		mem = &memory
 	}
-	if _, err := s.RecordOutcome(ctx, id, agent, store.RunResult{Attempt: c.Attempt, Status: store.StatusSucceeded,
+	if _, err := s.RecordOutcome(ctx, id, agent, store.RunResult{Attempt: attempt, Status: store.StatusSucceeded,
 		Summary: summary, Report: report}, store.Outcome{Memory: mem, Questions: []string{"Should the electricity budget move?"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +167,8 @@ func TestSearchBackfillsRowsWrittenBeforeIt(t *testing.T) {
 	if _, err := s.SendToAgent(ctx, "a", "the heat pump is loud", "kanishk", nil); err != nil {
 		t.Fatal(err)
 	}
-	searchedRun(t, s, "a", []string{`{"type":"assistant","message":{"content":[{"type":"text","text":"Checking the heat pump logs."}]}}`},
+	id := manual(t, s, "a")
+	finishSearchedRun(t, s, "a", id, claimAtOldSchema(t, s, id), []string{`{"type":"assistant","message":{"content":[{"type":"text","text":"Checking the heat pump logs."}]}}`},
 		"Heat pump fine", "The heat pump ran normally.", "heat pump: quiet mode on")
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatal(err)

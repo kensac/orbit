@@ -200,7 +200,7 @@ charter or memory gets those amounts sent back and then noted.
 `notify.when` (`always`, `agent`: when the run asks, or `never`) applies to
 unattended runs: schedule, manual, continue, build. A run answering a
 person's message never notifies, whatever it says: the person is reading
-the chat. Failures and pending approvals of unattended runs always notify.
+the chat. Failures and pending approvals of unattended runs always notify, except a failure that holds its runner (the backend refused orbit's login, or the subscription window is spent): that sends one notification for the runner, and the runner's unattended runs wait until it answers again (docs/ARCHITECTURE.md, Reliability).
 
 ## Memory topics
 
