@@ -107,3 +107,40 @@ func TestCostsBoundArithmeticAndMissingResultReportsZero(t *testing.T) {
 		t.Fatalf("missing result: %+v %v", report, err)
 	}
 }
+
+func TestRejectUnsupportedComparisonNumbers(t *testing.T) {
+	for _, value := range []string{"1e1001", "1e-1001", "1e1000000000", "1e-1000000000", strings.Repeat("1", 1001)} {
+		for _, nested := range []string{value, `{"items":[` + value + `]}`} {
+			for _, source := range []string{"expected", "output"} {
+				t.Run(source+"/"+value[:min(len(value), 20)], func(t *testing.T) {
+					s, r := fixture(t)
+					s.Cases[0].Checks = []Check{{Op: "equals", Value: json.RawMessage(`null`)}}
+					r[0].Output = json.RawMessage(`null`)
+					want := `result "daily" output:`
+					if source == "expected" {
+						s.Cases[0].Checks[0].Value = json.RawMessage(nested)
+						r = nil // Expectations must be validated even without a result.
+						want = `case "daily" check 1: value:`
+					} else {
+						r[0].Output = json.RawMessage(nested)
+					}
+					if _, err := Evaluate(s, r); err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "number exceeds exact comparison bounds") {
+						t.Fatalf("wanted contextual invalid-number error, got %v", err)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestComparisonNumberBoundaries(t *testing.T) {
+	for _, pair := range [][2]string{{"1e1000", "10e999"}, {"1e-1000", "1.0e-1000"}, {strings.Repeat("1", 1000), strings.Repeat("1", 1000)}, {"-1e1000", "-10e999"}, {"0", "-0"}} {
+		s, r := fixture(t)
+		s.Cases[0].Checks = []Check{{Op: "equals", Value: json.RawMessage(`{"n":[` + pair[0] + `]}`)}}
+		r[0].Output = json.RawMessage(`{"n":[` + pair[1] + `]}`)
+		report, err := Evaluate(s, r)
+		if err != nil || !report.Passed {
+			t.Fatalf("supported boundary %s: %+v %v", pair[0][:min(len(pair[0]), 20)], report, err)
+		}
+	}
+}
