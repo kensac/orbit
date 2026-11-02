@@ -135,6 +135,20 @@ func (e *Engine) build(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 		return nil, err
 	}
 
+	var review json.RawMessage
+	if b.Purpose != store.BuildPurposeFix {
+		comments, err := e.Store.BuildComments(ctx, c.ID)
+		if err != nil {
+			return nil, err
+		}
+		if len(comments) > 0 {
+			review, err = reviewJSON(comments)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	seq := 0
 	emit := func(kind string, payload []byte) {
 		seq++
@@ -144,7 +158,7 @@ func (e *Engine) build(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 	}
 	job := build.Job{
 		RunID: c.ID, Attempt: c.Attempt, TicketID: t.ID, Title: t.Title, Repo: *t.Repo,
-		Plan: b.Plan, PlanVersion: b.PlanVersion, Ticket: ticket, Purpose: b.Purpose, Failure: b.Failure,
+		Plan: b.Plan, PlanVersion: b.PlanVersion, Ticket: ticket, Purpose: b.Purpose, Failure: b.Failure, Review: review,
 		Policy: policy, Model: rs.Model, MaxTurns: rs.MaxTurns, Timeout: time.Duration(a.Timeout),
 		Credential: cred, Author: author,
 	}
@@ -209,4 +223,22 @@ func short(sha string) string {
 		return sha[:12]
 	}
 	return sha
+}
+
+// reviewJSON is the review comments a build is given, as the person wrote
+// them: what to change and where, nothing about their bookkeeping.
+func reviewJSON(comments []store.ReviewComment) (json.RawMessage, error) {
+	type comment struct {
+		Path      string  `json:"path"`
+		StartLine int     `json:"start_line"`
+		EndLine   int     `json:"end_line"`
+		Body      string  `json:"body"`
+		Author    *string `json:"author,omitempty"`
+		HeadSHA   string  `json:"head_sha"`
+	}
+	out := make([]comment, 0, len(comments))
+	for _, c := range comments {
+		out = append(out, comment{c.Path, c.StartLine, c.EndLine, c.Body, c.Author, c.HeadSHA})
+	}
+	return json.MarshalIndent(out, "", "  ")
 }
