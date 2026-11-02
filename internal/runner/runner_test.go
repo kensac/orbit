@@ -140,6 +140,33 @@ func TestClaudeCodeTimeoutKillsTheProcessGroup(t *testing.T) {
 	}
 }
 
+// A result is a line of type "result" (claudeproto.Line.IsResult); a type that only starts with "result." is some other event and must not end the turn.
+func TestClaudeCodeResultIsTheResultType(t *testing.T) {
+	bin, _ := fakeCLI(t, `echo '{"type":"result.partial","is_error":false,"structured_output":{"summary":"no"},"session_id":"s1"}'`)
+	r, _ := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
+	_, err := r.Run(context.Background(), Request{Workdir: t.TempDir(), OutputSchema: json.RawMessage(`{}`)}, func(Event) {})
+	if err == nil || !strings.Contains(err.Error(), "without a result") {
+		t.Fatalf("err = %v, want no result", err)
+	}
+}
+
+// runCLI starts its process as claudeproto does, so a nil environment inherits nothing of orbit's.
+func TestRunCLIWithANilEnvironmentInheritsNothing(t *testing.T) {
+	t.Setenv("ORBIT_SECRET", "s3cret")
+	lines := 0
+	if _, err := runCLI(context.Background(), "/usr/bin/env", nil, nil, t.TempDir(), "", func(l []byte) {
+		lines++
+		if strings.Contains(string(l), "s3cret") {
+			t.Errorf("inherited %s", l)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if lines != 0 {
+		t.Fatalf("the child saw %d environment variables, want none", lines)
+	}
+}
+
 func TestClaudeCodeNeedsACredential(t *testing.T) {
 	if _, err := New("c", spec.RunnerSpec{Kind: "claude-code"}, lookup(nil)); err == nil {
 		t.Fatal("a runner without a credential must fail to build")
