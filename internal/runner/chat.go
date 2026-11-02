@@ -17,6 +17,7 @@ import (
 
 	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/sandbox"
+	"github.com/kensac/orbit/internal/spec"
 )
 
 // A chat run is a plain Claude Code session (docs/ARCHITECTURE.md, Chat
@@ -57,6 +58,10 @@ type Chat struct {
 	// Interrupt, when closed, interrupts the turn (a person pressed stop):
 	// the CLI ends it with a result, and the run reports Interrupted.
 	Interrupt <-chan struct{}
+	// Level is the run's permission level (spec.Levels, resolved by the engine), and Ceiling the widest its conversation may set: a process whose ceiling is full is launched so that it can be raised to it.
+	Level, Ceiling string
+	// Prompt answers the CLI's permission requests during the turn; nil denies each one.
+	Prompt Prompt
 }
 
 // SandboxClient is sandboxd's four operations (*sandbox.Client).
@@ -104,14 +109,15 @@ const SandboxPlugin = sandbox.WorkDir + "/.orbit/plugin"
 const workstation = "workstation"
 
 // chatSettings are a chat run's --settings. Local runs keep orbit's deny
-// rules and the CLI's own workdir limit; a sandbox is the boundary for a
-// sandboxed run, so the CLI there may do anything inside it.
+// rules and the CLI's own workdir limit at every level; a sandbox is the
+// boundary for a sandboxed run, so the CLI there may do anything inside it
+// the level lets through. The mode itself is --permission-mode.
 func chatSettings(keepDays int, hooks map[string]any, sandboxed bool) string {
-	perms := map[string]any{"defaultMode": "dontAsk", "deny": []string{
+	perms := map[string]any{"deny": []string{
 		"Read(//proc/**)", "Read(//sys/**)", "Read(//run/**)", "Read(//etc/**)", "Read(//config/**)", "Read(~/**)",
 	}}
 	if sandboxed {
-		perms = map[string]any{"defaultMode": "bypassPermissions"}
+		perms = map[string]any{}
 	}
 	s := map[string]any{
 		"permissions":         perms,
@@ -166,8 +172,10 @@ func (c *claudeCode) chatArgs(req Request, home string, keepDays int) []string {
 		"--settings", chatSettings(keepDays, hooks, sandboxed),
 		"--allowedTools", strings.Join(allowed, ","),
 	)
-	if sandboxed {
-		args = append(args, "--permission-mode", "bypassPermissions")
+	args = append(args, "--permission-mode", startMode(req.Chat.Level))
+	if req.Chat.Ceiling == spec.LevelFull && sandboxed {
+		// Without it the CLI refuses set_permission_mode bypassPermissions, so a conversation could not be raised to full live.
+		args = append(args, "--allow-dangerously-skip-permissions")
 	}
 	if req.SkillsPlugin != "" {
 		dir := req.SkillsPlugin
@@ -201,31 +209,56 @@ func contains(list []string, s string) bool {
 type chatProc interface {
 	Turn(ctx context.Context, prompt string, emit func(claudeproto.Line)) (*claudeproto.Result, error)
 	Interrupt(ctx context.Context) error
+	SetPermissionMode(ctx context.Context, mode string) error
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
 }
 
-// chatTools routes a process's MCP requests to the turn in progress: a
-// live process serves many runs, each with its own tools.
+// chatTools routes a process's MCP and permission requests to the turn in
+// progress: a live process serves many runs, each with its own tools,
+// level and person.
 type chatTools struct {
 	mu   sync.Mutex
 	chat *Chat
+	emit func(Event)
 }
 
-func (t *chatTools) set(c *Chat) {
+func (t *chatTools) set(c *Chat, emit func(Event)) {
 	t.mu.Lock()
-	t.chat = c
+	t.chat, t.emit = c, emit
 	t.mu.Unlock()
 }
 
+func (t *chatTools) current() (*Chat, func(Event)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.chat, t.emit
+}
+
 func (t *chatTools) handler() claudeproto.Handler {
-	return claudeproto.Handler{Name: "orbit", MCP: func(ctx context.Context, req claudeproto.MCPMessage) (json.RawMessage, error) {
-		t.mu.Lock()
-		c := t.chat
-		t.mu.Unlock()
-		return serveMCP(ctx, c, req)
-	}}
+	return claudeproto.Handler{Name: "orbit",
+		MCP: func(ctx context.Context, req claudeproto.MCPMessage) (json.RawMessage, error) {
+			c, _ := t.current()
+			return serveMCP(ctx, c, req)
+		},
+		CanUseTool: func(ctx context.Context, req claudeproto.PermissionRequest) (claudeproto.Permission, error) {
+			c, emit := t.current()
+			decide := noPrompt
+			if c != nil && c.Prompt != nil {
+				decide = c.Prompt
+			}
+			// The decision is recorded as the run's orbit.permission event before it is sent; between turns there is no run to record it in, so nothing is allowed.
+			var record func(claudeproto.PermissionRequest, claudeproto.Permission) error
+			if emit != nil {
+				record = func(r claudeproto.PermissionRequest, p claudeproto.Permission) error {
+					emit(Event{Kind: "orbit.permission", Payload: permissionEvent(r, p)})
+					return nil
+				}
+			}
+			return claudeproto.Recorded(decide, record)(ctx, req)
+		},
+	}
 }
 
 // serveMCP answers one JSON-RPC message for orbit's SDK server, as the
@@ -308,6 +341,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	key := hashArgs(c.bin, req.Workdir, extra, env)
 
 	var p *liveProc
+	started := false
 	mode, parent := "fresh", resume
 	if sess != nil && sess.Live != nil {
 		if p = sess.Live.take(sess.Key, key, resume); p != nil {
@@ -319,7 +353,8 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			mode = "resumed"
 		}
 		tools := &chatTools{}
-		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, Resume: resume, Ephemeral: sess == nil}, extra)
+		// Every chat process has the stdio permission prompt, so a level that asks can be set without a new process; at locked or full the CLI sends none but ExitPlanMode's.
+		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, PermissionPrompt: true, Resume: resume, Ephemeral: sess == nil}, extra)
 		if err != nil {
 			return nil, err
 		}
@@ -333,6 +368,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			return nil, err
 		}
 		p = &liveProc{proc: proc, tools: tools, busy: true}
+		started = true
 		if sess != nil {
 			p.key = sess.Key
 		}
@@ -349,8 +385,14 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			return nil, err
 		}
 	}
-	p.tools.set(req.Chat)
-	defer p.tools.set(nil)
+	p.tools.set(req.Chat, emit)
+	defer p.tools.set(nil, nil)
+	if started && req.Chat.Level == spec.LevelAuto {
+		if _, err := applyLevel(ctx, p.proc, req.Chat.Level, emit); err != nil {
+			dropOrKill(sess, p)
+			return nil, fmt.Errorf("set the permission level: %w", err)
+		}
+	}
 
 	interrupted := false
 	turnCtx, endTurn := context.WithCancel(ctx)

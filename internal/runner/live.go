@@ -167,6 +167,7 @@ type liveProcess interface {
 	Kill()
 	Exited() <-chan struct{}
 	Interrupt(ctx context.Context) error
+	SetPermissionMode(ctx context.Context, mode string) error
 }
 
 // closeIdle closes every idle live process, for a sandbox slot or memory.

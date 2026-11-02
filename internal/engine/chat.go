@@ -413,6 +413,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	chat := e.chatTools(a, t.types, d.Defaults.MemoryMaxBytes, st)
 	e.repoChatTools(a, chat)
 	chat.Interrupt = t.cancel
+	chat.Level, chat.Ceiling = a.PermissionLevel(), a.PermissionCeiling()
 	if a.Sandbox != "" {
 		sb, err := e.sandboxPlan(d, a.Sandbox, c, t.workdir, t.home, t.plugin, t.emit)
 		if err != nil {

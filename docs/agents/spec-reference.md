@@ -157,6 +157,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `hooks` | list | none | Claude Code hooks for the agent's runs, beside orbit's own; claude-code only, at most 20 (below). |
 | `chat` | bool | `false` | A Claude Code session whose reply is its final message, with memory, questions and actions as orbit's tools; a workspace per conversation. claude-code only. |
 | `sandbox` | `workstation`, `build` | none | Needs `chat` and a sandboxd. Runs the CLI in a sandboxd container per conversation: `workstation` has every Claude Code tool and egress to any public host; `build` has its `tools` and the build allowlist (security.md, Sandboxed chats). A `workstation` agent also has a box for terminals (docs/workspace.md). |
+| `permissions` | map (below) | full in a `sandbox`, else locked | How a chat session asks before a tool runs, and how far a conversation may raise it. |
 | `needs` | list of capabilities | none | What a host must have to run the agent (`docker-network:hetzner`); without any, every host. |
 | `delegates` | list of agent names, or `["*"]` | none | Agents this one may hand tasks to; the `delegate` action also needs a rule. |
 | `repos` | list (below) | none | Repositories every run reads: the tree at a commit under `inputs/repos/<name>/`, plus orbit's history and pull request tools. Each must be in `github.read_repositories`; needs `github` in `needs` and a claude-code or codex runner. |
@@ -263,6 +264,17 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 |---|---|---|---|
 | `repo` | `owner/name` | required | One of `github.read_repositories`; its name (after the owner) is unique within the agent. |
 | `ref` | branch, tag or commit sha | the default branch | What the run's tree is; resolved to a commit in orbit's mirror before each run. |
+
+### `permissions`
+
+Levels, narrowest first: `locked` (Claude Code's `dontAsk`: only what the spec allows by name runs, the rest is denied unasked), `ask` (`default`: the CLI's prompts go to the person), `edits` (`acceptEdits`: file edits in the workspace run unasked), `auto` (the CLI's classifier decides and asks the person when it cannot; `ask` where the model does not offer it), `full` (`bypassPermissions`). A level never adds a tool: `tools` and the sandbox profile decide which exist (configuration.md, Permissions).
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `level` | level | `full` for a chat in a `sandbox`, else `locked` | What every run starts at. |
+| `ceiling` | level | the default, or `level` when that is wider | The widest level a conversation may set; at least `level`. |
+
+Only a `chat` agent may be above `locked`, and only one with a `sandbox` above `edits`. A raised level or ceiling widens an agent (`agent:define` waits for a person).
 
 ### `session`
 

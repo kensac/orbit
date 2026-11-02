@@ -231,6 +231,8 @@ type Agent struct {
 	// a home kept in the workspace) or "build" (the tools it names, the
 	// build egress allowlist). Needs sandboxd in orbit.yaml.
 	Sandbox string `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
+	// Permissions is how a chat session asks before a tool runs, and how far a conversation may raise it (permissions.go). Absent is the defaults: full in a sandbox, locked otherwise.
+	Permissions *Permissions `yaml:"permissions,omitempty" json:"permissions,omitempty"`
 	// Delegates names the agents this one may hand tasks to with the
 	// delegate action ("*" is every configured agent, itself included).
 	// The delegate rule still decides whether it may (docs/ARCHITECTURE.md,
@@ -1159,6 +1161,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("sandbox: needs sandboxd in orbit.yaml (a sandbox: or build: section)")
 		}
 	}
+	errs = append(errs, a.validatePermissions()...)
 	errs = append(errs, c.validateTrust(a)...)
 	if ss := a.Session; ss != nil {
 		rs := c.Deployment.Runners[a.Runner]

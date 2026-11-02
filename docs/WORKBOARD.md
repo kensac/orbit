@@ -42,6 +42,7 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | Hook-driven live agent status | #37 agent-status | |
 | Worktrees, review comments on PR diffs, stacked PRs, check reruns, RRULE schedules with a precheck | #32 #43 | |
 | Migration fix (duplicate version 14) | #50 | |
+| Permission levels (`permissions: {level, ceiling}`: locked, ask, edits, auto, full onto Claude Code's modes), per-conversation levels applied live, approval prompts as journal items, a WebFetch domain allowlist | perm-levels, claude-permissions | the portfolio's mode chip and approval cards build on docs/api.md once merged |
 | Workspace: an IDE in the portfolio chat (explorer, editor, terminals with Claude Code (direct), diffs with line comments), one shell with the chat | #78 docs/workspace-contract (design); items below | design [docs/workspace.md](workspace.md), contract docs/api.md, Workspace |
 
 ### Workspace: implementation items, in order

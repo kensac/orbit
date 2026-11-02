@@ -39,10 +39,10 @@ more than its agent's rules allow.
   the run's own HOME (denied like any `~`), so an interrupted attempt can be
   continued; it is removed with the run's workdir, and only that run's next
   attempt reads it.
-- **Control requests:** a live process may ask orbit for a permission or a
+- **Control requests:** a report run's process may ask orbit for a permission or a
   hook decision; orbit configures none of their sources and answers any with
   an error, recorded in the run's events. The tool grant is the spec's
-  `tools`, decided before the process starts.
+  `tools`, decided before the process starts. A chat run's process has the stdio permission prompt: what its level (Permission levels, below) leaves as "ask" comes to orbit, and orbit records each decision before it answers; one it cannot record is a deny.
 
 - **orbit's tools and hooks** run inside the CLI's process tree with its
   environment (no orbit secret) and are given `--root <workdir>` and
@@ -241,7 +241,11 @@ without docker):
 
 ## Sandboxed chats
 
-A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as a workstation when sandboxd is configured) runs Claude Code in a sandboxd container with `bypassPermissions`; a workstation has every tool. There is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the backend credential is in the container, readable by any command the model runs. A workstation's egress reaches any public host (`orbit egress` with `*`, still never a private, loopback, link-local or tailnet address), so the credential and anything the session read can leave the box, by design: it holds no GitHub token, no orbit secret, and nothing of the person's beyond what they gave the conversation. Pushing, merging, mail and spend stay orbit's actions, under the agent's rules. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
+A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as a workstation when sandboxd is configured) runs Claude Code in a sandboxd container, at `full` (`bypassPermissions`) unless its `permissions` say otherwise; a workstation has every tool. There is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the backend credential is in the container, readable by any command the model runs. A workstation's egress reaches any public host (`orbit egress` with `*`, still never a private, loopback, link-local or tailnet address), so the credential and anything the session read can leave the box, by design: it holds no GitHub token, no orbit secret, and nothing of the person's beyond what they gave the conversation. Pushing, merging, mail and spend stay orbit's actions, under the agent's rules. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
+
+## Permission levels
+
+A chat agent's `permissions` level (configuration.md, Permissions) decides which of its tools' calls run without a person; it never grants a tool. `full` and `auto` need a sandbox: both let a call run unasked (auto's classifier is the model's judgment, not a boundary), and on orbit's host that call is beside every `ORBIT_*` secret. Without a sandbox the widest level is `edits`, which runs only file edits inside the workspace unasked, and orbit's Read deny rules hold at every level. A level or ceiling an agent raises is a widening, so an `agent:define` that raises one waits for a person. A process whose ceiling is `full` is launched with `--allow-dangerously-skip-permissions`, which lets a set_permission_mode raise it to bypass; orbit sends that only for a level the ceiling allows, and only a sandboxed process gets the flag.
 
 ## Boxes and terminals
 
