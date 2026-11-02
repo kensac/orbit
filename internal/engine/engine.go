@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -80,6 +81,8 @@ type Engine struct {
 	// and every notification is recorded for control to send
 	// (DeliverOutbox), with the links only control can sign.
 	Outbox bool
+	// NewChannel builds a channel from its spec; nil is notify.New (tests replace it).
+	NewChannel func(name string, c spec.Channel, env notify.Env, client *http.Client) (notify.Channel, error)
 	// Worker names this instance in the outbox and session rows it writes.
 	Worker string
 	// Wake nudges this instance's executors when it queued runs itself
@@ -115,11 +118,15 @@ const StaleAfter = 10 * heartbeatEvery
 // with a missing credential fails the reload, not the first notification.
 func (e *Engine) SetConfig(cfg *spec.Config) error {
 	chans := map[string]notify.Channel{}
+	newChannel := e.NewChannel
+	if newChannel == nil {
+		newChannel = notify.New
+	}
 	for name, c := range cfg.Deployment.Channels {
 		if e.Outbox {
 			break
 		}
-		ch, err := notify.New(name, c, e.Env, e.Client)
+		ch, err := newChannel(name, c, e.Env, e.Client)
 		if err != nil {
 			return err
 		}
@@ -640,6 +647,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	out.known, out.topics, out.skills = knownEntries, topics, skills
 	out.task = task
+	prose := fullReport(out, events.prose())
 	if figures {
 		// The hook already sent the output back for these, up to
 		// MaxFigureDenials times (claude-code); this is the same check on
@@ -652,7 +660,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		for _, t := range harness.OrbitToolResults(events.messages()) {
 			backed.AddText(t)
 		}
-		if missing := backed.Unbacked(harness.ReportText(res.Output)); len(missing) > 0 {
+		if missing := backed.Unbacked(harness.ReportText(res.Output) + "\n" + prose); len(missing) > 0 {
 			emit("orbit.figures_unverified", map[string]any{"amounts": missing})
 			out.Report = strings.TrimRight(out.Report, "\n") + "\n\n_orbit could not trace these amounts to the inputs or a computed result: " +
 				strings.Join(missing, ", ") + "._"
@@ -788,25 +796,23 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if pr == "" {
 		pr = notify.Default
 	}
+	// A task's report and questions go to the agent that delegated it,
+	// which is woken with them; only its approvals are a person's.
+	routed := out.task != nil
+	// A person who wrote by mail is answered by mail, to them, as a reply to theirs, whatever notify.when says and however the run was triggered.
+	reply := e.mailForRun(ctx, snap, c.ID)
+	if reply != nil && !routed {
+		e.deliver(ctx, snap, a, &c.ID, nil, purposeMailReply, mailReply(reply, notify.Message{
+			Title: a.Name + ": " + out.Summary, Body: withQuestions(out.Report, out.Questions), Priority: pr, Link: link,
+		}))
+	}
 	if Attended(c.Trigger) {
 		// The person is reading the conversation this run answered in:
 		// its reply, questions and approvals are there, not in a channel.
 		return nil
 	}
-	send := a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send)
-	// A person who wrote by mail is answered by mail, as a reply to theirs.
-	var inReplyTo, mailSubject string
-	if snap.Config.Deployment.Mail != nil {
-		var merr error
-		if inReplyTo, mailSubject, merr = e.Store.MailForRun(ctx, c.ID); merr != nil {
-			e.Log.Warn("mail for run", "run", c.ID, "err", merr)
-		}
-		send = send || inReplyTo != ""
-	}
-	// A task's report and questions go to the agent that delegated it,
-	// which is woken with them; only its approvals are a person's.
-	routed := out.task != nil
-	if !routed && (send || len(out.Questions) > 0) {
+	send := reply == nil && (a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send))
+	if !routed && (send || (reply == nil && len(out.Questions) > 0)) {
 		title := out.Notify.Title
 		if title == "" {
 			title = out.Summary
@@ -816,22 +822,9 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			// Only the questions warrant a ping.
 			title, body = a.Name+" has a question", ""
 		}
-		if len(out.Questions) > 0 {
-			body += "\n\n**Questions**\n"
-			for _, q := range out.Questions {
-				body += "\n- " + q
-			}
-		}
 		m := notify.Message{
-			Title: a.Name + ": " + title, Body: strings.TrimSpace(body), Priority: pr,
+			Title: a.Name + ": " + title, Body: withQuestions(body, out.Questions), Priority: pr,
 			Tags: []string{"orbit", a.Name}, Link: link,
-		}
-		if inReplyTo != "" {
-			m.InReplyTo = inReplyTo
-			if mailSubject != "" && !strings.HasPrefix(strings.ToLower(mailSubject), "re:") {
-				mailSubject = "Re: " + mailSubject
-			}
-			m.Subject = mailSubject
 		}
 		e.deliver(ctx, snap, a, &c.ID, nil, "report", m)
 	}
@@ -856,6 +849,8 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 	e.Log.Warn("run failed", "run", c.ID, "agent", c.Agent, "err", runErr)
 	rr := store.RunResult{Attempt: c.Attempt, Status: "failed", Error: runErr.Error()}
 	fillResult(&rr, r)
+	// Read before FinishRun, which hands a failed run's messages back to the inbox.
+	reply := e.mailForRun(ctx, snap, c.ID)
 	if err := e.Store.FinishRun(context.WithoutCancel(ctx), c.ID, rr); err != nil {
 		return err
 	}
@@ -864,8 +859,18 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 	if terr != nil {
 		e.Log.Warn("task lookup", "run", c.ID, "err", terr)
 	}
-	// A task's failure goes to the agent that delegated it.
-	if a != nil && !Attended(c.Trigger) && routed == nil {
+	// A task's failure goes to the agent that delegated it; a mail's, in a short reply to it.
+	if a == nil || routed != nil {
+		return nil
+	}
+	if reply != nil {
+		e.deliver(ctx, snap, a, &c.ID, nil, purposeMailFailure, mailReply(reply, notify.Message{
+			Title: a.Name + " could not answer", Body: "The run answering your mail failed: " + shortError(runErr) + "\n\nYour mail is kept: reply to try again, and the next run reads both.",
+			Priority: notify.High, Link: snap.Config.Deployment.RunURL(c.ID),
+		}))
+		return nil
+	}
+	if !Attended(c.Trigger) {
 		e.deliver(ctx, snap, a, &c.ID, nil, "failure", notify.Message{
 			Title: a.Name + " run failed", Body: runErr.Error(), Priority: notify.High,
 			Tags: []string{"orbit", "warning"}, Link: snap.Config.Deployment.RunURL(c.ID),
@@ -874,10 +879,89 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 	return nil
 }
 
+// Mail replies are delivered to the agent's mail channel alone (mailChannel), whatever its notify.when.
+const (
+	purposeMailReply   = "mail_reply"
+	purposeMailFailure = "mail_failure"
+)
+
+func isMailReply(purpose string) bool {
+	return purpose == purposeMailReply || purpose == purposeMailFailure
+}
+
+// mailForRun is the mail run c answers, or nil: orbit has no mailbox, the run read none, or the lookup failed (logged; the run is then answered as if no mail had come).
+func (e *Engine) mailForRun(ctx context.Context, snap *Snapshot, runID string) *store.RunMail {
+	if snap.Config.Deployment.Mail == nil {
+		return nil
+	}
+	m, err := e.Store.MailForRun(context.WithoutCancel(ctx), runID)
+	if err != nil {
+		e.Log.Warn("mail for run", "run", runID, "err", err)
+		return nil
+	}
+	return m
+}
+
+// mailReply addresses m to the mail's sender as a reply to it: In-Reply-To its Message-ID and "Re:" its subject. deliver adds the conversation's Reply-To, Message-ID and References.
+func mailReply(r *store.RunMail, m notify.Message) notify.Message {
+	m.To = []string{r.From}
+	m.InReplyTo = r.MessageID
+	m.Subject = r.Subject
+	if m.Subject == "" {
+		m.Subject = m.Title
+	}
+	if !strings.HasPrefix(strings.ToLower(m.Subject), "re:") {
+		m.Subject = "Re: " + m.Subject
+	}
+	m.Tags = []string{"orbit", "mail"}
+	return m
+}
+
+// mailChannel is the channel a mail reply goes through: the agent's first smtp channel, else the deployment's first smtp channel by name, else "" (no way to mail).
+func mailChannel(cfg *spec.Config, a *spec.Agent) string {
+	for _, name := range a.Notify.Channels {
+		if cfg.Deployment.Channels[name].Kind == "smtp" {
+			return name
+		}
+	}
+	names := make([]string, 0, len(cfg.Deployment.Channels))
+	for name, ch := range cfg.Deployment.Channels {
+		if ch.Kind == "smtp" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	slices.Sort(names)
+	return names[0]
+}
+
+// withQuestions appends a run's questions to a body.
+func withQuestions(body string, questions []string) string {
+	if len(questions) > 0 {
+		body += "\n\n**Questions**\n"
+		for _, q := range questions {
+			body += "\n- " + q
+		}
+	}
+	return strings.TrimSpace(body)
+}
+
+// shortError is the first line of err, at most 300 characters: a mail says what went wrong, the run page has the rest.
+func shortError(err error) string {
+	s, _, _ := strings.Cut(strings.TrimSpace(err.Error()), "\n")
+	if r := []rune(s); len(r) > 300 {
+		s = string(r[:300]) + "..."
+	}
+	return s
+}
+
 // Attended reports whether a run's trigger means its person is watching
 // the conversation: a message they sent. Such a run
 // notifies nothing (its reply, questions, approvals and failure are in the
 // thread); channels are for unattended runs (schedule, continue, build).
+// A run that read a mail is the exception: its sender is answered by mail (mailForRun).
 func Attended(trigger string) bool { return trigger == "message" }
 
 // ruleFor is the rule a run's proposal of typ gets. Delegation's types
@@ -913,6 +997,15 @@ func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, run
 	if purpose == "report" && a.Notify.When == "never" {
 		return
 	}
+	channels := a.Notify.Channels
+	if isMailReply(purpose) {
+		name := mailChannel(snap.Config, a)
+		if name == "" {
+			e.Log.Warn("mail reply not sent: no smtp channel", "agent", a.Name, "purpose", purpose)
+			return
+		}
+		channels = []string{name}
+	}
 	ctx = context.WithoutCancel(ctx)
 	if e.Outbox {
 		// Control adds the link (an approval link is signed with a secret
@@ -929,7 +1022,7 @@ func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, run
 	}
 	// On control only: the token is signed with the secret a worker does not hold.
 	e.mailHeaders(ctx, snap, runID, &m)
-	for _, name := range a.Notify.Channels {
+	for _, name := range channels {
 		ch := snap.Channels[name]
 		sendCtx, cancel := context.WithTimeout(ctx, time.Minute)
 		err := ch.Send(sendCtx, m)

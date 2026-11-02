@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -41,6 +42,8 @@ type fakeRunner struct {
 	seen func(runner.Request)
 	// stalls is how many calls end as the stall watchdog ends a turn.
 	stalls int
+	// said are assistant lines emitted before the output.
+	said []string
 }
 
 func (f *fakeRunner) Kind() string  { return "claude-code" }
@@ -74,6 +77,9 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 	if f.calls <= f.stalls {
 		emit(runner.Event{Kind: "orbit.stalled", Payload: []byte(`{"idle_ms":600000,"stall_ms":600000}`)})
 		return nil, fmt.Errorf("%w: no line from the CLI for 10m0s and no tool call running", runner.ErrStalled)
+	}
+	for _, l := range f.said {
+		emit(runner.Event{Kind: "assistant", Payload: []byte(l)})
 	}
 	if f.block != nil {
 		close(f.started)
@@ -310,6 +316,24 @@ func TestRunEndToEnd(t *testing.T) {
 	}
 	if len(h.calls) != 1 || body["x"] != 1.0 {
 		t.Fatalf("endpoint calls = %v", h.calls)
+	}
+}
+
+func TestAStubReportIsReplacedByTheFinalProse(t *testing.T) {
+	answer := "## UX issues\n\n1. The send button is hidden.\n2. Steps count changes on expand."
+	fr := &fakeRunner{output: strings.Replace(goodOutput, `"Spend was fine."`, `"Listed the issues in the chat reply."`, 1),
+		said: []string{
+			`{"type":"assistant","message":{"content":[{"type":"text","text":"Reading."},{"type":"tool_use","id":"t1","name":"Read","input":{}}]}}`,
+			`{"type":"assistant","message":{"content":[{"type":"text","text":` + strconv.Quote(answer) + `}]}}`,
+		}}
+	e, s, _ := harness(t, fr)
+	c := claim(t, e, s)
+	if err := e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	run, _ := s.GetRun(ctx, c.ID)
+	if run.Status != "succeeded" || *run.Report != answer || *run.Summary != "October spend was $5,914" {
+		t.Fatalf("run = %s report=%q summary=%q", run.Status, *run.Report, *run.Summary)
 	}
 }
 
