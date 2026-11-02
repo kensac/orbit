@@ -31,7 +31,7 @@ orbit any placeholder token so the runner builds.
 
 After changing `internal/harness` or its wiring, run an agent with
 `verify: [figures]` and a JSON `file` source: the init event lists
-`mcp__orbit__query`, `mcp__orbit__calc` and `mcp__orbit__search`, a search for a word of an earlier run's report finds it, the totals come from query calls,
+`mcp__orbit__query`, `mcp__orbit__calc` and `mcp__orbit__search` (and `mcp__orbit__prometheus_query` for an agent with a `prometheus` source), a search for a word of an earlier run's report finds it, the totals come from query calls,
 a Read of `../x` is denied with orbit's message, and a figure asked for "in
 your head" is sent back and recomputed with a tool.
 
@@ -49,5 +49,7 @@ session alone (`resumed`, a new `session_id`), an approved `continue` that
 runs at its `run_after`, and a `kill -9` of the live process mid-turn (that
 run fails with "claude exited during the turn"; the next starts fresh), with a
 Read outside the workdir denied in the live turn.
+
+After changing connectors' wiring (`runner/connectors.go`, the permission prompt, the transport), run `ORBIT_REAL_CLAUDE=<wrapper> go test -run RealCLIConnectors ./internal/runner/`: a connector with a dash in its name is listed and called as an SDK server, an auto tool runs unasked, and an approve tool reaches orbit's prompt with the tool use id its call then carries, in a report run and in a chat run.
 
 After changing chat runs (`runner/chat.go`), run `ORBIT_REAL_CLAUDE=<wrapper> go test -run RealCLIChat ./internal/runner/`: orbit's SDK MCP tool is listed and called over the control channel, the reply is the final message, the second turn is `live` in the same process, and an interrupt ends the third turn with a result; and `TestRealCLIChatSteer`: a steer message written during the turn's tool call is started there (`Steered`) and the one reply answers both. Steering end to end (the database poll, `steered_into`, the `steer` item, withdrawal confirmed and not, a stop withdrawing a queued steer, the run woken for what the turn did not take) is `engine.TestSteeringARunningReply`, against a scripted fake CLI that speaks the protocol `claudeproto.TestRealCLISteer` pins. The sandboxed path is covered by `TestASandboxedChatKeepsItsWorkspace` against a fake sandboxd that runs the argv locally; a real sandbox is seen only on hetzner.

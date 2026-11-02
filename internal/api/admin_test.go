@@ -169,4 +169,16 @@ func TestHealthAndAgentNextFires(t *testing.T) {
 	if code != 200 || len(d["next_fires"].([]any)) != 1 || d["agent"].(map[string]any)["spec"] == nil {
 		t.Fatalf("agent detail = %d %v", code, d)
 	}
+	if hs := h["holds"].([]any); len(hs) != 0 || a["held"] != false {
+		t.Fatalf("holds = %v, held = %v", hs, a["held"])
+	}
+	// A held runner is listed, and so is every agent on it.
+	if _, err := v.s.OpenHold(ctx, store.NewHold{Runner: "r", Kind: store.HoldAuth, Reason: "Not logged in", FirstProbe: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	_, h = call(t, "GET", v.srv.URL+"/api/v1/health", v.person("kanishk"), "")
+	hs := h["holds"].([]any)
+	if len(hs) != 1 || hs[0].(map[string]any)["runner"] != "r" || hs[0].(map[string]any)["kind"] != "auth" || h["agents"].([]any)[0].(map[string]any)["held"] != true {
+		t.Fatalf("holds = %v, agents = %v", hs, h["agents"])
+	}
 }

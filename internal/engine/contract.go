@@ -57,6 +57,8 @@ type Output struct {
 	// task is the task whose conversation the run is in, set by the
 	// engine.
 	task *store.Task
+	// connectorCalls are connector calls the run recorded for approval (connectors.go), each already a pending action; set by the engine, never read from the output.
+	connectorCalls []pendingCall
 }
 
 // summaryMax keeps a summary to one notification title line.
@@ -235,6 +237,9 @@ type promptRun struct {
 	// Attached are the files the messages carry, by message id, as placed
 	// in the workdir.
 	Attached map[string][]placedUpload
+	// WorkspaceChanges is what the person changed in a chat's workspace
+	// since the agent's last turn (personChanges), "" when nothing.
+	WorkspaceChanges string
 }
 
 // userPrompt is the run's content: charter, why it woke, memory and inbox.

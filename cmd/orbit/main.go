@@ -4,6 +4,7 @@
 //	orbit serve              control: API, scheduler, delivery, actions, config sync, and executors
 //	orbit worker             executors only: claim and run what this host's capabilities cover
 //	orbit migrate            apply database migrations and exit
+//	orbit restore-check [--expect FILE]   read a restored orbit-db read only (deploy/restore-drill.sh)
 //	orbit preflight [--config DIR]   check this binary can migrate the database and the running one survives it, changing nothing
 //	orbit validate [dir]     load and check a configuration directory
 //	orbit run <agent> [prompt]   queue a manual run (a running serve picks it up)
@@ -12,6 +13,8 @@
 //	orbit drain              tell the local server to drain (a deploy replacing it)
 //	orbit import claude-memory <dir> --scope <s> [--apply]   seed memory entries through the API
 //	orbit import skills <dir> [--attach <agent>] [--apply]   seed the skills library through the API
+//	orbit import claude-sessions <dir> [--apply]   import Claude Code session transcripts through the API
+//	orbit sync claude [--memory-dir <dir>] [--apply <digest>]   write orbit's skills and memory entries into Claude Code's files
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
 //	orbit hook --root <dir> --state <dir> [--figures] [--status <socket>]   orbit's hook, run by Claude Code
 //	orbit agent-hook --root <dir> --def <hook>   one of an agent's own hooks, run by Claude Code
@@ -85,6 +88,8 @@ func main() {
 		err = preflightCmd(ctx, os.Args[2:])
 	case "validate":
 		err = validate(os.Args[2:])
+	case "restore-check":
+		err = restoreCheckCmd(ctx, os.Args[2:])
 	case "run":
 		err = enqueue(ctx, os.Args[2:])
 	case "approve", "reject":
@@ -95,6 +100,8 @@ func main() {
 		err = drainCmd()
 	case "import":
 		err = importCmd(ctx, os.Args[2:])
+	case "sync":
+		err = syncCmd(ctx, os.Args[2:], os.Stdout)
 	case "mcp", "hook":
 		err = harnessCmd(os.Args[1], os.Args[2:])
 	case "agent-hook":
@@ -131,6 +138,7 @@ func harnessCmd(name string, args []string) error {
 	statusSock := fs.String("status", "", "the run's status socket the hook posts every event to")
 	search := fs.String("search", "", "the engine's search socket for this agent (mcp)")
 	repoSock := fs.String("repos", "", "the engine's repository tools socket for this agent (mcp)")
+	promSock := fs.String("prometheus", "", "the engine's prometheus tool socket for this agent (mcp)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -138,7 +146,7 @@ func harnessCmd(name string, args []string) error {
 		return errors.New(name + ": --root is required")
 	}
 	if name == "mcp" {
-		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, *repoSock, revision)
+		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, *repoSock, *promSock, revision)
 	}
 	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state, Status: *statusSock})
 }
@@ -160,7 +168,7 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | restore-check [--expect file] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills|claude-sessions <dir> | sync claude | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
 	os.Exit(2)
 }
 
@@ -319,6 +327,11 @@ func referencedEnv(cfg *spec.Config) []string {
 	if m := cfg.Deployment.Mail; m != nil {
 		refs[m.IMAP.UsernameEnv], refs[m.IMAP.PasswordEnv] = true, true
 	}
+	for _, c := range cfg.Deployment.Connectors {
+		for _, v := range connectorEnv(c) {
+			refs[v] = true
+		}
+	}
 	// A build or a sandboxed chat hands the sandbox the subscription token itself (engine.buildCredential), so these name it alone.
 	if b := cfg.Deployment.Build; b != nil {
 		refs[b.TokenEnv] = true
@@ -334,6 +347,18 @@ func referencedEnv(cfg *spec.Config) []string {
 	}
 	sort.Strings(env)
 	return env
+}
+
+// connectorEnv is the environment a connector's calls need: its header's credentials, a configured client's secret, and for oauth the key its tokens are sealed with.
+func connectorEnv(c spec.Connector) []string {
+	out := spec.EnvRefs(c.Auth.Value)
+	if c.Auth.ClientSecretEnv != "" {
+		out = append(out, c.Auth.ClientSecretEnv)
+	}
+	if c.AuthKind() == spec.ConnectorAuthOAuth {
+		out = append(out, spec.ConnectorKeyEnv)
+	}
+	return out
 }
 
 func enqueue(ctx context.Context, args []string) error {
@@ -503,7 +528,8 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
 			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher,
-			Boxes: boxClient(func() spec.Deployment { return eng.Current().Config.Deployment }), WorkspaceOrigins: auth.SplitList(os.Getenv("ORBIT_WORKSPACE_ORIGINS"))}
+			WorkspaceGroup: strings.TrimSpace(os.Getenv("ORBIT_WORKSPACE_GROUP")),
+			Boxes:          boxClient(func() spec.Deployment { return eng.Current().Config.Deployment }), WorkspaceOrigins: auth.SplitList(os.Getenv("ORBIT_WORKSPACE_ORIGINS"))}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		// Bind before any executor starts: an instance that cannot serve
@@ -678,6 +704,12 @@ func serve(ctx context.Context, log *slog.Logger) error {
 					log.Warn("failed runs whose worker was lost", "runs", failed)
 				}
 				failOrphanedActions(life, s, log)
+				if !drain.Draining() {
+					// A held runner is tried again here (engine/hold.go); a probe that succeeds wakes the executors.
+					if _, err := eng.ProbeHolds(life); err != nil {
+						log.Error("probe held runners", "err", err)
+					}
+				}
 				if !drain.Draining() && time.Since(lastLearn) >= engine.LearnEvery {
 					lastLearn = time.Now()
 					if err := eng.EnqueueLearning(life); err != nil {

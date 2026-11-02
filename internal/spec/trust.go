@@ -12,7 +12,7 @@ import (
 
 // What an agent may reach depends on who wrote it. A file agent is reviewed in git with the deployment, so it may name any source, variable and tool. A database agent is written through the API or by an agent's agent:define, and the built-in one is changed the same way, so a model steered by a poisoned input can write either: they are held to what orbit.yaml offers (docs/agents/security.md, What a model can define).
 
-// Credential is a secret a source may send: the environment variable named by its key in orbit.yaml's credentials, and the only URLs it may be sent to.
+// Credential is a secret a source or an endpoint may send: the environment variable named by its key in orbit.yaml's credentials, and the only URLs it may be sent to.
 type Credential struct {
 	// URLPrefix is where the credential may go: every request it is rendered into must start with it. It is an absolute http(s) URL with a path ending in "/", so the host and the path segment it names are whole.
 	URLPrefix string `yaml:"url_prefix" json:"url_prefix"`
@@ -109,8 +109,11 @@ func (c *Config) validateTrust(a *Agent) []error {
 				continue
 			}
 			u := s.URL
-			if s.Kind == "prometheus" {
+			switch s.Kind {
+			case "prometheus":
 				u = strings.TrimRight(u, "/") + "/api/v1/query"
+			case "loki":
+				u = strings.TrimRight(u, "/") + "/loki/api/v1/query_range"
 			}
 			if strings.Contains(u, "{{") || strings.Contains(u, "${") {
 				continue // checked on every request (sources.Fetcher)
@@ -149,7 +152,7 @@ func ruleRank(r Rule) int {
 	return 0
 }
 
-// Widening lists how next reaches further than cur (nil: an agent that does not exist yet): a tool, source, credential, delegate target or need it adds, a source it changes, a sandbox profile it moves to, or an action type it allows more readily. agent:define applies such a change only with a person's approval, whatever its rule.
+// Widening lists how next reaches further than cur (nil: an agent that does not exist yet): a tool, source, credential, delegate target, need or connector it adds, a source it changes, a sandbox profile it moves to, or an action type it allows more readily. agent:define applies such a change only with a person's approval, whatever its rule.
 func Widening(cur, next *Agent) []string {
 	if cur == nil {
 		cur = &Agent{}
@@ -198,6 +201,12 @@ func Widening(cur, next *Agent) []string {
 	for _, n := range next.Needs {
 		if !slices.Contains(cur.Needs, n) {
 			out = append(out, "need "+n)
+		}
+	}
+	for _, n := range next.Connectors {
+		if !slices.Contains(cur.Connectors, n) {
+			// Its tools run as the agent's, on the person's account at that server.
+			out = append(out, "connector "+n)
 		}
 	}
 	for _, t := range next.Triggers {
