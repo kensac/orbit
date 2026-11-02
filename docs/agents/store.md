@@ -36,6 +36,10 @@ an agent's beliefs changed.
   run and move the ticket together. `build_decisions` and `build_sandboxes`
   rows are written only by the attempt holding the run's claim.
 
+- outbox (`outbox`, written by a worker's engine): unsent, claimed by one control instance (`ClaimOutbox`, reclaimed after `OutboxReclaimAfter`), then `sent_at` set once its deliveries are recorded. Rows are kept.
+- session transcripts (`session_transcripts`): written once per session id (`ON CONFLICT DO NOTHING`; a resume forks to a new id), never updated.
+- deployment (`deployment_specs`, `deployment_current`): every version kept, as `agent_specs`; `SyncDeployment` moves the pointer before `SyncAgents` records the agents loaded with it.
+
 A client request id (`receipts`) is written in the same transaction as the
 message or decision it records, so a retry returns the first result and a
 failure leaves no receipt.

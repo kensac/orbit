@@ -186,12 +186,18 @@ func TestAnAttemptThatLostItsClaimStopsAndWritesNothing(t *testing.T) {
 	go func() { done <- e.Execute(ctx, c) }()
 	<-fr.started
 	// Another instance's reaper took the run (this one's heartbeats did
-	// not land for StaleAfter), and another worker claimed it.
-	if _, err := s.Pool.Exec(ctx, `UPDATE runs SET heartbeat_at = now() - interval '1 hour' WHERE id = $1`, c.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.ReapStale(ctx, time.Minute); err != nil {
-		t.Fatal(err)
+	// not land for StaleAfter), and another worker claimed it. A beat can
+	// land between aging the heartbeat and the reap, so age and reap until
+	// the reap takes it.
+	for reaped := false; !reaped; {
+		if _, err := s.Pool.Exec(ctx, `UPDATE runs SET heartbeat_at = now() - interval '1 hour' WHERE id = $1`, c.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ReapStale(ctx, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		r, _ := s.GetRun(ctx, c.ID)
+		reaped = r.Status == "queued"
 	}
 	c2, _ := s.ClaimRun(ctx, "other/0")
 	if c2 == nil || c2.Attempt != 2 {
