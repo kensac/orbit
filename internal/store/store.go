@@ -774,15 +774,19 @@ func (s *Store) ListArtifacts(ctx context.Context, runID string) ([]Artifact, er
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[Artifact])
 }
 
-// GetArtifactContent returns one artifact's bytes and media type.
-func (s *Store) GetArtifactContent(ctx context.Context, id string) ([]byte, string, error) {
-	var b []byte
-	var mt string
-	err := s.Pool.QueryRow(ctx, `SELECT content, media_type FROM artifacts WHERE id = $1`, id).Scan(&b, &mt)
+// OpenArtifact returns one artifact and a reader of its content.
+func (s *Store) OpenArtifact(ctx context.Context, id string) (Artifact, *Blob, error) {
+	var a Artifact
+	err := s.Pool.QueryRow(ctx, `SELECT id::text, run_id::text, attempt, direction, name, media_type, sha256, bytes, created_at
+		FROM artifacts WHERE id = $1`, id).
+		Scan(&a.ID, &a.RunID, &a.Attempt, &a.Direction, &a.Name, &a.MediaType, &a.SHA256, &a.Bytes, &a.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, "", ErrNotFound
+		return a, nil, ErrNotFound
 	}
-	return b, mt, err
+	if err != nil {
+		return a, nil, err
+	}
+	return a, s.blob(ctx, blobArtifact, a.ID, a.Bytes), nil
 }
 
 // ---------------------------------------------------------------- memory
