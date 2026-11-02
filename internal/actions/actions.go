@@ -317,6 +317,8 @@ type Executor struct {
 	Continue func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (id string, queued bool, err error)
 	// Define applies an agent:define for the call's run.
 	Define func(ctx context.Context, c Call, spec json.RawMessage) (json.RawMessage, error)
+	// WriteSkill applies an approved skill:write.
+	WriteSkill func(ctx context.Context, c Call, p SkillWriteParams) (json.RawMessage, error)
 }
 
 // Call is one action to execute: its type and parameters, and the agent
@@ -428,8 +430,29 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 			return nil, fmt.Errorf("agent:define: not available in this process")
 		}
 		return e.Define(ctx, c, sp)
+	case typ == SkillWriteType:
+		var p SkillWriteParams
+		if err := strictDecode(params, &p); err != nil {
+			return nil, err
+		}
+		if e.WriteSkill == nil {
+			return nil, fmt.Errorf("%s: not available in this process", typ)
+		}
+		return e.WriteSkill(ctx, c, p)
 	}
 	return nil, fmt.Errorf("unknown action type %q", typ)
+}
+
+// SkillWriteType writes a skill a learning run proposed from imported sessions (a procedure seen in two or more of them). No agent is offered it: only a learning run proposes one, always for a person's approval, and a person's approval is what applies it.
+const SkillWriteType = "skill:write"
+
+// SkillWriteParams is a skill:write: the whole SKILL.md of a new skill (version 0) or the next version of one at version, the sessions it was seen in, and why.
+type SkillWriteParams struct {
+	Name     string   `json:"name"`
+	Content  string   `json:"content"`
+	Version  int      `json:"version"`
+	Sessions []string `json:"sessions"`
+	Why      string   `json:"why"`
 }
 
 // merge mints a merge token for the one repository, runs the gated merge,

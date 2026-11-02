@@ -1017,7 +1017,7 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 			return e.Store.EnqueueContinuation(ctx, store.Continuation{
 				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
 		},
-		Define: e.defineAction}
+		Define: e.defineAction, WriteSkill: e.writeSkillAction}
 	for {
 		act, err := e.Store.ClaimApprovedAction(ctx)
 		if err != nil || act == nil {
