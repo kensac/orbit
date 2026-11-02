@@ -10,7 +10,7 @@ import (
 )
 
 // searchMigration is the migration that creates search_docs.
-const searchMigration = 10
+const searchMigration = 12
 
 // finishWith runs one claimed run of agent to success with a transcript of
 // events, a report and a memory document.
@@ -83,7 +83,7 @@ func TestSearchFindsEveryKindWithHighlights(t *testing.T) {
 		t.Errorf("total %d, results %d", page.Total, len(page.Results))
 	}
 	for _, r := range page.Results {
-		if r.Agent != "finance" || r.ConversationID == nil {
+		if r.Agent == nil || *r.Agent != "finance" || r.ConversationID == nil {
 			t.Errorf("result %+v: want finance, in a conversation", r)
 		}
 		matched := false
@@ -183,5 +183,45 @@ func TestSearchIndexingNeverFailsAWrite(t *testing.T) {
 	evs, err := s.ListEvents(ctx, id, 0, 0, 10)
 	if err != nil || len(evs) != 3 {
 		t.Fatalf("events = %d %v", len(evs), err)
+	}
+}
+
+func TestSearchShowsAMemoryEntryAsItIsNow(t *testing.T) {
+	s := testdb.New(t)
+	seed(t, s, "a")
+	who := store.Provenance{Source: "person", Author: "kanishk"}
+	prof, err := s.CreateEntry(ctx, store.NewEntry{EntryRef: store.EntryRef{Scope: store.ScopeProfile},
+		EntryFields: store.EntryFields{Type: "user", Title: "Lives in Brooklyn", Body: "Rents in Brooklyn; the landlord is slow."}}, who)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateEntry(ctx, store.NewEntry{EntryRef: store.EntryRef{Scope: "agent", Owner: "a"},
+		EntryFields: store.EntryFields{Type: "feedback", Title: "Landlord emails", Body: "Summarise landlord emails in one line."}}, who); err != nil {
+		t.Fatal(err)
+	}
+	body := "Rents in Queens now."
+	if _, err := s.UpdateEntry(ctx, prof.ID, prof.Version, store.EntryEdit{Body: &body}, who); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := s.Search(ctx, store.SearchQuery{Q: "landlord", Kinds: []string{"memory_entry"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Results) != 1 || *p.Results[0].Title != "Landlord emails" || *p.Results[0].Agent != "a" || *p.Results[0].Scope != "agent" {
+		t.Fatalf("landlord = %+v, want only the agent's entry (the profile's current version no longer says it)", p.Results)
+	}
+	p, err = s.Search(ctx, store.SearchQuery{Q: "brooklyn"})
+	if err != nil || len(p.Results) != 1 || p.Results[0].Agent != nil || *p.Results[0].EntryVersion != 2 {
+		t.Fatalf("brooklyn = %+v %v, want the profile entry's current version, by its title", p, err)
+	}
+	if p, err := s.Search(ctx, store.SearchQuery{Q: "brooklyn", Agent: "a"}); err != nil || p.Total != 0 {
+		t.Fatalf("an agent filter matched a profile entry: %+v %v", p, err)
+	}
+	if _, err := s.RetireEntry(ctx, prof.ID, 2, nil, who); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := s.Search(ctx, store.SearchQuery{Q: "queens"}); err != nil || p.Total != 0 {
+		t.Fatalf("a retired entry matched: %+v %v", p, err)
 	}
 }

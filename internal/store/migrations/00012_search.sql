@@ -3,7 +3,7 @@
 -- Full-text search over what orbit stores (Store.Search, GET /search). One
 -- document per searchable piece: a person's message, an agent's question, a
 -- run's report or error, the prose a backend narrated, one tool call's
--- input, one memory version. Documents are derived from those rows by the
+-- input, one memory version, one memory entry version. Documents are derived from those rows by the
 -- triggers below, so every writer (either release during a deploy, a
 -- worker) indexes alike, and they are never deleted, as the rows they come
 -- from are not.
@@ -12,27 +12,39 @@ CREATE TABLE search_docs (
     -- The row a document was derived from, so a re-derivation (a run's
     -- report written again, the backfill) replaces rather than duplicates:
     -- message:<id>, report:<run>, error:<run>, event:<run>:<attempt>:<seq>:<n>
-    -- (n is the block within the line, 0 for its prose), memory:<id>.
+    -- (n is the block within the line, 0 for its prose), memory:<id>,
+    -- entry:<entry>:<version>.
     ref                text NOT NULL UNIQUE,
     kind               text NOT NULL
-                       CHECK (kind IN ('message', 'question', 'report', 'error', 'narration', 'tool_call', 'memory')),
-    agent              text NOT NULL,
+                       CHECK (kind IN ('message', 'question', 'report', 'error', 'narration', 'tool_call', 'memory', 'memory_entry')),
+    -- NULL only for a profile or topic memory entry, which no one agent owns.
+    agent              text,
     conversation_id    uuid,
     run_id             uuid,
     attempt            integer,
     seq                integer,
     message_id         uuid,
     memory_version_id  bigint,
+    entry_id           uuid,
+    entry_version      integer,
+    -- A memory entry's scope (profile, topic, agent) and its topic or agent.
+    scope              text,
+    owner              text,
+    -- A memory entry's title, weighted above its body.
+    title              text,
     author             text,
     -- The tool a tool_call document is the input of.
     tool               text,
     at                 timestamptz NOT NULL,
     body               text NOT NULL,
     tsv                tsvector GENERATED ALWAYS AS
-                       (setweight(to_tsvector('english', coalesce(tool, '')), 'B') || to_tsvector('english', body)) STORED
+                       (setweight(to_tsvector('english', coalesce(title, '')), 'A') || setweight(to_tsvector('english', coalesce(tool, '')), 'B')
+                        || to_tsvector('english', body)) STORED,
+    CHECK ((agent IS NULL) = (kind = 'memory_entry' AND scope <> 'agent'))
 );
 CREATE INDEX search_docs_tsv ON search_docs USING gin (tsv);
 CREATE INDEX search_docs_agent_at ON search_docs (agent, at DESC);
+CREATE INDEX search_docs_entry ON search_docs (entry_id) WHERE entry_id IS NOT NULL;
 
 -- orbit_search_clip bounds an indexed body: a tsvector is at most 1 MB, and
 -- 200,000 characters of text stays well inside it whatever the words.
@@ -197,6 +209,31 @@ $$;
 CREATE TRIGGER memory_versions_search AFTER INSERT ON memory_versions
     FOR EACH ROW EXECUTE FUNCTION orbit_search_index_memory();
 
+-- A memory entry version: its title, description, body, why and how to
+-- apply. Search shows an entry's current version only, read at query time.
+-- +goose StatementBegin
+CREATE FUNCTION orbit_search_index_entry() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    BEGIN
+        INSERT INTO search_docs (ref, kind, agent, conversation_id, run_id, entry_id, entry_version, scope, owner,
+                                 author, title, at, body)
+        SELECT 'entry:' || NEW.entry_id || ':' || NEW.version, 'memory_entry',
+               CASE WHEN e.scope = 'agent' THEN e.owner END, NEW.source_conversation, NEW.source_run,
+               NEW.entry_id, NEW.version, e.scope, e.owner, NEW.author, NEW.title, NEW.created_at,
+               orbit_search_clip(concat_ws(E'\n\n', NULLIF(NEW.description, ''), NEW.body,
+                                           NULLIF(NEW.why, ''), NULLIF(NEW.how_to_apply, '')))
+        FROM memory_entries e WHERE e.id = NEW.entry_id
+        ON CONFLICT (ref) DO NOTHING;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'search: memory entry % version %: %', NEW.entry_id, NEW.version, SQLERRM;
+    END;
+    RETURN NULL;
+END;
+$$;
+-- +goose StatementEnd
+CREATE TRIGGER memory_entry_versions_search AFTER INSERT ON memory_entry_versions
+    FOR EACH ROW EXECUTE FUNCTION orbit_search_index_entry();
+
 -- The backfill: every row written before this migration. The triggers above
 -- exist already and CREATE TRIGGER holds off concurrent writes to their
 -- tables until this commits, so no row is missed or indexed twice.
@@ -225,6 +262,14 @@ FROM memory_versions v LEFT JOIN runs r ON r.id = v.run_id
 WHERE btrim(v.content) <> ''
 ON CONFLICT (ref) DO NOTHING;
 
+INSERT INTO search_docs (ref, kind, agent, conversation_id, run_id, entry_id, entry_version, scope, owner,
+                         author, title, at, body)
+SELECT 'entry:' || v.entry_id || ':' || v.version, 'memory_entry', CASE WHEN e.scope = 'agent' THEN e.owner END,
+       v.source_conversation, v.source_run, v.entry_id, v.version, e.scope, e.owner, v.author, v.title, v.created_at,
+       orbit_search_clip(concat_ws(E'\n\n', NULLIF(v.description, ''), v.body, NULLIF(v.why, ''), NULLIF(v.how_to_apply, '')))
+FROM memory_entry_versions v JOIN memory_entries e ON e.id = v.entry_id
+ON CONFLICT (ref) DO NOTHING;
+
 INSERT INTO search_docs (ref, kind, agent, conversation_id, run_id, attempt, seq, tool, at, body)
 SELECT 'event:' || e.run_id || ':' || e.attempt || ':' || e.seq || ':' || d.n,
        d.kind, r.agent, r.conversation_id, e.run_id, e.attempt, e.seq, d.tool, e.at, orbit_search_clip(d.body)
@@ -233,10 +278,12 @@ WHERE e.kind IN ('assistant', 'response', 'item.started', 'item.completed')
 ON CONFLICT (ref) DO NOTHING;
 
 -- +goose Down
+DROP TRIGGER memory_entry_versions_search ON memory_entry_versions;
 DROP TRIGGER memory_versions_search ON memory_versions;
 DROP TRIGGER runs_search ON runs;
 DROP TRIGGER messages_search ON messages;
 DROP TRIGGER run_events_search ON run_events;
+DROP FUNCTION orbit_search_index_entry();
 DROP FUNCTION orbit_search_index_memory();
 DROP FUNCTION orbit_search_index_run();
 DROP FUNCTION orbit_search_index_message();

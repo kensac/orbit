@@ -13,7 +13,7 @@ import (
 
 // SearchKinds are the kinds of document search returns, in the order the
 // API documents them.
-var SearchKinds = []string{"message", "question", "report", "error", "narration", "tool_call", "memory"}
+var SearchKinds = []string{"message", "question", "report", "error", "narration", "tool_call", "memory", "memory_entry"}
 
 // MaxSearchResults bounds one page of results: each carries a snippet, and a
 // page is meant for a person or a model to read, not to export.
@@ -44,14 +44,20 @@ type SnippetPart struct {
 
 // SearchResult is one matching document.
 type SearchResult struct {
-	Kind           string        `json:"kind"`
-	Agent          string        `json:"agent"`
+	Kind string `json:"kind"`
+	// Agent is nil only for a profile or topic memory entry.
+	Agent          *string       `json:"agent"`
 	ConversationID *string       `json:"conversation_id"`
 	RunID          *string       `json:"run_id"`
 	Attempt        *int          `json:"attempt"`
 	Seq            *int          `json:"seq"`
 	MessageID      *string       `json:"message_id"`
 	MemoryVersion  *int64        `json:"memory_version_id"`
+	EntryID        *string       `json:"entry_id"`
+	EntryVersion   *int          `json:"entry_version"`
+	Scope          *string       `json:"scope"`
+	Owner          *string       `json:"owner"`
+	Title          *string       `json:"title"`
 	Author         *string       `json:"author"`
 	Tool           *string       `json:"tool"`
 	At             time.Time     `json:"at"`
@@ -76,7 +82,8 @@ const (
 // Search ranks the documents matching q.Q (ts_rank_cd, normalised by length;
 // ties newest first) within q's filters. Of an agent's memory versions only
 // the newest matching one is returned: each version is the whole document
-// again, so older ones would crowd every result out. A query that has no
+// again, so older ones would crowd every result out. A memory entry is
+// returned only as its current version, and not once retired. A query that has no
 // searchable words (only stop words) matches nothing.
 func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchPage, error) {
 	if strings.TrimSpace(q.Q) == "" {
@@ -108,13 +115,18 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchPage, error) 
 		      AND ($5::text[] IS NULL OR d.kind = ANY ($5))
 		      AND ($6::timestamptz IS NULL OR d.at >= $6)
 		      AND ($7::timestamptz IS NULL OR d.at < $7)
+		      AND (d.kind <> 'memory_entry' OR EXISTS (
+		          SELECT 1 FROM memory_entries e
+		          JOIN memory_entry_versions v ON v.entry_id = e.id AND v.version = e.current_version
+		          WHERE e.id = d.entry_id AND e.current_version = d.entry_version AND v.status = 'active'))
 		),
 		page AS (
 		    SELECT *, count(*) OVER () AS total FROM m WHERE newest IS NULL OR newest = 1
 		    ORDER BY rank DESC, at DESC, id DESC LIMIT $8 OFFSET $9
 		)
 		SELECT p.total, p.kind, p.agent, p.conversation_id::text, p.run_id::text, p.attempt, p.seq,
-		       p.message_id::text, p.memory_version_id, p.author, p.tool, p.at, p.rank::float8,
+		       p.message_id::text, p.memory_version_id, p.entry_id::text, p.entry_version, p.scope, p.owner, p.title,
+		       p.author, p.tool, p.at, p.rank::float8,
 		       ts_headline('english', translate(p.body, $10 || $11, ''), q.q,
 		           'MaxFragments=2, MaxWords=30, MinWords=12, FragmentDelimiter=" ... ", StartSel=' || $10 || ', StopSel=' || $11)
 		FROM page p, q
@@ -128,7 +140,8 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchPage, error) 
 		var r SearchResult
 		var headline string
 		if err := rows.Scan(&page.Total, &r.Kind, &r.Agent, &r.ConversationID, &r.RunID, &r.Attempt, &r.Seq,
-			&r.MessageID, &r.MemoryVersion, &r.Author, &r.Tool, &r.At, &r.Rank, &headline); err != nil {
+			&r.MessageID, &r.MemoryVersion, &r.EntryID, &r.EntryVersion, &r.Scope, &r.Owner, &r.Title,
+			&r.Author, &r.Tool, &r.At, &r.Rank, &headline); err != nil {
 			rows.Close()
 			return nil, err
 		}
