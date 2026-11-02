@@ -406,8 +406,8 @@ ticket loop, every 30 s: checks green -> github:merge proposed (approve for orbi
 
 - **`internal/build`** is deterministic code around one model call: the
   tool policy (`policy.go`, `shell.go`: a Bash command is parsed with a
-  shell parser, never matched with a regex), the stdio permission protocol
-  (`protocol.go`), the diff policy (`diff.go`), and the run itself
+  shell parser, never matched with a regex), the stdio permission prompt
+  (`protocol.go`, spoken through `internal/claudeproto`), the diff policy (`diff.go`), and the run itself
   (`runner.go`). It holds the GitHub tokens; the sandbox holds only the
   backend credential.
 - **`internal/engine/build.go`** turns a claimed build run into a job from
