@@ -148,9 +148,9 @@ func TestWidening(t *testing.T) {
 	moved.URL = "https://evil.example/"
 	next := &Agent{Tools: []string{"WebSearch", "WebFetch"}, Sources: []Source{moved, {Name: "b", Kind: "http", URL: "https://b/", Query: map[string]string{"k": "${OTHER}"}}},
 		Needs: []string{"sure", "docker-network:hetzner"}, Actions: ActionSet{"notify": RuleAuto, "continue": RuleApprove, "webhook:x": RuleDeny},
-		Delegates: []string{"builder"}, Sandbox: "workstation"}
+		Delegates: []string{"builder"}, Sandbox: "workstation", Triggers: []Trigger{{Schedule: "@daily"}, {Webhook: "issues", Secret: "HOOK"}}}
 	want := []string{"tool WebFetch", "source tx", "source b", "credential OTHER", "action continue: approve, was deny",
-		"action notify: auto, was approve", "sandbox workstation", "delegate to builder", "need docker-network:hetzner"}
+		"action notify: auto, was approve", "sandbox workstation", "delegate to builder", "need docker-network:hetzner", "webhook issues"}
 	if w := Widening(cur, next); !reflect.DeepEqual(w, want) {
 		t.Fatalf("widening =\n%q\nwant\n%q", w, want)
 	}
@@ -160,5 +160,38 @@ func TestWidening(t *testing.T) {
 	}
 	if w := Widening(nil, &Agent{Tools: []string{"WebFetch"}, Actions: ActionSet{"agent:define": RuleAuto}}); !reflect.DeepEqual(w, []string{"tool WebFetch", "action agent:define: auto, was deny"}) {
 		t.Fatalf("new = %v", w)
+	}
+}
+
+func TestToolsNeedAClaudeCodeRunner(t *testing.T) {
+	runners := `
+runners:
+  r: {kind: claude-code}
+  cx: {kind: codex}
+  api: {kind: anthropic, api_key_env: ANTHROPIC_API_KEY}
+`
+	load := func(js string) error {
+		t.Helper()
+		_, err := LoadAll(write(t, map[string]string{"orbit.yaml": strings.Replace(trustBase, "runners: {r: {kind: claude-code}}\n", runners, 1)}),
+			[]Definition{{Name: "d", Version: 1, Enabled: true, Spec: []byte(js)}})
+		return err
+	}
+	for _, r := range []string{"cx", "api"} {
+		err := load(`{"name":"d","charter":"x","runner":"` + r + `","tools":["WebFetch"]}`)
+		if err == nil || !strings.Contains(err.Error(), `tools: runner "`+r+`" is`) || !strings.Contains(err.Error(), "which takes no tools") {
+			t.Errorf("%s: err = %v", r, err)
+		}
+		if err := load(`{"name":"d","charter":"x","runner":"` + r + `"}`); err != nil {
+			t.Errorf("%s without tools: %v", r, err)
+		}
+	}
+	if err := load(`{"name":"d","charter":"x","runner":"r","tools":["WebFetch"]}`); err != nil {
+		t.Fatal(err)
+	}
+	// A file agent is held to it too: the run would fail whoever wrote the spec.
+	_, err := Load(write(t, map[string]string{"orbit.yaml": strings.Replace(base, "runners: {r: {kind: claude-code}}\n", runners, 1),
+		"agents/f.yaml": "name: f\ncharter: x\nrunner: cx\ntools: [Bash]\n"}))
+	if err == nil || !strings.Contains(err.Error(), `agent "f": tools: runner "cx" is codex`) {
+		t.Fatalf("file agent: err = %v", err)
 	}
 }

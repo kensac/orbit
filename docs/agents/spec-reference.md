@@ -17,6 +17,9 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `credentials` | map of variable to credential | none | The variables sources may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
+| `webhook_secrets` | map of variable to webhook secret | none | The signing secrets inbound webhooks are verified with, each bound to the agents whose webhook triggers may name it (below). |
+| `usage_poll` | map: `every` (default 5m, at least 1m), `token_env` (default `CLAUDE_CODE_OAUTH_TOKEN`) | absent | Poll the subscription's usage windows (configuration.md, Subscription usage and low-priority agents). |
+| `defer_low_priority` | bool | `false` | Hold `priority: low` agents' scheduled runs while a usage window is above `usage.DeferLowAbove`. |
 
 ### `defaults`
 
@@ -26,6 +29,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `timeout` | duration | `15m` | An agent's run timeout when it names none. |
 | `channels` | list of channel names | none | An agent's `notify.channels` when it names none. Each must exist. |
 | `memory_max_bytes` | int | `16384` | The largest memory document a run or the API may write. |
+| `decision_stall` | duration | `24h` | How long a delegated task's decision may wait for a person before, with nothing else in its batch able to move, its parent is woken (docs/ARCHITECTURE.md, Delegation). |
 
 ### `channels.<name>`
 
@@ -108,6 +112,13 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 |---|---|---|---|
 | `url_prefix` | http(s) URL, path ending in `/` | required | Every request the variable is rendered into, redirects included, must start with it; no user, query or fragment (configuration.md, Secrets). |
 
+### `webhook_secrets.<VAR>`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `scheme` | `github`, `standard` | required | How the sender signs: GitHub's `X-Hub-Signature-256`, or Standard Webhooks (`webhook-id`, `webhook-timestamp`, `webhook-signature`; a `whsec_` secret is base64 after the prefix) (configuration.md, Webhooks). |
+| `agents` | list of agent names | required | The agents whose webhook triggers may name the secret; any other agent naming it fails the load. |
+
 ### `mail`
 
 | Field | Type | Default | What it does |
@@ -144,7 +155,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `triggers` | list | none | When the agent wakes on its own (below). |
 | `sources` | list | none | Data orbit fetches before a run (below). |
 | `transforms` | list | none | Code over a source before the model sees it (below). |
-| `gates` | list | none | Checks that skip a scheduled run before any backend call (below). |
+| `gates` | list | none | Checks that skip a scheduled or webhook run before any backend call (below). |
 | `tools` | list of tool names | none | Extra Claude Code tools (below). |
 | `actions` | map of type to rule | every type `deny` | The writes the agent may propose and what happens to each (below). |
 | `notify` | map | | Where unattended runs report (below). |
@@ -156,19 +167,24 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `learn` | map | on | Learning runs over quiet conversations (below). |
 | `hooks` | list | none | Claude Code hooks for the agent's runs, beside orbit's own; claude-code only, at most 20 (below). |
 | `chat` | bool | `false` | A Claude Code session whose reply is its final message, with memory, questions and actions as orbit's tools; a workspace per conversation. claude-code only. |
-| `sandbox` | `workstation`, `build` | none | Needs `chat` and a sandboxd. Runs the CLI in a sandboxd container per conversation: `workstation` has every Claude Code tool and egress to any public host; `build` has its `tools` and the build allowlist (security.md, Sandboxed chats). |
+| `sandbox` | `workstation`, `build` | none | Needs `chat` and a sandboxd. Runs the CLI in a sandboxd container per conversation: `workstation` has every Claude Code tool and egress to any public host; `build` has its `tools` and the build allowlist (security.md, Sandboxed chats). A `workstation` agent also has a box for terminals (docs/workspace.md). |
 | `needs` | list of capabilities | none | What a host must have to run the agent (`docker-network:hetzner`); without any, every host. |
 | `delegates` | list of agent names, or `["*"]` | none | Agents this one may hand tasks to; the `delegate` action also needs a rule. |
 | `repos` | list (below) | none | Repositories every run reads: the tree at a commit under `inputs/repos/<name>/`, plus orbit's history and pull request tools. Each must be in `github.read_repositories`; needs `github` in `needs` and a claude-code or codex runner. |
+| `priority` | `normal`, `low` | `normal` | `low` is work that can wait: with `defer_low_priority`, its scheduled runs are held while the subscription is nearly spent. |
 
 ### `triggers[]`
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
-| `schedule` | cron (five fields) or descriptor | | When to fire, in the agent's timezone. Exactly one of `schedule` or `rrule`. |
+| `schedule` | cron (five fields) or descriptor | | When to fire, in the agent's timezone. Exactly one of `schedule`, `rrule` or `webhook`. |
 | `rrule` | RFC 5545 rule | | A recurrence cron cannot say (configuration.md, Triggers). |
 | `start` | local time `2026-11-03T09:00` | required with `rrule` | The rule's first period and its time of day; not allowed with `schedule`. |
 | `prompt` | string | none | The reason for this wake, appended to the charter. |
+| `webhook` | `^[a-z][a-z0-9-]{0,62}$` | | A signed delivery to `POST /hooks/<agent>/<webhook>` starts a run (configuration.md, Webhooks); unique per agent. |
+| `secret` | variable | required with `webhook` | The signing secret: one of `webhook_secrets`, listing this agent. |
+| `max_bytes` | int | `1048576` (1 MiB) | `webhook` only: the largest body accepted, at most 8 MiB; a larger one is `413`. |
+| `missed_grace` | duration, `1m` to `168h` | the time to the trigger's next fire, at most `1h` | `schedule` and `rrule` only: a fire claimed later than this is skipped as `missed` instead of run (configuration.md, Triggers). |
 
 ### `sources[]`
 
@@ -177,7 +193,7 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | Field | Type | Default | What it does |
 |---|---|---|---|
 | `name` | `^[a-z][a-z0-9-]{0,62}$` | required | The input's name; unique among sources and transforms. |
-| `kind` | `http`, `prometheus`, `file` | required | How it is fetched (below). |
+| `kind` | `http`, `prometheus`, `file`, `webhook` | required | How it is fetched (below). `webhook` takes only `name` and `max_bytes`. |
 | `url` | URL | required for http, prometheus | Target; may use `${VAR}` and `{{today}}`-style templates. A credential in any field of the source is sent only under its `url_prefix`. |
 | `headers` | map | none | http request headers; values may use `${VAR}`. |
 | `query` | map | none | http query values; may use `${VAR}` and templates. |
@@ -191,6 +207,7 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | `http` | any URL with `GET`, with the headers given | Whatever the URL returns is model input, so it may carry instructions. |
 | `prometheus` | a Prometheus API | As http. |
 | `file` | any file orbit's user can read | Exposes orbit's host files to the model: name only files meant for it. Only a file agent may have one. |
+| `webhook` | the body of the delivery that started the run, as received; absent on any other run | The sender writes it: it is untrusted input, as http's is. Needs a webhook trigger. |
 
 ### `sources[].paginate`
 
@@ -213,7 +230,7 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 
 ### `gates[]`
 
-Checked in order on scheduled runs with no message waiting (configuration.md, Gates).
+Checked in order on scheduled and webhook runs with no message waiting (configuration.md, Gates).
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
@@ -226,7 +243,7 @@ Checked in order on scheduled runs with no message waiting (configuration.md, Ga
 
 ### `tools`
 
-Every claude-code run has `Read`, `Glob` and `Grep`, confined to the run's workdir; with orbit's harness, `mcp__orbit__query`, `mcp__orbit__calc` and `mcp__orbit__search` (the agent's own records); with skills, `Skill`. `tools` adds Claude Code tool names, passed as given to `--tools` and `--allowedTools` (not checked at load; codex and anthropic runners fail the run if it is set). A listed tool is allowed by name with no path rule, and orbit's path guard covers only Read, Glob and Grep. The table is for runs on orbit's host; in a `sandbox` container the container is the boundary instead (a workstation has every tool and ignores `tools`). A database or built-in agent without a `sandbox` may list only `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite).
+Every claude-code run has `Read`, `Glob` and `Grep`, confined to the run's workdir; with orbit's harness, `mcp__orbit__query`, `mcp__orbit__calc` and `mcp__orbit__search` (the agent's own records); with skills, `Skill`. `tools` adds Claude Code tool names, passed as given to `--tools` and `--allowedTools` (names are not checked at load; a spec with `tools` on a codex or anthropic runner fails validation, since neither has a per-tool grant). A listed tool is allowed by name with no path rule, and orbit's path guard covers only Read, Glob and Grep. The table is for runs on orbit's host; in a `sandbox` container the container is the boundary instead (a workstation has every tool and ignores `tools`). A database or built-in agent without a `sandbox` may list only `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite).
 
 | Tool | Grants | Risk |
 |---|---|---|
@@ -245,7 +262,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `notify` | Sends a message to the agent's channels. | |
 | `continue` | Wakes the agent again in 1m to 24h, at most 12 in a row. | |
 | `delegate` | Hands a task to an agent in `delegates`. | `delegates` |
-| `task:message`, `task:cancel` | Messages or cancels a delegated task; follow the `delegate` rule unless named. | `delegates` |
+| `task:message`, `task:cancel`, `task:retry` | Messages, cancels or retries a delegated task; follow the `delegate` rule unless named. A retry past a task's third failure waits for a person whatever the rule. | `delegates` |
 | `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint; never a URL or header of the model's. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
 | `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |
