@@ -25,9 +25,11 @@ const mcpProtocol = "2025-06-18"
 // JSON-RPC 2.0) with two tools: query, over the JSON files under root, and
 // calc, exact arithmetic. It returns when in ends.
 //
-// Each successful result is also appended to LedgerPath(state), the record
-// the figure check reads of what orbit computed.
-func ServeMCP(in io.Reader, out io.Writer, root, state, version string) error {
+// Each successful query or calc result is also appended to LedgerPath(state),
+// the record the figure check reads of what orbit computed. With a search
+// socket it also serves search (search.go), whose results are earlier
+// writing, not computation, and so never back a figure.
+func ServeMCP(in io.Reader, out io.Writer, root, state, search, version string) error {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 64<<10), 4<<20)
 	enc := json.NewEncoder(out)
@@ -50,7 +52,7 @@ func ServeMCP(in io.Reader, out io.Writer, root, state, version string) error {
 		if len(req.ID) == 0 {
 			continue // a notification: nothing to answer
 		}
-		resp := handle(req.ID, req.Method, req.Params, root, state, version)
+		resp := handle(req.ID, req.Method, req.Params, root, state, search, version)
 		if err := enc.Encode(resp); err != nil {
 			return err
 		}
@@ -66,7 +68,7 @@ func rpcResult(id json.RawMessage, result any) map[string]any {
 	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
 }
 
-func handle(id json.RawMessage, method string, params json.RawMessage, root, state, version string) map[string]any {
+func handle(id json.RawMessage, method string, params json.RawMessage, root, state, search, version string) map[string]any {
 	switch method {
 	case "initialize":
 		var p struct {
@@ -106,6 +108,15 @@ func handle(id json.RawMessage, method string, params json.RawMessage, root, sta
 				"inputSchema": SkillSchema,
 			})
 		}
+		if search != "" {
+			tools = append(tools, map[string]any{
+				"name": "search",
+				"description": "Full-text search over your own earlier work: your runs' reports and errors, what you wrote " +
+					"while working, your tool calls' inputs, your person's messages, your questions and your memory. " +
+					"Ranked best first, matches marked «like this», each with its run and conversation.",
+				"inputSchema": SearchSchema,
+			})
+		}
 		return rpcResult(id, map[string]any{"tools": tools})
 	case "tools/call":
 		var p struct {
@@ -140,14 +151,22 @@ func handle(id json.RawMessage, method string, params json.RawMessage, root, sta
 				map[string]any{"type": "text", "text": text},
 			}})
 		}
-		res, err := call(p.Name, p.Arguments, root)
+		var res map[string]any
+		var err error
+		if p.Name == "search" && search != "" {
+			res, err = callSearch(search, p.Arguments)
+		} else {
+			res, err = call(p.Name, p.Arguments, root)
+		}
 		if err != nil {
 			// A tool failure is a result the model reads, not a protocol error.
 			return rpcResult(id, map[string]any{"isError": true,
 				"content": []any{map[string]any{"type": "text", "text": err.Error()}}})
 		}
 		b, _ := json.Marshal(res)
-		ledger(state, p.Name, string(b))
+		if p.Name != "search" {
+			ledger(state, p.Name, string(b))
+		}
 		return rpcResult(id, map[string]any{"content": []any{map[string]any{"type": "text", "text": string(b)}}})
 	}
 	return rpcError(id, -32601, "method not found: "+method)
@@ -191,4 +210,14 @@ func call(name string, args json.RawMessage, root string) (map[string]any, error
 		return Calc(c.Expression)
 	}
 	return nil, fmt.Errorf("unknown tool %q", name)
+}
+
+func callSearch(socket string, args json.RawMessage) (map[string]any, error) {
+	dec := json.NewDecoder(bytes.NewReader(args))
+	dec.DisallowUnknownFields()
+	var req SearchRequest
+	if err := dec.Decode(&req); err != nil {
+		return nil, fmt.Errorf("search: %w", err)
+	}
+	return Search(socket, req)
 }

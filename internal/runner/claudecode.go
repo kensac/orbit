@@ -98,9 +98,12 @@ func harnessHooks(h *Harness, workdir, home string) map[string]any {
 
 // harnessMCP is the --mcp-config that starts `orbit mcp` for the run.
 func harnessMCP(h *Harness, workdir, home string) string {
+	args := []string{"mcp", "--root", workdir, "--state", harness.StateDir(home)}
+	if h.Search != "" {
+		args = append(args, "--search", h.Search)
+	}
 	b, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{
-		harness.MCPServer: map[string]any{"type": "stdio", "command": h.Bin,
-			"args": []string{"mcp", "--root", workdir, "--state", harness.StateDir(home)}},
+		harness.MCPServer: map[string]any{"type": "stdio", "command": h.Bin, "args": args},
 	}})
 	return string(b)
 }
@@ -117,6 +120,9 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 		// MCP tools are not built-ins, so --tools does not list them; in
 		// dontAsk mode a tool runs only when allowed by name.
 		allowed = append(allowed, harness.ToolQuery, harness.ToolCalc)
+		if req.Harness.Search != "" {
+			allowed = append(allowed, harness.ToolSearch)
+		}
 		hooks = harnessHooks(req.Harness, req.Workdir, home)
 	}
 	if req.SkillsPlugin != "" {

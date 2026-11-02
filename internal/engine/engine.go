@@ -78,6 +78,9 @@ type Engine struct {
 
 	mu  sync.RWMutex
 	cfg *Snapshot
+
+	searchMu sync.Mutex
+	searchLn map[string]string // agent -> socket path being served
 }
 
 // Snapshot is one loaded configuration with its built channels.
@@ -472,13 +475,13 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	var hr *runner.Harness
 	if e.Harness != "" && r.Kind() == "claude-code" {
-		hr = &runner.Harness{Bin: e.Harness, Figures: figures}
+		hr = &runner.Harness{Bin: e.Harness, Figures: figures, Search: e.searchSocket(a.Name)}
 	}
 	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, hr != nil, inputs)
 	if err != nil {
 		return nil, nil, err
 	}
-	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr != nil)
+	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
 	if tk != nil {
 		system += ticketContract(tk, planning)
 	}
