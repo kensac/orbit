@@ -188,9 +188,11 @@ type Agent struct {
 	// may call (docs/ARCHITECTURE.md, Chat agents).
 	Chat bool `yaml:"chat,omitempty" json:"chat,omitempty"`
 	// Sandbox runs a chat agent's CLI in a sandboxd container per
-	// conversation, over a workspace kept between messages, with every tool
-	// it names (Bash, Edit, Write ...) inside it. Needs build.sandboxd.
-	Sandbox bool `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
+	// conversation, over a workspace kept between messages, as one of
+	// SandboxProfiles: "workstation" (every Claude Code tool, broad egress,
+	// a home kept in the workspace) or "build" (the tools it names, the
+	// build egress allowlist). Needs sandboxd in orbit.yaml.
+	Sandbox string `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
@@ -838,7 +840,10 @@ func (c *Config) validateAgent(a *Agent) []error {
 	if a.Chat && c.Deployment.Runners[a.Runner].Kind != "claude-code" {
 		at("chat: needs a claude-code runner (runner %q is %q)", a.Runner, c.Deployment.Runners[a.Runner].Kind)
 	}
-	if a.Sandbox {
+	if a.Sandbox != "" {
+		if !slices.Contains(SandboxProfiles, a.Sandbox) {
+			at("sandbox: %q is not a profile (want one of %v)", a.Sandbox, SandboxProfiles)
+		}
 		if !a.Chat {
 			at("sandbox: needs chat: true")
 		}

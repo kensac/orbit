@@ -110,6 +110,16 @@ func ValidGlob(p string) bool {
 	return true
 }
 
+// Sandbox profiles: what a sandboxed chat's container is. sandboxd maps
+// each to its container options and egress (internal/sandboxd).
+const (
+	SandboxWorkstation = "workstation"
+	SandboxBuild       = "build"
+)
+
+// SandboxProfiles lists them.
+var SandboxProfiles = []string{SandboxWorkstation, SandboxBuild}
+
 // SandboxService is sandboxd's address and the variable holding its token.
 type SandboxService struct {
 	Sandboxd string `yaml:"sandboxd" json:"sandboxd"`

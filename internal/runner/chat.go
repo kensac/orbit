@@ -61,7 +61,7 @@ type Chat struct {
 
 // SandboxClient is sandboxd's four operations (*sandbox.Client).
 type SandboxClient interface {
-	Create(ctx context.Context, runID string, archive io.Reader) (sandbox.CreateResponse, error)
+	CreateProfile(ctx context.Context, runID, profile string, archive io.Reader) (sandbox.CreateResponse, error)
 	Attach(ctx context.Context, id string, ar sandbox.AttachRequest, stdin io.Reader, stdout, stderr io.Writer) (int, error)
 	Archive(ctx context.Context, id string) (io.ReadCloser, error)
 	Destroy(ctx context.Context, id string) error
@@ -73,6 +73,10 @@ type Sandbox struct {
 	Client     SandboxClient
 	Label      string
 	Credential string
+	// Profile is the sandbox's kind (spec.SandboxProfiles): a
+	// "workstation" session gets every tool and a home kept in the
+	// workspace.
+	Profile string
 	// Pack is the workspace a new sandbox starts from.
 	Pack func() ([]byte, error)
 	// PackFiles is a tar of some workdir files, for a live sandbox.
@@ -88,6 +92,13 @@ type Sandbox struct {
 // SandboxConfigDir is the CLI's config directory inside a sandbox, in the
 // workspace so a session's transcript is read back with it.
 const SandboxConfigDir = sandbox.WorkDir + "/.orbit/claude"
+
+// SandboxHome is a workstation sandbox's HOME, in the workspace so what the
+// session installs or configures there is kept between sandboxes.
+const SandboxHome = sandbox.WorkDir + "/.orbit/home"
+
+// workstation is the profile whose session has Claude Code's full tool set.
+const workstation = "workstation"
 
 // chatSettings are a chat run's --settings. Local runs keep orbit's deny
 // rules and the CLI's own workdir limit; a sandbox is the boundary for a
@@ -116,6 +127,7 @@ func chatSettings(keepDays int, hooks map[string]any, sandboxed bool) string {
 // chatArgs are a chat run's flags, without the transport's.
 func (c *claudeCode) chatArgs(req Request, home string, keepDays int) []string {
 	sandboxed := req.Chat.Sandbox != nil
+	full := sandboxed && req.Chat.Sandbox.Profile == workstation
 	tools := append([]string{}, req.Tools...)
 	if !sandboxed {
 		for _, t := range readTools {
@@ -133,14 +145,20 @@ func (c *claudeCode) chatArgs(req Request, home string, keepDays int) []string {
 		hooks = harnessHooks(req.Harness, req.Workdir, home)
 	}
 	mcp, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{ChatServer: map[string]any{"type": "sdk", "name": ChatServer}}})
-	args := []string{
-		"--append-system-prompt", req.System,
-		"--tools", strings.Join(tools, ","),
+	if full {
+		// Every built-in tool: no --tools list, nothing to allow by name.
+		allowed = allowed[len(req.Tools):]
+	}
+	args := []string{"--append-system-prompt", req.System}
+	if !full {
+		args = append(args, "--tools", strings.Join(tools, ","))
+	}
+	args = append(args,
 		"--strict-mcp-config", "--mcp-config", string(mcp),
 		"--setting-sources", "",
 		"--settings", chatSettings(keepDays, hooks, sandboxed),
 		"--allowedTools", strings.Join(allowed, ","),
-	}
+	)
 	if sandboxed {
 		args = append(args, "--permission-mode", "bypassPermissions")
 	}
@@ -410,12 +428,12 @@ func startSandbox(ctx context.Context, sb *Sandbox, args []string, h claudeproto
 	if err != nil {
 		return nil, fmt.Errorf("pack the workspace: %w", err)
 	}
-	cr, err := sb.Client.Create(ctx, sb.Label, strings.NewReader(string(tree)))
+	cr, err := sb.Client.CreateProfile(ctx, sb.Label, sb.Profile, strings.NewReader(string(tree)))
 	var se *sandbox.Error
 	if errors.As(err, &se) && se.Status == 429 && sess != nil && sess.Live != nil {
 		// Every sandbox slot is taken; idle live sandboxes give theirs up.
 		sess.Live.closeIdle()
-		cr, err = sb.Client.Create(ctx, sb.Label, strings.NewReader(string(tree)))
+		cr, err = sb.Client.CreateProfile(ctx, sb.Label, sb.Profile, strings.NewReader(string(tree)))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("create the sandbox: %w", err)
@@ -431,6 +449,9 @@ func startSandbox(ctx context.Context, sb *Sandbox, args []string, h claudeproto
 	// may give a sandboxed process is the credential alone
 	// (sandbox.AllowedEnv).
 	script := `CFG=` + SandboxConfigDir + `; mkdir -p "$CFG" && CLAUDE_CONFIG_DIR="$CFG" exec "$@"`
+	if sb.Profile == workstation {
+		script = `CFG=` + SandboxConfigDir + `; H=` + SandboxHome + `; mkdir -p "$CFG" "$H" && HOME="$H" CLAUDE_CONFIG_DIR="$CFG" PATH="$H/.local/bin:$H/go/bin:$H/.npm-global/bin:$PATH" NPM_CONFIG_PREFIX="$H/.npm-global" exec "$@"`
+	}
 	argv := append([]string{"sh", "-c", script, "sh", bin}, args...)
 	ar := sandbox.AttachRequest{Argv: argv, Env: map[string]string{claudeproto.OAuthToken: sb.Credential}}
 	inR, inW := io.Pipe()

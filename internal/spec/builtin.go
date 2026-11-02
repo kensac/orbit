@@ -49,13 +49,14 @@ func Builtins(d Deployment) []*Agent {
 		return nil
 	}
 	addr, _ := d.SandboxService()
-	sandbox := addr != ""
-	// Claude Code's own tools. Writing and running commands only in a
-	// sandbox: on orbit's host they would reach orbit's own files.
+	// In a workstation sandbox the session has every Claude Code tool
+	// (tools is then unused). Without one it may not write or run
+	// commands: on orbit's host they would reach orbit's own files.
+	sandbox := ""
 	tools := []string{"WebSearch", "WebFetch", "Task", "TodoWrite"}
 	var needs []string
-	if sandbox {
-		tools = append([]string{"Read", "Edit", "Write", "Bash", "Glob", "Grep"}, tools...)
+	if addr != "" {
+		sandbox, tools = SandboxWorkstation, nil
 		// Only hosts that reach sandboxd claim its runs.
 		needs = []string{"sandbox"}
 	}

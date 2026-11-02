@@ -86,10 +86,11 @@ The API is `--api` (default `ORBIT_API_URL`, else the internal listener) with `-
   docker exec orbit rm -r /tmp/memory
   ```
 
-## sandboxd and egress on oci
+## sandboxd and egress
 
-The build sandbox runs on oci (tailnet `100.123.116.85`), not hetzner: a
-container escape there reaches CI runners, not every secret in the fleet.
+sandboxd and egress run on hetzner today (`hetzner-vps-config/compose.orbit-sandbox.yml`; orbit reaches sandboxd at `10.250.250.2:8091` on the internal `orbit-sandboxd-api` network). The layout below was written for oci (tailnet `100.123.116.85`), where a container escape would reach CI runners rather than every secret in the fleet; the services and their options are the same either way.
+
+**Workstation profile** (sandboxed chats, `sandbox: workstation`): a second `orbit egress` with `ORBIT_EGRESS_ALLOW=*` (any public host on 443, never a private or tailnet address) on the `orbit-sandbox` and `orbit-egress` networks, named for example `orbit-egress-open`, and sandboxd's environment gains `ORBIT_SANDBOX_WORKSTATION_PROXY=orbit-egress-open:3128`. Without it sandboxd refuses that profile (400), and the built-in agent's runs fail naming the variable.
 Two services from orbit's own image, in `oci-vps-config` as
 `compose.orbit-sandbox.yml` (included from `docker-compose.yml`, whitelisted
 in `.gitignore`):

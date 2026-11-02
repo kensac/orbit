@@ -32,10 +32,12 @@ type fakeSandbox struct {
 	mu      sync.Mutex
 	roots   map[string]string
 	created int
+	profile string
 	gone    int
 }
 
-func (f *fakeSandbox) Create(_ context.Context, _ string, archive io.Reader) (sandbox.CreateResponse, error) {
+func (f *fakeSandbox) CreateProfile(_ context.Context, _, profile string, archive io.Reader) (sandbox.CreateResponse, error) {
+	f.profile = profile
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.created++
@@ -100,6 +102,7 @@ while IFS= read -r line; do
   mkdir -p "$CLAUDE_CONFIG_DIR/projects/-work"
   echo '{"type":"user"}' >> "$CLAUDE_CONFIG_DIR/projects/-work/sb-1.jsonl"
   echo "turn $n" > "made-$n.txt"
+  echo "$n" >> "$HOME/.kept"
   up=$(cat uploads/* 2>/dev/null | tr '\n' ' ')
   echo '{"type":"system","subtype":"init","session_id":"sb-1"}'
   echo '{"type":"result","subtype":"success","is_error":false,"result":"reply '$n' saw '"$up"'token '"$TOKEN_SEEN"'","total_cost_usd":0.01,"session_id":"sb-1"}'
@@ -107,6 +110,12 @@ done
 `
 
 func TestASandboxedChatKeepsItsWorkspace(t *testing.T) {
+	for _, profile := range spec.SandboxProfiles {
+		t.Run(profile, func(t *testing.T) { sandboxedChat(t, profile) })
+	}
+}
+
+func sandboxedChat(t *testing.T, profile string) {
 	s := testdb.New(t)
 	dir := t.TempDir()
 	cli := filepath.Join(dir, "claude")
@@ -124,7 +133,7 @@ sandbox: {sandboxd: "unix:/tmp/none.sock"}
 name: helper
 charter: Help.
 chat: true
-sandbox: true
+sandbox: `+profile+`
 wake_on_message: true
 tools: [Bash, Read, Write]
 session: {resume: true, idle: 1h, live: 5m}
@@ -202,6 +211,12 @@ session: {resume: true, idle: 1h, live: 5m}
 	work := filepath.Join(e.DataDir, "conversations", conv, "work")
 	if p, _ := runner.SessionFile(home, work, "sb-1"); !exists(p) {
 		t.Fatalf("transcript not at %s", p)
+	}
+	if fs.profile != profile {
+		t.Fatalf("profile = %q", fs.profile)
+	}
+	if kept, err := os.ReadFile(filepath.Join(e.DataDir, "conversations", conv, "box-home", ".kept")); profile == spec.SandboxWorkstation && (err != nil || string(kept) != "1\n2\n") {
+		t.Fatalf("a workstation's home is kept: %q %v", kept, err)
 	}
 	e.Live.Close()
 	if fs.gone != 1 {

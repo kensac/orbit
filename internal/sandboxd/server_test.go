@@ -571,3 +571,20 @@ func TestCheckRefusesOpenNetwork(t *testing.T) {
 }
 
 func bufioReader(c net.Conn) *bufio.Reader { return bufio.NewReader(c) }
+
+func TestProfiles(t *testing.T) {
+	s := &Server{cfg: Config{Proxy: "orbit-egress:3128"}}
+	if _, err := s.profile("workstation"); err == nil {
+		t.Fatal("an unconfigured workstation profile was accepted")
+	}
+	s.cfg.WorkstationProxy = "orbit-egress-open:3128"
+	for name, want := range map[string]string{"": "orbit-egress:3128", "build": "orbit-egress:3128", "workstation": "orbit-egress-open:3128"} {
+		cfg, err := s.profile(name)
+		if err != nil || cfg.Proxy != want {
+			t.Errorf("%q: %q %v, want %q", name, cfg.Proxy, err, want)
+		}
+	}
+	if _, err := s.profile("root"); err == nil {
+		t.Fatal("an unknown profile was accepted")
+	}
+}

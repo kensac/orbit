@@ -84,11 +84,17 @@ func (e *Engine) snapshotWorkspace(ctx context.Context, c *store.ClaimedRun, wor
 // sandbox: its config directory's projects, for the cwd /work.
 var sandboxProject = runner.SandboxConfigDir[len(sandbox.WorkDir)+1:] + "/projects/-work"
 
+// sandboxHome is a workstation sandbox's HOME, relative to /work.
+var sandboxHome = runner.SandboxHome[len(sandbox.WorkDir)+1:]
+
+// skipCache leaves caches out of a kept home: rebuildable, and large.
+func skipCache(rel string) bool { return rel == ".cache" || strings.HasPrefix(rel, ".cache/") }
+
 // sandboxPlan is how a sandboxed chat run's workspace crosses into the
 // sandbox and back. The local session transcripts ride along under the
 // CLI's config directory there, so a session resumes in any sandbox; on the
 // way back they land in HOME where orbit's session code looks for them.
-func (e *Engine) sandboxPlan(d spec.Deployment, c *store.ClaimedRun, workdir, home string, emit func(string, any)) (*runner.Sandbox, error) {
+func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.ClaimedRun, workdir, home string, emit func(string, any)) (*runner.Sandbox, error) {
 	addr, tokenEnv := d.SandboxService()
 	token, _ := e.Env(tokenEnv)
 	newClient := e.NewSandbox
@@ -105,12 +111,16 @@ func (e *Engine) sandboxPlan(d spec.Deployment, c *store.ClaimedRun, workdir, ho
 	}
 	path, _ := runner.SessionFile(home, workdir, "x")
 	project := filepath.Dir(path)
+	// A workstation's own HOME, beside the conversation's (it is the
+	// model's, unlike HOME, which holds orbit's session state).
+	boxHome := filepath.Join(filepath.Dir(workdir), "box-home")
 	return &runner.Sandbox{
-		Client: client, Label: c.ID, Credential: cred,
+		Client: client, Label: c.ID, Credential: cred, Profile: profile,
 		Pack: func() ([]byte, error) {
 			tree, _, err := workspace.Pack(
 				workspace.Tree{Dir: workdir, Skip: func(rel string) bool { return rel == ".orbit" || strings.HasPrefix(rel, ".orbit/") }},
-				workspace.Tree{Prefix: sandboxProject, Dir: project})
+				workspace.Tree{Prefix: sandboxProject, Dir: project},
+				workspace.Tree{Prefix: sandboxHome, Dir: boxHome, Skip: skipCache})
 			return tree, err
 		},
 		PackFiles: func(paths []string) ([]byte, error) {
@@ -129,6 +139,9 @@ func (e *Engine) sandboxPlan(d spec.Deployment, c *store.ClaimedRun, workdir, ho
 				switch {
 				case strings.HasPrefix(name, sandboxProject+"/"):
 					return project, strings.TrimPrefix(name, sandboxProject+"/"), true
+				case strings.HasPrefix(name, sandboxHome+"/"):
+					rel := strings.TrimPrefix(name, sandboxHome+"/")
+					return boxHome, rel, !skipCache(rel)
 				case name == ".orbit" || strings.HasPrefix(name, ".orbit/"):
 					return "", "", false
 				}
@@ -142,14 +155,17 @@ func (e *Engine) sandboxPlan(d spec.Deployment, c *store.ClaimedRun, workdir, ho
 
 // chatContract is the system prompt of a chat run: where it is and what
 // orbit's tools do, nothing about the shape of its answer.
-func chatContract(a *spec.Agent, types []actions.Type, sandboxed bool) string {
+func chatContract(a *spec.Agent, types []actions.Type, profile string) string {
 	var b strings.Builder
 	b.WriteString(`You are running in orbit, as a Claude Code session your person reaches from anywhere (a chat in their browser or phone). Their messages arrive as user turns; your final message in each turn is your reply, shown to them as written, in Markdown. Work as you would in a terminal session with them: do what they ask, and say what you did and found.
 
 `)
-	if sandboxed {
-		b.WriteString("Your working directory is this conversation's workspace, in a sandbox: files you write stay between messages. You may run any command in it. The network reaches only some hosts; GitHub is not one of them, so clone, push and open pull requests through orbit's tools when they are offered.\n")
-	} else {
+	switch profile {
+	case spec.SandboxWorkstation:
+		b.WriteString("Your working directory is this conversation's workspace, in a sandbox of your own: files you write there, and your home directory, stay between messages. You have every tool and may run any command; the internet is open to you (public hosts), and you may install what you need under your home (pip install --user, npm with a prefix in ~, go install). No credential of the person's is in the sandbox: to push, open or merge pull requests, send mail or spend, use orbit's actions.\n")
+	case spec.SandboxBuild:
+		b.WriteString("Your working directory is this conversation's workspace, in a sandbox: files you write stay between messages. You may run any command in it. The network reaches only some hosts; GitHub is not one of them, so clone, push and open pull requests through orbit's actions when they are offered.\n")
+	default:
 		b.WriteString("Your working directory is this conversation's workspace: files the person sends you are under uploads/. You can read only inside it.\n")
 	}
 	b.WriteString("Files the person attaches are under uploads/ (you can view images with Read).\n\n")
@@ -383,8 +399,8 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	st := &chatState{}
 	chat := e.chatTools(a, t.types, d.Defaults.MemoryMaxBytes, st)
 	chat.Interrupt = t.cancel
-	if a.Sandbox {
-		sb, err := e.sandboxPlan(d, c, t.workdir, t.home, t.emit)
+	if a.Sandbox != "" {
+		sb, err := e.sandboxPlan(d, a.Sandbox, c, t.workdir, t.home, t.emit)
 		if err != nil {
 			return nil, nil, err
 		}
