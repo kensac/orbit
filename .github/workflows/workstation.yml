@@ -1,0 +1,136 @@
+# The workstation image (deploy/workstation.Dockerfile): an agent's box on
+# hetzner (amd64) and oci (arm64). A pull request builds it natively on each
+# architecture and runs every tool in it; main pushes
+# ghcr.io/kensac/orbit-workstation:{sha-<commit>,latest} for both.
+name: Workstation image
+
+on:
+  pull_request:
+    paths:
+      - deploy/workstation.Dockerfile
+      - deploy/workstation/**
+      - deploy/cli/**
+      - .github/workflows/workstation.yml
+  push:
+    branches: [main]
+    paths:
+      - deploy/workstation.Dockerfile
+      - deploy/workstation/**
+      - deploy/cli/**
+      - .github/workflows/workstation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: deploy/workstation.Dockerfile
+          push: false
+          load: true
+          tags: orbit-workstation:ci
+          platforms: linux/${{ matrix.arch }}
+          cache-from: type=gha,scope=workstation-${{ matrix.arch }}
+          cache-to: type=gha,scope=workstation-${{ matrix.arch }},mode=max
+      # Every tool answers, as the box's user, and the gh and git credential
+      # wiring reads /run/orbit/gh-token only when it is there.
+      - name: Smoke
+        run: |
+          docker run --rm orbit-workstation:ci bash -eu -c '
+            test "$(id -u)" = 10001 && test "$(id -un)" = agent && test "$HOME" = /home/agent
+            sudo -n true
+            claude --version
+            go version
+            node --version
+            npm --version
+            pnpm --version
+            python3 --version
+            uv --version
+            uvx --version
+            yq --version
+            gh --version
+            git --version
+            jq --version
+            rg --version | head -1
+            fd --version
+            fzf --version
+            curl --version | head -1
+            wget --version | head -1
+            make --version | head -1
+            gcc --version | head -1
+            tmux -V
+            nvim --version | head -1
+            nano --version | head -1
+            sqlite3 --version
+            psql --version
+            ssh -V
+            less --version | head -1
+            ps --version
+            ip -V
+            unzip -v | head -1
+            docker --version
+            docker buildx version
+            docker compose version
+            dockerd --version
+            containerd --version
+            locale -a | grep -qix en_US.utf8
+            infocmp tmux-256color >/dev/null
+            tmux new-session -d -s smoke && test "$(tmux show -gv set-clipboard)" = on && test "$(tmux show -gv window-size)" = latest && test "$(tmux show -gv mouse)" = on && tmux kill-server
+            export GIT_TERMINAL_PROMPT=0
+            if printf "protocol=https\nhost=github.com\n\n" | git credential fill 2>/dev/null | grep -q "^password="; then exit 1; fi
+            sudo install -d -m 0755 /run/orbit && echo smoke-token | sudo tee /run/orbit/gh-token >/dev/null
+            printf "protocol=https\nhost=github.com\n\n" | git credential fill | grep -qx "password=smoke-token"
+            out=$(gh auth status 2>&1 || true); grep -q GH_TOKEN <<<"$out" || { echo "$out"; exit 1; }
+          '
+      - name: Size
+        run: docker image inspect orbit-workstation:ci --format '{{.Size}}' | awk '{printf "linux/${{ matrix.arch }} %.0f MiB uncompressed\n", $1/1048576}' | tee -a "$GITHUB_STEP_SUMMARY"
+
+  push:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}-workstation
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: deploy/workstation.Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: |
+            type=gha,scope=workstation-amd64
+            type=gha,scope=workstation-arm64
+          cache-to: type=gha,scope=workstation,mode=max
