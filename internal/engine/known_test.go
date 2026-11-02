@@ -1,11 +1,16 @@
 package engine_test
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kensac/orbit/internal/engine"
+	orbitharness "github.com/kensac/orbit/internal/harness"
+	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -93,5 +98,48 @@ func TestKnownIndexStaysInItsBudget(t *testing.T) {
 	}
 	if engine.KnownIndex(entries) != idx {
 		t.Fatal("the index is not deterministic")
+	}
+}
+
+// A pinned feedback entry reaches every turn: written for orbit's UserPromptSubmit hook where the harness runs, and leading the prompt where it does not.
+func TestPinnedEntriesReachEveryTurn(t *testing.T) {
+	for _, hooked := range []bool{true, false} {
+		t.Run(fmt.Sprint("hooked=", hooked), func(t *testing.T) {
+			var file string
+			fr := &fakeRunner{output: goodOutput}
+			fr.seen = func(req runner.Request) {
+				b, _ := os.ReadFile(filepath.Join(orbitharness.StateDir(filepath.Join(req.Workdir, ".home")), "pinned.md"))
+				file = string(b)
+			}
+			e, s, _ := harness(t, fr)
+			if hooked {
+				e.Harness = "/usr/local/bin/orbit"
+			}
+			p := store.Provenance{Source: store.SourcePerson, Author: "kanishk"}
+			for _, f := range []store.EntryFields{
+				{Type: "feedback", Title: "No em dashes", Body: "Never write an em dash.", HowToApply: "Use a comma or a colon.", Pinned: true},
+				{Type: "feedback", Title: "Short replies", Body: "Keep it short."},
+			} {
+				if _, err := s.CreateEntry(ctx, store.NewEntry{EntryRef: store.EntryRef{Scope: store.ScopeProfile}, EntryFields: f}, p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := e.Execute(ctx, claim(t, e, s)); err != nil {
+				t.Fatal(err)
+			}
+			want := "- No em dashes: Use a comma or a colon. (profile/no-em-dashes)"
+			if !strings.Contains(fr.got.Prompt, "[feedback, pinned] No em dashes") {
+				t.Fatalf("the index does not mark the pinned entry:\n%s", fr.got.Prompt)
+			}
+			if hooked {
+				if !strings.Contains(file, want) || strings.Contains(file, "Short replies") || strings.HasPrefix(fr.got.Prompt, "Pinned rules") {
+					t.Fatalf("hook file = %q, prompt starts %q", file, fr.got.Prompt[:40])
+				}
+				return
+			}
+			if file != "" || !strings.HasPrefix(fr.got.Prompt, "Pinned rules from your person") || !strings.Contains(fr.got.Prompt, want) {
+				t.Fatalf("hook file = %q, prompt = %q", file, fr.got.Prompt)
+			}
+		})
 	}
 }

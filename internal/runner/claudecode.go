@@ -81,7 +81,8 @@ func claudeSettings(keepDays int, hooks map[string]any) string {
 const hookTimeout = 10
 
 // harnessHooks are the hooks orbit configures: a path guard on the file
-// tools, and, with Figures, the figure check on the structured output.
+// tools, with Figures the figure check on the structured output, and the
+// pinned entries on every prompt.
 // Matchers are tool names joined by |.
 func harnessHooks(h *Harness, workdir, home string) map[string]any {
 	cmd := func(extra string) []any {
@@ -93,7 +94,8 @@ func harnessHooks(h *Harness, workdir, home string) map[string]any {
 	if h.Figures {
 		pre = append(pre, map[string]any{"matcher": "StructuredOutput", "hooks": cmd(" --figures")})
 	}
-	out := map[string]any{"PreToolUse": pre}
+	// Every prompt gets the run's pinned entries (harness.PinnedPath) added as context, so they hold however far the session has compacted.
+	out := map[string]any{"PreToolUse": pre, "UserPromptSubmit": []any{map[string]any{"hooks": cmd("")}}}
 	for _, ah := range h.AgentHooks {
 		timeout := hookTimeout
 		if ah.Def.Timeout > 0 {

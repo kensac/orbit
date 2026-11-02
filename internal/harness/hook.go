@@ -60,6 +60,9 @@ func Hook(in io.Reader, out io.Writer, o HookOptions) error {
 	if err != nil {
 		return write(out, deny("PreToolUse", "orbit hook could not read the event: "+err.Error()))
 	}
+	if ev.Event == "UserPromptSubmit" {
+		return write(out, pinnedContext(o.State))
+	}
 	if ev.Event != "PreToolUse" {
 		return write(out, map[string]any{})
 	}
@@ -228,6 +231,30 @@ func (o HookOptions) countDenial(key string) bool {
 // reading. The engine empties it when a session agent's run starts; other
 // runs get a new HOME.
 func StateDir(home string) string { return filepath.Join(home, ".orbit-harness") }
+
+// PinnedPath is the file the engine writes a run's pinned entries to, as the text the hook adds to every prompt.
+func PinnedPath(state string) string { return filepath.Join(state, "pinned.md") }
+
+// pinnedMax bounds what the hook adds to a prompt; the engine writes well under it (engine/known.go, pinnedBudget).
+const pinnedMax = 16 << 10
+
+// pinnedContext is the hook's answer to UserPromptSubmit: the run's pinned entries as context added to the prompt, or nothing. A missing or unreadable file adds nothing; it never blocks the prompt.
+func pinnedContext(state string) map[string]any {
+	if state == "" {
+		return map[string]any{}
+	}
+	f, err := os.Open(PinnedPath(state))
+	if err != nil {
+		return map[string]any{}
+	}
+	defer func() { _ = f.Close() }()
+	b, _ := io.ReadAll(io.LimitReader(f, pinnedMax))
+	text := strings.TrimSpace(string(b))
+	if text == "" {
+		return map[string]any{}
+	}
+	return map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "UserPromptSubmit", "additionalContext": text}}
+}
 
 // LedgerPath is the file the tool server appends each result to, one JSON
 // line each, for the figure check.

@@ -574,6 +574,10 @@ func TestClaudeCodeHarnessToolsAndHooks(t *testing.T) {
 	if want := "'/opt/orbit' hook --root '" + work + "' --state '" + state + "' --figures"; pre[1].Hooks[0].Command != want {
 		t.Fatalf("hook command = %q, want %q", pre[1].Hooks[0].Command, want)
 	}
+	// Every prompt asks the hook for the run's pinned entries.
+	if p := settings.Hooks["UserPromptSubmit"]; len(p) != 1 || p[0].Hooks[0].Command != "'/opt/orbit' hook --root '"+work+"' --state '"+state+"'" {
+		t.Fatalf("UserPromptSubmit = %+v", p)
+	}
 }
 
 func TestClaudeCodeWithoutHarnessDisablesHooks(t *testing.T) {

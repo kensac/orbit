@@ -32,11 +32,18 @@ func TestMemoryEntriesAPI(t *testing.T) {
 		out["entry"].(map[string]any)["version"].(float64) != 2 {
 		t.Fatalf("patch = %d %v", code, out)
 	}
+	if code, out := call(t, "PATCH", pub+"/memory/entries/"+id, tok, `{"pinned":true}`); code != 200 ||
+		out["entry"].(map[string]any)["pinned"] != true || out["entry"].(map[string]any)["version"].(float64) != 3 {
+		t.Fatalf("pin = %d %v", code, out)
+	}
+	if code, out := call(t, "POST", pub+"/memory/entries", tok, `{"scope":"profile","type":"user","title":"t","body":"b","pinned":true}`); code != 400 {
+		t.Fatalf("a pinned user entry = %d %v", code, out)
+	}
 	if code, _ := call(t, "PATCH", pub+"/memory/entries/"+id, tok, `{"version":1,"body":"stale"}`); code != 409 {
 		t.Fatalf("stale patch = %d, want 409", code)
 	}
 	code, out = call(t, "GET", pub+"/memory/entries/"+id, tok, "")
-	if code != 200 || len(out["versions"].([]any)) != 2 {
+	if code != 200 || len(out["versions"].([]any)) != 3 {
 		t.Fatalf("get = %d %v", code, out)
 	}
 

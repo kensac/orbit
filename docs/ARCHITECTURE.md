@@ -133,7 +133,9 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
   nor the ledger, rounding to the figure's precision allowed, at most
   `harness.MaxFigureDenials` (2) times per prompt. The engine runs the same
   check on the final output for every backend and notes any amount it cannot
-  trace in the report.
+  trace in the report. UserPromptSubmit on every prompt adds the run's pinned
+  entries (Memory entries, below) as context, from the file the engine wrote
+  for the run (`harness.PinnedPath`).
 - **An agent's own hooks** (spec `hooks`): `say`, `deny` or `run` at a Claude Code event, each run by `orbit agent-hook` with its definition as a flag (docs/agents/configuration.md, Hooks), added to the same `--settings` after orbit's own.
 - Not used by orbit itself: SessionStart (a live process starts one session for many runs, so
   per-run context belongs in the prompt, where it already is), PostToolUse
@@ -240,6 +242,8 @@ What a person teaches orbit, and what orbit learns about them, outlives any one 
 - **agent**: one agent's own.
 
 A run that starts fresh (not a recovery) reads every active entry in its scopes (`Store.EntriesFor`) and gets them twice (`internal/engine/known.go`): an index in the prompt (`# What you know`: one line per entry, the profile, then each topic, then the agent's own; within each, feedback first, then user, project, reference, newest first), packed into `knownIndexBudget` (8 KB, each line at most `knownLineMax`), and every entry in full as an input file, `inputs/_memory.md`, within `knownFileMax` (256 KB), stored as an artifact like any input. The system prompt says what the entries are and that they never authorize an action the rules do not. The packing is deterministic, so the same entries give the same prompt.
+
+**Pinned entries.** A feedback entry with `pinned` (a field versioned like the rest; only feedback is pinned, and an edit that makes an entry another type unpins it) is a rule that must hold however long a session runs. The index lists it as `[feedback, pinned]`, and every turn of a run that reads it is given it again, fresh, beside the person's words, so it does not fade as a long or live session compacts the charter and the index (`renderPinned`: newest first within `pinnedBudget`, 2 KB, each as its title and how to apply it). Where orbit's hook runs (a Claude Code run with the harness, outside a sandbox) the engine writes them to the run's hook state and the UserPromptSubmit hook adds them as context to each prompt, including every turn a live process takes; elsewhere (a sandboxed chat, another backend) they lead the run's prompt. A person pins through the API; an agent's entry writes leave it as it is, as an import does.
 
 **Agents write their own entries.** Every run's output has `entries` (at most `maxEntryWrites`, 10): `add` (to the profile, the agent's own, or a topic it reads), `update` (only the fields given) and `retire` (with the entry that supersedes it, possibly one the same run adds), each naming an entry by the ref the index showed (`internal/engine/entries.go`). They are applied in `RecordOutcome`'s transaction, each in a savepoint: a write the store refuses (a version written since the run read it, such as a person's edit; an add whose key exists, which is how a near-duplicate is turned into a refusal rather than a second entry) is skipped and reported, and the rest apply. Nothing waits for approval: every version is kept, and a person reverts or retires through the API. What became of each write is the run's `entries.json` artifact.
 
