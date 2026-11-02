@@ -82,6 +82,26 @@ container's own layer every restart starts those sessions fresh.
 
 It also holds `mirrors/`, a bare mirror of each repository agents read (`repos`), and `checkouts/`, the builds' kept clones. Both are caches: a lost one is fetched again on the next run that needs it. The two instances of a rollout share them; a fetch takes a lock file beside its mirror.
 
+## Restore drill
+
+`deploy/restore-drill.sh DUMP IMAGE` proves a nightly orbit-db dump restores and that orbit can read it, without touching anything live. On hetzner, as root, with the dump `db-dump.timer` writes and the running image:
+
+```bash
+rev=$(docker exec orbit orbit version)
+curl -fsSL "https://raw.githubusercontent.com/kensac/orbit/$rev/deploy/restore-drill.sh" -o /tmp/restore-drill.sh
+bash /tmp/restore-drill.sh /root/db-dumps/orbit-db.dump "$(docker inspect -f '{{.Config.Image}}' orbit)"
+```
+
+It starts a throwaway Postgres (the pinned 18-alpine) on an internal docker network, so nothing in the drill can reach anything, and:
+
+1. counts every table's rows in the dump itself (each `COPY` block of `pg_restore --data-only`);
+2. restores with `pg_restore --exit-on-error --no-owner --no-acl`, and requires every table's restored count to equal the dump's;
+3. runs `orbit preflight` (when the image has it: the next rollout's migrations, dry-run on real rows) and `orbit migrate` on the copy;
+4. sets the database `default_transaction_read_only` and runs `orbit restore-check --expect <the dump's counts>`, which reads it on a read-only connection through the store's own queries (agents, recent runs with their attempts, events, artifacts and deliveries, conversations, messages, memory entries, skills, tickets, actions, attention) and fails if the schema is behind the image, a table is missing, or one holds fewer rows than the dump (migrations only add);
+5. removes the database, its volume and the network, pass or fail.
+
+The last line is `restore-drill: ok`; any failure names its step. It needs disk for one more copy of the database while it runs. Run it after a Postgres or orbit-db change, and as a periodic check that the dumps are usable.
+
 ## Credentials
 
 Rendered from Infisical (`HETZNER_ORBIT_*`). The Claude Code subscription
