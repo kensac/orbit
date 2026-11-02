@@ -21,8 +21,8 @@ type Credential struct {
 // Credentials are orbit.yaml's credentials, keyed by variable.
 type Credentials map[string]Credential
 
-// UnsandboxedTools are the only tools a database or built-in agent may be given. Its runs are not in a sandbox: they run in orbit's own container, which holds every ORBIT_* secret, so a tool that runs a command or writes a file (Bash, Edit, Write, NotebookEdit) would reach all of them. This is the one list; validation reads it.
-var UnsandboxedTools = []string{"Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite"}
+// UnsandboxedTools are the only tools a database or built-in agent without a sandbox may be given. Such a run is in orbit's own container, which holds every ORBIT_* secret, so a tool that runs a command or writes a file (Bash, Edit, Write, NotebookEdit) would reach all of them. In a sandbox (Agent.Sandbox) the container is the boundary instead. This is the one list; validation reads it.
+var UnsandboxedTools = []string{"Read", "Glob", "Grep", "WebSearch", "WebFetch", "Task", "TodoWrite"}
 
 var credentialNameRE = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 
@@ -120,10 +120,10 @@ func (c *Config) validateTrust(a *Agent) []error {
 			}
 		}
 	}
-	if a.Restricted() {
+	if a.Restricted() && a.Sandbox == "" {
 		for _, t := range a.Tools {
 			if !slices.Contains(UnsandboxedTools, t) {
-				at("tools: %q is not allowed outside a sandbox, and an agent outside the configuration files runs in orbit's container (allowed: %s)", t, strings.Join(UnsandboxedTools, ", "))
+				at("tools: %q is not allowed outside a sandbox: without one, an agent outside the configuration files runs in orbit's container (allowed: %s)", t, strings.Join(UnsandboxedTools, ", "))
 			}
 		}
 	}
@@ -141,7 +141,7 @@ func ruleRank(r Rule) int {
 	return 0
 }
 
-// Widening lists how next reaches further than cur (nil: an agent that does not exist yet): a tool, source, credential, delegate target or need it adds, a source it changes, or an action type it allows more readily. agent:define applies such a change only with a person's approval, whatever its rule.
+// Widening lists how next reaches further than cur (nil: an agent that does not exist yet): a tool, source, credential, delegate target or need it adds, a source it changes, a sandbox profile it moves to, or an action type it allows more readily. agent:define applies such a change only with a person's approval, whatever its rule.
 func Widening(cur, next *Agent) []string {
 	if cur == nil {
 		cur = &Agent{}
@@ -177,6 +177,10 @@ func Widening(cur, next *Agent) []string {
 		if ruleRank(next.RuleFor(t)) > ruleRank(cur.RuleFor(t)) {
 			out = append(out, fmt.Sprintf("action %s: %s, was %s", t, next.RuleFor(t), cur.RuleFor(t)))
 		}
+	}
+	if next.Sandbox != "" && next.Sandbox != cur.Sandbox {
+		// A profile's tools and egress are its own (SandboxProfiles), wider than orbit's container allows.
+		out = append(out, "sandbox "+next.Sandbox)
 	}
 	for _, d := range next.Delegates {
 		if !slices.Contains(cur.Delegates, d) && !slices.Contains(cur.Delegates, "*") {

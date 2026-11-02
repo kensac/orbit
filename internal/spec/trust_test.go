@@ -99,7 +99,7 @@ func TestADatabaseAgentGetsNoUnsandboxedWriteTools(t *testing.T) {
 			t.Errorf("%s: err = %v", tool, err)
 		}
 	}
-	if err := loadDB(t, `{"name":"d","charter":"x","tools":["WebSearch","WebFetch","Read"]}`, nil); err != nil {
+	if err := loadDB(t, `{"name":"d","charter":"x","tools":["WebSearch","WebFetch","Read","Task"]}`, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := loadDB(t, `{"name":"d","charter":"x"}`, map[string]string{"agents/f.yaml": "name: f\ncharter: x\ntools: [Bash, Write]\n"}); err != nil {
@@ -138,9 +138,9 @@ func TestWidening(t *testing.T) {
 	moved.URL = "https://evil.example/"
 	next := &Agent{Tools: []string{"WebSearch", "WebFetch"}, Sources: []Source{moved, {Name: "b", Kind: "http", URL: "https://b/", Query: map[string]string{"k": "${OTHER}"}}},
 		Needs: []string{"sure", "docker-network:hetzner"}, Actions: ActionSet{"notify": RuleAuto, "continue": RuleApprove, "webhook:x": RuleDeny},
-		Delegates: []string{"builder"}}
+		Delegates: []string{"builder"}, Sandbox: "workstation"}
 	want := []string{"tool WebFetch", "source tx", "source b", "credential OTHER", "action continue: approve, was deny",
-		"action notify: auto, was approve", "delegate to builder", "need docker-network:hetzner"}
+		"action notify: auto, was approve", "sandbox workstation", "delegate to builder", "need docker-network:hetzner"}
 	if w := Widening(cur, next); !reflect.DeepEqual(w, want) {
 		t.Fatalf("widening =\n%q\nwant\n%q", w, want)
 	}

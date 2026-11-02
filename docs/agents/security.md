@@ -77,13 +77,13 @@ types are not even offered.
 
 ## What a model can define
 
-A database agent is written through the API or by `agent:define`, and the built-in `orbit` is changed the same way, so a model steered by a poisoned input (a fetched page, an upload) can write either. Their runs are not in a sandbox: they run in orbit's container, which holds every `ORBIT_*` secret. So `spec.validateTrust` holds them (`spec.Agent.Restricted`) to what orbit.yaml offers, at load and so on every write:
+A database agent is written through the API or by `agent:define`, and the built-in `orbit` is changed the same way, so a model steered by a poisoned input (a fetched page, an upload) can write either. Without a sandbox (`sandbox:`, Sandboxed chats below) their runs are in orbit's container, which holds every `ORBIT_*` secret, and their sources are fetched by orbit either way. So `spec.validateTrust` holds them (`spec.Agent.Restricted`) to what orbit.yaml offers, at load and so on every write:
 
 - **No `file` source.** It would read orbit's filesystem (`/proc/self/environ`, `/config`, `/data`); the fetcher refuses one for a restricted agent too.
 - **No `${VAR}` but a credential.** orbit.yaml's `credentials:` binds each variable it lists to a URL prefix; a restricted agent may reference only those, so it can never render `${ORBIT_GITHUB_APP_PRIVATE_KEY}` into a header. The fetcher sends a credential only in a request whose URL starts with its prefix and has no dot segment, and refuses a redirect outside it (Go resends custom headers to any host). The binding holds for file agents too; a file agent may still name any other variable.
-- **Only `spec.UnsandboxedTools`** (Read, Glob, Grep, WebSearch, WebFetch, TodoWrite): no Bash, Edit, Write or NotebookEdit, which would run commands or write files beside the secrets. The list is the one place to change.
+- **Without a sandbox, only `spec.UnsandboxedTools`** (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite): no Bash, Edit, Write or NotebookEdit, which would run commands or write files beside the secrets. The list is the one place to change. In a sandbox the container is the boundary and its profile decides the tools.
 - **No precheck** (Prechecks, below).
-- **A change that widens an agent waits for a person.** `spec.Widening` compares the change, loaded as it would run, with the agent's current version (nothing, for a new agent): a tool, a source added or changed, a credential, a delegate target, a need, or an action type allowed more readily (deny, approve, auto). An `agent:define` that widens is recorded as `approve` whatever its rule says. One executing by rule alone is compared again against the agent as it is then, and fails if it widens, so a person's narrowing between proposal and execution holds.
+- **A change that widens an agent waits for a person.** `spec.Widening` compares the change, loaded as it would run, with the agent's current version (nothing, for a new agent): a tool, a source added or changed, a credential, a delegate target, a need, a move to a sandbox profile, or an action type allowed more readily (deny, approve, auto). An `agent:define` that widens is recorded as `approve` whatever its rule says. One executing by rule alone is compared again against the agent as it is then, and fails if it widens, so a person's narrowing between proposal and execution holds.
 
 What is left: an agent with `WebFetch` can send what its run read to any host, and a change within the agent's current reach (its charter, its triggers, narrowing) applies without a person.
 
@@ -224,6 +224,10 @@ without docker):
   does.
 - Tunnelled traffic is opaque: the proxy sees hostnames, not requests, so
   it cannot tell a download from an upload to an allowed host.
+
+## Sandboxed chats
+
+A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as a workstation when sandboxd is configured) runs Claude Code in a sandboxd container with `bypassPermissions`; a workstation has every tool. There is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the backend credential is in the container, readable by any command the model runs. A workstation's egress reaches any public host (`orbit egress` with `*`, still never a private, loopback, link-local or tailnet address), so the credential and anything the session read can leave the box, by design: it holds no GitHub token, no orbit secret, and nothing of the person's beyond what they gave the conversation. Pushing, merging, mail and spend stay orbit's actions, under the agent's rules. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
 
 ## Build runs
 
