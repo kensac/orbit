@@ -59,6 +59,17 @@ private key (`private_key_env`: PEM, or base64 of the PEM for a one-line env
 file), and the `repositories` tickets and `github:merge` may target. Without
 it, a request ticket or a `github:merge` rule fails validation.
 
+`read_repositories` (optional) lists the repositories agents may read (`repos`, below). It is separate from `repositories`: reading a repository never permits a ticket or a merge there, and a repository in `repositories` is not readable unless it is listed here too.
+
+## Repositories
+
+`repos: [{repo: owner/name, ref: main}]` on an agent gives every run the tree of each repository at `ref` (a branch, a tag or a full commit sha; empty is the default branch), fetched by orbit just before the run (`internal/repos`, docs/ARCHITECTURE.md, Repositories):
+
+- Each `repo` must be in `github.read_repositories`; each repository's name (the part after the owner) must be unique within the agent, because its tree is `inputs/repos/<name>/`.
+- The agent must list `github` in `needs` (only a host holding the App's key fetches; docs/agents/deployment.md, Capabilities), and its runner must read files: `claude-code` or `codex`, not `anthropic`.
+- Claude Code runs also get the read-only repository tools (`git_log`, `git_show`, `git_diff`, `git_blame`, `pr_list`, `pr_view`; docs/api.md, Repositories), so history needs no Bash and GitHub needs no WebFetch.
+- `_repos.json` (repo, ref, sha) is an input, so the `unchanged` gate skips a scheduled run only while every repository's commit is the one the last succeeded run read.
+
 ## Build
 
 `build:` in `orbit.yaml` turns approved tickets into PRs: `sandboxd` (the service's tailnet `host:port` or `unix:/path`), `token_env` (default `ORBIT_SANDBOX_TOKEN`), `agent` (whose claude-code runner, timeout and `github:merge` rule a build uses; timeout at most `spec.MaxBuildTimeout`), `author` (`"Name <email>"`, the App's bot user), and per repository the `commands` a build may run (argv prefixes of plain words), `protected` globs, `max_diff_lines`, and `trusted_scripts`: the sha256 (lower-case hex) of each setup and cleanup script in the repository's `.orbit/build.yaml` a person reviewed (docs/tickets.md, Setup and cleanup scripts). Each repository must be in `github.repositories`, and today must be `kensac/orbit` (docs/tickets.md, Open decisions). Without the section no ticket is built; approved tickets wait. orbit also needs `CLAUDE_CODE_OAUTH_TOKEN`, the one credential the sandbox receives. `orbit validate` lists both variables.
@@ -80,7 +91,7 @@ mail:
 
 ## Capabilities
 
-`needs: [<capability>, ...]` on an agent says what a host must have to run it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated; `*` alone is every agent, control's default when unset; a worker's default is none). A capability is `name` or `name:qualifier`, lower case (`spec.CapabilityRE`). An agent with no needs runs on any host. Give an agent a need for anything only some hosts have: a network its sources are on (`docker-network:hetzner`), a source credential that lives only on some hosts (`sure`), a tool (`browser`). The table of capabilities and the hosts that have them is docs/agents/deployment.md, Worker fleet. A run whose agent needs what no host has waits queued; nothing fails it.
+`needs: [<capability>, ...]` on an agent says what a host must have to run it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated; `*` alone is every agent, control's default when unset; a worker's default is none). A capability is `name` or `name:qualifier`, lower case (`spec.CapabilityRE`). An agent with no needs runs on any host. Give an agent a need for anything only some hosts have: a network its sources are on (`docker-network:hetzner`), a source credential that lives only on some hosts (`sure`), the GitHub App's key (`github`, required with `repos`), a tool (`browser`). The table of capabilities and the hosts that have them is docs/agents/deployment.md, Worker fleet. A run whose agent needs what no host has waits queued; nothing fails it.
 
 ## Transforms
 

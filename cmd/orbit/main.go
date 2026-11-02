@@ -50,6 +50,7 @@ import (
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/push"
+	"github.com/kensac/orbit/internal/repos"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
@@ -120,6 +121,7 @@ func harnessCmd(name string, args []string) error {
 	figures := fs.Bool("figures", false, "check the output's money amounts")
 	state := fs.String("state", "", "the directory the tool server and the hook share")
 	search := fs.String("search", "", "the engine's search socket for this agent (mcp)")
+	repoSock := fs.String("repos", "", "the engine's repository tools socket for this agent (mcp)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -127,7 +129,7 @@ func harnessCmd(name string, args []string) error {
 		return errors.New(name + ": --root is required")
 	}
 	if name == "mcp" {
-		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, revision)
+		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, *repoSock, revision)
 	}
 	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state})
 }
@@ -424,7 +426,10 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		eng.Drain = drain
 		// One spare clone per build repository: a build starts from a
 		// checkout that needs only an incremental fetch.
-		checkouts := &build.Pool{Root: filepath.Join(eng.DataDir, "checkouts"), Warm: 1}
+		// Mirrors of the repositories agents read (repos:), which also seed
+		// a build's new clone.
+		eng.Repos = &repos.Mirrors{Root: filepath.Join(eng.DataDir, "mirrors")}
+		checkouts := &build.Pool{Root: filepath.Join(eng.DataDir, "checkouts"), Warm: 1, Seed: eng.Repos.Has}
 		eng.Builder = &build.Runner{WorkRoot: filepath.Join(eng.DataDir, "builds"), Pool: checkouts}
 		life, endLife := context.WithCancel(context.WithoutCancel(ctx))
 		defer endLife()
