@@ -91,7 +91,7 @@ func (e *Engine) draftAgent(ctx context.Context, from *spec.Agent, conversationI
 	}
 	now := time.Now()
 	for _, s := range append(facts.Schedules, asked...) {
-		if _, err := actions.ApplySchedule(a, from.Timezone, actions.ScheduleAddType, actions.ScheduleParams{When: s.When, Prompt: s.Prompt}, now); err != nil {
+		if _, err := actions.ApplySchedule(a, from.Location(), actions.ScheduleAddType, actions.ScheduleParams{When: s.When, Prompt: s.Prompt}, now); err != nil {
 			continue // asked in words code could not read: the proposal said so then
 		}
 	}
