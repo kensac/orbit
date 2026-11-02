@@ -565,3 +565,18 @@ func TestShellQuote(t *testing.T) {
 		t.Fatalf("got %s", got)
 	}
 }
+
+func TestSkillsPluginArgs(t *testing.T) {
+	c := &claudeCode{bin: "claude", getenv: func(string) (string, bool) { return "", false }}
+	args := c.baseArgs(Request{Workdir: "/w", OutputSchema: []byte(`{}`), SkillsPlugin: "/h/.claude/orbit-skills-abc", Harness: &Harness{Bin: "/orbit"}}, "/h", 1)
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--plugin-dir /h/.claude/orbit-skills-abc", "Read,Glob,Grep,Skill", "mcp__orbit__skill"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args lack %q: %s", want, joined)
+		}
+	}
+	none := strings.Join(c.baseArgs(Request{Workdir: "/w", OutputSchema: []byte(`{}`)}, "/h", 1), " ")
+	if strings.Contains(none, "--plugin-dir") || strings.Contains(none, "Skill") {
+		t.Fatalf("args without skills: %s", none)
+	}
+}

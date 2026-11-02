@@ -149,6 +149,10 @@ the chat. Failures and pending approvals of unattended runs always notify.
 
 `topics: [finance]` names the shared memory topics whose entries every run of the agent reads, beside the profile's and its own (docs/ARCHITECTURE.md, Memory entries). A topic exists as soon as an entry or an agent names it; the API can attach more (`PUT /agents/{name}/topics/{topic}`).
 
+## Skills
+
+`skills: [monthly-close]` names skills from orbit's library the agent runs with (docs/ARCHITECTURE.md, Skills). A name no skill has is skipped at run time and shown as `missing` in `GET /agents/{name}/context`; the API attaches more.
+
 ## Learning
 
 Every agent is learned from (docs/ARCHITECTURE.md, Memory entries): a conversation quiet for `learn.idle` (default 30m, between 5m and 24h) with something new from the person gets one learning run. `learn: {enabled: false}` turns it off; `learn.runner` names a runner for learning runs instead of the agent's own (a cheaper model).

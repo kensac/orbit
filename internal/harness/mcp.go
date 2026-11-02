@@ -85,7 +85,7 @@ func handle(id json.RawMessage, method string, params json.RawMessage, root, sta
 	case "ping":
 		return rpcResult(id, map[string]any{})
 	case "tools/list":
-		return rpcResult(id, map[string]any{"tools": []any{
+		tools := []any{
 			map[string]any{
 				"name": "query",
 				"description": "Filter, group and aggregate the records of a JSON input file. Counts and sums are exact " +
@@ -97,7 +97,16 @@ func handle(id json.RawMessage, method string, params json.RawMessage, root, sta
 				"description": "Exact decimal arithmetic: + - * / and parentheses. Use it for any arithmetic you report.",
 				"inputSchema": CalcSchema,
 			},
-		}})
+		}
+		if skillsAvailable(state) {
+			tools = append(tools, map[string]any{
+				"name": "skill",
+				"description": "Read one of your skills in full: its SKILL.md (with the list of its files), or one of its files. " +
+					"A skill's stub says to call this; follow the text it returns.",
+				"inputSchema": SkillSchema,
+			})
+		}
+		return rpcResult(id, map[string]any{"tools": tools})
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -105,6 +114,31 @@ func handle(id json.RawMessage, method string, params json.RawMessage, root, sta
 		}
 		if err := json.Unmarshal(params, &p); err != nil {
 			return rpcError(id, -32602, "invalid params")
+		}
+		if p.Name == "skill" {
+			// A skill's text is instructions, not a computed figure: it goes to no ledger.
+			var a struct {
+				Name   string `json:"name"`
+				File   string `json:"file"`
+				Offset int64  `json:"offset"`
+			}
+			dec := json.NewDecoder(bytes.NewReader(p.Arguments))
+			dec.DisallowUnknownFields()
+			var res map[string]any
+			err := dec.Decode(&a)
+			if err == nil {
+				res, err = ReadSkill(state, a.Name, a.File, a.Offset)
+			}
+			if err != nil {
+				return rpcResult(id, map[string]any{"isError": true, "content": []any{map[string]any{"type": "text", "text": "skill: " + err.Error()}}})
+			}
+			text, _ := res["content"].(string)
+			delete(res, "content")
+			meta, _ := json.Marshal(res)
+			return rpcResult(id, map[string]any{"content": []any{
+				map[string]any{"type": "text", "text": string(meta)},
+				map[string]any{"type": "text", "text": text},
+			}})
 		}
 		res, err := call(p.Name, p.Arguments, root)
 		if err != nil {

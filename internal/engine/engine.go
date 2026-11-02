@@ -437,6 +437,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	schema := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, true)
 	envelope := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, false)
 	schema, envelope = withEntries(schema, true), withEntries(envelope, false)
+	schema, envelope = withSkills(schema, true), withSkills(envelope, false)
 	tk, err := e.Store.TicketForConversation(ctx, c.ConversationID)
 	if err != nil {
 		return nil, nil, err
@@ -469,6 +470,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if e.Harness != "" && r.Kind() == "claude-code" {
 		hr = &runner.Harness{Bin: e.Harness, Figures: figures}
 	}
+	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, hr != nil, inputs)
+	if err != nil {
+		return nil, nil, err
+	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr != nil)
 	if tk != nil {
 		system += ticketContract(tk, planning)
@@ -477,6 +482,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		system += knownContract
 	}
 	system += entriesContract(topics)
+	system += skillsContract(skills, skillsPlugin != "")
 	trigger := c.Trigger
 	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known},
 		rc, convo, inputs)
@@ -497,7 +503,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	defer cancel()
 	res, err := r.Run(runCtx, runner.Request{
 		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
-		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr,
+		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin,
 	}, func(ev runner.Event) { emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
@@ -515,7 +521,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if planning {
 		out.planTicket = tk.ID
 	}
-	out.known, out.topics = knownEntries, topics
+	out.known, out.topics, out.skills = knownEntries, topics, skills
 	if figures {
 		// The hook already sent the output back for these, up to
 		// MaxFigureDenials times (claude-code); this is the same check on
@@ -636,6 +642,8 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	writes, refused := resolveEntryWrites(a.Name, out.topics, out.known, out.Entries)
 	o.Entries = writes
+	skillWrites, skillsRefused := resolveSkillWrites(out.skills, out.Skills)
+	o.Skills = skillWrites
 	rr := store.RunResult{Attempt: c.Attempt, Status: "succeeded", Summary: out.Summary, Report: out.Report}
 	fillResult(&rr, res)
 	ids, err := e.Store.RecordOutcome(ctx, c.ID, a.Name, rr, o)
@@ -643,6 +651,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return err
 	}
 	e.recordEntryWrites(ctx, c, out.Entries, writes, refused)
+	e.recordSkillWrites(ctx, c, out.Skills, skillWrites, skillsRefused)
 	metrics.RunFinished(a.Name, "succeeded", runnerKind(snap, a), time.Since(start), rr.CostUSD)
 
 	// Delivery: the report, then each pending approval.
