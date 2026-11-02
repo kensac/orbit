@@ -156,7 +156,7 @@ defer_low_priority: true             # hold priority: low agents' scheduled runs
 
 ## Capabilities
 
-`needs: [<capability>, ...]` on an agent says what a host must have to run it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated; `*` alone is every agent, control's default when unset; a worker's default is none). A capability is `name` or `name:qualifier`, lower case (`spec.CapabilityRE`). An agent with no needs runs on any host. Give an agent a need for anything only some hosts have: a network its sources are on (`docker-network:hetzner`), a source credential that lives only on some hosts (`sure`), the GitHub App's key (`github`, required with `repos`), a tool (`browser`). The table of capabilities and the hosts that have them is docs/agents/deployment.md, Worker fleet. A run whose agent needs what no host has waits queued; nothing fails it.
+`needs: [<capability>, ...]` on an agent says what a host must have to run it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated; `*` alone is every agent, control's default when unset; a worker's default is none). A capability is `name` or `name:qualifier`, lower case (`spec.CapabilityRE`). An agent with no needs runs on any host. Give an agent a need for anything only some hosts have: a network its sources are on (`docker-network:hetzner`), a source credential that lives only on some hosts (`sure`), the GitHub App's key (`github`, required with `repos` or a `github` source), a tool (`browser`). The table of capabilities and the hosts that have them is docs/agents/deployment.md, Worker fleet. A run whose agent needs what no host has waits queued; nothing fails it.
 
 ## Transforms
 
@@ -249,6 +249,20 @@ The actions `schedule:add`, `schedule:pause`, `schedule:resume` and `schedule:re
 - `run:now {agent, prompt}` starts a manual run; it changes no spec. A run that no person's message woke cannot start its own agent (that is `continue`, which is bounded).
 
 The model never computes a time. Each proposal is compiled when it is made: a phrase code cannot read, or a trigger that is not there, is denied at once with the reason, and a chat agent's `act` call answers with the compiled rule and the next three fires for it to tell the person (the action's result, when it executes during the turn). The executed action's `result` echoes the same (`rule`, `timezone`, `triggers`, `paused_until`, `next_fires` as local times, `version`), and a pending one shows it as `preview` (docs/api.md, Actions). In a run answering the person's message an `approve` rule on these applies directly, as delegation's does; unattended runs follow the rules as written. The built-in `orbit` has all five under `approve`.
+
+## GitHub and Loki sources
+
+A `github` source reads one repository of `github.read_repositories` as the App: `resource: issues | pulls | checks | releases`, with `state` for issues and pulls, `ref` for checks, `limit` for lists. orbit mints a token of only that resource's permissions for the one fetch and revokes it after (docs/tickets.md, GitHub access), so the model never holds one; the agent needs `github` in `needs`. Lists are projected to the fields a review uses (number, title, state, author, labels, dates, URL, body cut at 4000 bytes), so a quiet repository is a small input and the `unchanged` gate sees only what changed.
+
+A `loki` source runs one LogQL `query_range` (`expr`) ending at the fetch, `since` back (default 1h, at most 24h), at most `limit` lines (default 1000, at most 5000), newest first. Count with a metric query (`sum by (container) (count_over_time({...} |= "error" [1h]))`) rather than reading lines when a number is the answer. Headers render like an http source's, under the credential binding.
+
+```yaml
+needs: [github, docker-network:hetzner]
+sources:
+  - {name: issues, kind: github, repo: kensac/orbit, resource: issues, state: open, limit: 50}
+  - {name: main-checks, kind: github, repo: kensac/orbit, resource: checks, ref: main}
+  - {name: errors, kind: loki, url: "http://loki:3100", expr: '{container=~"orbit|traefik"} |= "error"', since: 6h, limit: 500}
+```
 
 ## Templates in sources
 

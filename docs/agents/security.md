@@ -179,6 +179,10 @@ person approves first. In the fleet a merge is a deploy: keep it `approve`. A ch
 
 `actions: write` (rerunning failed jobs) also covers dispatching and cancelling workflows; orbit mints it alone, only in the ticket loop, for `RerunJob` on the job ids of checks that failed, and no model sees it.
 
+## GitHub and Loki sources
+
+A `github` source is fetched by orbit as the App with a token of one resource's read permissions (`issues: read`, `pull_requests: read`, `checks: read` with `statuses: read`, or `contents: read` for releases), minted for one repository of `github.read_repositories` for that fetch alone and revoked after it; the model sees only the projected JSON. A compromised model gains nothing it did not already read: it cannot change the repository, the resource or the permissions, which are its spec's, and an `agent:define` giving a database agent one is held to `read_repositories` and waits for a person as any added source does. Issue and pull request text is written by whoever can open one on that repository: data, like any input. A `loki` source is a GET of `query_range` with the configuration's LogQL; log lines carry whatever services logged, request paths and user agents from the internet included.
+
 ## Repositories agents read
 
 An agent's `repos` (configuration.md, Repositories) are read by orbit, never by the model with a credential (`internal/repos`, `engine/repos.go`):
