@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/actions"
+	"github.com/kensac/orbit/internal/build"
+	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/spec"
@@ -105,9 +107,9 @@ func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.Claimed
 	if err != nil {
 		return nil, fmt.Errorf("sandboxd: %w (%s)", err, tokenEnv)
 	}
-	cred, _ := e.Env(buildCredential)
-	if cred == "" {
-		return nil, errors.New("a sandboxed chat needs " + buildCredential + " for the CLI in the sandbox")
+	cred := build.SandboxEnv(e.Env)
+	if len(cred) == 0 {
+		return nil, fmt.Errorf("a sandboxed chat needs %s or %s for the CLI in the sandbox", claudeproto.OAuthToken, claudeproto.APIKey)
 	}
 	path, _ := runner.SessionFile(home, workdir, "x")
 	project := filepath.Dir(path)
@@ -115,7 +117,7 @@ func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.Claimed
 	// model's, unlike HOME, which holds orbit's session state).
 	boxHome := filepath.Join(filepath.Dir(workdir), "box-home")
 	return &runner.Sandbox{
-		Client: client, Label: c.ID, Credential: cred, Profile: profile,
+		Client: client, Label: c.ID, Env: cred, Profile: profile,
 		Pack: func() ([]byte, error) {
 			tree, _, err := workspace.Pack(
 				workspace.Tree{Dir: workdir, Skip: func(rel string) bool { return rel == ".orbit" || strings.HasPrefix(rel, ".orbit/") }},
@@ -158,7 +160,7 @@ func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.Claimed
 // orbit's tools do, nothing about the shape of its answer.
 func chatContract(a *spec.Agent, types []actions.Type, profile string) string {
 	var b strings.Builder
-	b.WriteString(`You are running in orbit, as a Claude Code session your person reaches from anywhere (a chat in their browser or phone). Their messages arrive as user turns; your final message in each turn is your reply, shown to them as written, in Markdown. Work as you would in a terminal session with them: do what they ask, and say what you did and found.
+	b.WriteString(`You are running in orbit, as a Claude Code session your person reaches from anywhere (a chat in their browser or phone). Their messages arrive as user turns; your final message in each turn is your reply, shown to them as written, in Markdown, and the only part of the turn they see at first: put the whole answer in it, not a reference to text earlier in the turn. Work as you would in a terminal session with them: do what they ask, and say what you did and found.
 
 `)
 	switch profile {
@@ -244,7 +246,7 @@ type chatAction struct {
 }
 
 // chatTools are orbit's tools for a chat run.
-func (e *Engine) chatTools(a *spec.Agent, trigger string, types []actions.Type, memoryMax int, st *chatState) *runner.Chat {
+func (e *Engine) chatTools(snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, instructor string, types []actions.Type, memoryMax int, st *chatState) *runner.Chat {
 	byName := map[string]actions.Type{}
 	var names []string
 	for _, t := range types {
@@ -267,6 +269,9 @@ func (e *Engine) chatTools(a *spec.Agent, trigger string, types []actions.Type, 
 				"reason": map[string]any{"type": "string"}}, "required": []string{"type", "params", "reason"}}})
 	}
 	call := func(ctx context.Context, name string, args json.RawMessage) (string, bool) {
+		if name == "act" {
+			return e.chatAct(ctx, snap, a, c, instructor, byName, st, args)
+		}
 		st.mu.Lock()
 		defer st.mu.Unlock()
 		switch name {
@@ -294,47 +299,6 @@ func (e *Engine) chatTools(a *spec.Agent, trigger string, types []actions.Type, 
 			}
 			st.questions = append(st.questions, strings.TrimSpace(v.Question))
 			return "Asked. The person's answer will come as a message.", false
-		case "act":
-			var v chatAction
-			if json.Unmarshal(args, &v) != nil {
-				return "want {type, params, reason}", true
-			}
-			t, ok := byName[v.Type]
-			if !ok {
-				return fmt.Sprintf("action type %q is not enabled for you", v.Type), true
-			}
-			if len(v.Params) == 0 {
-				v.Params = json.RawMessage(`{}`)
-			}
-			if err := t.Validate(v.Params); err != nil {
-				return "invalid params: " + err.Error(), true
-			}
-			if len(st.actions) >= maxActions {
-				return fmt.Sprintf("at most %d actions per reply", maxActions), true
-			}
-			// A schedule change is parsed by code now, and what it would do goes back to the model to confirm with the person.
-			preview := ""
-			if actions.IsScheduleType(v.Type) && v.Type != actions.RunNowType {
-				res, err := e.PreviewSchedule(ctx, a.Name, v.Type, v.Params)
-				if err != nil {
-					return err.Error(), true
-				}
-				b, _ := json.Marshal(res)
-				preview = " It will do this; tell the person the rule and the next fires: " + string(b)
-			}
-			if v.Type == actions.SaveType {
-				p, _ := actions.DecodeSave(v.Params)
-				if e.Current().Config.Agents[p.Name] != nil {
-					return fmt.Sprintf("an agent named %q exists; choose another name", p.Name), true
-				}
-				st.actions = append(st.actions, v)
-				return "Recorded: when your reply is sent, orbit adds what this conversation did (tools, fetched pages, approved action types, schedules asked for) and the person reviews the whole agent before it exists. A schedule:add with agent \"" + p.Name + "\" in this reply becomes its schedule.", false
-			}
-			st.actions = append(st.actions, v)
-			if ruleFor(a, v.Type, trigger) == spec.RuleAuto {
-				return "Recorded: it runs when your reply is sent." + preview, false
-			}
-			return "Recorded: it waits for the person's approval." + preview, false
 		}
 		return "unknown tool " + name, true
 	}
@@ -391,6 +355,8 @@ type chatTurn struct {
 	extra string
 	// plugin is the skills plugin directory, when the run has skills.
 	plugin string
+	// instructor is the person the run answers (runInstructor).
+	instructor string
 	// repos is what the agent's repositories add (repos.go), or nil.
 	repos *repoRun
 }
@@ -426,7 +392,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 		}
 	}
 	st := &chatState{}
-	chat := e.chatTools(a, c.Trigger, t.types, d.Defaults.MemoryMaxBytes, st)
+	chat := e.chatTools(snap, a, c, t.instructor, t.types, d.Defaults.MemoryMaxBytes, st)
 	e.repoChatTools(a, chat)
 	chat.Interrupt = t.cancel
 	if a.Sandbox != "" {
@@ -447,12 +413,16 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 			chat.Push = append(chat.Push, t.repos.files...)
 		}
 	}
-	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
-	defer cancel()
-	res, err := r.Run(runCtx, runner.Request{
+	req := runner.Request{
 		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
 		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin,
-	}, func(ev runner.Event) { t.emit(ev.Kind, ev.Payload) })
+	}
+	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
+		return nil, nil, err
+	}
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
+	defer cancel()
+	res, err := r.Run(runCtx, req, func(ev runner.Event) { t.emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
 	}
@@ -469,4 +439,125 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 		return nil, res, cancelledRun{out: out}
 	}
 	return out, res, nil
+}
+
+// storedWorkspace is a conversation's workspace for an action executed
+// after its run: the directory on this host, brought to the newest snapshot
+// first, and stored again by the returned func.
+func (e *Engine) storedWorkspace(ctx context.Context, runID string) (actions.Workspace, func()) {
+	conv, err := e.Store.RunConversation(ctx, runID)
+	if err != nil || conv == "" {
+		return nil, nil
+	}
+	workdir, _ := e.chatDirs(conv)
+	if err := e.restoreWorkspace(ctx, conv, workdir); err != nil {
+		e.Log.Warn("restore the workspace for an action", "run", runID, "err", err)
+		return nil, nil
+	}
+	return runner.LocalWorkspace(workdir), func() {
+		e.snapshotWorkspace(ctx, &store.ClaimedRun{ID: runID, ConversationID: conv}, workdir)
+	}
+}
+
+// runInstructor is the person a run answers: the author of the newest
+// message it read, when a person's message woke it.
+func runInstructor(c *store.ClaimedRun, rc *store.RunContext) string {
+	if !Attended(c.Trigger) {
+		return ""
+	}
+	for i := len(rc.Messages) - 1; i >= 0; i-- {
+		if m := rc.Messages[i]; m.Author != nil && *m.Author != "" {
+			return *m.Author
+		}
+	}
+	return ""
+}
+
+// chatAct is the act tool: an action the agent wants now. One its rule
+// runs alone, or one its person asked for in this conversation (their
+// message is the instruction, as typing into Claude Code is), executes at
+// once and the agent reads its result; any other is recorded with the
+// run's outcome and waits for approval. A worker holds no executor's
+// credentials, so there every action waits for control.
+func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, instructor string,
+	byName map[string]actions.Type, st *chatState, args json.RawMessage) (string, bool) {
+	var v chatAction
+	if json.Unmarshal(args, &v) != nil {
+		return "want {type, params, reason}", true
+	}
+	t, ok := byName[v.Type]
+	if !ok {
+		return fmt.Sprintf("action type %q is not enabled for you", v.Type), true
+	}
+	if len(v.Params) == 0 {
+		v.Params = json.RawMessage(`{}`)
+	}
+	if err := t.Validate(v.Params); err != nil {
+		return "invalid params: " + err.Error(), true
+	}
+	// A schedule change is parsed by code now: one it cannot read is refused, and what a recorded one will do goes back to the model to confirm with the person (an executed one's result says it).
+	preview := ""
+	if actions.IsScheduleType(v.Type) && v.Type != actions.RunNowType {
+		res, err := e.PreviewSchedule(ctx, a.Name, v.Type, v.Params)
+		if err != nil {
+			return err.Error(), true
+		}
+		b, _ := json.Marshal(res)
+		preview = " It will do this; tell the person the rule and the next fires: " + string(b)
+	}
+	if v.Type == actions.SaveType {
+		// Never executed: drafted by code once the reply is sent, then held for a person (engine/save.go).
+		p, _ := actions.DecodeSave(v.Params)
+		if e.Current().Config.Agents[p.Name] != nil {
+			return fmt.Sprintf("an agent named %q exists; choose another name", p.Name), true
+		}
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if len(st.actions) >= maxActions {
+			return fmt.Sprintf("at most %d actions per reply", maxActions), true
+		}
+		st.actions = append(st.actions, v)
+		return "Recorded: when your reply is sent, orbit adds what this conversation did (tools, fetched pages, approved action types, schedules asked for) and the person reviews the whole agent before it exists. A schedule:add with agent \"" + p.Name + "\" in this reply becomes its schedule.", false
+	}
+	rule := ruleFor(a, v.Type, c.Trigger)
+	if !a.Chat {
+		instructor = ""
+	}
+	now := (rule == spec.RuleAuto || (rule == spec.RuleApprove && instructor != "")) && !e.Outbox && v.Type != "continue"
+	if now && v.Type == actions.DefineType && len(e.defineWidening(ctx, v.Params)) > 0 {
+		// A change that widens an agent waits for a person's decision on
+		// the change itself, whatever the rule (succeed holds it).
+		now = false
+	}
+	if !now {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if len(st.actions) >= maxActions {
+			return fmt.Sprintf("at most %d actions per reply", maxActions), true
+		}
+		st.actions = append(st.actions, v)
+		if rule == spec.RuleAuto {
+			return "Recorded: it runs when your reply is sent." + preview, false
+		}
+		return "Recorded: it waits for the person's approval." + preview, false
+	}
+	id, err := e.Store.StartActionNow(ctx, c.ID, c.Attempt, a.Name, store.ProposedAction{Type: v.Type, Params: v.Params,
+		Reason: v.Reason, Rule: string(rule), InstructedBy: instructor})
+	if err != nil {
+		return "orbit could not record the action: " + err.Error(), true
+	}
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ActionTimeout)
+	result, xerr := e.executor(snap).Execute(actx, actions.Call{ID: id, Agent: a.Name, RunID: c.ID, Type: v.Type, Params: v.Params, Rule: rule,
+		Workspace: runner.WorkspaceOf(ctx)})
+	cancel()
+	if err := e.finishAction(ctx, snap, &store.Action{ID: id, RunID: c.ID, Agent: a.Name, Type: v.Type}, result, xerr); err != nil {
+		e.Log.Warn("record an action's execution", "action", id, "err", err)
+	}
+	if xerr != nil {
+		return fmt.Sprintf("%s failed: %s", v.Type, xerr.Error()), true
+	}
+	if len(result) == 0 {
+		result = json.RawMessage(`{}`)
+	}
+	return fmt.Sprintf("%s executed (action %s): %s", v.Type, id, result), false
 }

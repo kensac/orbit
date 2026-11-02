@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -27,6 +28,7 @@ import (
 	"github.com/kensac/orbit/internal/auth"
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/push"
+	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -59,6 +61,17 @@ type Server struct {
 	Push *push.Sender
 	// OAuth, when set, serves the authorization server MCP clients sign in through (oauth.go) on the public listener. Without it /mcp still takes an authentik token from a client that has one.
 	OAuth *OAuthProxy
+	// Boxes returns sandboxd's client for agents' boxes (terminals.go);
+	// nil is no boxes, and every workspace has no terminals.
+	Boxes func() (*sandbox.Client, error)
+	// WorkspaceOrigins are the Origins a terminal socket accepts
+	// (ORBIT_WORKSPACE_ORIGINS); empty is DefaultWorkspaceOrigins.
+	WorkspaceOrigins []string
+	// TerminalPing overrides terminalPing when set; tests shorten it.
+	TerminalPing time.Duration
+
+	termMu      sync.Mutex
+	termClients map[string]int
 }
 
 // Handler returns the public listener's routes, the ones traefik serves.
@@ -146,6 +159,14 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/comments/{comment}/edit", s.editComment)
 	api("POST /api/v1/tickets/{id}/comments/{comment}/withdraw", s.withdrawComment)
 	api("POST /api/v1/tickets/{id}/review", s.submitReview)
+	api("GET /api/v1/agents/{name}/workspace", s.agentWorkspace)
+	api("POST /api/v1/workspaces/{id}/terminals", s.createTerminal)
+	api("GET /api/v1/workspaces/{id}/terminals", s.listTerminals)
+	api("GET /api/v1/terminals/{tid}", s.getTerminal)
+	api("POST /api/v1/terminals/{tid}/kill", s.killTerminal)
+	api("POST /api/v1/terminals/{tid}/attach", s.attachTicket)
+	// The ticket in Sec-WebSocket-Protocol is the credential (terminals.go).
+	mux.HandleFunc("GET /api/v1/terminals/{tid}/ws", s.terminalSocket)
 	s.memoryRoutes(api)
 	s.skillsRoutes(api)
 
@@ -471,16 +492,17 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"deliveries": orEmpty(d)}, err)
 }
 
+// getArtifact is GET /artifacts/{id}: the content, streamed from the store, with Range support.
 func (s *Server) getArtifact(w http.ResponseWriter, r *http.Request) {
-	b, mt, err := s.Store.GetArtifactContent(r.Context(), r.PathValue("id"))
+	a, b, err := s.Store.OpenArtifact(r.Context(), r.PathValue("id"))
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	w.Header().Set("Content-Type", mt)
+	w.Header().Set("Content-Type", a.MediaType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'")
-	_, _ = w.Write(b)
+	http.ServeContent(w, r, "", a.CreatedAt, b)
 }
 
 // ---------------------------------------------------------------- actions

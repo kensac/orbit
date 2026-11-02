@@ -51,6 +51,10 @@ more than its agent's rules allow.
   gains no reach it lacked (it could already Read those files). The hook fails
   closed: an event it cannot parse is denied. Hooks come only from orbit's
   `--settings`; a workdir's `.claude/settings.json` is never read.
+  orbit never writes hooks or a status line into any settings file, the
+  user's `~/.claude/settings.json` least of all: they exist for one run's
+  CLI process, on its command line.
+- **The status channel** is a unix socket, mode 0600, and a spool file in the run's state directory under the CLI's HOME (which the CLI denies reading): local to the host, never a network listener. What arrives on it is the model's process tree reporting on itself, so it is data, never trusted for a decision: it sets the status a person sees and the run's `orbit.hook` events, and nothing else. A forged event can misreport a running run's status at most; the run's row decides once it is final.
 - **The search tool** (`mcp__orbit__search`) holds no database credential:
   the tool server asks the engine over a unix socket (`--search`, a 0600
   file under the temp directory) that the engine serves for one agent, and
@@ -58,6 +62,8 @@ more than its agent's rules allow.
   agent's records, which it could already have been shown. Results are
   past writing, so they are data like any input, and they never back a
   figure (they are kept out of the tool ledger).
+
+- **The usage poller** (`usage_poll`) is orbit's own code on control, outside any run: it reads the subscription's OAuth token from orbit's environment and sends it only to the configured URL. The token never reaches a model, a sample or a log line (an error records the status and a clipped body).
 
 ## Memory entries a model writes
 
@@ -167,7 +173,7 @@ installation's), is revoked after its operation, and is refused if GitHub
 grants more than was asked. The repository is one of `github.repositories` for tickets, builds and merges, and one of `github.read_repositories` for agents that read (below); the two lists are separate, so reading a repository never lets anything write to it. `github:merge` lets a compromised model ask to
 merge an orbit PR whose checks are green; the executor re-checks the head
 commit, the branch and every check itself, and the rule decides whether a
-person approves first. In the fleet a merge is a deploy: keep it `approve`.
+person approves first. In the fleet a merge is a deploy: keep it `approve`. A chat agent's `approve` rules are satisfied by its person's message in the conversation (`instructed_by`): a prompt injected into what the agent read during that turn can therefore get an approve-rule action executed while the person is chatting, as it could make Claude Code do anything its permissions allow. Unattended runs never get this. `github:pr` pushes only `orbit/chat/<branch>`, built by orbit from the working tree (the model's `.git` is never read or run), held to the build's diff policy; merging still needs every required check green.
 
 `actions: write` (rerunning failed jobs) also covers dispatching and cancelling workflows; orbit mints it alone, only in the ticket loop, for `RerunJob` on the job ids of checks that failed, and no model sees it.
 
@@ -203,9 +209,10 @@ without docker):
   GitHub, a host off the allowlist and any port but 443 are refused (403).
   The proxy never dials a private, loopback, link-local or CGNAT address
   (every tailnet address), so an allowed name that resolves to one cannot
-  reach the host's networks.
-- The environment is sandboxd's fixed list plus the backend credential
-  (`sandbox.AllowedEnv`); no orbit secret, no GitHub token.
+  reach the host's networks. A build tunnel must open with a TLS ClientHello whose server name is the allowed host, read before anything is dialed, so a tunnel to an allowed front (a CDN, Google's module proxy) cannot ask it for another name (`TestServerName`).
+- A build never shares a network with the workstation profile's open proxy: workstation sandboxes join `ORBIT_SANDBOX_WORKSTATION_NETWORK`, which sandboxd requires with the open proxy and refuses to be the build network, and both must be internal (`TestWorkstationOwnNetwork`, `TestConfigValidate`). Otherwise code in a build could name the open proxy and leave its allowlist behind.
+- The environment is sandboxd's fixed list plus a credential proxy token in one backend credential's place; no orbit secret, no GitHub token, and never the credential's value. orbit chooses the credential as for an ordinary run, for builds and sandboxed chats alike (`build.SandboxEnv` through `claudeproto.Credential` and `claudeproto.Env`): the subscription token when set, else the API key; `sandbox.AllowedEnv` permits `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` in an attach, refuses one carrying both, and sandboxd replaces the value with the token before the process starts (`TestServerFlow` opens the token sandboxd sent; `TestIntegrationIsolation` reads the variable inside a real sandbox).
+- **The backend is reached only through `orbit credproxy`** (`internal/credproxy`): `ANTHROPIC_BASE_URL` points at it and `NO_PROXY` names it. The token is the credential sealed (AES-256-GCM) under `ORBIT_CREDPROXY_KEY`, with the container's address on the sandbox network and the container's expiry. The proxy forwards only `POST /v1/messages` and `POST /v1/messages/count_tokens` (no query but `beta=true`) to `api.anthropic.com`, and only for a token that opens, presented in its own kind's header, from that address, before that time; everything else is 401 or 403 and never reaches the backend. It strips cookies, proxy and forwarding headers and any credential the request carried, dials only a public address for the backend's name, and streams the answer unbuffered. Unit-tested in `internal/credproxy` (every refusal, streaming, the public-address dial) and from inside a real sandbox by `TestIntegrationIsolation` (its token forwarded to the Messages API, another path and a forged token refused by the proxy). sandboxd refuses to start without `ORBIT_SANDBOX_CREDPROXY` and `ORBIT_CREDPROXY_KEY`, so no configuration hands a sandbox the credential.
 - Callers cannot pass docker options: the create request is the tar and a
   run id, the attach request is argv and env (unknown fields refused); the
   unit tests pin the full create document and reject any container the
@@ -221,21 +228,15 @@ without docker):
 
 **Not guaranteed:**
 
-- **The backend credential is readable by code the model runs** (same uid;
-  `/proc/<pid>/environ`), and an allowed host can carry it out: the Go
-  module proxy fetches any module path a request names, from a host the
-  path names, so a request for a crafted path is a message to whoever owns
-  that host. Hence tickets.md's precondition (only `kensac/orbit`, whose
-  diff is reviewed, until the credential proxy keeps the token out) and the
-  diff policy's exact-match scan before anything is committed. Treat every
-  allowlisted host as a channel for anything the sandbox holds.
+- **The token spends the credential while the sandbox lives.** Code the model runs can read it (same uid; `/proc/<pid>/environ`) and call the Messages API through the proxy until the container's expiry, as the CLI itself does; it cannot read the credential, use the token from anywhere else, or reach another backend endpoint with it. A leaked token is ciphertext of the credential: whoever also holds `ORBIT_CREDPROXY_KEY` (sandboxd's and the proxy's environment only) recovers the credential from it, so the diff policy refuses the token's pattern as it refuses the credential's exact value.
+- **An allowed host is still a channel for anything the session read**: the Go module proxy fetches any module path a request names, from a host the path names, so a request for a crafted path is a message to whoever owns that host. Hence tickets.md's precondition (only `kensac/orbit`, whose diff is reviewed, until the credential proxy is deployed) and the diff policy's scans before anything is committed. Treat every allowlisted host as a channel for anything the sandbox holds. With the proxy deployed the build allowlist does not need `api.anthropic.com` and should not have it (deployment.md): an open route there carries data out under any API key the model brings.
 - **The kernel is shared** with the host, hetzner today. A container escape is root on hetzner,
   which holds every other secret in the fleet; `ORBIT_SANDBOX_RUNTIME=
-  runsc` (gVisor) narrows this where installed.
+  runsc` (gVisor) narrows this where installed; deployment.md, Box isolation on a host, is the planned layout (a second daemon whose only runtime is runsc, and nftables tables dropping what egress refuses).
 - **`/work` has no disk quota**: a sandbox can fill the host's docker volume
   until its lifetime ends. The readback refuses more than 256 MiB.
 - **sandboxd holds the docker socket**, so a bug in it is root on its host. Its
-  surface is the four handlers and `docker.go`; it listens only on one address (on hetzner, an internal docker network only orbit shares)
+  surface is its handlers (`server.go`, `box.go`) and `docker.go`; it listens only on one address (on hetzner, an internal docker network only orbit shares)
   or a unix socket (`validListen` refuses every interface)
   and requires the token on every request.
 - **A dropped attach does not stop the process**; the lifetime or a destroy
@@ -245,7 +246,33 @@ without docker):
 
 ## Sandboxed chats
 
-A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as a workstation when sandboxd is configured) runs Claude Code in a sandboxd container with `bypassPermissions`; a workstation has every tool. There is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the backend credential is in the container, readable by any command the model runs. A workstation's egress reaches any public host (`orbit egress` with `*`, still never a private, loopback, link-local or tailnet address), so the credential and anything the session read can leave the box, by design: it holds no GitHub token, no orbit secret, and nothing of the person's beyond what they gave the conversation. Pushing, merging, mail and spend stay orbit's actions, under the agent's rules. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
+A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as a workstation when sandboxd is configured) runs Claude Code in a sandboxd container with `bypassPermissions`; a workstation has every tool. There is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the container holds a credential proxy token, not the backend credential: any command the model runs can spend the credential through the proxy while the sandbox lives, and cannot carry it out. A person's own `claude` terminal in a box (docs/workspace.md, direct mode) holds the real subscription credential, by choice; orbit's runs never do. A workstation's egress is the open web (Workstation egress, below), so anything the session read can leave the box, by design: it holds no GitHub token, no orbit secret, and nothing of the person's beyond what they gave the conversation. Pushing, merging, mail and spend stay orbit's actions, under the agent's rules. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
+
+## Workstation egress
+
+`orbit egress` with `ORBIT_EGRESS_PROFILE=workstation` (`internal/egress`, `TestWorkstationProfile`, `TestRebinding`, `TestServerName`, `TestPlainHTTP`) is a workstation's or box's only route out: a laptop's open web, minus the places a box on a fleet host must never reach.
+
+**Guaranteed by egress's code:**
+
+- Any public host on any port is tunnelled (CONNECT), and plain HTTP is forwarded with the URL's host as its `Host`, except SMTP's ports (25, 465, 587), in every profile.
+- Never dialed: loopback, RFC 1918 and ULA (every docker network), link-local (`169.254.0.0/16`, cloud metadata included, and `fe80::/10`), CGNAT (`100.64.0.0/10`, every tailnet address, so orbit-db and orbit's internal listener), multicast and reserved ranges (`egress.Public`), and every prefix in `ORBIT_EGRESS_DENY_NETS` (the fleet hosts' own public addresses, where hetzner's public ports and orbit's origin listen).
+- Never tunnelled: a name in `ORBIT_EGRESS_DENY_HOSTS` (`name` exactly, `.name` for it and everything under it; the person's zone, so orbit's API, authentik and Infisical), as the CONNECT target, as a plain request's host, or as the TLS server name of a tunnel on 443. On 443 the ClientHello is read before anything is dialed, and a server name other than the name asked for is refused, so a tunnel to any CDN address cannot be fronted to a denied host.
+- DNS rebinding: a name is resolved once, its answers are checked, and the checked address is the one dialed; an answer naming any refused range is skipped, and a name with no other answer is refused.
+
+**Not guaranteed:**
+
+- **Data leaves.** The open web is the point: anything the box holds can be sent anywhere public.
+- **A non-TLS tunnel, or TLS on another port, is not inspected.** Plain HTTP over a CONNECT tunnel, or TLS to port 8443, can name a denied host in its own `Host` or server name if the address it reaches serves that host (a CDN). Denied hosts behind a CDN still enforce their own authentication (orbit's API checks an authentik token, authentik and Infisical their logins), which is what stands between a box and them there.
+- **The deny lists are configuration.** A fleet host's public address missing from `ORBIT_EGRESS_DENY_NETS` is reachable, with every public port on it (hetzner has no firewall); deployment.md lists what each host's egress must carry; the planned nftables tables (deployment.md, Box isolation on a host) drop the same ranges in the kernel for traffic that does not go through a proxy.
+- **Abuse from the fleet's address.** Traffic leaves from the host's public IP, so what a box sends is attributed to it.
+
+## Boxes and terminals
+
+An agent's box (sandboxd's `box` profile, `internal/sandboxd/box.go`; docs/workspace.md) is a persistent container from the workstation image where a person drives a shell or Claude Code (direct) from the browser. It gives up three of a build sandbox's options, on purpose: the root filesystem is writable, the capabilities are docker's default set less `MKNOD` and `NET_RAW` (not `ALL`), and there is no `no-new-privileges`, so the image's passwordless sudo works: root inside the box is real container root. It keeps the rest: uid 10001 for every exec, no privileged mode, no added capability, no bind mount (only its two named volumes, `orbit-box-<agent>-home` and `orbit-box-<agent>-work`), no host namespace, the internal network with the workstation proxy as its only route out, memory, CPU and process limits. `verifyBox` checks each of these on every container it finds under the box's name, so a container of that name sandboxd did not make is refused, and a box never carries `orbit.sandbox`, so the sandbox API, the reaper and the sandbox count never touch it. The runtime is runc until `ORBIT_SANDBOX_BOX_RUNTIME=runsc`; under runc a kernel escape from root in the box is root on the host, which is the accepted cost of "build first".
+
+- **What runs**: a TTY's argv is fixed by sandboxd from a preset (`shell`, `claude`) and a tmux session name orbit derives from the terminal's id; the request has no field for an argv, a user or an option (`TestTTYExecSpec`). The other execs are `tmux has-session`, `tmux kill-session` and `kill -HUP <pid>` of the tmux client sandboxd started, with exact targets.
+- **Credentials**: a `claude` terminal's client carries `CLAUDE_CODE_OAUTH_TOKEN` (the subscription, as a chat sandbox's CLI does); tmux copies it into that session (`update-environment`), and a tmux server first started by a `claude` terminal holds it for every session after. Any process in the box can read it. No GitHub token reaches the box yet.
+- **The socket**: `GET /api/v1/terminals/{id}/ws` is on the public listener without a bearer token. Its credential is a ticket: 32 random bytes, stored only as a sha256, minted by a person's authentik token through `POST /terminals/{id}/attach`, valid 30 s, used once (a guarded UPDATE), and bound to that terminal and to the Origin it names, or, minted server side without one, to every Origin in `ORBIT_WORKSPACE_ORIGINS`. The socket refuses any Origin outside that list before reading the ticket, so a cross-site page cannot open one. The ticket travels in `Sec-WebSocket-Protocol`, so it stays out of access logs; the `?ticket=` fallback can reach them, which a single use and 30 s make worthless. Tickets are limited to 10 a minute per person. Terminal input is never logged or stored.
 
 ## Build runs
 
@@ -291,7 +318,7 @@ run; `internal/build`):
   (`tickets_one_building`, `tickets_one_merging`), and an attempt destroys
   any sandbox an interrupted attempt of its run left before it starts its
   own, so a build never holds two sandboxes.
-- **Not guaranteed**: the backend credential is in the sandbox (above);
+- **Not guaranteed**: the token spends the credential while the sandbox lives (above);
   everything the sandbox section says it does not guarantee holds for a
   build.
 
