@@ -27,6 +27,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kensac/orbit/internal/rrule"
+	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/transforms"
 )
 
@@ -74,6 +75,35 @@ type Deployment struct {
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
 	// Credentials are the variables a source may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
 	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
+	// Box is what orbit keeps in agents' boxes besides their GitHub token
+	// (docs/workspace.md, Connectors and MCP).
+	Box *BoxConfig `yaml:"box,omitempty" json:"box,omitempty"`
+}
+
+// BoxConfig is what orbit mirrors into every agent's box.
+type BoxConfig struct {
+	// MCPServers are user MCP servers orbit adds to every Claude account in
+	// a box (`claude mcp add-json -s user`), by name, each a server's JSON
+	// config with literal values: it is in git and in each account's
+	// .claude.json, so it carries no secret.
+	MCPServers map[string]map[string]any `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
+}
+
+// MCPJSON is the managed servers as JSON, by name; nil without any.
+func (b *BoxConfig) MCPJSON() map[string]json.RawMessage {
+	if b == nil || len(b.MCPServers) == 0 {
+		return nil
+	}
+	out := make(map[string]json.RawMessage, len(b.MCPServers))
+	for n, c := range b.MCPServers {
+		raw, err := json.Marshal(c)
+		if err != nil {
+			// Validate refused it at load.
+			continue
+		}
+		out[n] = raw
+	}
+	return out
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -948,6 +978,20 @@ func (c *Config) Validate() error {
 		}
 		if r.Kind == "anthropic" && r.APIKeyEnv == "" {
 			errs = append(errs, fmt.Errorf("runner %q: anthropic needs api_key_env", name))
+		}
+	}
+	if d.Box != nil {
+		raw := map[string]json.RawMessage{}
+		for n, c := range d.Box.MCPServers {
+			b, err := json.Marshal(c)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("box.mcp_servers.%s: %w", n, err))
+				continue
+			}
+			raw[n] = b
+		}
+		if err := sandbox.ValidateMCPServers(raw); err != nil {
+			errs = append(errs, fmt.Errorf("box.mcp_servers: %w", err))
 		}
 	}
 	if g := d.GitHub; g != nil {

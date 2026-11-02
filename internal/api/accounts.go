@@ -316,3 +316,82 @@ func (s *Server) loginAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	s.startTerminal(w, r, b, &a, loginTerminal(b, a, body, actor(r, "operator")))
 }
+
+// mcpServerJSON is a server of an account's `claude mcp list`, and whether
+// orbit manages it (box.mcp_servers).
+type mcpServerJSON struct {
+	sandbox.MCPServer
+	Managed bool `json:"managed"`
+}
+
+// accountMCP lists an account's MCP servers and claude.ai connectors as its
+// Claude Code sees them, health-checked in the box (started if stopped).
+func (s *Server) accountMCP(w http.ResponseWriter, r *http.Request) {
+	b, ok := s.workspaceBox(w, r)
+	if !ok {
+		return
+	}
+	a, ok := s.workspaceAccount(w, r, b, r.PathValue("aid"))
+	if !ok {
+		return
+	}
+	c, ok := s.boxClient(w)
+	if !ok {
+		return
+	}
+	if !s.readyBox(w, r, c, b, &a) {
+		return
+	}
+	servers, err := c.AccountMCP(r.Context(), b.Agent, a.Slot)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	managed := s.Engine.Current().Config.Deployment.Box.MCPJSON()
+	out := make([]mcpServerJSON, 0, len(servers))
+	for _, m := range servers {
+		_, ok := managed[m.Name]
+		out = append(out, mcpServerJSON{MCPServer: m, Managed: ok})
+	}
+	respond(w, map[string]any{"servers": out, "checked_at": time.Now().UTC()}, nil)
+}
+
+// mcpLogin opens a terminal running `claude mcp login --no-browser <server>`
+// under the account: the person opens the URL it prints and pastes the
+// redirect back, which authenticates an HTTP server or a claude.ai
+// connector for that account alone.
+func (s *Server) mcpLogin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Server string `json:"server"`
+		Cols   int    `json:"cols"`
+		Rows   int    `json:"rows"`
+	}
+	if !decode(w, r, 1<<10, &body, bodyRequired) {
+		return
+	}
+	b, ok := s.workspaceBox(w, r)
+	if !ok {
+		return
+	}
+	if !sandbox.ValidMCPName(body.Server) {
+		writeErr(w, http.StatusBadRequest, "server: a name as claude mcp list prints it, 1 to 100 bytes, not starting with -")
+		return
+	}
+	size := loginBody{Cols: body.Cols, Rows: body.Rows}
+	if !size.valid(w) {
+		return
+	}
+	a, ok := s.workspaceAccount(w, r, b, r.PathValue("aid"))
+	if !ok {
+		return
+	}
+	c, ok := s.boxClient(w)
+	if !ok {
+		return
+	}
+	if !s.readyBox(w, r, c, b, &a) {
+		return
+	}
+	s.startTerminal(w, r, b, &a, store.NewBoxTerminal{WorkspaceID: b.ID, Preset: sandbox.TTYMCPLogin, Title: "Connect: " + body.Server,
+		Cols: size.Cols, Rows: size.Rows, CreatedBy: actor(r, "operator"), MCPServer: body.Server})
+}

@@ -26,6 +26,7 @@ var referenceTables = map[string]any{
 	"`build.repositories.<owner/name>`": BuildRepo{},
 	"`sandbox` (orbit.yaml)":            SandboxService{},
 	"`credentials.<VAR>`":               Credential{},
+	"`box`":                             BoxConfig{},
 	"`mail`":                            Mail{},
 	"`mail.imap`":                       IMAP{},
 	"Agent":                             Agent{},

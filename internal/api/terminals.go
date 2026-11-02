@@ -542,6 +542,9 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tr := sandbox.TTYRequest{Preset: t.Preset, Session: t.Session, Cwd: t.Cwd, Cols: t.Cols, Rows: t.Rows, Account: t.AccountSlot}
+	if t.MCPServer != nil {
+		tr.MCPServer = *t.MCPServer
+	}
 	// An account's terminal uses that account's own login: it is given no
 	// credential (sandboxd also removes the token from its session).
 	if t.Preset == sandbox.TTYClaude && t.AccountSlot == "" {

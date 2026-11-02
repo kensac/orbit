@@ -758,12 +758,12 @@ Unattended agents push through the action `workspace:push`, `{"repo", "branch", 
 
 ```json
 {"id": "uuid", "workspace_id": "uuid", "preset": "claude", "title": "Claude Code (direct)",
- "account_id": null, "cwd": "", "state": "running", "exit_code": null, "end_reason": null,
+ "account_id": null, "mcp_server": null, "cwd": "", "state": "running", "exit_code": null, "end_reason": null,
  "cols": 120, "rows": 32, "clients": 2, "created_by": "kanishk",
  "created_at": "...", "last_attached_at": "...", "last_output_at": null, "ended_at": null}
 ```
 
-`preset` is `shell`, `claude` or `login` (an account's `claude auth login`, started only by Accounts, below). `account_id` is the account the terminal runs under, `null` for the box's own profile. `state` is `running` or `exited`; `end_reason` is `exit` (its session ended), `killed` or `box_restarted` (the box was recreated to mount a new account, which ends every session in it). `exit_code` is set with `exit`. Rows are never deleted: an exited terminal keeps its record. `clients` counts the sockets attached on the instance answering. `last_attached_at` is the newest attach; `last_output_at` is not recorded yet (always `null`). `cols` and `rows` are the size last asked for.
+`preset` is `shell`, `claude`, `login` (an account's `claude auth login`) or `mcp-login` (an account's `claude mcp login --no-browser <mcp_server>`), the last two started only by Accounts, below. `account_id` is the account the terminal runs under, `null` for the box's own profile; `mcp_server` is the server an `mcp-login` terminal logs in to, `null` for every other. `state` is `running` or `exited`; `end_reason` is `exit` (its session ended), `killed` or `box_restarted` (the box was recreated to mount a new account, which ends every session in it). `exit_code` is set with `exit`. Rows are never deleted: an exited terminal keeps its record. `clients` counts the sockets attached on the instance answering. `last_attached_at` is the newest attach; `last_output_at` is not recorded yet (always `null`). `cols` and `rows` are the size last asked for.
 
 - `POST /workspaces/{id}/terminals` `{"preset": "shell", "cwd"?, "cols", "rows", "title"?, "account"?}`: `201 {"terminal"}`. `preset` is `shell` or `claude`; `account` is an account's `id` (Accounts, below): the terminal runs under that account's login, and an unknown one, or another workspace's, is `404` (`not_found`), one the running box does not mount yet `409` (`restart`); `cols` 1 to 1000, `rows` 1 to 500; `cwd` is a clean path relative to `/work` (default `""`, `/work` itself; `path` otherwise); `title` defaults to `Shell` or `Claude Code (direct)`. The box is created or started here (a failure is `502` naming sandboxd's reason). At most 8 running per workspace (`limit`). `claude` options (`{"resume"?, "continue"?, "model"?}`) are planned and answer `400`.
 - `GET /workspaces/{id}/terminals?state=running|exited|all`: `{"terminals": [...]}`, newest first, at most 500. `GET /terminals/{tid}`: `{"terminal"}`.
@@ -825,7 +825,17 @@ Routes, each requiring the workspace to be a box (`409`, `no_shell`, otherwise):
 - `PATCH /workspaces/{id}/accounts/{aid}` `{"label"}`: `200 {"account"}`; `exists` as above.
 - `POST /workspaces/{id}/accounts/{aid}/login` `{"cols", "rows"}`: `201 {"terminal"}`, a new `login` terminal under the account, for a login past its `refresh_expires_at` or a switch to another login. `409` (`restart`) when the running box does not mount the account yet.
 
-Accounts are never deleted. Attaching to a `login` terminal is as for any terminal; when it ends, the account is read again before the `exit` frame, so the client's next list shows the login.
+- `GET /workspaces/{id}/accounts/{aid}/mcp`: `{"servers": [...], "checked_at": "..."}`, the account's `claude mcp list` run in the box now (a stopped box is started; it can take tens of seconds, each server being health-checked): its user servers, its claude.ai connectors and the shared plugins' servers, in the CLI's order.
+
+```json
+{"name": "claude.ai Gmail", "target": "https://gmailmcp.googleapis.com/mcp/v1", "transport": "",
+ "status": "needs_auth", "detail": "", "connector": true, "managed": false}
+```
+
+  `status` is `connected`, `needs_auth`, `failed` (with `detail`, the CLI's reason), `pending` (a project server awaiting approval) or `unknown` (a mark this version does not know; `detail` is what the CLI printed). `transport` is the CLI's (`HTTP`, `SSE`), `""` when it printed none. `connector` is a claude.ai connector (its name starts `claude.ai `), which comes with the account's login. `managed` is one of `box.mcp_servers`, which orbit adds to every account (workspace.md, Connectors and MCP).
+- `POST /workspaces/{id}/accounts/{aid}/mcp/login` `{"server", "cols", "rows"}`: `201 {"terminal"}`, an `mcp-login` terminal under the account running `claude mcp login --no-browser <server>`: the person opens the URL it prints and pastes the redirect URL back, which authenticates that HTTP server or claude.ai connector for this account alone. `server` is a name as the list prints it, 1 to 100 bytes, no control characters, not starting with `-` (`400` otherwise). `409` (`restart`) as for a login.
+
+Accounts are never deleted. Attaching to a `login` or `mcp-login` terminal is as for any terminal; when it ends, the account is read again before the `exit` frame, so the client's next list shows the login.
 
 ### Review comments
 
@@ -951,7 +961,7 @@ The access token is authentik's own (the `orbit-mcp` provider), so its issuer an
 
 ## Skills
 
-orbit keeps a library of Claude Code skills: each a `SKILL.md` (frontmatter with `name` and `description`, then the instructions) and optional files beside it (references, scripts, assets), every version kept. An agent runs with the skills its spec names (`skills`) and those attached here; a run gets each at its current version (docs/ARCHITECTURE.md, Skills). Agents also write and retire their own skills, applied directly (below).
+orbit keeps a library of Claude Code skills: each a `SKILL.md` (frontmatter with `name` and `description`, then the instructions) and optional files beside it (references, scripts, assets), every version kept. An agent runs with the skills its spec names (`skills`) and those attached here; a run gets each at its current version (docs/ARCHITECTURE.md, Skills). Every active skill is also written into each agent's box, in the shared profile its Claude accounts link (workspace.md, Connectors and MCP). Agents also write and retire their own skills, applied directly (below).
 
 A skill:
 

@@ -17,6 +17,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `credentials` | map of variable to credential | none | The variables sources may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
+| `box` | map (below) | none | What orbit mirrors into every Claude account of agents' boxes (docs/workspace.md, Connectors and MCP). |
 
 ### `defaults`
 
@@ -112,6 +113,12 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 |---|---|---|---|
 | `sandboxd` | `host:port` or `unix:/path` | `build.sandboxd` | The sandbox service for chat agents with `sandbox`. |
 | `token_env` | env var | `ORBIT_SANDBOX_TOKEN` | sandboxd's bearer token. |
+
+### `box`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `mcp_servers` | map of name to a server's JSON config | none | User MCP servers orbit adds to every Claude account in every box with `claude mcp add-json -s user <name> <json>`, removing one it added when it leaves this map. A name is letters, digits, `.`, `-` and `_`; `type` is `stdio` (with `command`), `http` or `sse` (with an http(s) `url`); at most 32, each at most 8 KB. Values are literal: `${...}` is refused, since the CLI would expand it from the box's environment, and nothing secret belongs here (it is in git and every account's `.claude.json`); a server that needs a login uses OAuth, done per account through an MCP login terminal (docs/api.md, Accounts). |
 
 ### `credentials.<VAR>`
 

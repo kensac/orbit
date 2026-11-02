@@ -72,13 +72,15 @@ type BoxTerminal struct {
 	// own profile); AccountSlot is its directory's name.
 	AccountID   *string `json:"account_id"`
 	AccountSlot string  `json:"-"`
-	Title       string  `json:"title"`
-	Cwd         string  `json:"cwd"`
-	State       string  `json:"state"`
-	ExitCode    *int    `json:"exit_code"`
-	EndReason   *string `json:"end_reason"`
-	Cols        int     `json:"cols"`
-	Rows        int     `json:"rows"`
+	// MCPServer is the server an mcp-login terminal logs in to.
+	MCPServer *string `json:"mcp_server"`
+	Title     string  `json:"title"`
+	Cwd       string  `json:"cwd"`
+	State     string  `json:"state"`
+	ExitCode  *int    `json:"exit_code"`
+	EndReason *string `json:"end_reason"`
+	Cols      int     `json:"cols"`
+	Rows      int     `json:"rows"`
 	// Clients is how many sockets are attached on the instance answering;
 	// the API fills it.
 	Clients        int        `json:"clients"`
@@ -100,9 +102,11 @@ type NewBoxTerminal struct {
 	CreatedBy   string
 	// AccountID is the account to run under, "" for none.
 	AccountID string
+	// MCPServer is an mcp-login terminal's server, "" for any other.
+	MCPServer string
 }
 
-const terminalCols = `t.id::text, t.workspace_id::text, b.agent, t.preset, t.session, t.account_id::text, coalesce(a.slot, ''), t.title, t.cwd,
+const terminalCols = `t.id::text, t.workspace_id::text, b.agent, t.preset, t.session, t.account_id::text, coalesce(a.slot, ''), t.mcp_server, t.title, t.cwd,
 	t.exit_code, t.end_reason, t.cols, t.rows, t.created_by, t.created_at, t.last_attached_at, t.ended_at`
 
 // terminalFrom is the join terminalCols reads, with t the terminals rows.
@@ -110,7 +114,7 @@ const terminalFrom = ` JOIN boxes b ON b.id = t.workspace_id LEFT JOIN box_accou
 
 func scanTerminal(row pgx.Row) (BoxTerminal, error) {
 	var t BoxTerminal
-	err := row.Scan(&t.ID, &t.WorkspaceID, &t.Agent, &t.Preset, &t.Session, &t.AccountID, &t.AccountSlot, &t.Title, &t.Cwd,
+	err := row.Scan(&t.ID, &t.WorkspaceID, &t.Agent, &t.Preset, &t.Session, &t.AccountID, &t.AccountSlot, &t.MCPServer, &t.Title, &t.Cwd,
 		&t.ExitCode, &t.EndReason, &t.Cols, &t.Rows, &t.CreatedBy, &t.CreatedAt, &t.LastAttachedAt, &t.EndedAt)
 	t.State = TerminalRunning
 	if t.EndedAt != nil {
@@ -150,11 +154,11 @@ func (s *Store) CreateTerminal(ctx context.Context, n NewBoxTerminal) (BoxTermin
 		// The tmux session is named for the terminal: a preset and the
 		// first 12 hex digits of its id.
 		t, err = scanTerminal(tx.QueryRow(ctx, `WITH n AS (SELECT gen_random_uuid() AS id),
-			t AS (INSERT INTO terminals (id, workspace_id, preset, session, title, cwd, cols, rows, created_by, account_id)
-				SELECT n.id, $1, $2, $2 || '-' || substr(replace(n.id::text, '-', ''), 1, 12), $3, $4, $5, $6, $7, nullif($8, '')::uuid FROM n
+			t AS (INSERT INTO terminals (id, workspace_id, preset, session, title, cwd, cols, rows, created_by, account_id, mcp_server)
+				SELECT n.id, $1, $2, $2 || '-' || substr(replace(n.id::text, '-', ''), 1, 12), $3, $4, $5, $6, $7, nullif($8, '')::uuid, nullif($9, '') FROM n
 				RETURNING *)
 			SELECT `+terminalCols+` FROM t`+terminalFrom,
-			n.WorkspaceID, n.Preset, n.Title, n.Cwd, n.Cols, n.Rows, n.CreatedBy, n.AccountID))
+			n.WorkspaceID, n.Preset, n.Title, n.Cwd, n.Cols, n.Rows, n.CreatedBy, n.AccountID, n.MCPServer))
 		return err
 	})
 	return t, err

@@ -67,7 +67,7 @@ is the design; the topic documents below are the rules for changing it.
   loop that carries a ticket from approved to done.
 - `internal/sandboxd/`, `internal/egress/`, `internal/sandbox/`: the build
   sandbox service (the only holder of a docker socket), its egress proxy,
-  and orbit's client for it; `internal/boxkeep/`: orbit's periodic work on agents' running boxes (their GitHub token, polling accounts' usage).
+  and orbit's client for it; `internal/boxkeep/`: orbit's periodic work on agents' running boxes (their GitHub token, the skills library and managed MCP servers, polling accounts' usage).
 - `deploy/`: the image (`Dockerfile`), the build sandbox's image
   (`build.Dockerfile`), an agent's workstation box image (`workstation.Dockerfile`, its files in `workstation/`) and the pinned agent CLIs (`cli/`).
 

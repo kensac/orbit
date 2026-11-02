@@ -110,6 +110,12 @@ func (f *fakeSandboxd) handler(t *testing.T) http.Handler {
 		f.prepared = append(f.prepared, r.PathValue("slot"))
 		w.WriteHeader(http.StatusNoContent)
 	})
+	mux.HandleFunc("GET /v1/boxes/{name}/accounts/{slot}/mcp", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"servers": []sandbox.MCPServer{
+			{Name: "claude.ai Gmail", Target: "https://gmailmcp.googleapis.com/mcp/v1", Status: sandbox.MCPNeedsAuth, Connector: true},
+			{Name: "orbit", Target: "https://orbit.kanishksachdev.com/mcp", Transport: "HTTP", Status: sandbox.MCPConnected},
+		}})
+	})
 	mux.HandleFunc("GET /v1/boxes/{name}/accounts/{slot}/usage", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -213,6 +219,7 @@ defaults: {runner: r, channels: [c]}
 runners: {r: {kind: claude-code}}
 channels: {c: {kind: log}}
 sandbox: {sandboxd: "`+addr+`"}
+box: {mcp_servers: {orbit: {type: http, url: "https://orbit.kanishksachdev.com/mcp"}}}
 `), 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "agents", "a.yaml"), []byte("name: a\ncharter: x\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "agents", "box.yaml"), []byte("name: box\ncharter: x\nchat: true\nsandbox: workstation\n"), 0o644)

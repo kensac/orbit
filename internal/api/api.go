@@ -169,6 +169,8 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/workspaces/{id}/accounts/{aid}", s.getAccount)
 	api("PATCH /api/v1/workspaces/{id}/accounts/{aid}", s.renameAccount)
 	api("POST /api/v1/workspaces/{id}/accounts/{aid}/login", s.loginAccount)
+	api("GET /api/v1/workspaces/{id}/accounts/{aid}/mcp", s.accountMCP)
+	api("POST /api/v1/workspaces/{id}/accounts/{aid}/mcp/login", s.mcpLogin)
 	// The ticket in Sec-WebSocket-Protocol is the credential (terminals.go).
 	mux.HandleFunc("GET /api/v1/terminals/{tid}/ws", s.terminalSocket)
 	s.memoryRoutes(api)
