@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -53,39 +54,43 @@ func (s *Server) markRead(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"conversation_id": id, "read_through": at}, err)
 }
 
-// serveThread serves a conversation's thread page with the read point it
-// had before this request (read_through), and with mark_read=1 moves the
-// read point to when the page was read.
+// serveThread serves a conversation's thread page (readThread); with
+// mark_read=1 it also moves the read point to when the page was read.
 func (s *Server) serveThread(w http.ResponseWriter, r *http.Request, id string) {
 	if !store.IsUUID(id) {
 		writeErr(w, http.StatusBadRequest, "not a valid id")
 		return
 	}
-	before, limit, ok := pageParams(w, r)
-	if !ok {
+	var limit int
+	if !queryInt(w, r, "limit", &limit) {
 		return
 	}
-	prev, now, err := s.Store.ReadPoint(r.Context(), id)
+	resp, err := s.readThread(r.Context(), id, r.URL.Query().Get("before"), limit, queryFlag(r, "mark_read"))
+	respond(w, resp, err)
+}
+
+// readThread is a thread page for HTTP and MCP alike (threadPage), with the
+// read point the conversation had before this read (read_through). markRead
+// moves it to the database's clock as of before the page was read, so
+// nothing that finished after the page was read counts as seen.
+func (s *Server) readThread(ctx context.Context, id, before string, limit int, markRead bool) (map[string]any, error) {
+	prev, now, err := s.Store.ReadPoint(ctx, id)
 	if err != nil {
-		respond(w, nil, err)
-		return
+		return nil, err
 	}
-	page, err := s.Store.ConversationThread(r.Context(), id, before, limit)
+	resp, err := threadPage(before, limit, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
+		return s.Store.ConversationThread(ctx, id, before, limit)
+	})
 	if err != nil {
-		respond(w, nil, err)
-		return
+		return nil, err
 	}
-	if queryFlag(r, "mark_read") {
-		if _, err := s.Store.MarkRead(r.Context(), id, &now); err != nil {
-			respond(w, nil, err)
-			return
+	if markRead {
+		if _, err := s.Store.MarkRead(ctx, id, &now); err != nil {
+			return nil, err
 		}
 	}
-	resp := map[string]any{"items": orEmpty(page.Items), "has_more": page.HasMore, "next_before": nil, "read_through": prev}
-	if page.HasMore {
-		resp["next_before"] = page.NextBefore
-	}
-	respond(w, resp, nil)
+	resp["read_through"] = prev
+	return resp, nil
 }
 
 // eventsPoll is how often the change feed reads new records: a sidebar
