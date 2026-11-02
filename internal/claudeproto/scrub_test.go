@@ -6,18 +6,18 @@ import (
 	"testing"
 )
 
-// fake joins a made-up credential from parts, so the repository's secret scanner does not take a test value for a real one.
-func fake(parts ...string) string { return strings.Join(parts, "") }
+// madeUp joins a made-up credential from parts, so the repository's secret scanner does not take a test value for a real one.
+func madeUp(parts ...string) string { return strings.Join(parts, "") }
 
 func TestScrubCredentialsKeepsNamesAndJSON(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-abcdefghijklmnopqrstuvwxyz", "export CLAUDE_CODE_OAUTH_TOKEN=" + Redacted},
 		{"DB_PASSWORD: correct-horse-battery", "DB_PASSWORD: " + Redacted},
-		{`{"client_secret":"` + fake("0123", "456789abcdef") + `"}`, `{"client_secret":"` + Redacted + `"}`},
+		{`{"client_secret":"` + madeUp("0123", "456789abcdef") + `"}`, `{"client_secret":"` + Redacted + `"}`},
 		{`{"command":"curl -H \"Authorization: Bearer abcdefghijklmnop1234\" x"}`, `{"command":"curl -H \"Authorization: Bearer ` + Redacted + `\" x"}`},
 		{"see https://user:hunter22@example.com/x", "see https://user:" + Redacted + "@example.com/x"},
-		{"token " + fake("ghp_", "0123456789abcdefghijklmnopqrstuvwxyzAB") + " here", "token " + Redacted + " here"},
-		{"key " + fake("AKIA", "ABCDEFGHIJKLMNOP") + ".", "key " + Redacted + "."},
+		{"token " + madeUp("ghp_", "0123456789abcdefghijklmnopqrstuvwxyzAB") + " here", "token " + Redacted + " here"},
+		{"key " + madeUp("AKIA", "ABCDEFGHIJKLMNOP") + ".", "key " + Redacted + "."},
 		{`"-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----"`, `"` + Redacted + `"`},
 		// Not credentials: short values, references, counts.
 		{"PASSWORD=short", "PASSWORD=short"},
