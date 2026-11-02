@@ -11,6 +11,7 @@
 //	orbit drain              tell the local server to drain (a deploy replacing it)
 //	orbit import claude-memory <dir> --scope <s> [--apply]   seed memory entries through the API
 //	orbit import skills <dir> [--attach <agent>] [--apply]   seed the skills library through the API
+//	orbit import claude-sessions <dir> [--apply]   import Claude Code session transcripts through the API
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
 //	orbit hook --root <dir> --state <dir> [--figures]   orbit's hook, run by Claude Code
 //	orbit agent-hook --root <dir> --def <hook>   one of an agent's own hooks, run by Claude Code
@@ -52,6 +53,7 @@ import (
 	"github.com/kensac/orbit/internal/push"
 	"github.com/kensac/orbit/internal/repos"
 	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -151,7 +153,7 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills|claude-sessions <dir> | version | mcp | hook | tls-cert | sandboxd | egress")
 	os.Exit(2)
 }
 
@@ -463,7 +465,8 @@ func serve(ctx context.Context, log *slog.Logger) error {
 
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
-			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher}
+			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher,
+			Boxes: boxClient(func() spec.Deployment { return eng.Current().Config.Deployment }), WorkspaceOrigins: auth.SplitList(os.Getenv("ORBIT_WORKSPACE_ORIGINS"))}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		// Bind before any executor starts: an instance that cannot serve
@@ -707,6 +710,33 @@ const writeTimeout = 5 * time.Minute
 // reader syncs the run it reads itself, so this only bounds how stale the
 // steps of a run nobody streams can be while an older instance writes it.
 const journalSyncEvery = 30 * time.Second
+
+// boxClient is sandboxd's client for agents' boxes: the sandboxd chats use
+// (spec.Deployment.SandboxService) with its token, made again only when
+// either changes.
+func boxClient(deployment func() spec.Deployment) func() (*sandbox.Client, error) {
+	var mu sync.Mutex
+	var key string
+	var c *sandbox.Client
+	return func() (*sandbox.Client, error) {
+		addr, tokenEnv := deployment().SandboxService()
+		if addr == "" {
+			return nil, errors.New("orbit.yaml names no sandboxd (a sandbox: or build: section)")
+		}
+		token := os.Getenv(tokenEnv)
+		mu.Lock()
+		defer mu.Unlock()
+		if c != nil && key == addr+"\x00"+token {
+			return c, nil
+		}
+		nc, err := sandbox.NewClient(addr, token)
+		if err != nil {
+			return nil, fmt.Errorf("%w (%s)", err, tokenEnv)
+		}
+		c, key = nc, addr+"\x00"+token
+		return c, nil
+	}
+}
 
 func httpServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: writeTimeout}

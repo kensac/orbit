@@ -621,9 +621,9 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
 
 `GET /conversations/{id}/tasks/stream` is Server-Sent Events: a `tasks` event (`{"tasks": [<task>]}`, as the list) on connect and again whenever any task of the conversation changes, and `: ping` every 15 s. It never ends on its own; reconnect after a deploy (there is no `Last-Event-ID`: the first event is the whole state). A chat UI shows the delegating run's tasks from its thread item, then keeps them live from this stream, and opens a task's `conversation_id` to show its work.
 
-## Workspace (planned)
+## Workspace
 
-**Planned: not implemented.** The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). Until a route is built it answers `404`. Each part loses this mark in the PR that implements it.
+**Partly built.** The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). Built: `GET /agents/{name}/workspace` for an agent with a box, and Terminals (below). Every other route here is planned and answers `404` until built; each part says "built" in the PR that implements it.
 
 A workspace is a file tree a person and an agent share. Routes take the authentik token as above; writes, trash, uploads, terminals and git writes also require membership of `ORBIT_WORKSPACE_GROUP` (default `ORBIT_OIDC_GROUP`; `403`, `check: "group"`). Errors carry a `check` beside `error`, as authentication errors do:
 
@@ -643,7 +643,7 @@ A workspace is a file tree a person and an agent share. Routes take the authenti
 
 ### Finding a workspace
 
-`GET /conversations/{id}/workspace` and `GET /agents/{name}/workspace` return `{"workspace": <workspace>}`:
+`GET /conversations/{id}/workspace` and `GET /agents/{name}/workspace` return `{"workspace": <workspace>}`. Built: `GET /agents/{name}/workspace`, for an agent with a box (Terminals, below; `null` for any other agent until the snapshot backend is built); the conversation route is planned.
 
 ```json
 {"id": "uuid", "scope": "conversation", "conversation_id": "uuid", "agent": "orbit",
@@ -657,7 +657,7 @@ A workspace is a file tree a person and an agent share. Routes take the authenti
 - `scope` is `conversation` (the snapshot backend: one per conversation) or `agent` (a box: one per agent, shared by its conversations). From a conversation, `cwd` is that conversation's directory in the tree (`""` on the snapshot backend, `conversations/<id>` in a box); a client opens there and lets the person go up. From an agent, `cwd` is `""`.
 - `backend` is informative; a client decides from `capabilities`. `presets` lists the terminal presets (`shell`, `claude`).
 - `as_of` is the snapshot read (snapshot backend), `null` in a box.
-- `box` is `{"host": "oci", "arch": "arm64", "state": "running", "image": "sha256:..."}` in a box, `state` one of `starting`, `running`, `stopped`. A request to a stopped box starts it, waits up to 30 s, then answers `box_starting`.
+- `box` is `{"host": "oci", "arch": "arm64", "state": "running", "image": "sha256:..."}` in a box, `state` one of `starting`, `running`, `stopped`. A request to a stopped box starts it, waits up to 30 s, then answers `box_starting`. Built: `host` and `arch` are sandboxd's docker host's, `image` the reference the container runs (`ghcr.io/kensac/orbit-workstation@sha256:...`), `state` `running` or `stopped` (also before the box's first start); reading the workspace does not start the box, creating or attaching a terminal does, and `box_starting` is not used yet. Until the box serves files and git (W10, W13) its `capabilities` are `terminals: true` and `presets: ["shell", "claude"]` with every other capability false.
 - A conversation of an agent without chat workspaces returns `{"workspace": null}`.
 - Conversations gain `workspace_id` (the same id; `null` without one) in every conversation shape above.
 
@@ -750,39 +750,50 @@ A diff file, here and in git diffs:
 
 Unattended agents push through the action `workspace:push`, `{"repo", "branch", "base_sha", "head_sha", "reason"}`, denied unless the agent's spec names it: orbit reads the commits from the box as a bundle, applies the build diff policy, and pushes with an App token for the repository (`github.repositories`) to `branch`, which may not be the default or a protected branch. `result` is `{"pushed": "sha", "branch"}`.
 
-### Terminals (box only)
+### Terminals (box only): built
 
-`capabilities.terminals` false answers `no_shell`. A terminal:
+**Built.** What is still planned is said where it applies; a planned route answers `404`.
+
+`capabilities.terminals` false answers `no_shell`. An agent has a box, and its workspace terminals, when its chats run in a workstation sandbox (`sandbox: workstation`) and orbit reaches sandboxd. A terminal:
 
 ```json
 {"id": "uuid", "workspace_id": "uuid", "preset": "claude", "title": "Claude Code (direct)",
- "cwd": "conversations/uuid", "state": "running", "exit_code": null, "end_reason": null,
+ "cwd": "", "state": "running", "exit_code": null, "end_reason": null,
  "cols": 120, "rows": 32, "clients": 2, "created_by": "kanishk",
- "created_at": "...", "last_output_at": "...", "ended_at": null}
+ "created_at": "...", "last_attached_at": "...", "last_output_at": null, "ended_at": null}
 ```
 
-`state` is `running` or `exited`; `end_reason` is `exit`, `killed` or `box_restarted`. An exited terminal's record and final scrollback are kept.
+`state` is `running` or `exited`; `end_reason` is `exit` (its session ended), `killed` or `box_restarted` (reserved: not yet written). `exit_code` is set with `exit`. Rows are never deleted: an exited terminal keeps its record. `clients` counts the sockets attached on the instance answering. `last_attached_at` is the newest attach; `last_output_at` is not recorded yet (always `null`). `cols` and `rows` are the size last asked for.
 
-- `POST /workspaces/{id}/terminals` `{"preset": "shell", "cwd"?, "cols", "rows", "title"?, "claude"?: {"resume"?: "session id", "continue"?: false, "model"?}}`: `201 {"terminal"}`. `cwd` defaults to the workspace's `cwd`. `claude` options are only for the `claude` preset. At most 8 running per workspace (`limit`).
-- `GET /workspaces/{id}/terminals?state=running|exited|all`: `{"terminals": [...]}`, newest first. `GET /terminals/{tid}`: `{"terminal"}`. `PATCH /terminals/{tid}` `{"title"}`.
-- `POST /terminals/{tid}/resize` `{"cols", "rows"}` (an attached client resizes in band instead). `POST /terminals/{tid}/kill` `{"signal": "HUP"}` (`HUP`, `INT`, `TERM`, `KILL`): `200 {"terminal"}`.
-- `GET /terminals/{tid}/scrollback?lines=` is the scrollback as text with escapes (`text/plain; charset=utf-8`), at most 10,000 lines.
-- `GET /workspaces/{id}/claude-sessions?cwd=`: the box's Claude Code sessions for a directory, for the `resume` picker: `{"sessions": [{"id", "started_at", "last_at", "first_prompt"}]}`.
+- `POST /workspaces/{id}/terminals` `{"preset": "shell", "cwd"?, "cols", "rows", "title"?}`: `201 {"terminal"}`. `preset` is `shell` or `claude`; `cols` 1 to 1000, `rows` 1 to 500; `cwd` is a clean path relative to `/work` (default `""`, `/work` itself; `path` otherwise); `title` defaults to `Shell` or `Claude Code (direct)`. The box is created or started here (a failure is `502` naming sandboxd's reason). At most 8 running per workspace (`limit`). `claude` options (`{"resume"?, "continue"?, "model"?}`) are planned and answer `400`.
+- `GET /workspaces/{id}/terminals?state=running|exited|all`: `{"terminals": [...]}`, newest first, at most 500. `GET /terminals/{tid}`: `{"terminal"}`.
+- `POST /terminals/{tid}/kill` `{"signal"?: "HUP"}` (`HUP`, `INT`, `TERM`, `KILL`; each ends the tmux session the same way): `200 {"terminal"}`, `exited` with `end_reason` `killed`. A terminal already ended is returned as it is.
+- Planned: `PATCH /terminals/{tid}` `{"title"}`, `POST /terminals/{tid}/resize` (an attached client resizes in band), `GET /terminals/{tid}/scrollback?lines=`, and `GET /workspaces/{id}/claude-sessions?cwd=` (`{"sessions": [{"id", "started_at", "last_at", "first_prompt"}]}`, for a `resume` picker).
 
-**Attaching.** `POST /terminals/{tid}/attach` returns `{"url": "wss://orbit.kanishksachdev.com/api/v1/terminals/{tid}/socket?ticket=...", "protocol": "orbit.terminal.v1", "expires_at": "..."}`. The ticket names the terminal and the person, is single-use and expires in 30 s; it is the socket's only credential besides a bearer token. `GET /terminals/{tid}/socket` is the WebSocket (subprotocol `orbit.terminal.v1`), authenticated by `ticket` or `Authorization: Bearer`; an `Origin` outside `ORBIT_WORKSPACE_ORIGINS` (default `https://kanishksachdev.com`) is refused. At most 8 clients per terminal.
+**Attaching.** `POST /terminals/{tid}/attach` `{"origin"?}` mints a ticket for the token's person and returns:
+
+```json
+{"url": "wss://orbit.kanishksachdev.com/api/v1/terminals/{tid}/ws?ticket=<ticket>", "protocol": "orbit.terminal.v1",
+ "ticket": "<43 chars>", "protocols": ["orbit.terminal.v1", "orbit.ticket.<ticket>"], "expires_at": "..."}
+```
+
+The ticket is single-use, expires in 30 s, and is bound to the terminal, the person and an Origin: the body's `origin`, else the request's `Origin` header, else (a mint from a server-side proxy, which has neither) any of `ORBIT_WORKSPACE_ORIGINS` (comma list, default `https://kanishksachdev.com,https://www.kanishksachdev.com`); a named origin outside that list is `400` (`check: "origin"`). The ticket is both the `ticket` field and the `url`'s query. An ended terminal is `409` (`exited`). At most 10 tickets a minute per person (`429`, `rate`, `Retry-After`).
+
+`GET /terminals/{tid}/ws` is the WebSocket. The browser opens it with `new WebSocket(url, protocols)`: the ticket travels in `Sec-WebSocket-Protocol` as `orbit.ticket.<ticket>` beside `orbit.terminal.v1`, which the server selects. A client that cannot set a second subprotocol may send the ticket as `?ticket=` instead (then it can reach access logs; it is still single-use and expires in 30 s); `orbit.terminal.v1` must be offered either way. Before upgrading, an `Origin` outside `ORBIT_WORKSPACE_ORIGINS` is `403` (`origin`), and a missing, unknown, used, expired or mismatched ticket is `401` (`ticket`). After the upgrade a terminal that cannot attach sends an `error` frame and closes. At most 8 clients per terminal on one instance (`limit`). Bearer tokens on the socket are planned.
 
 | frame | direction | content |
 |---|---|---|
 | binary | both | terminal bytes: input to the terminal, output from it |
-| `{"type": "ready", "terminal": {...}, "replay_bytes": n}` | server | first; the next `n` bytes of binary frames are the scrollback replay, then live output |
-| `{"type": "resize", "cols", "rows"}` | client | this client's size |
-| `{"type": "ping"}` / `{"type": "pong"}` | both | every 30 s (Cloudflare closes a socket idle for 100 s) |
-| `{"type": "exit", "code": 0, "reason": "exit"}` | server | the terminal ended; the socket closes |
-| `{"type": "error", "check": "...", "error": "..."}` | server | then the socket closes |
+| `{"type": "ready", "terminal": {...}, "replay_bytes": 0}` | server | first. tmux redraws the screen on attach; replaying scrollback first (`replay_bytes` above 0: the next that many binary bytes are the replay) is planned |
+| `{"type": "resize", "cols", "rows"}` | client | this client's size; send one after `ready` and on every change |
+| `{"type": "ping"}` / `{"type": "pong"}` | both | the client pings every 10 s and may treat 25 s without a frame as a dead socket; the server answers each ping with a pong at once and sends its own ping every 15 s (Cloudflare closes a socket idle for 100 s) |
+| `{"type": "exit", "code": 0, "reason": "exit"}` | server | the session ended; the terminal is `exited`; the socket closes (1000) |
+| `{"type": "detached"}` | server | this client left tmux (its detach key) while the session lives; the socket closes (1000) and the terminal stays `running` |
+| `{"type": "error", "check": "...", "error": "..."}` | server | then the socket closes (1008) |
 
-A client with 4 MiB of output queued is closed (code 4008) and reattaches with a replay.
+Close codes: `4001` when the instance drains or shuts down: reconnect with a new ticket and the ready instance takes the terminal, which kept running. `4008` when the client took no output for 30 s: reattach. A socket closing for any reason detaches only its own tmux client; the session lives on.
 
-**Without a WebSocket** (a proxy that cannot carry one): `GET /terminals/{tid}/output` is SSE, `ready` then `data` events (`{"b64": "..."}`, id an output offset), resumable with `Last-Event-ID` (a lost offset replays the scrollback after a `ready`); `POST /terminals/{tid}/input` `{"b64": "...", "cols"?, "rows"?}` writes input, `204`.
+**Without a WebSocket** (planned, for a proxy that cannot carry one): `GET /terminals/{tid}/output` is SSE, `ready` then `data` events (`{"b64": "..."}`, id an output offset), resumable with `Last-Event-ID` (a lost offset replays the scrollback after a `ready`); `POST /terminals/{tid}/input` `{"b64": "...", "cols"?, "rows"?}` writes input, `204`.
 
 ### Review comments
 
