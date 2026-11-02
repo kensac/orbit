@@ -22,7 +22,7 @@ On an existing service, create a simple agent with `POST /api/v1/agents`. The re
 
 An agent without sources sees what you tell it and the context orbit supplies; it does not acquire access to your accounts just because its charter mentions them. Deployment defaults can also supply channels and other settings. Inspect the returned `spec` before using the agent. The [agent definition API](../api.md#defining-agents) explains updates, disabling and archiving; file-defined agents are edited in configuration instead.
 
-For a schedule or fetched data, follow the [configuration reference](../agents/configuration.md) and [finance example](../../examples/agents/finance.yaml). The example uses placeholder hosts and environment variables; it is a template, not a ready account connection. An operator can validate a configuration directory with `go run ./cmd/orbit validate <dir>` from the repository.
+For a schedule or fetched data, follow the [field reference](../agents/spec-reference.md), the [configuration rules](../agents/configuration.md) and [finance example](../../examples/agents/finance.yaml). The example uses placeholder hosts and environment variables; it is a template, not a ready account connection. An operator can validate a configuration directory with `go run ./cmd/orbit validate <dir>` from the repository.
 
 ## Start a conversation
 
