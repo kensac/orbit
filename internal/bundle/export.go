@@ -267,6 +267,16 @@ func (e *exporter) run(ctx context.Context, agent string) error {
 			e.problem(agentResource, "invalid agent definition")
 		}
 	}
+	memoryObj, memoryResource, err := e.get(ctx, "agents/"+agent+"/memory?limit=1", "current", "")
+	if err != nil {
+		return err
+	}
+	if memoryObj != nil {
+		var versions []json.RawMessage
+		if json.Unmarshal(memoryObj["versions"], &versions) != nil || len(versions) > 1 {
+			e.problem(memoryResource, "invalid current memory version")
+		}
+	}
 	obj, contextResource, err := e.get(ctx, "agents/"+agent+"/context", "current", "")
 	if err != nil {
 		return err

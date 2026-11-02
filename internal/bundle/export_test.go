@@ -30,6 +30,8 @@ func apiFixture(t *testing.T, failThread bool) (*client.Client, *[]string) {
 		switch r.URL.Path {
 		case "/api/v1/agents/assistant":
 			fmt.Fprint(w, `{"agent":{"name":"assistant","origin":"database","version":7,"spec_sha":"abc","spec":{"charter":"help"}},"memory":"current memory"}`)
+		case "/api/v1/agents/assistant/memory":
+			fmt.Fprint(w, `{"versions":[{"id":12,"content":"current memory"}]}`)
 		case "/api/v1/agents/assistant/context":
 			fmt.Fprint(w, `{"topics":[{"name":"finance"}],"skills":[{"name":"analysis","version":3}],"entries":3,"index":"index"}`)
 		case "/api/v1/skills/analysis/versions/3":
@@ -85,7 +87,7 @@ func TestExportTLSAPI(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %v %v", info, err)
 	}
-	if len(*calls) != 13 {
+	if len(*calls) != 14 {
 		t.Fatalf("calls %d: %v", len(*calls), *calls)
 	}
 	var cursor, revision bool
@@ -265,7 +267,7 @@ func TestVerifyTampering(t *testing.T) {
 				extra = "../outside"
 			}
 			if kind == "unlisted" {
-				extra = "resources/009999.json"
+				extra = "resources/000999.json"
 			}
 			if kind == "duplicate-member" {
 				extra = "manifest.json"
@@ -283,15 +285,16 @@ func TestVerifyTampering(t *testing.T) {
 						if err := json.Unmarshal(b, &m); err != nil {
 							t.Fatal(err)
 						}
-						if kind == "duplicate-reference" {
+						switch kind {
+						case "duplicate-reference":
 							m.Resources = append(m.Resources, m.Resources[0])
-						} else if kind == "fileless" {
+						case "fileless":
 							m.Resources[0].File = ""
 							m.Resources[0].Bytes = 0
 							m.Resources[0].SHA256 = ""
-						} else if kind == "oversized-size" {
+						case "oversized-size":
 							m.Resources[0].Bytes = maxResponseBytes + 1
-						} else {
+						default:
 							m.Resources[0].Bytes = -1
 						}
 						b, _ = json.Marshal(m)
@@ -311,6 +314,8 @@ func TestUnpaginatedLimitMarked(t *testing.T) {
 	f := fetchFunc(func(_ context.Context, _, endpoint string, _ io.Reader, w io.Writer) error {
 		body := `{"agent":{"name":"assistant","spec":{}}}`
 		switch {
+		case strings.Contains(endpoint, "/memory?"):
+			body = `{"versions":[]}`
 		case strings.HasSuffix(endpoint, "/context"):
 			body = `{"topics":[],"skills":[]}`
 		case strings.HasPrefix(endpoint, "memory/entries?"):
@@ -364,6 +369,8 @@ func TestPageCapPublishesPartial(t *testing.T) {
 		calls++
 		body := `{"agent":{"name":"assistant","spec":{}}}`
 		switch {
+		case strings.Contains(endpoint, "/memory?"):
+			body = `{"versions":[]}`
 		case strings.HasSuffix(endpoint, "/context"):
 			body = `{"topics":[],"skills":[]}`
 		case strings.HasPrefix(endpoint, "memory/entries?"):
