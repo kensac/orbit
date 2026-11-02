@@ -39,7 +39,7 @@ func (e *Engine) pollSteers(ctx context.Context, c *store.ClaimedRun, f *steerFe
 			continue
 		}
 		select {
-		case f.ch <- runner.SteerMessage{ID: m.ID, Text: strings.TrimSpace(m.Body)}:
+		case f.ch <- runner.SteerMessage{ID: m.ID, Text: steerText(m)}:
 			f.sent[m.ID] = m
 		default:
 			return
@@ -64,4 +64,13 @@ func (e *Engine) steered(ctx context.Context, c *store.ClaimedRun, f *steerFeed,
 		author = *m.Author
 	}
 	emit("orbit.steer", map[string]any{"message_id": id, "text": strings.TrimSpace(m.Body), "author": author})
+}
+
+// steerText is a steer message as the turn reads it: a delegating agent's (task:message) names it, as the prompt names it in a task's messages (messageFrom).
+func steerText(m store.Message) string {
+	body := strings.TrimSpace(m.Body)
+	if from := messageFrom(m); from != "" {
+		return from + ": " + body
+	}
+	return body
 }
