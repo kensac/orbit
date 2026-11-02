@@ -133,7 +133,8 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
   `harness.MaxFigureDenials` (2) times per prompt. The engine runs the same
   check on the final output for every backend and notes any amount it cannot
   trace in the report.
-- Not used: SessionStart (a live process starts one session for many runs, so
+- **An agent's own hooks** (spec `hooks`): `say`, `deny` or `run` at a Claude Code event, each run by `orbit agent-hook` with its definition as a flag (docs/agents/configuration.md, Hooks), added to the same `--settings` after orbit's own.
+- Not used by orbit itself: SessionStart (a live process starts one session for many runs, so
   per-run context belongs in the prompt, where it already is), PostToolUse
   and Stop (the stream already records every tool result, and the output to
   verify is the StructuredOutput call, not the stop).
@@ -461,3 +462,4 @@ The direction, so changes now do not close it off:
 
 - **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)).
 - **Event triggers** from webhooks (a ticket assigned, a comment).
+- **The workspace**: an IDE in the portfolio chat over files, terminals and git in a conversation's snapshot or an agent's box ([workspace.md](workspace.md)).
