@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,8 +14,12 @@ import (
 // default conversation is also /agents/{name}/thread and /messages.
 
 func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
+	var limit int
+	if !queryInt(w, r, "limit", &limit) {
+		return
+	}
 	resp, err := s.conversationPage(r.Context(), r.PathValue("name"), r.URL.Query().Get("archived") == "true",
-		r.URL.Query().Get("before"), intParam(r, "limit"))
+		r.URL.Query().Get("before"), limit)
 	respond(w, resp, err)
 }
 
@@ -49,11 +52,8 @@ func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
 		// built-in general agent when empty.
 		Agent string `json:"agent"`
 	}
-	if r.ContentLength != 0 {
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
+	if !decode(w, r, 64<<10, &body, bodyOptional) {
+		return
 	}
 	name := r.PathValue("name")
 	if name == "" {
@@ -91,8 +91,7 @@ func (s *Server) updateConversation(w http.ResponseWriter, r *http.Request) {
 		Title    *string `json:"title"`
 		Archived *bool   `json:"archived"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if !decode(w, r, 4<<10, &body, bodyRequired) {
 		return
 	}
 	id := r.PathValue("id")

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -97,15 +96,8 @@ func (s *Server) searchHTTP(w http.ResponseWriter, r *http.Request) {
 	v := r.URL.Query()
 	p := searchParams{Q: v.Get("q"), Agent: v.Get("agent"), ConversationID: v.Get("conversation_id"),
 		RunID: v.Get("run_id"), Kind: v.Get("kind"), From: v.Get("from"), To: v.Get("to")}
-	for name, dst := range map[string]*int{"limit": &p.Limit, "offset": &p.Offset} {
-		if raw := v.Get(name); raw != "" {
-			n, err := strconv.Atoi(raw)
-			if err != nil {
-				writeErr(w, http.StatusBadRequest, name+": want an integer")
-				return
-			}
-			*dst = n
-		}
+	if !queryInt(w, r, "limit", &p.Limit) || !queryInt(w, r, "offset", &p.Offset) {
+		return
 	}
 	out, err := s.search(r.Context(), p)
 	respond(w, out, err)

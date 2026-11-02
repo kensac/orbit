@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
@@ -113,8 +112,7 @@ func (s *Server) uploadURL(w http.ResponseWriter, r *http.Request) {
 		MediaType string `json:"media_type"`
 		Bytes     int64  `json:"bytes"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if !decode(w, r, 16<<10, &body, bodyRequired) {
 		return
 	}
 	if body.Bytes < 0 || body.Bytes > store.MaxUploadBytes {
