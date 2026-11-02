@@ -355,6 +355,8 @@ type chatTurn struct {
 	plugin string
 	// instructor is the person the run answers (runInstructor).
 	instructor string
+	// repos is what the agent's repositories add (repos.go), or nil.
+	repos *repoRun
 }
 
 // errCancelled is a run a person stopped; Execute records it cancelled.
@@ -376,6 +378,9 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	}
 	system += t.extra
 	prompt := chatPrompt(a, t.now, t.run, t.rc, t.convo)
+	if t.repos != nil {
+		prompt += t.repos.prompt
+	}
 	if t.rec != nil {
 		prompt = recoveryPrompt(t.rec, t.rc, t.now.Location())
 	}
@@ -386,6 +391,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	}
 	st := &chatState{}
 	chat := e.chatTools(snap, a, c, t.instructor, t.types, d.Defaults.MemoryMaxBytes, st)
+	e.repoChatTools(a, chat)
 	chat.Interrupt = t.cancel
 	if a.Sandbox != "" {
 		sb, err := e.sandboxPlan(d, a.Sandbox, c, t.workdir, t.home, t.plugin, t.emit)
@@ -400,6 +406,9 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 		}
 		for _, in := range t.inputs {
 			chat.Push = append(chat.Push, in.Path)
+		}
+		if t.repos != nil {
+			chat.Push = append(chat.Push, t.repos.files...)
 		}
 	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
@@ -485,6 +494,11 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		instructor = ""
 	}
 	now := (rule == spec.RuleAuto || (rule == spec.RuleApprove && instructor != "")) && !e.Outbox && v.Type != "continue"
+	if now && v.Type == actions.DefineType && len(e.defineWidening(ctx, v.Params)) > 0 {
+		// A change that widens an agent waits for a person's decision on
+		// the change itself, whatever the rule (succeed holds it).
+		now = false
+	}
 	if !now {
 		st.mu.Lock()
 		defer st.mu.Unlock()
@@ -503,7 +517,7 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return "orbit could not record the action: " + err.Error(), true
 	}
 	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ActionTimeout)
-	result, xerr := e.executor(snap).Execute(actx, actions.Call{ID: id, Agent: a.Name, RunID: c.ID, Type: v.Type, Params: v.Params,
+	result, xerr := e.executor(snap).Execute(actx, actions.Call{ID: id, Agent: a.Name, RunID: c.ID, Type: v.Type, Params: v.Params, Rule: rule,
 		Workspace: runner.WorkspaceOf(ctx)})
 	cancel()
 	if err := e.finishAction(ctx, snap, &store.Action{ID: id, RunID: c.ID, Agent: a.Name, Type: v.Type}, result, xerr); err != nil {

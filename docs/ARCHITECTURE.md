@@ -22,6 +22,7 @@ trigger (schedule: cron or RRULE | manual | message | continue | task | delegati
   -> a fresh session: the recent thread, packed into a byte budget, as conversation.md
   -> sources fetched by the harness, written to <workdir>/inputs/, stored as artifacts
   -> transforms run over sources, each output an input (a source only transforms read is withheld)
+  -> repositories (repos): each fetched into orbit's mirror, its tree at the ref's commit under inputs/repos/<name>, _repos.json an input
   -> gates (scheduled runs, no message waiting): one that finds nothing to judge ends the run skipped
   -> runner called with: system contract, prompt, workdir, tools, output schema
   -> output validated against the contract
@@ -123,6 +124,7 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
   (below): the tool server asks the engine over a per-agent unix socket
   (`engine/search.go`), the engine fills in the agent, and its results are
   not ledgered, since an earlier run's words back no figure.
+  With `repos`, the repository tools (Repositories, below) are served the same way, over a socket of their own, and are not ledgered either.
 - **Hooks** (`orbit hook`, from `--settings`; with `--setting-sources ""` no
   other hook is loaded, so `disableAllHooks` is on whenever orbit has none):
   PreToolUse on Read, Glob and Grep denies a path that leaves the workdir after
@@ -133,10 +135,17 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
   `harness.MaxFigureDenials` (2) times per prompt. The engine runs the same
   check on the final output for every backend and notes any amount it cannot
   trace in the report.
-- Not used: SessionStart (a live process starts one session for many runs, so
+- **An agent's own hooks** (spec `hooks`): `say`, `deny` or `run` at a Claude Code event, each run by `orbit agent-hook` with its definition as a flag (docs/agents/configuration.md, Hooks), added to the same `--settings` after orbit's own.
+- Not used by orbit itself: SessionStart (a live process starts one session for many runs, so
   per-run context belongs in the prompt, where it already is), PostToolUse
   and Stop (the stream already records every tool result, and the output to
   verify is the StructuredOutput call, not the stop).
+
+## Repositories
+
+An agent reads git repositories through orbit, not through the web (`internal/repos`, `engine/repos.go`; configuration.md, Repositories). orbit keeps a bare mirror of each repository in `github.read_repositories` that an agent names, under `<data>/mirrors/`: every branch, tag and pull request head (`refs/pull/<n>/head`), fetched before each run with a `contents: read` token that exists only for that fetch. The run gets the tree at the ref's commit, without `.git`, at `inputs/repos/<name>/`, and `_repos.json` (repo, ref, sha) as an input: the prompt names each path and commit, the `unchanged` gate sees a new commit as a change, and a recovered attempt extracts the same commits again. A tree is not stored as artifacts; its commit is the record, and the mirror can give it again.
+
+History and GitHub's state are tools orbit runs, never a credential or a `.git` in the model's reach: `git_log`, `git_show`, `git_diff` and `git_blame` over the mirror, and `pr_list` (every page up to its limit, `merged_at` set only for a merge) and `pr_view` (with the head commit's check runs and statuses) from GitHub with a read token minted per call. A Claude Code report agent reaches them through `orbit mcp`, which asks the engine over a per-agent unix socket (as search does); a chat agent has them among its SDK tools. A build's new clone is seeded from the mirror's default branch head (`build.Pool.Seed`), so its fetch from GitHub transfers only what the mirror lacked.
 
 ## Mail
 
@@ -221,7 +230,7 @@ carries a title and a link only; bursts fold into one summary push.
   questions are shown to the conversation's next run so it does not ask
   again.
 - **Messages** to an agent are consumed by the first run of their
-  conversation that starts after them. A run that fails or is interrupted hands them back.
+  conversation that starts after them. A run that fails or is interrupted hands them back. Each attempt's read is a `message_reads` row, kept when it hands the message back (`released_at`); a message waits while no attempt holds it (`store.waitingMessage`).
 
 ## Memory entries
 
@@ -254,7 +263,7 @@ An action type is code (`internal/actions`): a name, a parameter schema shown
 to the agent, a validator, and an executor. An agent's spec maps types to
 `auto`, `approve` or `deny`; unnamed types are denied and not offered.
 Today: `notify` (an extra message to one of the agent's channels),
-`continue` (wake this agent again later, above), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; docs/api.md, Defining agents), `github:clone` and `github:pr` (a chat agent's repository work: orbit clones into its workspace and commits and pushes its working tree to `orbit/chat/<branch>`, `build.Git`), `webhook:<endpoint>` (a
+`continue` (wake this agent again later, above), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; a change that widens it waits for a person; docs/api.md, Defining agents), `github:clone` and `github:pr` (a chat agent's repository work: orbit clones into its workspace and commits and pushes its working tree to `orbit/chat/<branch>`, `build.Git`), `webhook:<endpoint>` (a
 JSON body to an endpoint whose URL and credentials are configuration, never
 chosen by the model), and `github:merge` (squash one of orbit's own
 `orbit/*` PRs, only if its head is still the approved commit and every
@@ -461,3 +470,4 @@ The direction, so changes now do not close it off:
 
 - **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)).
 - **Event triggers** from webhooks (a ticket assigned, a comment).
+- **The workspace**: an IDE in the portfolio chat over files, terminals and git in a conversation's snapshot or an agent's box ([workspace.md](workspace.md)).

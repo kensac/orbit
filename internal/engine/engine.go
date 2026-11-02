@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,7 +29,9 @@ import (
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/notify"
+	"github.com/kensac/orbit/internal/repos"
 	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/sources"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -50,8 +51,8 @@ type Engine struct {
 	Reloader func(context.Context) error
 	Env      func(string) (string, bool)
 	Client   *http.Client
-	// Secret signs approval links (see ApprovalSig).
-	Secret []byte
+	// Secret signs approval links (see ApprovalSig) and mail tokens.
+	Secret secret.Key
 	// NewRunner is runner.New, replaceable in tests.
 	NewRunner func(name string, rs spec.RunnerSpec, env func(string) (string, bool)) (runner.Runner, error)
 	Log       *slog.Logger
@@ -68,6 +69,9 @@ type Engine struct {
 	NewSandbox func(addr, token string) (runner.SandboxClient, error)
 	// Builder runs build runs (internal/build); nil fails them.
 	Builder *build.Runner
+	// Repos is the mirrors of the repositories agents read (repos.go);
+	// nil fails a run whose agent names repos.
+	Repos *repos.Mirrors
 	// Drain is this instance's drain; a draining instance starts no build
 	// sandbox (build.go).
 	Drain *Drain
@@ -90,7 +94,7 @@ type Engine struct {
 	cfg *Snapshot
 
 	searchMu sync.Mutex
-	searchLn map[string]string // agent -> socket path being served
+	searchLn map[string]string // kind and agent -> the socket path being served (search.go)
 }
 
 // Snapshot is one loaded configuration with its built channels.
@@ -350,8 +354,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return nil, nil, err
 	}
 
-	loc, _ := time.LoadLocation(a.Timezone)
-	now := time.Now().In(loc)
+	now := time.Now().In(a.Location())
 
 	rec, skipped, err := e.planRecovery(ctx, a, c, r.Kind(), workdir, home)
 	if err != nil {
@@ -400,7 +403,8 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if c.Attempt > 1 && claudeCode {
 		emit("orbit.recovery", map[string]any{"recovers_attempt": recFrom(rec), "skipped_because": skipped})
 	}
-	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env}
+	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env,
+		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted()}
 	vars := sources.Vars(now)
 	var inputs []runner.Input
 	if rec != nil {
@@ -455,6 +459,13 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		if inputs, err = e.transform(ctx, a, c, workdir, inputsDir, raw, inputs, emit); err != nil {
 			return nil, nil, err
 		}
+	}
+	// Before the gates: _repos.json names the commits, so unchanged sees a
+	// new commit as a change.
+	withTools := claudeCode && (chat || e.Harness != "")
+	inputs, repoRun, err := e.repoInputs(ctx, snap.Config.Deployment, a, c.ID, c.Attempt, workdir, inputsDir, rec != nil, inputs, withTools, emit)
+	if err != nil {
+		return nil, nil, err
 	}
 	if gated(a, c, rc, rec != nil) {
 		docs := maps.Clone(raw)
@@ -551,7 +562,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	var hr *runner.Harness
 	if e.Harness != "" && r.Kind() == "claude-code" {
-		hr = &runner.Harness{Bin: e.Harness, Figures: figures && !chat, Search: e.searchSocket(a.Name)}
+		hr = &runner.Harness{Bin: e.Harness, Figures: figures && !chat, Search: e.searchSocket(a.Name), Repos: e.repoSocket(a), AgentHooks: agentHooks(a)}
+	} else if len(a.Hooks) > 0 {
+		emit("orbit.hooks_skipped", map[string]any{"reason": "the agent's hooks need claude-code with orbit's harness binary"})
 	}
 	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, hr != nil && !chat, inputs)
 	if err != nil {
@@ -561,7 +574,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
 			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec, instructor: st.instructor,
-			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin})
+			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun})
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
 	if tk != nil {
@@ -582,6 +595,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	trigger := c.Trigger
 	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached, Tasks: delegated},
 		rc, convo, inputs)
+	if repoRun != nil {
+		prompt += repoRun.prompt
+	}
 	if rec != nil {
 		prompt = recoveryPrompt(rec, rc, now.Location())
 	}
@@ -736,6 +752,15 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		if act.Type == actions.DelegateType && pa.Error == "" && out.task != nil && out.task.Depth >= store.MaxTaskDepth {
 			pa.Rule, pa.Error = string(spec.RuleDeny), fmt.Sprintf("delegation is nested at most %d deep, and this task is at depth %d", store.MaxTaskDepth, out.task.Depth)
 		}
+		if act.Type == actions.DefineType && pa.Error == "" && pa.Rule == string(spec.RuleAuto) {
+			// A change that widens an agent waits for a person, whatever the rule: a model steered by its input must not grant itself reach.
+			if w := e.defineWidening(ctx, act.Params); len(w) > 0 {
+				// Nor does its person's message in the chat approve it: the
+				// decision is theirs to make on the change itself.
+				pa.Rule, pa.InstructedBy = string(spec.RuleApprove), ""
+				e.Log.Info("agent:define widens an agent; held for approval", "run", c.ID, "widens", strings.Join(w, "; "))
+			}
+		}
 		if len(pa.Params) == 0 {
 			pa.Params = json.RawMessage(`{}`)
 		}
@@ -756,7 +781,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	metrics.RunFinished(a.Name, "succeeded", runnerKind(snap, a), time.Since(start), rr.CostUSD)
 
 	// Delivery: the report, then each pending approval.
-	link := e.runLink(snap, c.ID)
+	link := snap.Config.Deployment.RunURL(c.ID)
 	pr := notify.Priority(out.Notify.Priority)
 	if pr == "" {
 		pr = notify.Default
@@ -841,7 +866,7 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 	if a != nil && !Attended(c.Trigger) && routed == nil {
 		e.deliver(ctx, snap, a, &c.ID, nil, "failure", notify.Message{
 			Title: a.Name + " run failed", Body: runErr.Error(), Priority: notify.High,
-			Tags: []string{"orbit", "warning"}, Link: e.runLink(snap, c.ID),
+			Tags: []string{"orbit", "warning"}, Link: snap.Config.Deployment.RunURL(c.ID),
 		})
 	}
 	return nil
@@ -938,13 +963,6 @@ func (e *Engine) mailHeaders(ctx context.Context, snap *Snapshot, runID *string,
 	m.References = ref
 }
 
-func (e *Engine) runLink(snap *Snapshot, runID string) string {
-	if snap.Config.Deployment.PublicURL == "" {
-		return ""
-	}
-	return strings.TrimRight(snap.Config.Deployment.PublicURL, "/") + "/ui/runs/" + runID
-}
-
 // ApprovalLink is the page where a person approves or rejects an action. The
 // signature lets the link work from a phone without a login while naming
 // exactly one action.
@@ -955,11 +973,9 @@ func (e *Engine) ApprovalLink(snap *Snapshot, actionID string) string {
 	return strings.TrimRight(snap.Config.Deployment.PublicURL, "/") + "/ui/actions/" + actionID + "?sig=" + e.ApprovalSig(actionID)
 }
 
-// ApprovalSig is an HMAC of the action id under the deployment secret.
+// ApprovalSig is the action's approval purpose derived from the deployment secret (secret.Approval).
 func (e *Engine) ApprovalSig(actionID string) string {
-	m := hmac.New(sha256.New, e.Secret)
-	m.Write([]byte("action:" + actionID))
-	return hex.EncodeToString(m.Sum(nil))
+	return hex.EncodeToString(e.Secret.Derive(secret.Approval(actionID)))
 }
 
 // CheckApprovalSig reports whether sig is ApprovalSig(actionID).
@@ -989,7 +1005,7 @@ func (e *Engine) DeliverOutbox(ctx context.Context) error {
 				m.Link = e.ApprovalLink(snap, *it.ActionID)
 				m.Buttons = []notify.Button{{Label: "Review", URL: m.Link}}
 			case it.RunID != nil:
-				m.Link = e.runLink(snap, *it.RunID)
+				m.Link = snap.Config.Deployment.RunURL(*it.RunID)
 			}
 			e.deliver(ctx, snap, a, it.RunID, it.ActionID, it.Purpose, m)
 		}
@@ -1010,7 +1026,7 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 		if err != nil || act == nil {
 			return err
 		}
-		call := actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params}
+		call := actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)}
 		var after func()
 		if a, ok := snap.Config.Agents[act.Agent]; ok && a.Chat {
 			call.Workspace, after = e.storedWorkspace(ctx, act.RunID)
@@ -1051,7 +1067,7 @@ func (e *Engine) finishAction(ctx context.Context, snap *Snapshot, act *store.Ac
 			if a, ok := snap.Config.Agents[act.Agent]; ok {
 				e.deliver(ctx, snap, a, &act.RunID, &act.ID, "action", notify.Message{
 					Title: fmt.Sprintf("%s: %s failed", act.Agent, act.Type), Body: xerr.Error(),
-					Priority: notify.High, Tags: []string{"orbit", "warning"}, Link: e.runLink(snap, act.RunID),
+					Priority: notify.High, Tags: []string{"orbit", "warning"}, Link: snap.Config.Deployment.RunURL(act.RunID),
 				})
 			}
 		}

@@ -13,6 +13,7 @@
 //	orbit import skills <dir> [--attach <agent>] [--apply]   seed the skills library through the API
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
 //	orbit hook --root <dir> --state <dir> [--figures]   orbit's hook, run by Claude Code
+//	orbit agent-hook --root <dir> --def <hook>   one of an agent's own hooks, run by Claude Code
 //	orbit tls-cert --dir <d> [--owner uid:gid]   orbit-db's self-signed TLS certificate
 //	orbit sandboxd           the build sandbox service (holds the docker socket)
 //	orbit egress             the allowlisting proxy, a sandbox's only route out
@@ -49,6 +50,7 @@ import (
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/push"
+	"github.com/kensac/orbit/internal/repos"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
@@ -89,6 +91,8 @@ func main() {
 		err = importCmd(ctx, os.Args[2:])
 	case "mcp", "hook":
 		err = harnessCmd(os.Args[1], os.Args[2:])
+	case "agent-hook":
+		os.Exit(agentHookCmd(os.Args[2:]))
 	case "tls-cert":
 		err = tlsCertCmd(os.Args[2:])
 	case "sandboxd":
@@ -117,6 +121,7 @@ func harnessCmd(name string, args []string) error {
 	figures := fs.Bool("figures", false, "check the output's money amounts")
 	state := fs.String("state", "", "the directory the tool server and the hook share")
 	search := fs.String("search", "", "the engine's search socket for this agent (mcp)")
+	repoSock := fs.String("repos", "", "the engine's repository tools socket for this agent (mcp)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -124,9 +129,25 @@ func harnessCmd(name string, args []string) error {
 		return errors.New(name + ": --root is required")
 	}
 	if name == "mcp" {
-		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, revision)
+		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, *repoSock, revision)
 	}
 	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state})
+}
+
+// agentHookCmd runs one of an agent's own hooks for Claude Code (spec hooks): the definition is a flag orbit wrote, the event is stdin, and the exit code is the CLI's to read.
+func agentHookCmd(args []string) int {
+	fs := flag.NewFlagSet("agent-hook", flag.ContinueOnError)
+	root := fs.String("root", "", "the run's working directory")
+	def := fs.String("def", "", "the hook, as orbit encoded it")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	d, err := harness.DecodeAgentHook(*def)
+	if err != nil || *root == "" {
+		fmt.Fprintln(os.Stderr, "orbit agent-hook: --root and a valid --def are required")
+		return 1
+	}
+	return harness.AgentHook(os.Stdin, os.Stdout, os.Stderr, d, *root)
 }
 
 func usage() {
@@ -388,7 +409,10 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		eng.Drain = drain
 		// One spare clone per build repository: a build starts from a
 		// checkout that needs only an incremental fetch.
-		checkouts := &build.Pool{Root: filepath.Join(eng.DataDir, "checkouts"), Warm: 1}
+		// Mirrors of the repositories agents read (repos:), which also seed
+		// a build's new clone.
+		eng.Repos = &repos.Mirrors{Root: filepath.Join(eng.DataDir, "mirrors")}
+		checkouts := &build.Pool{Root: filepath.Join(eng.DataDir, "checkouts"), Warm: 1, Seed: eng.Repos.Has}
 		eng.Builder = &build.Runner{WorkRoot: filepath.Join(eng.DataDir, "builds"), Pool: checkouts}
 		life, endLife := context.WithCancel(context.WithoutCancel(ctx))
 		defer endLife()

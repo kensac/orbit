@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -62,11 +61,7 @@ type searchHit struct {
 // each result's links.
 func (s *Server) search(ctx context.Context, p searchParams) (map[string]any, error) {
 	cfg := s.Engine.Current().Config
-	loc, err := time.LoadLocation(cfg.Deployment.Timezone)
-	if err != nil {
-		return nil, fmt.Errorf("deployment timezone %q: %w", cfg.Deployment.Timezone, err)
-	}
-	q, err := p.storeQuery(loc)
+	q, err := p.storeQuery(cfg.Deployment.Location())
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", store.ErrInvalid, err.Error())
 	}
@@ -74,15 +69,12 @@ func (s *Server) search(ctx context.Context, p searchParams) (map[string]any, er
 	if err != nil {
 		return nil, err
 	}
-	public := strings.TrimRight(cfg.Deployment.PublicURL, "/")
 	hits := make([]searchHit, len(page.Results))
 	for i, r := range page.Results {
 		h := searchHit{SearchResult: r}
 		if r.RunID != nil {
 			h.Links.Run = "/api/v1/runs/" + *r.RunID
-			if public != "" {
-				h.Links.RunPage = public + "/ui/runs/" + *r.RunID
-			}
+			h.Links.RunPage = cfg.Deployment.RunURL(*r.RunID)
 		}
 		if r.ConversationID != nil {
 			h.Links.Conversation = "/api/v1/conversations/" + *r.ConversationID + "/thread"
@@ -97,15 +89,8 @@ func (s *Server) searchHTTP(w http.ResponseWriter, r *http.Request) {
 	v := r.URL.Query()
 	p := searchParams{Q: v.Get("q"), Agent: v.Get("agent"), ConversationID: v.Get("conversation_id"),
 		RunID: v.Get("run_id"), Kind: v.Get("kind"), From: v.Get("from"), To: v.Get("to")}
-	for name, dst := range map[string]*int{"limit": &p.Limit, "offset": &p.Offset} {
-		if raw := v.Get(name); raw != "" {
-			n, err := strconv.Atoi(raw)
-			if err != nil {
-				writeErr(w, http.StatusBadRequest, name+": want an integer")
-				return
-			}
-			*dst = n
-		}
+	if !queryInt(w, r, "limit", &p.Limit) || !queryInt(w, r, "offset", &p.Offset) {
+		return
 	}
 	out, err := s.search(r.Context(), p)
 	respond(w, out, err)

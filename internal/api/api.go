@@ -11,8 +11,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -275,32 +277,47 @@ func (s *Server) thread(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// servePage is the one way a thread page is served, whichever conversation:
-// the before cursor and limit in, items, has_more and next_before out.
+// servePage is the one way a thread page is served over HTTP, whichever conversation (threadPage).
 func servePage(w http.ResponseWriter, r *http.Request, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) {
-	var before *store.ThreadCursor
-	if b := r.URL.Query().Get("before"); b != "" {
-		c, err := store.ParseThreadCursor(b)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, "before: "+err.Error())
-			return
-		}
-		before = c
-	}
-	page, err := fetch(before, intParam(r, "limit"))
-	if err != nil {
-		respond(w, nil, err)
+	var limit int
+	if !queryInt(w, r, "limit", &limit) {
 		return
 	}
-	resp := map[string]any{"items": orEmpty(page.Items), "has_more": page.HasMore, "next_before": nil}
-	if page.HasMore {
-		resp["next_before"] = page.NextBefore
+	resp, err := threadPage(r.URL.Query().Get("before"), limit, fetch)
+	respond(w, resp, err)
+}
+
+// threadPage reads a thread page for HTTP and MCP alike: the before cursor and limit in, items, has_more and next_before out (listPage).
+func threadPage(before string, limit int, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) (map[string]any, error) {
+	var c *store.ThreadCursor
+	if before != "" {
+		var err error
+		if c, err = store.ParseThreadCursor(before); err != nil {
+			return nil, requestError("before: " + err.Error())
+		}
 	}
-	respond(w, resp, nil)
+	page, err := fetch(c, limit)
+	if err != nil {
+		return nil, err
+	}
+	return listPage("items", page.Items, page.HasMore, page.NextBefore), nil
+}
+
+// listPage is a page as every paged list is served, over HTTP and MCP alike: the items under key (always an array), has_more, and next_before, null exactly when has_more is false.
+func listPage[T any](key string, items []T, hasMore bool, next string) map[string]any {
+	resp := map[string]any{key: orEmpty(items), "has_more": hasMore, "next_before": nil}
+	if hasMore {
+		resp["next_before"] = next
+	}
+	return resp
 }
 
 func (s *Server) memoryHistory(w http.ResponseWriter, r *http.Request) {
-	v, err := s.Store.MemoryHistory(r.Context(), r.PathValue("name"), intParam(r, "limit"))
+	var limit int
+	if !queryInt(w, r, "limit", &limit) {
+		return
+	}
+	v, err := s.Store.MemoryHistory(r.Context(), r.PathValue("name"), limit)
 	respond(w, map[string]any{"versions": orEmpty(v)}, err)
 }
 
@@ -308,11 +325,8 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Prompt string `json:"prompt"`
 	}
-	if r.ContentLength != 0 {
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
+	if !decode(w, r, 64<<10, &body, bodyOptional) {
+		return
 	}
 	a, ok := s.Engine.Current().Config.Agents[r.PathValue("name")]
 	if !ok {
@@ -327,7 +341,11 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
-	m, err := s.Store.ListMessages(r.Context(), r.PathValue("name"), intParam(r, "limit"))
+	var limit int
+	if !queryInt(w, r, "limit", &limit) {
+		return
+	}
+	m, err := s.Store.ListMessages(r.Context(), r.PathValue("name"), limit)
 	respond(w, map[string]any{"messages": orEmpty(m)}, err)
 }
 
@@ -357,8 +375,7 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 		// Attachments are uploads of this conversation the message carries.
 		Attachments []string `json:"attachments"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if !decode(w, r, 64<<10, &body, bodyRequired) {
 		return
 	}
 	if strings.TrimSpace(body.Body) == "" && len(body.Attachments) == 0 {
@@ -399,7 +416,10 @@ func actor(r *http.Request, named string) string {
 // ---------------------------------------------------------------- runs
 
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
-	f := store.RunFilter{Agent: r.URL.Query().Get("agent"), Status: r.URL.Query().Get("status"), Limit: intParam(r, "limit")}
+	f := store.RunFilter{Agent: r.URL.Query().Get("agent"), Status: r.URL.Query().Get("status")}
+	if !queryInt(w, r, "limit", &f.Limit) {
+		return
+	}
 	if b := r.URL.Query().Get("before"); b != "" {
 		t, err := time.Parse(time.RFC3339Nano, b)
 		if err != nil {
@@ -432,7 +452,11 @@ func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
-	ev, err := s.Store.ListEvents(r.Context(), r.PathValue("id"), intParam(r, "attempt"), intParam(r, "after"), intParam(r, "limit"))
+	var attempt, after, limit int
+	if !queryInt(w, r, "attempt", &attempt) || !queryInt(w, r, "after", &after) || !queryInt(w, r, "limit", &limit) {
+		return
+	}
+	ev, err := s.Store.ListEvents(r.Context(), r.PathValue("id"), attempt, after, limit)
 	respond(w, map[string]any{"events": orEmpty(ev)}, err)
 }
 
@@ -446,45 +470,48 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"deliveries": orEmpty(d)}, err)
 }
 
+// getArtifact is GET /artifacts/{id}: the content, streamed from the store, with Range support.
 func (s *Server) getArtifact(w http.ResponseWriter, r *http.Request) {
-	b, mt, err := s.Store.GetArtifactContent(r.Context(), r.PathValue("id"))
+	a, b, err := s.Store.OpenArtifact(r.Context(), r.PathValue("id"))
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	w.Header().Set("Content-Type", mt)
+	w.Header().Set("Content-Type", a.MediaType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'")
-	_, _ = w.Write(b)
+	http.ServeContent(w, r, "", a.CreatedAt, b)
 }
 
 // ---------------------------------------------------------------- actions
 
 func (s *Server) listActions(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	f := store.ActionFilter{Agent: q.Get("agent"), Status: q.Get("status"), RunID: q.Get("run_id"), Limit: intParam(r, "limit")}
-	if f.RunID != "" && !isUUID(f.RunID) {
-		writeErr(w, http.StatusBadRequest, "run_id: not a run id")
+	f := store.ActionFilter{Agent: q.Get("agent"), Status: q.Get("status"), RunID: q.Get("run_id")}
+	if !queryInt(w, r, "limit", &f.Limit) {
 		return
 	}
-	if b := q.Get("before"); b != "" {
-		c, err := store.ParseConversationCursor(b)
+	resp, err := s.actionPage(r.Context(), f, q.Get("before"))
+	respond(w, resp, err)
+}
+
+// actionPage is a page of actions for HTTP and MCP alike; before is the previous page's next_before.
+func (s *Server) actionPage(ctx context.Context, f store.ActionFilter, before string) (map[string]any, error) {
+	if f.RunID != "" && !store.IsUUID(f.RunID) {
+		return nil, requestError("run_id: not a run id")
+	}
+	if before != "" {
+		c, err := store.ParseConversationCursor(before)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, "before: "+err.Error())
-			return
+			return nil, requestError("before: " + err.Error())
 		}
 		f.Before = c
 	}
-	page, err := s.Store.ListActionsPage(r.Context(), f)
+	page, err := s.Store.ListActionsPage(ctx, f)
 	if err != nil {
-		respond(w, nil, err)
-		return
+		return nil, err
 	}
-	resp := map[string]any{"actions": orEmpty(page.Actions), "has_more": page.HasMore, "next_before": nil}
-	if page.HasMore {
-		resp["next_before"] = page.NextBefore
-	}
-	respond(w, resp, nil)
+	return listPage("actions", page.Actions, page.HasMore, page.NextBefore), nil
 }
 
 func (s *Server) getAction(w http.ResponseWriter, r *http.Request) {
@@ -498,21 +525,29 @@ func (s *Server) decide(approve bool) http.HandlerFunc {
 			By              string `json:"by"`
 			ClientRequestID string `json:"client_request_id"`
 		}
-		if r.ContentLength != 0 {
-			_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body)
+		if !decode(w, r, 4<<10, &body, bodyOptional) {
+			return
 		}
 		// A person decides as themselves; by is for the operator token.
+		by := body.By
 		if p := principalOf(r); p.Person != "" {
-			body.By = p.Person
-		} else if body.By == "" {
-			body.By = "operator"
+			by = p.Person
 		}
-		replayed, err := s.Store.DecideActionOnce(r.Context(), r.PathValue("id"), approve, body.By, body.ClientRequestID)
-		if err == nil && !replayed {
-			s.Wake()
-		}
+		err := s.decideAction(r.Context(), r.PathValue("id"), approve, by, body.ClientRequestID)
 		respond(w, map[string]any{"ok": err == nil}, err)
 	}
+}
+
+// decideAction records a decision for HTTP and MCP alike, as by ("" is the operator), and wakes the action loop unless it replayed an earlier one.
+func (s *Server) decideAction(ctx context.Context, id string, approve bool, by, clientID string) error {
+	if by == "" {
+		by = "operator"
+	}
+	replayed, err := s.Store.DecideActionOnce(ctx, id, approve, by, clientID)
+	if err == nil && !replayed {
+		s.Wake()
+	}
+	return err
 }
 
 // ---------------------------------------------------------------- helpers
@@ -520,24 +555,39 @@ func (s *Server) decide(approve bool) http.HandlerFunc {
 func respond(w http.ResponseWriter, v any, err error) { respondStatus(w, http.StatusOK, v, err) }
 
 func respondStatus(w http.ResponseWriter, status int, v any, err error) {
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		writeErr(w, http.StatusNotFound, "not found")
-	case store.IsBadID(err):
-		writeErr(w, http.StatusBadRequest, "not a valid id")
-	case errors.Is(err, store.ErrReplyElsewhere), errors.Is(err, store.ErrInvalid):
-		writeErr(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, store.ErrReceiptMismatch):
-		writeErr(w, http.StatusConflict, err.Error())
-	case errors.Is(err, store.ErrConflict):
-		writeErr(w, http.StatusConflict, "no longer in a state that allows this")
-	case err != nil:
-		writeErr(w, http.StatusInternalServerError, err.Error())
-	default:
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(v)
+	if err != nil {
+		code, msg := errorStatus(err)
+		writeErr(w, code, msg)
+		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// requestError is a request its caller must change, told to them as is (HTTP 400).
+type requestError string
+
+func (e requestError) Error() string { return string(e) }
+
+// errorStatus is how an error is told to a caller, the same over HTTP (the status) and MCP (the message, mcpErr).
+func errorStatus(err error) (int, string) {
+	var bad requestError
+	switch {
+	case errors.As(err, &bad):
+		return http.StatusBadRequest, err.Error()
+	case errors.Is(err, store.ErrNotFound):
+		return http.StatusNotFound, "not found"
+	case store.IsBadID(err):
+		return http.StatusBadRequest, "not a valid id"
+	case errors.Is(err, store.ErrReplyElsewhere), errors.Is(err, store.ErrInvalid):
+		return http.StatusBadRequest, err.Error()
+	case errors.Is(err, store.ErrReceiptMismatch):
+		return http.StatusConflict, err.Error()
+	case errors.Is(err, store.ErrConflict):
+		return http.StatusConflict, "no longer in a state that allows this"
+	}
+	return http.StatusInternalServerError, err.Error()
 }
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
@@ -546,28 +596,60 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-func intParam(r *http.Request, name string) int {
-	n, _ := strconv.Atoi(r.URL.Query().Get(name))
-	return n
-}
+// bodyRule says whether a request body may be empty.
+type bodyRule bool
 
-// isUUID reports whether s is a UUID in its canonical text form, so an id
-// that cannot name a row is a 400, not a Postgres cast error.
-func isUUID(s string) bool {
-	if len(s) != 36 {
+const (
+	// bodyRequired: an empty body is a 400.
+	bodyRequired bodyRule = false
+	// bodyOptional: an empty body decodes as the zero value.
+	bodyOptional bodyRule = true
+)
+
+// decode is how every handler reads its JSON body: at most limit bytes,
+// one JSON value, and strictly, so a field the handler does not know is a
+// 400. Lenient decoding would silently drop a misspelt field, and with it
+// what the field was for (a dropped client_request_id loses idempotency).
+// It writes the 400 itself; false means the handler returns.
+func decode(w http.ResponseWriter, r *http.Request, limit int64, into any, rule bodyRule) bool {
+	if rule == bodyOptional && r.ContentLength == 0 {
+		return true
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
+	dec.DisallowUnknownFields()
+	err := dec.Decode(into)
+	switch {
+	case errors.Is(err, io.EOF) && rule == bodyOptional:
+		// An empty body sent without a length (chunked).
+		return true
+	case errors.Is(err, io.EOF):
+		writeErr(w, http.StatusBadRequest, "a JSON body is required")
+		return false
+	case err != nil:
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return false
 	}
-	for i, c := range s {
-		switch {
-		case i == 8 || i == 13 || i == 18 || i == 23:
-			if c != '-' {
-				return false
-			}
-		case '0' <= c && c <= '9', 'a' <= c && c <= 'f', 'A' <= c && c <= 'F':
-		default:
-			return false
-		}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		writeErr(w, http.StatusBadRequest, "the body must be one JSON value")
+		return false
 	}
+	return true
+}
+
+// queryInt reads an integer query parameter into dst, leaving it 0 when
+// absent. A value that is not an integer is a 400 (written here), never a
+// silent 0 that would read as "the default".
+func queryInt(w http.ResponseWriter, r *http.Request, name string, dst *int) bool {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, name+": want an integer")
+		return false
+	}
+	*dst = n
 	return true
 }
 
