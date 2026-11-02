@@ -46,11 +46,15 @@ type Job struct {
 	PlanVersion int
 	// Ticket is the ticket as data for the prompt (ticket.json).
 	Ticket json.RawMessage
-	// Purpose is "build" (from the default branch) or "fix" (on top of the
-	// PR's head, with Failure).
+	// Purpose is "build" (from the default branch), "fix" (on top of the
+	// PR's head, with Failure) or "revise" (on top of the PR's head, with
+	// Review).
 	Purpose string
 	Failure json.RawMessage
-	Policy  spec.BuildRepo
+	// Review is the review comments the run is given (review.json), as
+	// the person wrote them; empty when none waits.
+	Review json.RawMessage
+	Policy spec.BuildRepo
 	// Model and MaxTurns are the build agent's runner's; Timeout its.
 	Model    string
 	MaxTurns int
@@ -153,6 +157,10 @@ func TrustBoundary(repo string, paths []string) []string {
 	return out
 }
 
+// fromPRHead reports whether a build of purpose starts from the PR's head,
+// as store.FromPRHead does: a fix and a revise commit on top of it.
+func fromPRHead(purpose string) bool { return purpose == "fix" || purpose == "revise" }
+
 func (r *Runner) cloneURL(repo string) string {
 	if r.CloneURL != nil {
 		return r.CloneURL(repo)
@@ -232,7 +240,7 @@ func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
 	}
 
 	start := defSHA
-	if j.Purpose == "fix" {
+	if fromPRHead(j.Purpose) {
 		if branchSHA == "" {
 			return nil, fmt.Errorf("the PR's branch %s is gone; retry the ticket to build it again", branch)
 		}
@@ -416,7 +424,7 @@ func (r *Runner) redeliver(ctx context.Context, j Job, d Deps, g git, res *Resul
 		return nil, err
 	}
 	res.HeadSHA, res.BaseSHA = head, strings.Fields(parent + " ")[0]
-	if j.Purpose == "fix" {
+	if fromPRHead(j.Purpose) {
 		res.BaseSHA = ""
 	}
 	if names, err := g.run(ctx, nil, "diff", "--name-only", "-z", res.HeadSHA+"^", res.HeadSHA); err == nil {
