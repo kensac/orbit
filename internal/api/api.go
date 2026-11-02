@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -26,6 +27,7 @@ import (
 	"github.com/kensac/orbit/internal/auth"
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/push"
+	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -60,6 +62,17 @@ type Server struct {
 	OAuth *OAuthProxy
 	// LinkClient, when set, fetches another orbit's template link in place of the guarded client (share.go's fetchBundle); tests point it at a local TLS server, which the guard refuses.
 	LinkClient *http.Client
+	// Boxes returns sandboxd's client for agents' boxes (terminals.go);
+	// nil is no boxes, and every workspace has no terminals.
+	Boxes func() (*sandbox.Client, error)
+	// WorkspaceOrigins are the Origins a terminal socket accepts
+	// (ORBIT_WORKSPACE_ORIGINS); empty is DefaultWorkspaceOrigins.
+	WorkspaceOrigins []string
+	// TerminalPing overrides terminalPing when set; tests shorten it.
+	TerminalPing time.Duration
+
+	termMu      sync.Mutex
+	termClients map[string]int
 }
 
 // Handler returns the public listener's routes, the ones traefik serves.
@@ -148,6 +161,14 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/comments/{comment}/edit", s.editComment)
 	api("POST /api/v1/tickets/{id}/comments/{comment}/withdraw", s.withdrawComment)
 	api("POST /api/v1/tickets/{id}/review", s.submitReview)
+	api("GET /api/v1/agents/{name}/workspace", s.agentWorkspace)
+	api("POST /api/v1/workspaces/{id}/terminals", s.createTerminal)
+	api("GET /api/v1/workspaces/{id}/terminals", s.listTerminals)
+	api("GET /api/v1/terminals/{tid}", s.getTerminal)
+	api("POST /api/v1/terminals/{tid}/kill", s.killTerminal)
+	api("POST /api/v1/terminals/{tid}/attach", s.attachTicket)
+	// The ticket in Sec-WebSocket-Protocol is the credential (terminals.go).
+	mux.HandleFunc("GET /api/v1/terminals/{tid}/ws", s.terminalSocket)
 	s.memoryRoutes(api)
 	s.skillsRoutes(api)
 	s.templatesRoutes(api)
