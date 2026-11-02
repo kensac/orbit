@@ -75,6 +75,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `private_key_env` | env var | required | The App's PEM private key, or base64 of it. Read by orbit, never by a model. |
 | `api_url` | URL | `https://api.github.com` | GitHub's API (tests, Enterprise). |
 | `repositories` | list of `owner/name` | required | The repositories tickets and `github:merge` may target; every token is limited to one. |
+| `read_repositories` | list of `owner/name` | none | The repositories an agent's `repos` may name: orbit mirrors them and mints read tokens for them. Reading one never permits a ticket or a merge there (configuration.md, Repositories). |
 
 ### `build`
 
@@ -165,6 +166,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `sandbox` | `workstation`, `build` | none | Needs `chat` and a sandboxd. Runs the CLI in a sandboxd container per conversation: `workstation` has every Claude Code tool and egress to any public host; `build` has its `tools` and the build allowlist (security.md, Sandboxed chats). |
 | `needs` | list of capabilities | none | What a host must have to run the agent (`docker-network:hetzner`); without any, every host. |
 | `delegates` | list of agent names, or `["*"]` | none | Agents this one may hand tasks to; the `delegate` action also needs a rule. |
+| `repos` | list (below) | none | Repositories every run reads: the tree at a commit under `inputs/repos/<name>/`, plus orbit's history and pull request tools. Each must be in `github.read_repositories`; needs `github` in `needs` and a claude-code or codex runner. |
 
 ### `triggers[]`
 
@@ -261,6 +263,13 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 |---|---|---|---|
 | `channels` | list of channel names | `defaults.channels` | Where unattended runs report. |
 | `when` | `always`, `agent`, `never` | `always` | `agent`: only when the run asks. Failures and pending approvals of unattended runs always notify; a run answering a message never does. |
+
+### `repos[]`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `repo` | `owner/name` | required | One of `github.read_repositories`; its name (after the owner) is unique within the agent. |
+| `ref` | branch, tag or commit sha | the default branch | What the run's tree is; resolved to a commit in orbit's mirror before each run. |
 
 ### `session`
 
