@@ -20,7 +20,8 @@ This document is the design. What exists today:
 | the `build:` section of `orbit.yaml` | **Built**, unit-tested | `internal/spec/build.go` |
 | the build runner: clone, sandbox, the CLI under orbit's permission handler, readback, diff policy, commit, push, PR; decisions and sandboxes recorded per attempt | **Built**; tested against a fake sandboxd and a fake GitHub, with a real git remote; the permission protocol **seen** against the real CLI 2.1.316 (`TestRealCLIPermissionProtocol`); the whole run against a real sandboxd and docker in CI (`TestIntegrationBuild`) | `internal/build`, `internal/engine/build.go`, `internal/store/builds.go`, `migrations/00007_builds.sql` |
 | the ticket loop: build enqueue, PR and checks polling, proposing the merge, reruns of failed jobs (its own and a person's), fix attempts with the failure report, done on deploy, reconciliation, closing an abandoned ticket's PR, the self-hosting rules | **Built**, tested against a fake GitHub and real Postgres | `internal/tickets` |
-| review comments; `skipped` as a run status for gates | not built | specified below |
+| review comments: drafts, edits as new versions, one structured message per review, the revise build that applies them, delivered when it succeeds | **Built**, tested against real Postgres and a fake GitHub | `internal/store/reviews.go`, `internal/api/reviews.go`, `migrations/20261102032212_review_comments.sql` |
+| `skipped` as a run status for gates | **Built** for a build that redelivers an earlier attempt's push | `store.FinishBuild` |
 
 Nothing has run against the real GitHub API yet; the fake
 (`internal/github/githubtest`) follows GitHub's documented shapes. No
@@ -63,7 +64,7 @@ Nothing about a thread is built twice. What tickets add is the lifecycle:
 | `tickets` | one row per ticket: kind, title, the agent discussing it, the target repository, status, the approved plan, the branch, PR and merge commit, and `conversation_id` (unique: one ticket per conversation) | the lifecycle has states no conversation has |
 | `ticket_events` | every transition: from, to, who, when, detail | the history of a ticket is a record, never overwritten (a `tickets.status` alone would lose it) |
 | `ticket_plans` | every plan version an agent proposed, and which one was approved | a plan is approved by version; a later plan must never inherit an earlier approval |
-| `ticket_review_comments` | line comments on a PR's diff and the message that delivered them | a comment is anchored to a file and lines, and delivered exactly once (Lifecycle) |
+| `ticket_review_comments`, `ticket_build_comments` | line comments on a PR's diff, the message that carried them, and the build runs given them | a comment is anchored to a file, lines and a commit, and delivered exactly once (Lifecycle) |
 
 **Scoping** is the conversation's: two tickets with the same agent never see
 each other's words, and ticket work never touches the agent's other
@@ -114,7 +115,8 @@ request:
    +------ open (plan revised)   failed  (fix) failed  failed       |
    +------------------------------ failed (person reopens to discuss)
   approved <- failed (person retries the build with the same plan)
-  review <- failed (person reruns the PR's failed checks)
+  review <- failed (person reruns the PR's failed checks, or submits a review)
+  review -> building (a revise applies a submitted review)
   review, failed -> merged (reconciliation: GitHub says the PR merged)
   any state before merged -> abandoned
 ```
@@ -125,7 +127,7 @@ request:
 | `planned` | a plan version waits for the person | the person approving that version (`approved`) or replying, which reopens it (`open`) |
 | `approved` | the approved plan waits for a build run | the harness enqueuing the build run (`building`) |
 | `building` | the build run is working in its sandbox | the harness opening the PR (`review`), or the build failing (`failed`) |
-| `review` | the PR is open; checks are running | the gate seeing every required check green (`merging`), a check failing (a fix, `building`, or `failed` once `tickets.MaxFixAttempts` fixes are spent), the PR merged by a person on GitHub (`merged`) |
+| `review` | the PR is open; checks are running | a submitted review (a revise, `building`), the gate seeing every required check green (`merging`), a check failing (a fix, `building`, or `failed` once `tickets.MaxFixAttempts` fixes are spent), the PR merged by a person on GitHub (`merged`) |
 | `merging` | a `github:merge` action exists | the action executing (`merged`), failing (`failed`), or being rejected (`failed`) |
 | `merged` | the PR is merged; for orbit itself, the new revision is not yet running | deployment confirmed (`done`) |
 | `done`, `abandoned` | terminal | nothing |
@@ -199,14 +201,13 @@ A fix run (`ticket_builds.purpose = fix`, `review -> building`) gets exactly tha
 
 **Rerunning checks by hand.** `POST /tickets/{id}/checks/rerun` records a request (`ticket_check_reruns`, one waiting per ticket) on a PR in `review` or `failed`; the loop carries it out on its next tick: it reruns the failed Actions jobs at the head the request named and moves a failed ticket back to `review` in the same transaction as the request's outcome (`store.FinishRerun`, the only way along `failed -> review`). A PR that closed or whose head moved answers the request with why, and the ticket stays.
 
-**Review comments.** A person can review the PR's diff in orbit: line
-comments `{path, start_line, end_line, body}` are stored as
-`ticket_review_comments` rows, and submitting the review sends them to the
-ticket's thread as one structured message (each comment with its file and
-line range), which wakes the next run. A comment records the message that
-carried it; it counts as delivered once the run that consumed that message
-succeeded, and a failed run hands the message back like any other, so a
-comment is never lost and never sent twice. An edited comment is a new row.
+**Review comments.** A person reviews the PR's diff in orbit (`internal/store/reviews.go`, the API below):
+
+- **Drafts.** A comment is `{path, start_line, end_line, body}` on the ticket's PR at its current head (`head_sha` is recorded with it; lines `0` and `0` mean the whole file), allowed while the ticket is `building`, `review`, `merging` or `failed`. A path must be clean and inside the repository; a body is at most 8 KB. A draft can be withdrawn; nothing is deleted.
+- **Edits are new rows.** Editing writes a new draft that `supersedes` the old version, which keeps its state: a submitted one is no longer given to any build, a delivered one stays delivered. A version is edited at most once.
+- **Submit.** `POST /tickets/{id}/review` sends every draft to the ticket's thread as one message (`store.FormatReview`: the PR and commit, the person's note, then each comment with its file and lines and its body quoted line by line, so nothing in a body can pass for another comment), in one transaction with each draft's `message_id`. Allowed on a PR in `review` or `failed`; a failed ticket goes back to `review` with it, and a failed ticket with submitted comments still waiting may be resubmitted with no new draft.
+- **Apply.** The loop, seeing submitted comments waiting on a ticket in review, starts a revise build (`ticket_builds.purpose = revise`, `review -> building`) before it looks at the checks, so nothing is merged past a person's review. `StartBuild` records every waiting comment as given to the run (`ticket_build_comments`) and marks their messages read by it. A revise starts from the PR's head, commits on top of it, and gets the comments as `review.json` with instructions to apply each and to leave, and explain, one the plan does not cover. A retried build from the default branch is given waiting comments too; a fix is not.
+- **Delivered once.** A comment is `delivered` once a run given it succeeded (or was skipped redelivering that run's push); until then every later build is given it again, so a comment is never lost and never applied twice. Statuses: `draft`, `submitted`, `delivered`, `superseded`, `withdrawn`, derived from the rows, never stored.
 
 **Prechecks are gates.** Before any build or retry run calls the backend,
 tested Go predicates decide whether there is work: the PR already merged,
@@ -231,6 +232,7 @@ reconciles at a time, stopped by a drain) holds no state between ticks:
 | `approved` | | enqueues the build (waits while the repository has one building) |
 | `building` | the build run failed or was cancelled without moving it (the reaper ran out of attempts) | `failed` with the run's error |
 | `review` | PR merged / closed / head moved off what orbit built | `merged` / `failed` / `failed` |
+| `review` | a submitted review waits | a revise (`building`) |
 | `review` | checks green at the head orbit built | proposes `github:merge` (`merging`); waits while another ticket of the repository merges |
 | `review` | a check failed | a rerun (once per head), then a fix (`building`), or `failed` after `MaxFixAttempts` or when the base fails it too |
 | `merging` | the action executed | `merged` with its merge commit |
@@ -261,6 +263,11 @@ same id for a different request is a 409.
 | `POST` | `/tickets/{id}/abandon` | `{"reason"}` | `{"ok": true}`; 409 once merged or terminal |
 | `POST` | `/tickets/{id}/retry` | | `{"ok": true}`; `failed -> approved` |
 | `POST` | `/tickets/{id}/reopen` | | `{"ok": true}`; `failed -> open` |
+| `GET` | `/tickets/{id}/comments` | | `{"comments": [...]}`, every version, oldest first, each with its `status` |
+| `POST` | `/tickets/{id}/comments` | `{"path", "start_line", "end_line", "body"}` | `201 {"comment"}`, a draft; 400 for a path outside the repository or a bad range; 409 without a PR |
+| `POST` | `/tickets/{id}/comments/{comment}/edit` | `{"start_line", "end_line", "body"}` | `201 {"comment"}`, the new version; 409 for a withdrawn or already edited one |
+| `POST` | `/tickets/{id}/comments/{comment}/withdraw` | | `{"ok": true}`; 409 unless it is a draft |
+| `POST` | `/tickets/{id}/review` | `{"body", "client_request_id"}` | `201 {"message_id", "comments"}`; 400 with nothing to send; 409 unless the PR is in `review` or `failed` |
 | `POST` | `/tickets/{id}/checks/rerun` | | `202 {"rerun": {...}}`; the loop reruns the PR's failed checks; 409 without a PR in `review` or `failed`, or while one waits |
 
 A ticket's thread and its messages are its conversation's:
@@ -357,7 +364,7 @@ ticket approved
 The build run is a run of the agent `build.agent` names. It is in the
 ticket's conversation when that agent is the ticket's, and in the build
 agent's default conversation otherwise (a run is always in a conversation
-of its own agent). It reads no messages and writes no memory.
+of its own agent). It reads no messages (the review messages whose comments it is given are marked read by it, so the discussion agent does not answer them too) and writes no memory.
 
 **Attempts.** A build run is claimed, heartbeated and fenced like any run:
 its permission decisions (`build_decisions`) and its sandboxes
