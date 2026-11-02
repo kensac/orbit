@@ -5,6 +5,8 @@ go 1.26.0
 toolchain go1.27.3
 
 require (
+	github.com/emersion/go-imap v1.2.1
+	github.com/emersion/go-message v0.18.2
 	github.com/go-jose/go-jose/v4 v4.1.7
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/pressly/goose/v3 v3.29.0
@@ -18,6 +20,7 @@ require (
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.3 // indirect

@@ -124,6 +124,15 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
   and Stop (the stream already records every tool result, and the output to
   verify is the StructuredOutput call, not the stop).
 
+## Mail
+
+With `mail` configured (configuration.md), a person talks to orbit by mail as well as by the API (`internal/mail`):
+
+- **Out.** Every mail orbit sends for a run carries `Reply-To: local+<token>@domain` and `Message-ID: <orbit.<token>.<random>@domain>`, where the token is the run's conversation id and an HMAC of it under the operator token (`mail.Token`), plus `References: <orbit.<token>@domain>` so a mail client threads a conversation. A report for a run that read a mail is always sent (whatever `notify.when` is, except `never`), as a reply to that mail (`In-Reply-To`, `Re:` its subject).
+- **In.** A poller (every `poll`, on each instance that takes claims) reads the unseen mails of the IMAP mailbox. Each is parsed in code: the sender, the tokens it names (a recipient's plus address, then `In-Reply-To`, then `References`), and its text (plain, or the HTML as text) with the quoted mail and signature cut deterministically (`StripQuoted`). A mail from an allowed sender that names a signed token becomes a message in that conversation; one that names none opens a new conversation with `mail.agent`, titled by its subject. Automatic mail (`Auto-Submitted`, `Precedence: bulk`) and a failed DMARC result in `Authentication-Results` are ignored, so an out-of-office reply cannot start a loop. The author is the sender's address.
+- **Once.** `IngestMail` writes the message, its run and the `mail_in` row in one transaction keyed by Message-ID, and the mail is marked seen only after; a database error leaves it unseen for the next poll.
+- **Attachments** are not uploads yet: the message names each (file, type, size) and the raw mail is kept in `mail_in`.
+
 ## Continuations
 
 An agent with the `continue` action may ask to be woken again

@@ -37,6 +37,16 @@ channels:
   log:
     kind: log
 
+# orbit's mailbox (docs/agents/configuration.md, Mail): replies to its mails
+# continue their conversation; a new mail starts one with `agent`.
+mail:
+  address: orbit@example.com
+  imap:
+    host: mail.example.com
+    username_env: ORBIT_SMTP_USER
+    password_env: ORBIT_SMTP_PASS
+  allow: [me@example.com]
+
 endpoints:
   home-assistant:
     url: http://homeassistant.example.ts.net:8123/api/webhook/orbit

@@ -41,6 +41,7 @@ import (
 	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/harness"
+	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/scheduler"
@@ -229,6 +230,9 @@ func validate(args []string) error {
 	}
 	if g := cfg.Deployment.GitHub; g != nil {
 		refs[g.PrivateKeyEnv] = true
+	}
+	if m := cfg.Deployment.Mail; m != nil {
+		refs[m.IMAP.UsernameEnv], refs[m.IMAP.PasswordEnv] = true, true
 	}
 	if b := cfg.Deployment.Build; b != nil {
 		refs[b.TokenEnv] = true
@@ -420,6 +424,16 @@ func serve(ctx context.Context, log *slog.Logger) error {
 				Store: s, Config: func() *spec.Config { return eng.Current().Config }, Env: os.LookupEnv,
 				Client: &http.Client{Timeout: 2 * time.Minute}, Revision: revision, Log: log.With("component", "tickets"),
 				Approval: eng.NotifyApproval, Wake: nudge,
+			}).Run(claimCtx)
+		}()
+
+		// The mailbox poller turns mail into messages; it stops with claims, so a draining instance leaves the mailbox to the ready one (two polling at once is safe: a mail is acted on once, by Message-ID).
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			(&mail.Poller{
+				Store: s, Config: func() *spec.Config { return eng.Current().Config }, Secret: []byte(token),
+				Env: os.LookupEnv, Log: log.With("component", "mail"), Wake: nudge,
 			}).Run(claimCtx)
 		}()
 

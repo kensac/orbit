@@ -39,6 +39,21 @@ Open decisions). Without the section no ticket is built; approved tickets
 wait. orbit also needs `CLAUDE_CODE_OAUTH_TOKEN`, the one credential the
 sandbox receives. `orbit validate` lists both variables.
 
+## Mail
+
+`mail:` in `orbit.yaml` gives orbit a mailbox, so a person can answer its mails and write to it (`internal/mail`, docs/ARCHITECTURE.md, Mail):
+
+```yaml
+mail:
+  address: orbit@example.com      # bare, no plus part; replies go to its plus form
+  imap: {host: mail.example.com, port: 993, username_env: SMTP_USER, password_env: SMTP_PASS, mailbox: INBOX}
+  allow: [me@example.com]         # default: every smtp channel's `to`
+  agent: assistant                # a mail that is not a reply opens a conversation here
+  poll: 1m
+```
+
+`port` defaults to 993 (implicit TLS); any other port must offer STARTTLS. `mailbox` defaults to `INBOX` and must be orbit's own: every unseen mail in it is read and marked seen. The server must deliver `local+anything@domain` to the mailbox (Postfix's `recipient_delimiter`). Without `agent`, a mail that is not a reply is recorded and ignored. `poll` is at least 10s. With the section, every mail orbit sends carries a reply address and Message-ID naming its run's conversation.
+
 ## Templates in sources
 
 URLs and query values may use `{{today}}`, `{{now}}`, `{{month_start}}`,

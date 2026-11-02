@@ -26,6 +26,7 @@ import (
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/harness"
+	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/notify"
 	"github.com/kensac/orbit/internal/runner"
@@ -557,6 +558,15 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		pr = notify.Default
 	}
 	send := a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send)
+	// A person who wrote by mail is answered by mail, as a reply to theirs.
+	var inReplyTo, mailSubject string
+	if snap.Config.Deployment.Mail != nil {
+		var merr error
+		if inReplyTo, mailSubject, merr = e.Store.MailForRun(ctx, c.ID); merr != nil {
+			e.Log.Warn("mail for run", "run", c.ID, "err", merr)
+		}
+		send = send || inReplyTo != ""
+	}
 	if send || len(out.Questions) > 0 {
 		title := out.Notify.Title
 		if title == "" {
@@ -573,10 +583,18 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 				body += "\n- " + q
 			}
 		}
-		e.deliver(ctx, snap, a, &c.ID, nil, "report", notify.Message{
+		m := notify.Message{
 			Title: a.Name + ": " + title, Body: strings.TrimSpace(body), Priority: pr,
 			Tags: []string{"orbit", a.Name}, Link: link,
-		})
+		}
+		if inReplyTo != "" {
+			m.InReplyTo = inReplyTo
+			if mailSubject != "" && !strings.HasPrefix(strings.ToLower(mailSubject), "re:") {
+				mailSubject = "Re: " + mailSubject
+			}
+			m.Subject = mailSubject
+		}
+		e.deliver(ctx, snap, a, &c.ID, nil, "report", m)
 	}
 	for i, pa := range o.Actions {
 		if pa.Rule != string(spec.RuleApprove) {
@@ -634,6 +652,7 @@ func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, run
 		return
 	}
 	ctx = context.WithoutCancel(ctx)
+	e.mailHeaders(ctx, snap, runID, &m)
 	for _, name := range a.Notify.Channels {
 		ch := snap.Channels[name]
 		sendCtx, cancel := context.WithTimeout(ctx, time.Minute)
@@ -647,6 +666,27 @@ func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, run
 			e.Log.Error("record delivery", "err", rerr)
 		}
 	}
+}
+
+// mailHeaders names the run's conversation in m's reply address and Message-ID when orbit has a mailbox, so a reply to the mail continues that conversation (internal/mail).
+func (e *Engine) mailHeaders(ctx context.Context, snap *Snapshot, runID *string, m *notify.Message) {
+	mc := snap.Config.Deployment.Mail
+	if mc == nil || runID == nil {
+		return
+	}
+	conv, err := e.Store.RunConversation(ctx, *runID)
+	if err != nil {
+		e.Log.Warn("mail headers", "run", *runID, "err", err)
+		return
+	}
+	tok := mail.Token(e.Secret, conv)
+	m.ReplyTo = mail.ReplyAddress(mc.Address, tok)
+	m.MessageID = mail.MessageID(mc.Address, tok)
+	ref := mail.ThreadRef(mc.Address, tok)
+	if m.InReplyTo != "" {
+		ref += " " + m.InReplyTo
+	}
+	m.References = ref
 }
 
 func (e *Engine) runLink(snap *Snapshot, runID string) string {

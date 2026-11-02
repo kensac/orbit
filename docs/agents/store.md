@@ -47,5 +47,7 @@ moves `last_activity_at`). Every query that reads a thread for a run filters
 by the run's conversation. Conversations are archived, never deleted, and
 the default one cannot be archived.
 
+A mail (`mail_in`, keyed by Message-ID) is recorded in the same transaction as the message and run it becomes (`IngestMail`), so a mail fetched twice, by two instances or after a crash before it was marked seen, is acted on once. An ignored mail is recorded with its reason; every row keeps the raw mail.
+
 Every transition is a guarded UPDATE (`WHERE status = ...`); zero rows
 affected is `ErrConflict`, not success.
