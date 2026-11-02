@@ -22,6 +22,7 @@ import (
 // importCmd seeds orbit from Claude Code's files on disk, through the API:
 //
 //	orbit import claude-memory <dir> --scope <profile|topic:NAME|agent:NAME> [--profile-types user] [--apply]
+//	orbit import skills <dir> [--only a,b] [--attach agent] [--apply]
 //
 // Without --apply it is a dry run: the server reports what it would create, update or leave alone, and writes nothing. --print shows what was read from disk without calling the server at all.
 func importCmd(ctx context.Context, args []string) error {
@@ -31,8 +32,10 @@ func importCmd(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "claude-memory":
 		return importMemory(ctx, args[1:])
+	case "skills":
+		return importSkills(ctx, args[1:])
 	}
-	return fmt.Errorf("import: unknown kind %q (want claude-memory)", args[0])
+	return fmt.Errorf("import: unknown kind %q (want claude-memory or skills)", args[0])
 }
 
 // apiFlags are how an operator command reaches an orbit API: by default the internal listener inside the container, with the operator token.
@@ -179,6 +182,98 @@ func importMemory(ctx context.Context, args []string) error {
 	fmt.Printf("\n%d created, %d updated, %d unchanged (%s); %d skipped\n", counts["created"], counts["updated"], counts["unchanged"], verb, len(warnings))
 	if out.DryRun {
 		fmt.Println("dry run: nothing was written; run again with --apply")
+	}
+	return nil
+}
+
+// importSkills sends each skill directory under dir to POST /api/v1/skills/import, and with --attach attaches them to an agent.
+func importSkills(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("import skills", flag.ContinueOnError)
+	var api apiFlags
+	api.register(fs)
+	only := fs.String("only", "", "comma list of skill names to import (default: every skill under the directory)")
+	attach := fs.String("attach", "", "an agent to attach the imported skills to (with --apply)")
+	apply := fs.Bool("apply", false, "write the skills; without it the server only reports what it would do")
+	printOnly := fs.Bool("print", false, "list the skills read from disk and stop, without calling the server")
+	dir, rest := "", args
+	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		dir, rest = rest[0], rest[1:]
+	}
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	if dir == "" && fs.NArg() > 0 {
+		dir = fs.Arg(0)
+	}
+	if dir == "" {
+		return errors.New("import skills: name the skills directory (~/.claude/skills or a project's .claude/skills)")
+	}
+	skills, warnings, err := claudeimport.ReadSkillsDir(dir)
+	if err != nil {
+		return err
+	}
+	if *only != "" {
+		want := map[string]bool{}
+		for _, n := range strings.Split(*only, ",") {
+			want[strings.TrimSpace(n)] = true
+		}
+		var kept []claudeimport.Skill
+		for _, k := range skills {
+			if want[k.Name] {
+				kept = append(kept, k)
+				delete(want, k.Name)
+			}
+		}
+		for n := range want {
+			warnings = append(warnings, n+": not found under "+dir)
+		}
+		skills = kept
+	}
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "warning:", w)
+	}
+	if *printOnly {
+		for _, k := range skills {
+			size := len(k.Content)
+			for _, f := range k.Files {
+				size += len(f.Content)
+			}
+			fmt.Printf("%s\t%d files\t%d bytes\n", k.Name, len(k.Files), size)
+		}
+		return nil
+	}
+	var out struct {
+		DryRun  bool                      `json:"dry_run"`
+		Results []store.SkillImportResult `json:"results"`
+	}
+	abs, _ := filepath.Abs(dir)
+	if err := api.call(ctx, http.MethodPost, "/api/v1/skills/import", map[string]any{
+		"dry_run": !*apply, "skills": skills, "note": "imported from " + filepath.Base(abs),
+	}, &out); err != nil {
+		return err
+	}
+	counts := map[string]int{}
+	for _, r := range out.Results {
+		fmt.Printf("%s\t%s\tversion %d\n", r.Outcome, r.Name, r.Version)
+		counts[r.Outcome]++
+	}
+	verb := "would be"
+	if !out.DryRun {
+		verb = "were"
+	}
+	fmt.Printf("\n%d created, %d updated, %d unchanged (%s); %d skipped\n", counts["created"], counts["updated"], counts["unchanged"], verb, len(warnings))
+	if out.DryRun {
+		fmt.Println("dry run: nothing was written; run again with --apply")
+		return nil
+	}
+	if *attach != "" {
+		for _, r := range out.Results {
+			var res map[string]any
+			if err := api.call(ctx, http.MethodPut, "/api/v1/agents/"+*attach+"/skills/"+r.Name, nil, &res); err != nil {
+				return err
+			}
+			fmt.Printf("attached %s to %s\n", r.Name, *attach)
+		}
 	}
 	return nil
 }

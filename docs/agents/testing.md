@@ -29,11 +29,13 @@ orbit any placeholder token so the runner builds.
 
 After changing `internal/harness` or its wiring, run an agent with
 `verify: [figures]` and a JSON `file` source: the init event lists
-`mcp__orbit__query` and `mcp__orbit__calc`, the totals come from query calls,
+`mcp__orbit__query`, `mcp__orbit__calc` and `mcp__orbit__search`, a search for a word of an earlier run's report finds it, the totals come from query calls,
 a Read of `../x` is denied with orbit's message, and a figure asked for "in
 your head" is sent back and recomputed with a tool.
 
 After changing the hook events or `internal/status`, watch `runs.hook_status` during that run: it reads `working` from UserPromptSubmit and `done` at Stop, the run's events hold an `orbit.hook` per hook event (SessionStart, UserPromptSubmit, a PreToolUse and a PostToolUse per allowed tool, Stop), and a second message to a live process records only its own turn's events (a new `prompt_id`, no SessionStart). The SessionEnd a live process sends when it closes lands in the spool, read by no run.
+
+After changing skills or their wiring, run an agent with one skill whose `SKILL.md` tells it to read a file of the skill: the run's events show the `Skill` tool on `orbit:<name>`, then `mcp__orbit__skill` for `SKILL.md` and for the file, and the answer uses the file's content (seen on 2.1.316).
 
 After changing sessions or the live process, also run an agent with
 `session: {resume: true, live: 10m}` and `continue: approve`: a message (run

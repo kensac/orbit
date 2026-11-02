@@ -3,6 +3,8 @@ package harness
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,7 +131,7 @@ func TestMCPServer(t *testing.T) {
 		`{"jsonrpc":"2.0","id":5,"method":"nope"}`,
 	}, "\n")
 	var out bytes.Buffer
-	if err := ServeMCP(strings.NewReader(in), &out, root, state, "test"); err != nil {
+	if err := ServeMCP(strings.NewReader(in), &out, root, state, "", "test"); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
@@ -317,5 +319,62 @@ func TestHookReportsEveryEvent(t *testing.T) {
 	o.State = filepath.Join(blocked, "state")
 	if v := hook(t, o, `{"hook_event_name":"Stop"}`); len(v) != 0 {
 		t.Fatalf("decision = %v", v)
+	}
+}
+
+func TestMCPSearchAsksTheEngineSocket(t *testing.T) {
+	sock := filepath.Join(os.TempDir(), fmt.Sprintf("orbit-test-%d.sock", os.Getpid()))
+	_ = os.Remove(sock)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(sock) })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			req, err := ReadSearchRequest(conn)
+			resp := SearchResponse{Result: map[string]any{"total": 1, "echo": req.Q}}
+			if err != nil {
+				resp = SearchResponse{Error: err.Error()}
+			}
+			b, _ := json.Marshal(resp)
+			_, _ = conn.Write(append(b, '\n'))
+			_ = conn.Close()
+		}
+	}()
+	root, state := workdir(t), t.TempDir()
+	in := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"q":"heat pump","kind":"report"}}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"q":"x","agent":"other"}}}`,
+	}, "\n")
+	var out bytes.Buffer
+	if err := ServeMCP(strings.NewReader(in), &out, root, state, sock, "test"); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 3 || !strings.Contains(lines[0], `"name":"search"`) {
+		t.Fatalf("tools/list = %s", out.String())
+	}
+	if !strings.Contains(lines[1], `\"echo\":\"heat pump\"`) || strings.Contains(lines[1], "isError") {
+		t.Errorf("search = %s", lines[1])
+	}
+	if !strings.Contains(lines[2], `"isError":true`) || !strings.Contains(lines[2], "agent") {
+		t.Errorf("a search naming an agent must be refused: %s", lines[2])
+	}
+	if ledger, _ := os.ReadFile(LedgerPath(state)); len(ledger) != 0 {
+		t.Fatalf("a search result backs no figure, but the ledger has %s", ledger)
+	}
+
+	out.Reset()
+	if err := ServeMCP(strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), &out, root, state, "", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), `"name":"search"`) {
+		t.Fatal("search listed without a socket")
 	}
 }

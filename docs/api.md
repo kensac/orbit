@@ -132,7 +132,8 @@ returns `201`:
  "spec": {"name": "news", "...": "the agent as loaded, defaults applied"},
  "definition": {"id": 7, "name": "news", "version": 1, "spec": {"...": "as stored"},
                 "enabled": true, "archived": false, "change": "create",
-                "author": "kanishk", "created_at": "..."},
+                "author": "kanishk", "created_at": "...",
+                "run_id": null, "edited_by": "kanishk"},
  "next_fires": [{"trigger_index": 0, "schedule": "0 8 * * *", "at": "..."}],
  "agent": {"name": "news", "origin": "database", "version": 1, "...": "as in GET /agents"}}
 ```
@@ -143,7 +144,9 @@ returns `201`:
   stored on the definition, not in `spec`.
 - A name already defined in the database (and not archived) is `409`; an
   archived name may be created again, as its next version.
-- `author` is the token's person (`null` with the operator token).
+- `author` is the token's person (`null` with the operator token). For a change an agent made (`agent:define`, below), it is the person whose message the agent was answering (`null` for an unattended run).
+- `run_id` is the run of the agent that made the change, `null` for a change made through this API. `edited_by` names the editor: the agent's name when `run_id` is set, else `author`, else `operator`.
+- `change` is `create`, `update`, `enable`, `disable`, `archive` or `revert`; a revert also carries `reverts`, the version it restored.
 
 `PUT /agents/{name}` `{"spec": {...}, "dry_run": false}` replaces the spec
 with a new version: `200`, the same shape (`change: "update"`). `spec.name`
@@ -155,6 +158,10 @@ the same spec, `200` in the same shape. An archived agent is no longer
 configured (`present: false` in the list); its runs and conversations stay
 readable. Changing an archived agent is `404`; a file or built-in agent is
 `409`.
+
+`POST /agents/{name}/definitions/{version}/revert` puts an earlier version back: a new version with that version's spec and enabled state (`change: "revert"`, `reverts: <version>`), `200` in the same shape. A version that archived the agent cannot be reverted to (`400`); an archived agent is `404`.
+
+**Agents change agents.** An agent whose rules enable `agent:define` (the built-in `orbit` does, `auto`) proposes `{"spec": {...}}`: a whole agent, as `POST /agents` takes it, for a new agent or one already defined in the database or built in, itself included. Executed, it goes through the same validation and is stored as the next version with the run as `run_id`. A file agent cannot be changed this way (the action fails, naming why).
 
 `GET /agents/{name}/definitions` is `{"name": "news", "origin":
 "database", "versions": [<definition>, ...]}`, newest first (empty for a
@@ -215,6 +222,33 @@ characters (400 otherwise). The default conversation cannot be archived
 `POST /conversations/{id}/messages` takes and returns exactly what
 `POST /agents/{name}/messages` does (below), in that conversation.
 
+## Uploads
+
+Files a person gives an agent, as Claude Code takes a file: uploaded into a conversation, then carried by a message. The run that reads the message finds each file in its working directory at `uploads/<name>` and is told so in its prompt (`attached: uploads/<name> (<type>, <n> bytes)`); an image is readable with Claude Code's `Read`, as a picture. A file is at most 64 MiB (`store.MaxUploadBytes`), and kept whole (`uploads`).
+
+`POST /conversations/{id}/uploads` takes `multipart/form-data` with one file (the field `file`, or the first part with a file name) and returns `201`:
+
+```json
+{"upload": {"id": "uuid", "name": "receipt.png", "media_type": "image/png",
+            "bytes": 48213, "sha256": "hex", "created_at": "..."}}
+```
+
+- `name` is the file's base name, without path or control characters, at most 200 bytes. A name already taken in the conversation is numbered: `receipt (2).png`. The stored name is the one returned.
+- `media_type` is the part's `Content-Type`, sniffed from the content when it is absent or `application/octet-stream`.
+
+`POST /conversations/{id}/uploads/url` `{"name": "video.mp4", "media_type": "video/mp4", "bytes": 52428800}` returns a signed URL for a file larger than a proxy in front of orbit accepts:
+
+```json
+{"url": "https://orbit.kanishksachdev.com/api/v1/uploads/signed?...", "method": "PUT",
+ "headers": {"Content-Type": "video/mp4"}, "expires_at": "...", "max_bytes": 52428800}
+```
+
+The browser sends the file as the body of a `PUT` to `url`, with no `Authorization` header: the URL's signature (HMAC under a key derived from `ORBIT_API_TOKEN`) is the credential, and it names one conversation, the name, the type, `bytes` as the most it accepts, the person it was issued to, and an expiry 15 minutes ahead (`api.UploadURLTTL`). The answer is `201` with the same `{"upload": ...}` as above. A URL uploads once: a second `PUT` is `409`. A body larger than `bytes` is `413`, an altered or expired URL `403`. It needs `public_url` in `orbit.yaml` (`503` without it).
+
+`GET /conversations/{id}/uploads/{upload}` is the file: its `media_type` as `Content-Type`, `Content-Disposition: inline` for an image (not SVG) and `attachment` for everything else, with `nosniff` and a CSP that runs nothing.
+
+A message carries uploads with `attachments` (below): ids of uploads of the same conversation, at most 20; one from another conversation is a `400`. A message with attachments may have an empty `body`.
+
 ## A conversation's thread
 
 A thread is the person's messages, the agent's questions, and every run
@@ -229,7 +263,9 @@ conversation:
 {"items": [
   {"kind": "message", "id": "uuid", "at": "...", "from": "person",
    "body": "How much did I spend on Uber Eats?", "author": "kanishk",
-   "run_id": "uuid-of-run-that-read-it"},
+   "run_id": "uuid-of-run-that-read-it",
+   "attachments": [{"id": "uuid", "name": "receipt.png", "media_type": "image/png",
+                    "bytes": 48213, "sha256": "hex", "created_at": "..."}]},
   {"kind": "run", "id": "uuid", "at": "...", "trigger": "message",
    "status": "succeeded", "attempt": 1,
    "started_at": "...", "finished_at": "...", "steps": 4,
@@ -256,7 +292,7 @@ conversation:
   200, and a larger value is clamped.
 - **Messages.** `from` is `person` (to the agent) or `agent` (a question it
   asked). `author` is the person who wrote it (absent for questions).
-  `reply_to`, when set, is the message it answers. `run_id` is the run that
+  `reply_to`, when set, is the message it answers. `attachments` are the uploads it carries (Uploads, above), in order; always an array. `run_id` is the run that
   read a person's message (`null` until one starts) or the run that asked a
   question.
 - **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again) `build` (a ticket's build run, docs/tickets.md) or `learn` (a learning run, below; only in an agent's learning conversation). `status` is
@@ -292,6 +328,7 @@ conversation:
 
 ```json
 {"body": "text", "reply_to": "optional message id", "wake": true,
+ "attachments": ["optional upload ids"],
  "client_message_id": "optional, minted by the client"}
 ```
 
@@ -505,19 +542,7 @@ A row:
 
 ## Tickets
 
-A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)):
-`POST /tickets` (opens its conversation; returns `ticket_id`,
-`conversation_id`, `message_id`, `run_id`), `GET /tickets`,
-`GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that
-reached merging carries `merge_action_id`, its `github:merge` action),
-`POST /tickets/{id}/plans/{version}/approve`, and
-`POST /tickets/{id}/{abandon,retry,reopen}`. Its thread and messages are
-its conversation's (`/conversations/{conversation_id}/thread`,
-`/messages`); a message there reopens a `planned` ticket, and a `merged`,
-`done` or `abandoned` one refuses messages (409). A ticket's conversation
-carries `ticket_id` in the conversation list. Filing and approving take
-`client_request_id`; the author and approver are the token's person. A
-transition the ticket's state does not allow is 409.
+A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /tickets` (opens its conversation; returns `ticket_id`, `conversation_id`, `message_id`, `run_id`), `GET /tickets`, `GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that reached merging carries `merge_action_id`, its `github:merge` action), `POST /tickets/{id}/plans/{version}/approve`, `POST /tickets/{id}/{abandon,retry,reopen}`, and `POST /tickets/{id}/checks/rerun` (`202`; the ticket loop reruns the PR's failed Actions jobs on its next tick, and a failed ticket goes back to review; `GET /tickets/{id}` lists every rerun in `reruns`). Its thread and messages are its conversation's (`/conversations/{conversation_id}/thread`, `/messages`); a message there reopens a `planned` ticket, and a `merged`, `done` or `abandoned` one refuses messages (409). A ticket's conversation carries `ticket_id` in the conversation list. Filing and approving take `client_request_id`; the author and approver are the token's person. A transition the ticket's state does not allow is 409.
 
 ## Memory
 
@@ -597,6 +622,7 @@ After a conversation goes quiet, orbit runs a short learning pass over it (trigg
 | `read_thread` | `agent` or `conversation_id`, `limit` (default 20), `before` | `items`, `has_more`, `next_before`, as a thread page |
 | `list_actions` | `agent`, `status` (default `pending`; `all`) | `actions` |
 | `approve_action`, `reject_action` | `action_id` | the decided `action`; a decided one is an error |
+| `search` | `q`, and as `GET /search`: `agent`, `conversation_id`, `run_id`, `kind`, `from`, `to`, `limit`, `offset` | as `GET /search` |
 
 - **Waiting.** `send_message` and `create_conversation` wait for the run they woke up to `wait_seconds` (default 45, at most 300; `-1` returns at once). A run still going when the wait ends is returned with its status and a `note` to call `wait_for_reply`. A message that woke no run (`wake_on_message` off) says so in `note`.
 - **Streaming.** When the call carries a `progressToken`, the wait sends the run's narration (the stream's `text` and `tool` events, a tool as `<name> <summary>`) as progress notifications on the call's response.
@@ -625,6 +651,70 @@ The access token is authentik's own (the `orbit-mcp` provider), so its issuer an
 | `ORBIT_MCP_REDIRECT_HOSTS` | comma list of hosts a client may redirect to (the host or a subdomain of it), default `claude.ai,claude.com`. Loopback is always allowed. |
 
 `ORBIT_OIDC_GROUP` is required with the issuer. The authentik provider needs the redirect URI `<public_url>/oauth/callback` (strict), the `openid`, `email`, `profile` and `offline_access` scope mappings (profile carries `preferred_username` and `groups`), the `authorization_code` and `refresh_token` grants, and the application bound to the group. traefik must route `/mcp`, `/.well-known/oauth-` and `/oauth/` past forward-auth, as it does `/api/`.
+
+## Skills
+
+orbit keeps a library of Claude Code skills: each a `SKILL.md` (frontmatter with `name` and `description`, then the instructions) and optional files beside it (references, scripts, assets), every version kept. An agent runs with the skills its spec names (`skills`) and those attached here; a run gets each at its current version (docs/ARCHITECTURE.md, Skills). Agents also write and retire their own skills, applied directly (below).
+
+A skill:
+
+```json
+{"name": "monthly-close", "version": 2, "status": "active",
+ "description": "Use when the person asks to close a month.",
+ "sha256": "<hex>", "source": "agent", "source_run_id": "uuid", "author": null,
+ "note": "...", "restored_from": null, "created_at": "...", "updated_at": "...",
+ "file_paths": ["references/format.md"],
+ "content": "<SKILL.md>", "files": [{"path": "references/format.md", "content": "<base64>"}],
+ "agents": ["finance"]}
+```
+
+- `name` matches `^[a-z][a-z0-9-]{0,62}$`; a `name` in the frontmatter must be the same. `description` is the frontmatter's (required: it is how Claude Code decides to use the skill). `SKILL.md` is UTF-8, at most 256 KB; at most 200 files, each at most 4 MB, 16 MB in all; a file's `path` is relative, clean, inside the skill and not `SKILL.md`. A file's `content` is base64.
+- `version` counts versions, the newest in force; `status` is `active` or `retired` (a retired skill is given to no run). `sha256` is over `SKILL.md` and every file. `source` is `person`, `agent` (a run wrote it: `source_run_id`) or `import`. `author` is the token's person for `person` and `import`. `restored_from` is the version a restore copied.
+- `content` and `files` are in the responses of `GET /skills/{name}` and `GET /skills/{name}/versions/{v}` only; lists carry `file_paths`. `agents` (in the list and `GET /skills/{name}`) are the agents that run with it, from their spec or attached.
+
+Routes:
+
+- `GET /skills?status=`: `{"skills": [...]}` by name, current versions; `status` as for entries.
+- `POST /skills` `{"name", "content", "files"?, "note"?}`: `201 {"skill"}`; 409 when the name exists, 400 for an invalid skill.
+- `GET /skills/{name}`: `{"skill": <current, in full>, "versions": [<every version without content>, newest first]}`.
+- `GET /skills/{name}/versions/{version}`: `{"skill": <that version, in full>}`.
+- `PUT /skills/{name}` `{"content", "files"?, "version"?, "note"?}`: the next version (`files` replaces the files; omitted means none). `version` is the version the client read; another is 409. Content and files identical to the current active version write nothing: `{"skill", "changed": false}`.
+- `POST /skills/{name}/restore` `{"restore": <version>, "version"?, "note"?}`: the next version, an active copy of an earlier one.
+- `POST /skills/{name}/retire` `{"version"?, "note"?}`: the next version, retired.
+- `POST /skills/import` `{"dry_run", "skills": [{"name", "content", "files"?}], "note"?}`: each skill's next version where it differs from the current one (or is new, or retired); `{"dry_run", "results": [{"name", "outcome": "created"|"updated"|"unchanged", "version"}]}`, one transaction, at most 100 skills. `orbit import skills` calls it (deployment.md).
+- `PUT /agents/{name}/skills/{skill}` and `DELETE` attach and detach, as for topics; attaching an unknown skill is 404. `GET /agents/{name}/context` lists the agent's `skills`: `[{"name", "from": ["spec"|"api"], "version", "status"}]`, `status` `missing` (and `version` null) for a name no skill has.
+
+**Skills agents write.** A run's output carries `skills` (at most 3): `write` (the whole `SKILL.md` of a new skill, or of one the run has, whose files stay) and `retire` (one the run has). They apply with the run's outcome as `source: "agent"` versions, a write against the version the run was given (a newer one refuses it), and a written skill is attached to the agent. What became of each is the run's `skill-writes.json` artifact (`[{"op", "name", "result": {"outcome", "error", "key", "version"}}]`); the versions the run was given are its `skills.json` artifact. A person reverts with `restore` or `retire`.
+
+## Search
+
+`GET /search?q=&agent=&conversation_id=&run_id=&kind=&from=&to=&limit=&offset=`
+
+Full-text search across everything orbit stores, ranked best first.
+
+```json
+{"query": "electricity bill",
+ "total": 3,
+ "results": [
+   {"kind": "report", "agent": "finance", "conversation_id": "uuid", "run_id": "uuid",
+    "attempt": 1, "seq": null, "message_id": null, "memory_version_id": null,
+    "entry_id": null, "entry_version": null, "scope": null, "owner": null, "title": null,
+    "author": null, "tool": null, "at": "...", "rank": 0.083,
+    "snippet": "The electricity bill rose because of a rate change ...",
+    "snippet_parts": [{"text": "The ", "match": false}, {"text": "electricity", "match": true},
+                      {"text": " ", "match": false}, {"text": "bill", "match": true},
+                      {"text": " rose because of a rate change ...", "match": false}],
+    "links": {"run": "/api/v1/runs/uuid", "run_page": "https://orbit.kanishksachdev.com/ui/runs/uuid",
+              "conversation": "/api/v1/conversations/uuid/thread"}}]}
+```
+
+- **`kind`** is what matched: `message` (a person's message to an agent; `author`, `message_id`), `question` (an agent's question; `message_id`, `run_id`), `report` (a run's summary and report), `error` (a failed run's error), `narration` (the prose a backend wrote while working, one transcript line; `attempt`, `seq` locate it in `GET /runs/{id}/events`), `tool_call` (one tool call's input as JSON, `tool` its name; tool results are not searched), `memory` (an agent's memory document; `memory_version_id`), `memory_entry` (a memory entry: `entry_id`, `entry_version`, `scope`, `owner`, `title`, and `agent` for an agent's own, `null` for a profile or topic entry). Of an agent's memory versions only the newest matching one is returned; a memory entry only as its current version, and never once retired. The `kind` parameter is a comma list of these.
+- **`q`** is web-search syntax: words (all must match, stemmed: `bills` finds `bill`), `"a quoted phrase"`, `or` between alternatives, `-word` to exclude. Required (`400` without one). A query of only stop words matches nothing.
+- **Ranking** is Postgres `ts_rank_cd` normalised by document length (`rank`, comparable only within one response), ties newest first. A memory entry's title weighs more than its body, and a tool's name more than its input.
+- **`snippet`** is up to two fragments of the matching text joined by ` ... `; `snippet_parts` is the same text split into runs, `match` true on matched words, so a client highlights without parsing markup (the text is never escaped or marked up).
+- **Filters:** `agent` (that agent's documents; a profile or topic entry belongs to none), `conversation_id`, `run_id` (a UUID, else `400`); `from` and `to` are a calendar day in the deployment's timezone (`to` includes its day) or an RFC 3339 time (`to` excluded), by the document's `at` (a message's or memory version's creation, a run's finish, a transcript line's time). `limit` defaults to 20, at most 100; `offset` pages, at most 1000. `total` counts every match within the filters, whatever the page.
+- **`links`** are where the result is read in full: the run (`run`, and `run_page` when `public_url` is set) and its conversation's thread. A memory version names its run's conversation when it has one.
+- Documents are derived by triggers as rows are written, and existing rows were indexed by the migration that added search, so a result is there as soon as its row is.
 
 ## Usage
 
@@ -736,4 +826,4 @@ The access token is authentik's own (the `orbit-mcp` provider), so its issuer an
   `next_fires` is each schedule trigger's next fire after now, read in the
   agent's timezone, soonest first, in UTC; `[]` for a disabled agent or one
   without triggers. A fire is enqueued by the scheduler's leader, so it is
-  when the run is due, not when it starts.
+  when the run is due, not when it starts. A cron trigger carries `schedule`; an RRULE trigger carries `rrule` and `start` instead, and one whose series has ended is not listed.

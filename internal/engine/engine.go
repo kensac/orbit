@@ -45,8 +45,12 @@ type Engine struct {
 	// ConfigDir is the configuration directory (orbit.yaml, agents/),
 	// loaded with the database's agent definitions (config.go).
 	ConfigDir string
-	Env       func(string) (string, bool)
-	Client    *http.Client
+	// Reloader puts the configuration in force after a definition changes
+	// (define.go); serve sets it to also refresh its metrics and wake the
+	// scheduler. Nil is Reload.
+	Reloader func(context.Context) error
+	Env      func(string) (string, bool)
+	Client   *http.Client
 	// Secret signs approval links (see ApprovalSig).
 	Secret []byte
 	// NewRunner is runner.New, replaceable in tests.
@@ -79,6 +83,9 @@ type Engine struct {
 
 	mu  sync.RWMutex
 	cfg *Snapshot
+
+	searchMu sync.Mutex
+	searchLn map[string]string // agent -> socket path being served
 }
 
 // Snapshot is one loaded configuration with its built channels.
@@ -291,6 +298,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "memory.md", "text/markdown", []byte(rc.Memory)); err != nil {
 		return nil, nil, err
 	}
+	attached, err := e.placeUploads(ctx, workdir, rc)
+	if err != nil {
+		return nil, nil, err
+	}
 	if len(rc.Messages) > 0 {
 		b, _ := json.Marshal(rc.Messages)
 		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "messages.json", "application/json", b); err != nil {
@@ -383,7 +394,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		for _, in := range inputs {
 			docs[in.Name] = in.Content
 		}
-		sk, err := e.gate(ctx, a, inputs, docs)
+		sk, err := e.gate(ctx, a, c, workdir, inputsDir, inputs, docs, emit)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -442,6 +453,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	schema := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, true)
 	envelope := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, false)
 	schema, envelope = withEntries(schema, true), withEntries(envelope, false)
+	schema, envelope = withSkills(schema, true), withSkills(envelope, false)
 	tk, err := e.Store.TicketForConversation(ctx, c.ConversationID)
 	if err != nil {
 		return nil, nil, err
@@ -472,14 +484,18 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	var hr *runner.Harness
 	if e.Harness != "" && r.Kind() == "claude-code" {
-		hr = &runner.Harness{Bin: e.Harness, Figures: figures}
+		hr = &runner.Harness{Bin: e.Harness, Figures: figures, Search: e.searchSocket(a.Name)}
+	}
+	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, hr != nil, inputs)
+	if err != nil {
+		return nil, nil, err
 	}
 	var hooks *status.Listener
 	if hr != nil {
 		hooks, hr.Status = e.listenHooks(ctx, c, home, emit, log)
 		defer hooks.Close()
 	}
-	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr != nil)
+	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
 	if tk != nil {
 		system += ticketContract(tk, planning)
 	}
@@ -487,8 +503,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		system += knownContract
 	}
 	system += entriesContract(topics)
+	system += skillsContract(skills, skillsPlugin != "")
 	trigger := c.Trigger
-	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known},
+	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
 		rc, convo, inputs)
 	if rec != nil {
 		prompt = recoveryPrompt(rec, rc, now.Location())
@@ -507,7 +524,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	defer cancel()
 	res, err := r.Run(runCtx, runner.Request{
 		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
-		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr,
+		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin,
 	}, func(ev runner.Event) { emit(ev.Kind, ev.Payload) })
 	// Every hook of the turn has run once the CLI returned; what they
 	// spooled is read now, before the outcome is recorded.
@@ -528,7 +545,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if planning {
 		out.planTicket = tk.ID
 	}
-	out.known, out.topics = knownEntries, topics
+	out.known, out.topics, out.skills = knownEntries, topics, skills
 	if figures {
 		// The hook already sent the output back for these, up to
 		// MaxFigureDenials times (claude-code); this is the same check on
@@ -649,6 +666,8 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	writes, refused := resolveEntryWrites(a.Name, out.topics, out.known, out.Entries)
 	o.Entries = writes
+	skillWrites, skillsRefused := resolveSkillWrites(out.skills, out.Skills)
+	o.Skills = skillWrites
 	rr := store.RunResult{Attempt: c.Attempt, Status: "succeeded", Summary: out.Summary, Report: out.Report}
 	fillResult(&rr, res)
 	ids, err := e.Store.RecordOutcome(ctx, c.ID, a.Name, rr, o)
@@ -656,6 +675,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return err
 	}
 	e.recordEntryWrites(ctx, c, out.Entries, writes, refused)
+	e.recordSkillWrites(ctx, c, out.Skills, skillWrites, skillsRefused)
 	metrics.RunFinished(a.Name, "succeeded", runnerKind(snap, a), time.Since(start), rr.CostUSD)
 
 	// Delivery: the report, then each pending approval.
@@ -891,7 +911,8 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 		Continue: func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (string, bool, error) {
 			return e.Store.EnqueueContinuation(ctx, store.Continuation{
 				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
-		}}
+		},
+		Define: e.defineAction}
 	for {
 		act, err := e.Store.ClaimApprovedAction(ctx)
 		if err != nil || act == nil {

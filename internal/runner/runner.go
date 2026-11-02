@@ -48,6 +48,8 @@ type Request struct {
 	// Harness, when set, gives a claude-code run orbit's tools (`orbit
 	// mcp`) and hooks (`orbit hook`). Other backends ignore it.
 	Harness *Harness
+	// SkillsPlugin is a plugin directory holding the run's skills (engine/skills.go), loaded with --plugin-dir; claude-code only.
+	SkillsPlugin string
 }
 
 // Harness is orbit's own code inside the CLI's process tree.
@@ -61,6 +63,9 @@ type Harness struct {
 	// run (status.SocketPath of the run's state directory); with it, every
 	// Claude Code hook event is configured and posted there.
 	Status string
+	// Search is the engine's search socket for the run's agent; empty
+	// offers no search tool.
+	Search string
 }
 
 // Session is how one run uses a persistent Claude Code session. The engine

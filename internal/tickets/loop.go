@@ -34,14 +34,6 @@ const TickEvery = 30 * time.Second
 // attempts could not fix is one a person should look at.
 const MaxFixAttempts = 2
 
-// Failure report bounds: the end of each failing job's log, for at most
-// maxFailing checks. A fix needs the failure, not the whole log, and the
-// report rides in its prompt.
-const (
-	logTailBytes = 16 << 10
-	maxFailing   = 5
-)
-
 // MergeRule is the rule a ticket's merge is proposed with: the build
 // agent's rule for github:merge, except that orbit's own repository is
 // always approve. A merge to orbit replaces the process that made it, so a
@@ -151,6 +143,15 @@ func (l *Loop) Tick(ctx context.Context) error {
 }
 
 func (k *tick) reconcile(ctx context.Context, t *store.Ticket) error {
+	if t.Status == store.TicketReview || t.Status == store.TicketFailed {
+		r, err := k.l.Store.PendingRerun(ctx, t.ID)
+		if err != nil {
+			return err
+		}
+		if r != nil {
+			return k.personRerun(ctx, t, r)
+		}
+	}
 	switch t.Status {
 	case store.TicketApproved:
 		return k.startBuild(ctx, t, store.BuildPurposeBuild, nil)
@@ -275,7 +276,7 @@ func (k *tick) review(ctx context.Context, t *store.Ticket) error {
 	case github.ChecksGreen:
 		return k.proposeMerge(ctx, t, c, pr)
 	case github.ChecksFailed:
-		return k.checksFailed(ctx, t, failing)
+		return k.checksFailed(ctx, t, c, pr, failing)
 	}
 	return nil
 }
@@ -325,62 +326,6 @@ func (k *tick) proposeMerge(ctx context.Context, t *store.Ticket, c *github.Clie
 		k.l.Wake()
 	}
 	return nil
-}
-
-// checksFailed starts a fix with the failure report, or fails the ticket
-// once MaxFixAttempts fixes were spent on this PR.
-func (k *tick) checksFailed(ctx context.Context, t *store.Ticket, failing []github.Failing) error {
-	names := make([]string, 0, len(failing))
-	for _, f := range failing {
-		s := f.Name + " (" + f.Conclusion + ")"
-		if f.URL != "" {
-			s += " " + f.URL
-		}
-		names = append(names, s)
-	}
-	fixes, err := k.l.Store.FixesSinceBuild(ctx, t.ID)
-	if err != nil {
-		return err
-	}
-	if fixes >= MaxFixAttempts {
-		return k.fail(ctx, t, fmt.Sprintf("checks failed after %d fix attempts: %s", fixes, strings.Join(names, "; ")))
-	}
-	report, err := k.failureReport(ctx, *t.Repo, failing)
-	if err != nil {
-		return err
-	}
-	return k.startBuild(ctx, t, store.BuildPurposeFix, report)
-}
-
-// failureReport is what a fix is told, collected by code: each failing
-// check's name, conclusion and URL, and the end of its Actions job log.
-func (k *tick) failureReport(ctx context.Context, repo string, failing []github.Failing) (json.RawMessage, error) {
-	type entry struct {
-		github.Failing
-		LogTail string `json:"log_tail,omitempty"`
-		LogNote string `json:"log_note,omitempty"`
-	}
-	var out []entry
-	var c *github.Client
-	for _, f := range failing[:min(len(failing), maxFailing)] {
-		e := entry{Failing: f}
-		if f.JobID > 0 {
-			if c == nil {
-				var err error
-				if c, err = k.client(ctx, repo, github.FailureReport, "failures"); err != nil {
-					return nil, err
-				}
-			}
-			tail, err := c.JobLogTail(ctx, repo, f.JobID, logTailBytes)
-			if err != nil {
-				e.LogNote = "orbit could not read the job log: " + err.Error()
-			} else {
-				e.LogTail = tail
-			}
-		}
-		out = append(out, e)
-	}
-	return json.Marshal(out)
 }
 
 // merging follows the merge action. GitHub decides what happened when the

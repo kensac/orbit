@@ -123,9 +123,12 @@ func harnessHooks(h *Harness, workdir, home string) map[string]any {
 
 // harnessMCP is the --mcp-config that starts `orbit mcp` for the run.
 func harnessMCP(h *Harness, workdir, home string) string {
+	args := []string{"mcp", "--root", workdir, "--state", harness.StateDir(home)}
+	if h.Search != "" {
+		args = append(args, "--search", h.Search)
+	}
 	b, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{
-		harness.MCPServer: map[string]any{"type": "stdio", "command": h.Bin,
-			"args": []string{"mcp", "--root", workdir, "--state", harness.StateDir(home)}},
+		harness.MCPServer: map[string]any{"type": "stdio", "command": h.Bin, "args": args},
 	}})
 	return string(b)
 }
@@ -142,7 +145,18 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 		// MCP tools are not built-ins, so --tools does not list them; in
 		// dontAsk mode a tool runs only when allowed by name.
 		allowed = append(allowed, harness.ToolQuery, harness.ToolCalc)
+		if req.Harness.Search != "" {
+			allowed = append(allowed, harness.ToolSearch)
+		}
 		hooks = harnessHooks(req.Harness, req.Workdir, home)
+	}
+	if req.SkillsPlugin != "" {
+		// Skills load from the plugin (setting sources are off, so no other skill is found) and run through the Skill tool, which in dontAsk mode runs only when allowed by name; orbit's skill tool serves their text.
+		tools = append(tools, "Skill")
+		allowed = append(allowed, "Skill")
+		if req.Harness != nil {
+			allowed = append(allowed, harness.ToolSkill)
+		}
 	}
 	args := []string{
 		"--json-schema", string(req.OutputSchema),
@@ -154,6 +168,9 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 	}
 	if req.Harness != nil {
 		args = append(args, "--mcp-config", harnessMCP(req.Harness, req.Workdir, home))
+	}
+	if req.SkillsPlugin != "" {
+		args = append(args, "--plugin-dir", req.SkillsPlugin)
 	}
 	if len(allowed) > 0 {
 		args = append(args, "--allowedTools", strings.Join(allowed, ","))

@@ -74,6 +74,8 @@ type PostMessage struct {
 	// ConversationID is where the message goes; empty is the agent's
 	// default conversation.
 	ConversationID string
+	// Attachments are uploads of the conversation the message carries.
+	Attachments []string
 }
 
 // PostResult is what PostMessage did.
@@ -87,7 +89,7 @@ type PostResult struct {
 // message nor wakes a second run. replayed reports a retry.
 func (s *Store) PostMessageOnce(ctx context.Context, p PostMessage) (res PostResult, replayed bool, err error) {
 	req := map[string]any{"op": "message", "conversation": p.ConversationID, "body": p.Body, "reply_to": p.ReplyTo,
-		"author": p.Author, "wake": p.Wake}
+		"author": p.Author, "wake": p.Wake, "attachments": p.Attachments}
 	raw, replayed, err := s.withReceipt(ctx, p.Agent, p.ClientID, req, func(tx pgx.Tx) (json.RawMessage, error) {
 		r, err := postMessage(ctx, tx, p)
 		if err != nil {
@@ -140,6 +142,9 @@ func postMessage(ctx context.Context, tx pgx.Tx, p PostMessage) (PostResult, err
 		return r, ErrNotFound
 	}
 	if err != nil {
+		return r, err
+	}
+	if err := attach(ctx, tx, r.MessageID, conv, p.Attachments); err != nil {
 		return r, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE conversations SET archived = false,

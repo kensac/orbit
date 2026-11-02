@@ -55,16 +55,27 @@ more than its agent's rules allow.
   user's `~/.claude/settings.json` least of all: they exist for one run's
   CLI process, on its command line.
 - **The status channel** is a unix socket, mode 0600, and a spool file in the run's state directory under the CLI's HOME (which the CLI denies reading): local to the host, never a network listener. What arrives on it is the model's process tree reporting on itself, so it is data, never trusted for a decision: it sets the status a person sees and the run's `orbit.hook` events, and nothing else. A forged event can misreport a running run's status at most; the run's row decides once it is final.
+- **The search tool** (`mcp__orbit__search`) holds no database credential:
+  the tool server asks the engine over a unix socket (`--search`, a 0600
+  file under the temp directory) that the engine serves for one agent, and
+  the engine sets the agent on every query, so a run finds only its own
+  agent's records, which it could already have been shown. Results are
+  past writing, so they are data like any input, and they never back a
+  figure (they are kept out of the tool ledger).
 
 ## Memory entries a model writes
 
 A run writes memory entries directly, and a learning run writes them from a conversation, so a poisoned input or message can plant an entry that later runs of every agent reading its scope are shown. What bounds it: entries are shown as data (the system prompt says they never authorize an action the rules do not, and an instruction in one is not to be followed); a run may write only to the profile, itself and the topics it reads, at most 10 writes, and only change entries it was shown at the version it was shown; every version is kept with the run and conversation it came from (`GET /memory/entries?run_id=`), so a bad one is found and retired or restored. A learning run reads the person's messages and the agent's reports (which can quote inputs), not the inputs themselves.
 
+## Skills
+
+A skill is instructions a run follows, and agents write their own, so a run steered by a poisoned input can write a skill that steers its later runs, and those of every agent the skill is attached to. What bounds it: a run writes at most 3 skills, only new ones or ones it was given (at the version given), and a written skill is attached to that agent only; every version is kept with its run (`source_run_id`), so a bad one is found, restored or retired. The skill tool reads only the run's own copy, inside each skill's directory after symlinks; it records nothing in the ledger, so a skill's text never backs a figure. Supporting files are stored as given and never executed by orbit; a script in a skill runs only if the agent's own `tools` let it.
+
 ## What the model can cause
 
 Only actions its spec enables, through executors here, to destinations in
 configuration. `continue` can make an agent run again on its own, so it is
-bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body, never a URL or a header.
+bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body, never a URL or a header. `agent:define` lets a model rewrite an agent defined in the database, itself included: its charter, tools, sources and rules, so an agent with it enabled can widen any database agent's reach up to what orbit.yaml offers (endpoints, channels, repositories); never a file agent's, and never past the configuration. Every change is a version with its run, so it is seen and reverted through the API.
 `deny` is the default for every type an agent does not name, and denied
 types are not even offered.
 
@@ -93,6 +104,7 @@ types are not even offered.
   login. The GET only shows; deciding is a POST from the page, so a link
   preview cannot approve anything. Rotating the token invalidates every
   outstanding link.
+- **Signed upload URLs** (`PUT /api/v1/uploads/signed`, docs/api.md) are the one `/api/` route without a token: the HMAC in the URL, keyed from `ORBIT_API_TOKEN`, names one conversation, file name, type, size bound, person and a 15-minute expiry, and its nonce is unique in `uploads`, so a URL writes one file once. Anyone holding a live URL can upload that one file into that conversation; nothing else. Uploaded files are served as downloads (images inline) with `nosniff` and a CSP that runs nothing, never as pages.
 - `/ui/runs/{id}` is read-only and relies on forward-auth. Reports can hold
   personal data; never route `/ui/` around authentik.
 - **`/mcp`** is the API as tools, with the same check: an authentik token (the person decides and authors), the operator token only on the internal listener. Its tools can do what `/api/v1` can (post, approve, reject); nothing more.
@@ -126,6 +138,8 @@ grants more than was asked. `github:merge` lets a compromised model ask to
 merge an orbit PR whose checks are green; the executor re-checks the head
 commit, the branch and every check itself, and the rule decides whether a
 person approves first. In the fleet a merge is a deploy: keep it `approve`.
+
+`actions: write` (rerunning failed jobs) also covers dispatching and cancelling workflows; orbit mints it alone, only in the ticket loop, for `RerunJob` on the job ids of checks that failed, and no model sees it.
 
 ## The build sandbox
 
@@ -233,6 +247,10 @@ run; `internal/build`):
 - **Not guaranteed**: the backend credential is in the sandbox (above);
   everything the sandbox section says it does not guarantee holds for a
   build.
+
+## Prechecks
+
+A `precheck` gate runs a shell command from an agent's spec in orbit's own process tree, as orbit's user, before the model is called. Its environment is the fixed list in `engine.precheckEnv` (no secret, no credential), but the same user can read what orbit can, `/proc/<orbit>/environ` included. So a precheck is accepted only in an agent defined in the configuration files, which a person writes and reviews in git: a database agent (written through the API, or by an agent's `agent:define`) with one fails validation, so nothing a model writes ever becomes a command. Its output reaches only the run's events, never a prompt.
 
 ## Adding a capability
 
