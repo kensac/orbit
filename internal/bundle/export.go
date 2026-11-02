@@ -107,6 +107,7 @@ func Export(ctx context.Context, fetch Fetcher, agent, target string) (Manifest,
 		"Current selected-agent definition, legacy memory and visible current profile/agent/topic entries only; historical definitions, memory versions and retired entries are excluded.",
 		"Only skills attached to the selected agent at context-read time are fetched at their recorded versions; other skills and historical versions are excluded.",
 		"Conversation thread summaries are included; upload bytes, run artifacts, journals, transcripts, source inputs, actions outside threads and server configuration are excluded.",
+		"Persistent conversation workspace file listings/content, snapshot metadata/archives, retained sandbox HOME and hidden .orbit session state are excluded and are not fetched.",
 		"This is a portable API export, not a database backup or a tested restore bundle.",
 		"Identifiers and revisions are preserved in payload JSON; the manifest identity index is bounded and may omit entries.",
 	}}}
