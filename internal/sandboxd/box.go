@@ -478,7 +478,7 @@ func (s *Server) tty(w http.ResponseWriter, r *http.Request) {
 				if json.Unmarshal(p, &rz) != nil || rz.Validate() != nil {
 					continue
 				}
-				rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				if err := s.d.resizeExec(rctx, execID, rz.Cols, rz.Rows); err != nil {
 					s.log.Warn("sandboxd: tty resize", "box", name, "err", err)
 				}

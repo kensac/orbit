@@ -320,7 +320,7 @@ func (d *Docker) startExecWith(ctx context.Context, id string, body []byte) (net
 	if err != nil {
 		return nil, nil, fmt.Errorf("docker: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, "http://docker/"+apiVersion+"/exec/"+id+"/start", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, "http://docker/"+apiVersion+"/exec/"+id+"/start", bytes.NewReader(body)) //nolint:gosec // fixed host on the docker socket; id is docker's own exec id
 	if err != nil {
 		_ = conn.Close()
 		return nil, nil, err
