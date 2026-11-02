@@ -54,13 +54,25 @@ type ThreadMessage struct {
 	Body    string    `json:"body"`
 	Author  *string   `json:"author,omitempty"`
 	ReplyTo *string   `json:"reply_to,omitempty"`
-	// RunID is the run that read it (person) or asked it (agent).
+	// RunID is the run that holds it (person; nil while it waits for a
+	// run) or asked it (agent).
 	RunID *string `json:"run_id"`
+	// Reads are the attempts that read a person's message, oldest first;
+	// a handed-back one has ReleasedAt set (message_reads).
+	Reads []MessageRead `json:"reads,omitempty"`
 	// Open is set on a question: true until answered (openQuestion).
 	Open *bool `json:"open,omitempty"`
 	// Attachments are the files a person's message carries; always an
 	// array.
 	Attachments []Upload `json:"attachments"`
+}
+
+// MessageRead is one attempt's read of a person's message.
+type MessageRead struct {
+	RunID      string     `json:"run_id"`
+	Attempt    int        `json:"attempt"`
+	ReadAt     time.Time  `json:"read_at"`
+	ReleasedAt *time.Time `json:"released_at"`
 }
 
 // ThreadRun is a run with what it said: its report, its questions and the
@@ -83,7 +95,9 @@ type ThreadRun struct {
 	Questions []ThreadQuestion `json:"questions"`
 	Error     *string          `json:"error"`
 	CostUSD   *float64         `json:"cost_usd"`
-	Actions   []ThreadAction   `json:"actions"`
+	// Tokens is every attempt's token counts together, null when none were reported.
+	Tokens  *Tokens        `json:"tokens"`
+	Actions []ThreadAction `json:"actions"`
 	// Gate names what ended a skipped run; null otherwise.
 	Gate *string `json:"gate"`
 	// Tasks are the tasks the run delegated, in the order it listed them.
@@ -157,7 +171,7 @@ const latestTurn = `(
 // in one round trip; the correlated aggregates use messages_run,
 // actions_run and journal_items' key, so a page costs the same queries
 // however many runs it holds.
-const threadRunSelect = `
+var threadRunSelect = `
 	SELECT r.id::text, r.created_at, r.trigger, r.status, r.attempt, r.started_at, r.finished_at,
 	       ` + stepsCount + `, ` + latestTurn + `, r.summary, r.report, r.error, r.cost_usd::float8, r.gate,
 	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', (` + openQuestion + `)) ORDER BY m.created_at, m.id)
@@ -174,14 +188,15 @@ const threadRunSelect = `
 	                                                       WHERE x.task_id = k.id), '[]'))
 	                                 ORDER BY k.created_at, k.id)
 	                 FROM tasks k WHERE k.parent_run_id = r.id), '[]'),
-	       r.hook_status
+	       r.hook_status,
+	       ` + runTokens + `
 	FROM runs r`
 
 func scanThreadRun(row pgx.Row) (*ThreadRun, error) {
 	r := ThreadRun{Kind: "run"}
 	var questions, actions, tasks, hook []byte
 	if err := row.Scan(&r.ID, &r.At, &r.Trigger, &r.Status, &r.Attempt, &r.StartedAt, &r.FinishedAt, &r.Steps,
-		&r.Turn, &r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions, &tasks, &hook); err != nil {
+		&r.Turn, &r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions, &tasks, &hook, &r.Tokens); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -333,8 +348,13 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 		}
 		if len(msgIDs) > 0 {
 			rows, err := tx.Query(ctx, `
-				SELECT id::text, created_at, direction, body, author, reply_to::text, run_id::text,
-				       CASE WHEN direction = 'from_agent' THEN (`+openQuestion+`) END
+				SELECT id::text, created_at, direction, body, author, reply_to::text,
+				       CASE WHEN `+waitingMessage+` THEN NULL ELSE run_id::text END,
+				       CASE WHEN direction = 'from_agent' THEN (`+openQuestion+`) END,
+				       (SELECT json_agg(json_build_object('run_id', x.run_id, 'attempt', x.attempt,
+				                                          'read_at', x.read_at, 'released_at', x.released_at)
+				                        ORDER BY x.read_at, x.attempt)
+				        FROM message_reads x WHERE x.message_id = m.id)
 				FROM messages m WHERE id = ANY($1::uuid[])`, msgIDs)
 			if err != nil {
 				return err
@@ -342,9 +362,16 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 			for rows.Next() {
 				m := ThreadMessage{Kind: "message"}
 				var dir string
-				if err := rows.Scan(&m.ID, &m.At, &dir, &m.Body, &m.Author, &m.ReplyTo, &m.RunID, &m.Open); err != nil {
+				var reads []byte
+				if err := rows.Scan(&m.ID, &m.At, &dir, &m.Body, &m.Author, &m.ReplyTo, &m.RunID, &m.Open, &reads); err != nil {
 					rows.Close()
 					return err
+				}
+				if reads != nil {
+					if err := json.Unmarshal(reads, &m.Reads); err != nil {
+						rows.Close()
+						return err
+					}
 				}
 				m.From = map[string]string{"to_agent": "person", "from_agent": "agent"}[dir]
 				page.Items = append(page.Items, ThreadItem{Message: &m})

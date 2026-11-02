@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -185,6 +187,9 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "DELETE" && r.URL.Path == "/installation/token":
 		f.Revoked = append(f.Revoked, auth)
 		w.WriteHeader(204)
+	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls" && r.URL.Query().Get("head") == "":
+		// A plain list: PR and Others in the state asked for, paged.
+		f.write(w, 200, f.list(r.URL.Query()))
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls":
 		list := []any{}
 		if f.PR != nil {
@@ -305,6 +310,43 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		f.write(w, 404, map[string]string{"message": "Not Found"})
 	}
+}
+
+// list is GET pulls without a head filter: PR and Others whose state
+// matches (open by default, or all), by number descending, one page.
+func (f *Server) list(q url.Values) []any {
+	state := q.Get("state")
+	if state == "" {
+		state = "open"
+	}
+	var all []map[string]any
+	if f.PR != nil {
+		all = append(all, f.PR)
+	}
+	for _, pr := range f.Others {
+		all = append(all, pr)
+	}
+	num := func(pr map[string]any) int {
+		var n int
+		_, _ = fmt.Sscan(fmt.Sprint(pr["number"]), &n)
+		return n
+	}
+	sort.Slice(all, func(i, j int) bool { return num(all[i]) > num(all[j]) })
+	var match []any
+	for _, pr := range all {
+		if state == "all" || pr["state"] == state {
+			match = append(match, pr)
+		}
+	}
+	per, page := 30, 1
+	_, _ = fmt.Sscan(q.Get("per_page"), &per)
+	_, _ = fmt.Sscan(q.Get("page"), &page)
+	lo, hi := min((page-1)*per, len(match)), min(page*per, len(match))
+	out := match[lo:hi]
+	if out == nil {
+		out = []any{}
+	}
+	return out
 }
 
 // other is the PR of Others a path names, or nil.

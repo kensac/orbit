@@ -527,7 +527,7 @@ func TestClaudeCodeHarnessToolsAndHooks(t *testing.T) {
 	r, _ := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
 	work := t.TempDir()
 	if _, err := r.Run(context.Background(), Request{Workdir: work, OutputSchema: json.RawMessage(`{}`),
-		Harness: &Harness{Bin: "/opt/orbit", Figures: true, Search: "/tmp/orbit-search-x.sock"}}, func(Event) {}); err != nil {
+		Harness: &Harness{Bin: "/opt/orbit", Figures: true, Search: "/tmp/orbit-search-x.sock", Repos: "/tmp/orbit-repos-x.sock"}}, func(Event) {}); err != nil {
 		t.Fatal(err)
 	}
 	argv := strings.Split(read(t, filepath.Join(dir, "argv")), "\n")
@@ -550,10 +550,10 @@ func TestClaudeCodeHarnessToolsAndHooks(t *testing.T) {
 	if err := json.Unmarshal([]byte(flag("--mcp-config")), &mcp); err != nil {
 		t.Fatal(err)
 	}
-	if s := mcp.MCPServers["orbit"]; s.Command != "/opt/orbit" || strings.Join(s.Args, " ") != "mcp --root "+work+" --state "+state+" --search /tmp/orbit-search-x.sock" {
+	if s := mcp.MCPServers["orbit"]; s.Command != "/opt/orbit" || strings.Join(s.Args, " ") != "mcp --root "+work+" --state "+state+" --search /tmp/orbit-search-x.sock --repos /tmp/orbit-repos-x.sock" {
 		t.Fatalf("mcp server = %+v", s)
 	}
-	if got := flag("--allowedTools"); got != "mcp__orbit__query,mcp__orbit__calc,mcp__orbit__search" {
+	if got := flag("--allowedTools"); got != "mcp__orbit__query,mcp__orbit__calc,mcp__orbit__search,mcp__orbit__git_log,mcp__orbit__git_show,mcp__orbit__git_diff,mcp__orbit__git_blame,mcp__orbit__pr_list,mcp__orbit__pr_view" {
 		t.Fatalf("allowedTools = %q", got)
 	}
 	var settings struct {
