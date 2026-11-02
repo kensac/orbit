@@ -232,15 +232,16 @@ func (s *Store) TicketsSince(ctx context.Context, person string, t time.Time) (i
 }
 
 // RedeemTicket uses a ticket once: it must be unused, unexpired, and have
-// been minted for this terminal and origin. Any failure is ErrNotFound, so a
-// caller learns nothing about which check failed.
-func (s *Store) RedeemTicket(ctx context.Context, ticket, terminalID, origin string) (person string, err error) {
+// been minted for this terminal and for origin or for wildcard (a ticket
+// minted without an Origin; "" matches none). Any failure is ErrNotFound, so
+// a caller learns nothing about which check failed.
+func (s *Store) RedeemTicket(ctx context.Context, ticket, terminalID, origin, wildcard string) (person string, err error) {
 	if !IsUUID(terminalID) {
 		return "", ErrNotFound
 	}
 	err = s.Pool.QueryRow(ctx, `UPDATE terminal_tickets SET used_at = now()
-		WHERE sha256 = $1 AND terminal_id = $2 AND origin = $3 AND used_at IS NULL AND expires_at > now()
-		RETURNING person`, ticketSum(ticket), terminalID, origin).Scan(&person)
+		WHERE sha256 = $1 AND terminal_id = $2 AND (origin = $3 OR ($4 <> '' AND origin = $4)) AND used_at IS NULL AND expires_at > now()
+		RETURNING person`, ticketSum(ticket), terminalID, origin, wildcard).Scan(&person)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrNotFound
 	}

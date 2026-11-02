@@ -33,8 +33,9 @@ const (
 	// ticketsPerMinute bounds a person's tickets (docs/workspace.md).
 	ticketsPerMinute = 10
 	// terminalPing is the server's keepalive: Cloudflare closes a WebSocket
-	// idle for 100 s.
-	terminalPing = 25 * time.Second
+	// idle for 100 s, and the portfolio's client counts 25 s of silence as
+	// a dead socket (it pings every 10 s itself).
+	terminalPing = 15 * time.Second
 	// maxTerminalClients is the sockets one terminal may have on one
 	// instance (docs/workspace.md).
 	maxTerminalClients = 8
@@ -46,8 +47,9 @@ const (
 	CloseDrain websocket.StatusCode = 4001
 	// CloseSlow is the close code for a client that stopped reading.
 	CloseSlow websocket.StatusCode = 4008
-	// DefaultWorkspaceOrigin is ORBIT_WORKSPACE_ORIGINS' default.
-	DefaultWorkspaceOrigin = "https://kanishksachdev.com"
+	// anyOrigin binds a ticket minted without an Origin to every allowed
+	// one: the portfolio's proxy mints server side, without the browser's.
+	anyOrigin = "*"
 	// claudeCredential is what the claude preset's TTY gets: the backend
 	// credential, as a chat sandbox's CLI does.
 	claudeCredential = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // G101: the variable's name, not a value
@@ -61,9 +63,13 @@ func writeCheck(w http.ResponseWriter, status int, check, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg, "check": check})
 }
 
+// DefaultWorkspaceOrigins is ORBIT_WORKSPACE_ORIGINS' default: the
+// portfolio, served from both its apex and www.
+var DefaultWorkspaceOrigins = []string{"https://kanishksachdev.com", "https://www.kanishksachdev.com"}
+
 func (s *Server) origins() []string {
 	if len(s.WorkspaceOrigins) == 0 {
-		return []string{DefaultWorkspaceOrigin}
+		return DefaultWorkspaceOrigins
 	}
 	return s.WorkspaceOrigins
 }
@@ -294,8 +300,9 @@ func isStopped(err error) bool {
 }
 
 // attachTicket mints a socket ticket for the token's person, this terminal
-// and an allowed Origin: the body's origin, else the request's Origin
-// header, else the first of ORBIT_WORKSPACE_ORIGINS.
+// and an Origin: the body's origin, else the request's Origin header, else
+// any of ORBIT_WORKSPACE_ORIGINS (the socket refuses every other Origin
+// regardless).
 func (s *Server) attachTicket(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Origin string `json:"origin"`
@@ -316,9 +323,8 @@ func (s *Server) attachTicket(w http.ResponseWriter, r *http.Request) {
 		origin = r.Header.Get("Origin")
 	}
 	if origin == "" {
-		origin = s.origins()[0]
-	}
-	if !slices.Contains(s.origins(), origin) {
+		origin = anyOrigin
+	} else if !slices.Contains(s.origins(), origin) {
 		writeCheck(w, http.StatusBadRequest, "origin", "origin "+origin+" is not in ORBIT_WORKSPACE_ORIGINS")
 		return
 	}
@@ -346,7 +352,7 @@ func (s *Server) attachTicket(w http.ResponseWriter, r *http.Request) {
 		base = "ws://" + strings.TrimPrefix(base, "http://")
 	}
 	respond(w, map[string]any{
-		"url":        base + "/api/v1/terminals/" + t.ID + "/ws",
+		"url":        base + "/api/v1/terminals/" + t.ID + "/ws?ticket=" + ticket,
 		"protocol":   TerminalProtocol,
 		"ticket":     ticket,
 		"protocols":  []string{TerminalProtocol, ticketProtocol + ticket},
@@ -383,8 +389,9 @@ func (s *Server) dropClient(id string) {
 	}
 }
 
-// offeredTicket finds the ticket and the protocol among the offered
-// subprotocols.
+// offeredTicket finds the ticket among the offered subprotocols, else in
+// the query (a client that cannot set subprotocols), and requires the
+// terminal protocol to be offered.
 func offeredTicket(r *http.Request) (ticket string, ok bool) {
 	proto := false
 	for _, h := range r.Header.Values("Sec-WebSocket-Protocol") {
@@ -396,6 +403,9 @@ func offeredTicket(r *http.Request) (ticket string, ok bool) {
 				ticket = t
 			}
 		}
+	}
+	if ticket == "" {
+		ticket = r.URL.Query().Get("ticket")
 	}
 	return ticket, proto && ticket != ""
 }
@@ -422,7 +432,7 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tid := r.PathValue("tid")
-	person, err := s.Store.RedeemTicket(r.Context(), ticket, tid, origin)
+	person, err := s.Store.RedeemTicket(r.Context(), ticket, tid, origin, anyOrigin)
 	if errors.Is(err, store.ErrNotFound) {
 		unauthorized(w, "ticket", "the ticket is unknown, used, expired, or for another terminal or origin")
 		return

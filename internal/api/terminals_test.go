@@ -214,7 +214,7 @@ func (v *boxEnv) ticket(t *testing.T, tid string) (string, string) {
 	if code != 200 {
 		t.Fatalf("attach: %d %v", code, out)
 	}
-	if !strings.HasPrefix(out["url"].(string), "wss://orbit.kanishksachdev.com/api/v1/terminals/"+tid+"/ws") || out["protocol"] != api.TerminalProtocol {
+	if out["url"] != "wss://orbit.kanishksachdev.com/api/v1/terminals/"+tid+"/ws?ticket="+out["ticket"].(string) || out["protocol"] != api.TerminalProtocol {
 		t.Fatalf("attach answer %v", out)
 	}
 	return out["ticket"].(string), strings.Replace(v.srv.URL, "http://", "ws://", 1) + "/api/v1/terminals/" + tid + "/ws"
@@ -475,6 +475,42 @@ func TestClaudeTerminalKillAndDrain(t *testing.T) {
 	}
 }
 
+// TestTicketOrigins: a ticket minted without an Origin (the portfolio's
+// proxy, server side) opens from either of the portfolio's origins, a ticket
+// minted for one does not open from the other, and the URL's query carries
+// the ticket for a client that cannot put it in a subprotocol.
+func TestTicketOrigins(t *testing.T) {
+	v := newBoxEnv(t)
+	tid := v.newTerminal(t, `{"preset":"shell","cols":80,"rows":24}`)["id"].(string)
+	ticket, u := v.ticket(t, tid)
+	c, _, err := dial(t, u, ticket, "https://www.kanishksachdev.com")
+	if err != nil {
+		t.Fatalf("www with an origin-free ticket: %v", err)
+	}
+	if m := readText(t, c); m["type"] != "ready" {
+		t.Fatal(m)
+	}
+	c.Close(websocket.StatusNormalClosure, "")
+
+	code, out := call(t, http.MethodPost, v.srv.URL+"/api/v1/terminals/"+tid+"/attach", v.person("kanishk"), `{"origin":"`+portfolio+`"}`)
+	if code != 200 {
+		t.Fatal(code, out)
+	}
+	if _, resp, err := dial(t, u, out["ticket"].(string), "https://www.kanishksachdev.com"); err == nil || resp.StatusCode != 401 {
+		t.Fatalf("a ticket for the apex opened from www: %v %v", resp, err)
+	}
+
+	ticket, u = v.ticket(t, tid)
+	c, _, err = dial(t, u+"?ticket="+ticket, "", portfolio)
+	if err != nil {
+		t.Fatalf("ticket in the query: %v", err)
+	}
+	if c.Subprotocol() != api.TerminalProtocol {
+		t.Fatalf("subprotocol %q", c.Subprotocol())
+	}
+	c.Close(websocket.StatusNormalClosure, "")
+}
+
 func TestTicketRate(t *testing.T) {
 	v := newBoxEnv(t)
 	tid := v.newTerminal(t, `{"preset":"shell","cols":80,"rows":24}`)["id"].(string)
@@ -503,17 +539,17 @@ func TestTicketExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.s.RedeemTicket(ctx, ticket, tid, portfolio); err == nil {
+	if _, err := v.s.RedeemTicket(ctx, ticket, tid, portfolio, "*"); err == nil {
 		t.Fatal("an expired ticket was redeemed")
 	}
 	ticket, _, _ = v.s.MintTicket(ctx, tid, "kanishk", portfolio, 30*time.Second)
-	if _, err := v.s.RedeemTicket(ctx, ticket, tid, "https://www.kanishksachdev.com"); err == nil {
+	if _, err := v.s.RedeemTicket(ctx, ticket, tid, "https://www.kanishksachdev.com", "*"); err == nil {
 		t.Fatal("a ticket was redeemed from another origin")
 	}
-	if p, err := v.s.RedeemTicket(ctx, ticket, tid, portfolio); err != nil || p != "kanishk" {
+	if p, err := v.s.RedeemTicket(ctx, ticket, tid, portfolio, "*"); err != nil || p != "kanishk" {
 		t.Fatalf("redeem: %q %v", p, err)
 	}
-	if _, err := v.s.RedeemTicket(ctx, ticket, tid, portfolio); !errors.Is(err, store.ErrNotFound) {
+	if _, err := v.s.RedeemTicket(ctx, ticket, tid, portfolio, "*"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("second redeem: %v", err)
 	}
 }
