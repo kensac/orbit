@@ -1,0 +1,190 @@
+package engine
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/kensac/orbit/internal/actions"
+	"github.com/kensac/orbit/internal/store"
+)
+
+// Delegation (docs/ARCHITECTURE.md, Delegation): the engine's side is the
+// prompts (a task's run is told whom it reports to; a parent's run is told
+// where its tasks are), the actions' executor, and the reconcile that moves
+// tasks and wakes parents.
+
+// ReconcileTasks moves every open task and wakes every parent due one
+// (store.ReconcileTasks), and nudges the executors when it queued runs.
+// Control calls it after each run, after delegation actions, and on every
+// outbox tick, so a decision a person resolves is picked up within one.
+func (e *Engine) ReconcileTasks(ctx context.Context) error {
+	res, err := e.Store.ReconcileTasks(ctx)
+	if err != nil {
+		return err
+	}
+	if len(res.Started) > 0 {
+		e.Log.Info("delegation: queued runs", "runs", res.Started, "moved", res.Moved)
+		if e.Wake != nil {
+			e.Wake()
+		}
+	}
+	return nil
+}
+
+// taskOps carries out delegation's actions for the action loop.
+type taskOps struct {
+	e    *Engine
+	snap *Snapshot
+}
+
+func (o *taskOps) Delegate(ctx context.Context, c actions.Call, p actions.DelegateParams) (json.RawMessage, error) {
+	a, ok := o.snap.Config.Agents[c.Agent]
+	if !ok {
+		return nil, fmt.Errorf("delegate: agent %q is no longer configured", c.Agent)
+	}
+	// Checked again against the configuration in force: a target may have
+	// gone since the run proposed it.
+	if _, err := actions.DecodeDelegate(c.Params, a.DelegateTargets()); err != nil {
+		return nil, err
+	}
+	made, err := o.e.Store.Delegate(ctx, store.Delegation{ActionID: c.ID, RunID: c.RunID, Tasks: p.NewTasks()})
+	if err != nil {
+		return nil, err
+	}
+	parent, err := o.e.Store.GetRun(ctx, c.RunID)
+	if err != nil {
+		return nil, err
+	}
+	for i, d := range made {
+		if d.DecisionID == nil || Attended(parent.Trigger) {
+			// A person in the conversation sees the decision there.
+			continue
+		}
+		o.e.NotifyApproval(ctx, c.Agent, c.RunID, *d.DecisionID,
+			fmt.Sprintf("%s: may task %q (%s) go ahead?", c.Agent, d.Key, d.Agent), p.Tasks[i].Decision)
+	}
+	if err := o.e.ReconcileTasks(ctx); err != nil {
+		o.e.Log.Warn("delegation: reconcile after delegate", "err", err)
+	}
+	return json.Marshal(map[string]any{"tasks": made})
+}
+
+func (o *taskOps) MessageTask(ctx context.Context, c actions.Call, p actions.TaskMessageParams) (json.RawMessage, error) {
+	msg, run, err := o.e.Store.MessageTask(ctx, store.TaskMessage{FromRun: c.RunID, TaskID: p.TaskID, Body: strings.TrimSpace(p.Body), ReplyTo: p.ReplyTo})
+	if err != nil {
+		return nil, err
+	}
+	if run != "" && o.e.Wake != nil {
+		o.e.Wake()
+	}
+	out := map[string]any{"message_id": msg}
+	if run != "" {
+		out["run_id"] = run
+	}
+	return json.Marshal(out)
+}
+
+func (o *taskOps) CancelTask(ctx context.Context, c actions.Call, p actions.TaskCancelParams) (json.RawMessage, error) {
+	if err := o.e.Store.CancelTask(ctx, p.TaskID, c.RunID, p.Reason, store.AgentAuthorPrefix+c.Agent); err != nil {
+		return nil, err
+	}
+	if err := o.e.ReconcileTasks(ctx); err != nil {
+		o.e.Log.Warn("delegation: reconcile after cancel", "err", err)
+	}
+	return json.RawMessage(`{"cancelled":true}`), nil
+}
+
+// taskContract is the system prompt's part for a run in a task's own
+// conversation.
+func taskContract(t *store.Task) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\nThis conversation is a task (key %q) that agent %s delegated to you. %s is an agent, not a person: your result goes back to it, and it integrates your report with its other tasks' and answers its own person.\n", t.Key, t.ParentAgent, t.ParentAgent)
+	b.WriteString("- Its brief is the first message from " + t.ParentAgent + " below; later messages from it add to the brief or answer you.\n")
+	b.WriteString("- report: your complete answer to the brief, self-contained (it is all " + t.ParentAgent + " reads of your work). Lead with the outcome. The task is done when a run of yours ends without an open question.\n")
+	b.WriteString("- questions: only what you cannot proceed without. They go to " + t.ParentAgent + ", which answers or asks its person; your next run gets the answer.\n")
+	b.WriteString("- notify: nothing you send here reaches a person directly; leave notify.send false.\n")
+	if t.Fresh {
+		b.WriteString("- You are a fresh worker for this task: you start with no memory, and nothing you put in memory is kept.\n")
+	}
+	return b.String()
+}
+
+// tasksBudget bounds the delegated tasks a parent's prompt shows, and
+// taskReportMax one report in it: room for a batch of full reports beside
+// the conversation (conversationBudget). A report clipped here is whole on
+// GET /tasks/{id}.
+const (
+	tasksBudget   = 48 << 10
+	taskReportMax = 12 << 10
+)
+
+// tasksSection is the prompt's part about the tasks this conversation
+// delegated: every task's state, and in full what is new since the
+// conversation's previous run (a report, a question, a failure). Newest
+// batches are kept when the budget runs out.
+func tasksSection(tasks []store.Task, loc *time.Location) string {
+	if len(tasks) == 0 {
+		return ""
+	}
+	var blocks []string
+	used := 0
+	for i := len(tasks) - 1; i >= 0; i-- {
+		t := tasks[i]
+		var b strings.Builder
+		fmt.Fprintf(&b, "## %s: %s, %s\n\ntask_id: %s\nagent: %s\n", t.Key, t.Status, newLabel(t), t.ID, t.Agent)
+		if len(t.DependsOn) > 0 {
+			fmt.Fprintf(&b, "after: %s\n", strings.Join(t.DependsOn, ", "))
+		}
+		if t.Decision != nil {
+			fmt.Fprintf(&b, "decision: %q, %s\n", t.Decision.Question, t.Decision.Status)
+		}
+		if t.Error != nil {
+			fmt.Fprintf(&b, "error: %s\n", *t.Error)
+		}
+		for _, q := range t.Questions {
+			fmt.Fprintf(&b, "question (reply_to %s): %s\n", q.ID, q.Body)
+		}
+		if t.Report != nil {
+			fmt.Fprintf(&b, "summary: %s\n", t.Report.Summary)
+			if t.New {
+				fmt.Fprintf(&b, "\n%s\n", clip(strings.TrimSpace(t.Report.Report), taskReportMax))
+			}
+		}
+		if t.FinishedAt != nil {
+			fmt.Fprintf(&b, "finished: %s\n", t.FinishedAt.In(loc).Format("2006-01-02 15:04"))
+		}
+		s := b.String() + "\n"
+		if used+len(s) > tasksBudget {
+			blocks = append(blocks, fmt.Sprintf("(%d earlier tasks not shown)\n", i+1))
+			break
+		}
+		used += len(s)
+		blocks = append(blocks, s)
+	}
+	var out strings.Builder
+	out.WriteString("\n# Tasks you delegated from this conversation (oldest first)\n\n")
+	out.WriteString("Their agents worked on them in their own conversations. Integrate the reports into your answer; reply to a task's question with task:message (reply_to its id), or ask your person if only they can answer. You are woken again when tasks still open settle; do not poll.\n\n")
+	for i := len(blocks) - 1; i >= 0; i-- {
+		out.WriteString(blocks[i])
+	}
+	return out.String()
+}
+
+func newLabel(t store.Task) string {
+	if t.New {
+		return "new since your last run"
+	}
+	return "as before"
+}
+
+// messageFrom names who wrote a message in a prompt: the person, or the
+// agent that delegated the conversation's task.
+func messageFrom(m store.Message) string {
+	if m.Author != nil && strings.HasPrefix(*m.Author, store.AgentAuthorPrefix) {
+		return "from " + strings.TrimPrefix(*m.Author, store.AgentAuthorPrefix)
+	}
+	return ""
+}
