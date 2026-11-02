@@ -240,3 +240,26 @@ func TestAFailedRunInterruptsItsOpenTurn(t *testing.T) {
 		t.Fatalf("turn = %+v", tb)
 	}
 }
+
+func TestAClaimIsNotSkippedWhileAnEventIsBeingWritten(t *testing.T) {
+	s := testdb.New(t)
+	seed(t, s, "a")
+	run := manual(t, s, "a")
+	c, _ := s.ClaimRun(ctx, "w")
+	if err := s.HandBack(ctx, run, c.Attempt, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The superseded attempt is mid-write: its event row references the
+	// run (a KEY SHARE lock) until its transaction ends.
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `INSERT INTO run_events (run_id, attempt, seq, kind, payload) VALUES ($1, 1, 99, 'raw', '"x"')`, run); err != nil {
+		t.Fatal(err)
+	}
+	if c2, err := s.ClaimRun(ctx, "w2"); err != nil || c2 == nil || c2.Attempt != 2 {
+		t.Fatalf("claim = %+v %v", c2, err)
+	}
+}

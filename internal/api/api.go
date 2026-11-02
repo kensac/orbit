@@ -85,6 +85,11 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
 	api("POST /api/v1/conversations/{id}/messages", s.conversationMessage)
+	api("POST /api/v1/conversations/{id}/uploads", s.createUpload)
+	api("POST /api/v1/conversations/{id}/uploads/url", s.uploadURL)
+	api("GET /api/v1/conversations/{id}/uploads/{upload}", s.getUpload)
+	// The signature in the URL is the credential (uploads.go).
+	mux.HandleFunc("PUT /api/v1/uploads/signed", s.signedUpload)
 	api("GET /api/v1/agents/{name}/memory", s.memoryHistory)
 	api("POST /api/v1/agents/{name}/runs", s.startRun)
 	api("GET /api/v1/agents/{name}/messages", s.listMessages)
@@ -323,13 +328,15 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 		Wake *bool `json:"wake"`
 		// ClientMessageID makes a retry return the first result.
 		ClientMessageID string `json:"client_message_id"`
+		// Attachments are uploads of this conversation the message carries.
+		Attachments []string `json:"attachments"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if strings.TrimSpace(body.Body) == "" {
-		writeErr(w, http.StatusBadRequest, "body is required")
+	if strings.TrimSpace(body.Body) == "" && len(body.Attachments) == 0 {
+		writeErr(w, http.StatusBadRequest, "body or attachments is required")
 		return
 	}
 	wake := a.MessagesTrigger
@@ -338,7 +345,7 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 	}
 	res, replayed, err := s.Store.PostMessageOnce(r.Context(), store.PostMessage{
 		Agent: a.Name, SpecSHA: a.SHA, Body: body.Body, Author: actor(r, body.Author), ReplyTo: body.ReplyTo,
-		Wake: wake, ClientID: body.ClientMessageID, ConversationID: conversationID,
+		Wake: wake, ClientID: body.ClientMessageID, ConversationID: conversationID, Attachments: body.Attachments,
 	})
 	if err != nil {
 		respond(w, nil, err)

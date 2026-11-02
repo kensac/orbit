@@ -36,6 +36,9 @@ type fakeRunner struct {
 	// savedCost, when set, is the running total a blocked run's
 	// transcript saves when it is stopped.
 	savedCost float64
+	// seen, when set, is called with the request while the run's workdir
+	// exists.
+	seen func(runner.Request)
 }
 
 func (f *fakeRunner) Kind() string  { return "claude-code" }
@@ -43,6 +46,9 @@ func (f *fakeRunner) Model() string { return "fake" }
 func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runner.Event)) (*runner.Result, error) {
 	f.got = req
 	f.calls++
+	if f.seen != nil {
+		f.seen(req)
+	}
 	sid := "s1"
 	if req.Session != nil {
 		// As the CLI does: continue req.Session.Resume in a new (forked)
