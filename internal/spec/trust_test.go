@@ -162,3 +162,36 @@ func TestWidening(t *testing.T) {
 		t.Fatalf("new = %v", w)
 	}
 }
+
+func TestToolsNeedAClaudeCodeRunner(t *testing.T) {
+	runners := `
+runners:
+  r: {kind: claude-code}
+  cx: {kind: codex}
+  api: {kind: anthropic, api_key_env: ANTHROPIC_API_KEY}
+`
+	load := func(js string) error {
+		t.Helper()
+		_, err := LoadAll(write(t, map[string]string{"orbit.yaml": strings.Replace(trustBase, "runners: {r: {kind: claude-code}}\n", runners, 1)}),
+			[]Definition{{Name: "d", Version: 1, Enabled: true, Spec: []byte(js)}})
+		return err
+	}
+	for _, r := range []string{"cx", "api"} {
+		err := load(`{"name":"d","charter":"x","runner":"` + r + `","tools":["WebFetch"]}`)
+		if err == nil || !strings.Contains(err.Error(), `tools: runner "`+r+`" is`) || !strings.Contains(err.Error(), "which takes no tools") {
+			t.Errorf("%s: err = %v", r, err)
+		}
+		if err := load(`{"name":"d","charter":"x","runner":"` + r + `"}`); err != nil {
+			t.Errorf("%s without tools: %v", r, err)
+		}
+	}
+	if err := load(`{"name":"d","charter":"x","runner":"r","tools":["WebFetch"]}`); err != nil {
+		t.Fatal(err)
+	}
+	// A file agent is held to it too: the run would fail whoever wrote the spec.
+	_, err := Load(write(t, map[string]string{"orbit.yaml": strings.Replace(base, "runners: {r: {kind: claude-code}}\n", runners, 1),
+		"agents/f.yaml": "name: f\ncharter: x\nrunner: cx\ntools: [Bash]\n"}))
+	if err == nil || !strings.Contains(err.Error(), `agent "f": tools: runner "cx" is codex`) {
+		t.Fatalf("file agent: err = %v", err)
+	}
+}
