@@ -776,6 +776,11 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		if act.Type == actions.DelegateType && pa.Error == "" && out.task != nil && out.task.Depth >= store.MaxTaskDepth {
 			pa.Rule, pa.Error = string(spec.RuleDeny), fmt.Sprintf("delegation is nested at most %d deep, and this task is at depth %d", store.MaxTaskDepth, out.task.Depth)
 		}
+		if act.Type == actions.TaskRetryType && pa.Error == "" && e.retryNeedsPerson(ctx, act.Params) {
+			// The circuit breaker: past it, a retry waits for a person even
+			// in a run answering one, so an agent cannot loop a hopeless task.
+			pa.Rule = string(spec.RuleApprove)
+		}
 		if act.Type == actions.DefineType && pa.Error == "" && pa.Rule == string(spec.RuleAuto) {
 			// A change that widens an agent waits for a person, whatever the rule: a model steered by its input must not grant itself reach.
 			if w := e.defineWidening(ctx, act.Params); len(w) > 0 {

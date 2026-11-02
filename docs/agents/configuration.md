@@ -176,7 +176,7 @@ are constants in `internal/actions` (`ContinueMinDelay`, `ContinueMaxDelay`,
 
 ## Delegation
 
-`delegates: [<agent>, ...]` (or `["*"]`, every configured agent, itself included) names the agents an agent may hand tasks to; an unknown name fails the load. The `delegate` action needs it, and is denied unless named, like any action; `task:message` and `task:cancel` follow the `delegate` rule unless named themselves. In a run answering the person's message, `approve` on these applies directly (docs/ARCHITECTURE.md, Delegation). Bounds are constants in `internal/store` (`MaxTasksPerDelegation`, `MaxTaskDepth`, `MaxConversationTasks`).
+`delegates: [<agent>, ...]` (or `["*"]`, every configured agent, itself included) names the agents an agent may hand tasks to; an unknown name fails the load. The `delegate` action needs it, and is denied unless named, like any action; `task:message`, `task:cancel` and `task:retry` follow the `delegate` rule unless named themselves. In a run answering the person's message, `approve` on these applies directly (docs/ARCHITECTURE.md, Delegation). Bounds are constants in `internal/store` (`MaxTasksPerDelegation`, `MaxTaskDepth`, `MaxConversationTasks`, `MaxTaskFailures`).
 
 ## Checks
 
