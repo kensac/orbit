@@ -17,7 +17,7 @@ A self-hosted Go service on Kanishk's server (hetzner) that runs Claude Code on 
 | Memory | typed memory entries at profile, topic and agent scope with every version kept; agents write their own; a learning pass over quiet conversations; `orbit import claude-memory` | #28 #44 |
 | Skills | a versioned skills library, real Claude Code skills per run, agents writing and retiring their own, `orbit import skills` | #49 |
 | Search | search across messages, reports, narration, tool calls and memory | #42 |
-| Tickets and builds | tickets on conversations, GitHub App tokens (App `orbit-kensac`, id 5571920), the build runner (sandboxed Claude Code, orbit commits and pushes), the ticket loop, `github:merge` gated on green checks, failed checks rerun once and compared with the base before a fix, review comments on a ticket's PR applied by a revise build, stacked tickets restacked by code and merged in order | #9 #14 #17 #32 #58 #69 |
+| Tickets and builds | tickets on conversations, GitHub App tokens (App `orbit-kensac`, id 5571920), the build runner (sandboxed Claude Code, orbit commits and pushes), the ticket loop, `github:merge` gated on green checks, failed checks rerun once and compared with the base before a fix, review comments on a ticket's PR applied by a revise build, stacked tickets restacked by code and merged in order, a checkout pool (one clone per ticket, warm spares) and setup and cleanup scripts trusted by content hash | #9 #14 #17 #32 #58 #69 #77 |
 | Sandbox | `orbit sandboxd` (one locked-down container per build, or a `workstation` per chat conversation), `orbit egress` (allowlist proxy, never GitHub; open egress for workstations), the build image | #15 #59 |
 | Chat agents | the built-in `orbit` agent as a plain Claude Code session per conversation in a sandbox, with a workspace snapshotted after each run and restored on any host (`internal/workspace`), orbit's tools over the control channel, workspace file downloads, stopping a running reply | #59 |
 | Operations | seamless upgrades (readiness, drain, resuming interrupted attempts), the worker fleet (capabilities, control vs worker, sessions across hosts), usage and health APIs | #11 #16 #25 |
@@ -36,7 +36,6 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | A live usage poller and deferring low-priority runs | #55 usage-poll | search merged in #42 |
 | Memory restore endpoint, per-agent hooks | #57 context-hooks-2 (hooks) | skills library merged in #49 |
 | Hook-driven live agent status | #37 agent-status | |
-| Worktrees | no open PR | stacked tickets merged in #69, review comments in #58, check reruns in #32, RRULE and precheck in #43 |
 
 The Claude side also plans: agent templates and more sources (Gmail, Calendar, Drive, GitHub, Prometheus/Loki, RSS, the DuckDB lake), a homelab-ops agent, presence-aware notifications across devices, the "safeguard later" pass (a credential proxy so the Claude token stays out of the sandbox, a review of self-edit rights, rate limits), and deploying the worker fleet. Ask before starting any of these.
 
