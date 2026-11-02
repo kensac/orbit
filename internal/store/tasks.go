@@ -587,9 +587,11 @@ const briefDepMax = 8 << 10
 //     report; succeeded with an open question or outcome blocked is
 //     needs_input; else done, with that run's report.
 //
-// A task needing input is due to its parent at once; a finished one when
-// its whole batch is over. A parent conversation with a due task and no
-// run since gets one delegation run.
+// A task needing input or failed is due to its parent at once, so it can
+// answer, retry or reroute while the task's siblings run; any other
+// finished one when its whole batch is over. A parent conversation with a
+// due task and no run since gets one delegation run, and never more than
+// one waiting (runs_one_delegation).
 func (s *Store) ReconcileTasks(ctx context.Context) (*Reconciled, error) {
 	res := &Reconciled{}
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -697,7 +699,7 @@ func reconcilePass(ctx context.Context, tx pgx.Tx, list []*openTask, res *Reconc
 		if _, err := tx.Exec(ctx, `UPDATE tasks SET status = $2, report = COALESCE($3, report), error = NULLIF($4, ''),
 			    updated_at = now(),
 			    finished_at = CASE WHEN $2 IN ('done', 'failed', 'cancelled') THEN now() END,
-			    report_due_at = CASE WHEN $2 = 'needs_input' THEN now() ELSE report_due_at END
+			    report_due_at = CASE WHEN $2 IN ('needs_input', 'failed') THEN now() ELSE report_due_at END
 			WHERE id = $1`, t.ID, next, rep, errText); err != nil {
 			return err
 		}

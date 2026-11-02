@@ -196,7 +196,7 @@ func tasksSection(tasks []store.Task, loc *time.Location) string {
 	}
 	var out strings.Builder
 	out.WriteString("\n# Tasks you delegated from this conversation (oldest first)\n\n")
-	out.WriteString("Their agents worked on them in their own conversations. Integrate the reports into your answer; reply to a task's question with task:message (reply_to its id), or ask your person if only they can answer. You are woken again when tasks still open settle; do not poll.\n\n")
+	out.WriteString("Their agents worked on them in their own conversations. Integrate the reports into your answer; reply to a task's question with task:message (reply_to its id), or ask your person if only they can answer. You are woken again when tasks still open settle, fail or ask; do not poll.\n\n")
 	for i := len(blocks) - 1; i >= 0; i-- {
 		out.WriteString(blocks[i])
 	}

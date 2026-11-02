@@ -79,7 +79,7 @@ func delegateType(targets []string) Type {
 			"after lists keys of tasks in this same action that must be done first; a dependent task is given their reports. "+
 			"fresh starts the agent without its memory (a worker from its template). "+
 			"decision is a question a person must approve before the task starts. "+
-			"You are woken with every report once all tasks are over, or as soon as one asks you something; do not wait or poll. "+
+			"You are woken with every report once all tasks are over, and as soon as one fails or asks you something; do not wait or poll. "+
 			"At most %d tasks per action.", strings.Join(targets, ", "), store.MaxTasksPerDelegation),
 		ParamsSchema: map[string]any{
 			"type": "object",
