@@ -107,8 +107,10 @@ type Result struct {
 	TrustBoundary []string
 	CostUSD       *float64
 	Usage         json.RawMessage
-	// Gate, when set, says why the model was not called.
-	Gate string
+	// Gate, when set, says why the model was not called; GateName is its
+	// short name, recorded on the skipped run.
+	Gate     string
+	GateName string
 }
 
 // Runner runs build jobs.
@@ -407,7 +409,7 @@ func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git) (*Output, 
 // redeliver finishes a run whose earlier attempt pushed its commit: the PR
 // is found or opened from the commit itself.
 func (r *Runner) redeliver(ctx context.Context, j Job, d Deps, g git, res *Result, defBranch, head, msg string) (*Result, error) {
-	res.Gate = "an earlier attempt of this run already pushed " + head[:12]
+	res.Gate, res.GateName = "an earlier attempt of this run already pushed "+head[:12], "pushed"
 	d.emit("orbit.gate", map[string]any{"gate": "pushed", "head": head})
 	parent, err := g.run(ctx, nil, "log", "-1", "--format=%P", head)
 	if err != nil {

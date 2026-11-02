@@ -357,7 +357,9 @@ The direction, so changes now do not close it off:
   function from a source's bytes to smaller bytes, stored as its own
   artifact; a gate is a predicate over inputs and memory that ends the run
   without a backend call, recorded as its own status (`skipped`, naming the
-  gate) so a run that judged nothing is distinguishable from one that did.
+  gate in `runs.gate`) so a run that judged nothing is distinguishable from
+  one that did. The status exists; today only a build that redelivers an
+  earlier attempt's pushed commit records it.
 
 - **Tickets, what is left**: review comments on a PR's diff, and webhook
   events in place of the loop's polling ([tickets.md](tickets.md)).

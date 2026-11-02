@@ -139,7 +139,15 @@ func TestOneBuildAndOneMergePerRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	c2 := claimBuild(t, s, run2)
-	_ = s.FinishBuild(ctx, run2, store.RunResult{Attempt: c2.Attempt}, store.TicketUpdate{PRNumber: &pr, HeadSHA: "h2"})
+	// A build delivered without the model (an earlier attempt's push) is
+	// skipped, naming its gate, and moves its ticket all the same.
+	_ = s.FinishBuild(ctx, run2, store.RunResult{Attempt: c2.Attempt, Gate: "pushed"}, store.TicketUpdate{PRNumber: &pr, HeadSHA: "h2"})
+	if r, _ := s.GetRun(ctx, run2); r.Status != store.StatusSkipped || r.Gate == nil || *r.Gate != "pushed" {
+		t.Fatalf("redelivered build = %s %v, want skipped by pushed", r.Status, r.Gate)
+	}
+	if status(t, s, two.TicketID) != store.TicketReview {
+		t.Fatal("a skipped build must still move its ticket to review")
+	}
 
 	m := store.MergeProposal{TicketID: one.TicketID, RunID: run, Agent: "a", HeadSHA: "stale", Params: json.RawMessage(`{}`), Rule: "approve"}
 	if _, err := s.ProposeMerge(ctx, m); !errors.Is(err, store.ErrConflict) {

@@ -62,14 +62,19 @@ func (e *Engine) executeBuild(ctx, actx context.Context, snap *Snapshot, a *spec
 	report := buildReport(res)
 	out, _ := json.Marshal(res.Output)
 	rr := store.RunResult{Attempt: c.Attempt, Summary: res.Output.Summary, Report: report, Output: out,
-		CostUSD: res.CostUSD, Usage: res.Usage}
+		CostUSD: res.CostUSD, Usage: res.Usage, Gate: res.GateName}
 	pr := res.PRNumber
 	if err := e.Store.FinishBuild(context.WithoutCancel(ctx), c.ID, rr, store.TicketUpdate{
 		BaseSHA: res.BaseSHA, Branch: res.Branch, PRNumber: &pr, HeadSHA: res.HeadSHA,
 	}); err != nil {
 		return err
 	}
-	metrics.RunFinished(c.Agent, "succeeded", kind, time.Since(start), res.CostUSD)
+	status := store.StatusSucceeded
+	if res.GateName != "" {
+		status = store.StatusSkipped
+		metrics.RunSkipped(c.Agent, res.GateName)
+	}
+	metrics.RunFinished(c.Agent, status, kind, time.Since(start), res.CostUSD)
 	e.deliver(ctx, snap, a, &c.ID, nil, "report", notify.Message{
 		Title: fmt.Sprintf("%s: PR #%d opened", a.Name, res.PRNumber), Body: report, Priority: notify.Default,
 		Tags: []string{"orbit", a.Name}, Link: res.PRURL,
