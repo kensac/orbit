@@ -91,3 +91,19 @@ func TestDecodeStrict(t *testing.T) {
 		}
 	}
 }
+
+func TestCostsBoundArithmeticAndMissingResultReportsZero(t *testing.T) {
+	for _, value := range []string{"1e1000000000", "1e-1000000000", "-0.1", strings.Repeat("1", 1001)} {
+		s, r := fixture(t)
+		cost := json.Number(value)
+		r[0].CostUSD = &cost
+		if _, err := Evaluate(s, r); err == nil {
+			t.Errorf("accepted unsafe cost %q", value)
+		}
+	}
+	s, _ := fixture(t)
+	report, err := Evaluate(s, nil)
+	if err != nil || report.Passed || report.KnownCostUSD != "0" || report.MissingCosts != 1 {
+		t.Fatalf("missing result: %+v %v", report, err)
+	}
+}
