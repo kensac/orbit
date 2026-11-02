@@ -63,6 +63,9 @@ type Deployment struct {
 	// Build is how orbit builds approved tickets (build.go). Without it no
 	// ticket is built.
 	Build *Build `yaml:"build,omitempty" json:"build,omitempty"`
+	// Sandbox is sandboxd for sandboxed chat agents, when it is not the
+	// build section's (SandboxService).
+	Sandbox *SandboxService `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
 	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
 }
@@ -185,6 +188,17 @@ type Agent struct {
 	// claims a run only when its ORBIT_CAPABILITIES cover every one; an
 	// agent with none runs anywhere (docs/ARCHITECTURE.md, Worker fleet).
 	Needs []string `yaml:"needs,omitempty" json:"needs,omitempty"`
+	// Chat makes the agent a conversation, as a Claude Code session is
+	// (claude-code only): its reply is the session's final message, not a
+	// report schema, and memory, questions and actions are orbit's tools it
+	// may call (docs/ARCHITECTURE.md, Chat agents).
+	Chat bool `yaml:"chat,omitempty" json:"chat,omitempty"`
+	// Sandbox runs a chat agent's CLI in a sandboxd container per
+	// conversation, over a workspace kept between messages, as one of
+	// SandboxProfiles: "workstation" (every Claude Code tool, broad egress,
+	// a home kept in the workspace) or "build" (the tools it names, the
+	// build egress allowlist). Needs sandboxd in orbit.yaml.
+	Sandbox string `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
 	// Delegates names the agents this one may hand tasks to with the
 	// delegate action ("*" is every configured agent, itself included).
 	// The delegate rule still decides whether it may (docs/ARCHITECTURE.md,
@@ -776,6 +790,9 @@ func (c *Config) Validate() error {
 		errs = append(errs, c.validateAgent(c.Agents[n])...)
 	}
 	errs = append(errs, c.validateBuild()...)
+	if sb := c.Deployment.Sandbox; sb != nil && !strings.HasPrefix(sb.Sandboxd, "unix:/") && !strings.Contains(sb.Sandboxd, ":") {
+		errs = append(errs, fmt.Errorf("sandbox: sandboxd %q is neither host:port nor unix:/path", sb.Sandboxd))
+	}
 	errs = append(errs, c.validateMail()...)
 	return errors.Join(errs...)
 }
@@ -1017,6 +1034,20 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("needs: %q is listed twice", n)
 		}
 		seenNeed[n] = true
+	}
+	if a.Chat && c.Deployment.Runners[a.Runner].Kind != "claude-code" {
+		at("chat: needs a claude-code runner (runner %q is %q)", a.Runner, c.Deployment.Runners[a.Runner].Kind)
+	}
+	if a.Sandbox != "" {
+		if !slices.Contains(SandboxProfiles, a.Sandbox) {
+			at("sandbox: %q is not a profile (want one of %v)", a.Sandbox, SandboxProfiles)
+		}
+		if !a.Chat {
+			at("sandbox: needs chat: true")
+		}
+		if addr, _ := c.Deployment.SandboxService(); addr == "" {
+			at("sandbox: needs sandboxd in orbit.yaml (a sandbox: or build: section)")
+		}
 	}
 	if ss := a.Session; ss != nil {
 		rs := c.Deployment.Runners[a.Runner]

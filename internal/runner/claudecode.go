@@ -192,6 +192,9 @@ func (c *claudeCode) env(home string) []string {
 }
 
 func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*Result, error) {
+	if req.Chat != nil {
+		return c.runChat(ctx, req, emit)
+	}
 	sess := req.Session
 	home := filepath.Join(req.Workdir, ".home")
 	keepDays := 1
