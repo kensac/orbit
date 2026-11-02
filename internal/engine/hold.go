@@ -99,7 +99,7 @@ func (e *Engine) failHeld(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 		Title: "orbit: runner " + h.Runner + " is held",
 		Body: fmt.Sprintf("%s\n\nScheduled and other unattended runs of every agent on %s wait in the queue instead of failing. %s, and resumes when that succeeds or when you run something yourself.",
 			h.Reason, h.Runner, resume),
-		Priority: notify.High, Tags: []string{"orbit", "warning"}, Link: e.runLink(snap, c.ID),
+		Priority: notify.High, Tags: []string{"orbit", "warning"}, Link: snap.Config.Deployment.RunURL(c.ID),
 	})
 	return nil
 }
