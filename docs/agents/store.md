@@ -10,6 +10,11 @@ the engine never write SQL.
 change that drops or renames is expand, then contract, across two releases,
 because the previous image may still be running during a deploy.
 
+- **Expand only.** `store.ExpandFindings` reads a migration's Up section and flags what would break the image still running beside the new one: a `DROP` of a table, column, view, type or default, a `RENAME`, a column type change, `SET NOT NULL`, and `ADD COLUMN ... NOT NULL` without a `DEFAULT`. `TestMigrationsAreExpandOnly` fails on any of them. The contract half, merged once the previous release no longer reads what it drops, carries a `-- orbit:contract: <why>` line; the check then reports it instead of failing. It reads SQL, not data: a new constraint the previous image would violate is caught only by `deploy/compat.sh` below.
+- **No `NO TRANSACTION` migrations** (`CREATE INDEX CONCURRENTLY` and the like): `orbit preflight` cannot dry-run them.
+- **`orbit preflight [--config DIR]`** (run from the new image against the live database, before the new instance starts; docs/agents/deployment.md, Rolling out): lists the applied, pending and ahead versions (`PlanMigrations`, read only), refuses a pending migration that is not expand-only, then applies every pending one to the live schema and rows in one transaction and rolls it back (`DryRunMigrations`, each lock waited for at most `DryRunLockTimeout`), and with `--config` loads that configuration. It changes nothing.
+- **`make compat BASE=<commit>`** (`deploy/compat.sh`, in CI's check job against a pull request's base or the commit a push moved from): the previous release migrates a database and queues a run, this tree preflights and migrates it, and the previous binary then serves on the new schema: ready, two runs claimed and finished, the API answering, a clean drain, and no error logged outside the ticket loop.
+
 ## Stored files
 
 `uploads.content` and `artifacts.content` are bytea, never updated. A reader serves one through `store.Blob`, a slice of `blobSlice` bytes per query (`substring`), so a GET holds a slice in memory, not the file, and a `Range` reads only its slices; `uploads.content` is stored uncompressed (`STORAGE EXTERNAL`), because a compressed value is decompressed from its start for every slice. `CreateUpload` finds a free name under a per-conversation advisory lock before its one INSERT, so the content crosses the wire once.
@@ -29,7 +34,7 @@ an agent's beliefs changed.
 - run: `queued -> running -> succeeded | failed | skipped | cancelled` (cancelled: a person stopped it, `cancel_requested_at`), `queued -> cancelled`,
   `running -> queued` (a hand-back, a lost worker under `MaxAttempts`).
   Every write by a running attempt also guards `attempt = <its own>`, so an
-  attempt superseded by a newer claim writes nothing. `skipped` is a run that ended without a backend call, and names what ended it in `gate` (`runs_skipped_names_gate`): an agent's gate (`unchanged`, `items_above`; configuration.md) or a build that delivered an earlier attempt's pushed commit (`pushed`). It counts as a success for staleness (`orbit_agent_last_success_timestamp_seconds`, `/health`'s `last_success`); `orbit_runs_skipped_total` counts them by gate.
+  attempt superseded by a newer claim writes nothing. `skipped` is a run that ended without a backend call, and names what ended it in `gate` (`runs_skipped_names_gate`): an agent's gate (`unchanged`, `items_above`; configuration.md), a schedule fire claimed past its grace (`missed`; configuration.md, Triggers) or a build that delivered an earlier attempt's pushed commit (`pushed`). It counts as a success for staleness (`orbit_agent_last_success_timestamp_seconds`, `/health`'s `last_success`), except `missed`, where the agent did nothing; `orbit_runs_skipped_total` counts them by gate.
 - attempt (`run_attempts`, one per claim, written in `ClaimRun`'s
   transaction): open, then `succeeded | failed | skipped` with its run, `handed_back`
   (`HandBack`) or `lost` (`ReapStale`).

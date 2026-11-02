@@ -34,6 +34,38 @@ func manual(t *testing.T, s *store.Store, agent string) string {
 	return id
 }
 
+// oldAgent writes agent, its spec and its default conversation in SQL, for a test that migrates to an old version first: today's store code reads columns later migrations add. It returns the conversation.
+func oldAgent(t *testing.T, s *store.Store, agent string) string {
+	t.Helper()
+	var conv string
+	if err := s.Pool.QueryRow(ctx, `
+		WITH spec AS (INSERT INTO agent_specs (sha, agent, spec) VALUES ('sha-' || $1, $1, '{}')),
+		     a AS (INSERT INTO agents (name, spec_sha, enabled) VALUES ($1, 'sha-' || $1, true))
+		INSERT INTO conversations (agent, title, is_default) VALUES ($1, 'General', true) RETURNING id`, agent).Scan(&conv); err != nil {
+		t.Fatal(err)
+	}
+	return conv
+}
+
+// oldRun writes a finished run of agent in conv with its one attempt in SQL, for the same tests as oldAgent. set is an UPDATE's SET list over runs, with args from $2.
+func oldRun(t *testing.T, s *store.Store, agent, conv, set string, args ...any) string {
+	t.Helper()
+	var id string
+	if err := s.Pool.QueryRow(ctx, `INSERT INTO runs (agent, spec_sha, trigger, conversation_id, attempt, status, worker, started_at, finished_at)
+		VALUES ($1, 'sha-' || $1, 'manual', $2, 1, 'succeeded', 'w', now(), now()) RETURNING id`, agent, conv).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO run_attempts (run_id, attempt, worker) VALUES ($1, 1, 'w')`, id); err != nil {
+		t.Fatal(err)
+	}
+	if set != "" {
+		if _, err := s.Pool.Exec(ctx, `UPDATE runs SET `+set+` WHERE id = $1`, append([]any{id}, args...)...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return id
+}
+
 func TestSyncAgentsKeepsRemovedAgentsAbsent(t *testing.T) {
 	s := testdb.New(t)
 	seed(t, s, "a", "b")

@@ -275,6 +275,9 @@ type ClaimedRun struct {
 	// its open questions, the thread it is shown and the session it
 	// continues are that conversation's.
 	ConversationID string
+	// TriggerIndex and ScheduledFor are which trigger fired and when, on a schedule run (a webhook run has the index only).
+	TriggerIndex *int
+	ScheduledFor *time.Time
 }
 
 // MaxAttempts bounds how often an interrupted run is claimed again. A run
@@ -323,8 +326,8 @@ func (s *Store) claim(ctx context.Context, worker, filter string, args ...any) (
 				    LIMIT 1
 				    FOR NO KEY UPDATE SKIP LOCKED
 				)
-				RETURNING id::text, attempt, agent, spec_sha, trigger, prompt, chain, conversation_id::text`, append([]any{worker}, args...)...).
-				Scan(&c.ID, &c.Attempt, &c.Agent, &c.SpecSHA, &c.Trigger, &c.Prompt, &c.Chain, &c.ConversationID); err != nil {
+				RETURNING id::text, attempt, agent, spec_sha, trigger, prompt, chain, conversation_id::text, trigger_index, scheduled_for`, append([]any{worker}, args...)...).
+				Scan(&c.ID, &c.Attempt, &c.Agent, &c.SpecSHA, &c.Trigger, &c.Prompt, &c.Chain, &c.ConversationID, &c.TriggerIndex, &c.ScheduledFor); err != nil {
 				return err
 			}
 			_, err := tx.Exec(ctx, `INSERT INTO run_attempts (run_id, attempt, worker) VALUES ($1, $2, $3)`,
@@ -555,6 +558,8 @@ const (
 	// StatusSkipped is a run a gate ended without calling a backend: it
 	// finished well, and judged nothing.
 	StatusSkipped = "skipped"
+	// GateMissed names a schedule fire that was claimed past its grace and skipped rather than run late. Unlike a gate's skip it is no success: the agent did nothing.
+	GateMissed = "missed"
 )
 
 // FinishRun records the outcome of a run that wrote nothing else (a failure,
@@ -600,6 +605,9 @@ func finishRun(ctx context.Context, tx pgx.Tx, runID string, r RunResult) error 
 		session_id = COALESCE(NULLIF($6, ''), session_id)
 		WHERE run_id = $1 AND attempt = $2 AND outcome IS NULL`,
 		runID, r.Attempt, r.Status, r.CostUSD, r.SessionCostUSD, r.SessionID); err != nil {
+		return err
+	}
+	if err := wakeForSteers(ctx, tx, runID); err != nil {
 		return err
 	}
 	if err := recordTokens(ctx, tx, runID, r.Attempt, r.Tokens); err != nil {

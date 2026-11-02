@@ -285,6 +285,10 @@ type containerState struct {
 	Mounts []mountState `json:"Mounts"`
 	State  struct {
 		Running bool `json:"Running"`
+		// Health is absent for a container without a healthcheck.
+		Health *struct {
+			Status string `json:"Status"`
+		} `json:"Health"`
 	} `json:"State"`
 	NetworkSettings struct {
 		Networks map[string]struct {
