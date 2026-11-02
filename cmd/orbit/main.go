@@ -17,6 +17,7 @@
 //	orbit tls-cert --dir <d> [--owner uid:gid]   orbit-db's self-signed TLS certificate
 //	orbit sandboxd           the build sandbox service (holds the docker socket)
 //	orbit egress             the allowlisting proxy, a sandbox's only route out
+//	orbit credproxy          a sandbox's route to its backend, adding the credential it never holds
 package main
 
 import (
@@ -50,11 +51,14 @@ import (
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/push"
+	"github.com/kensac/orbit/internal/repos"
 	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/tickets"
+	subusage "github.com/kensac/orbit/internal/usage"
 )
 
 // revision is set at build time (-ldflags -X main.revision=<sha>).
@@ -98,6 +102,8 @@ func main() {
 		err = sandboxdCmd(ctx, log)
 	case "egress":
 		err = egressCmd(ctx, log)
+	case "credproxy":
+		err = credproxyCmd(ctx, log)
 	case "vapid":
 		err = vapid()
 	case "version":
@@ -120,6 +126,7 @@ func harnessCmd(name string, args []string) error {
 	figures := fs.Bool("figures", false, "check the output's money amounts")
 	state := fs.String("state", "", "the directory the tool server and the hook share")
 	search := fs.String("search", "", "the engine's search socket for this agent (mcp)")
+	repoSock := fs.String("repos", "", "the engine's repository tools socket for this agent (mcp)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -127,7 +134,7 @@ func harnessCmd(name string, args []string) error {
 		return errors.New(name + ": --root is required")
 	}
 	if name == "mcp" {
-		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, revision)
+		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, *repoSock, revision)
 	}
 	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state})
 }
@@ -149,7 +156,7 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
 	os.Exit(2)
 }
 
@@ -407,7 +414,10 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		eng.Drain = drain
 		// One spare clone per build repository: a build starts from a
 		// checkout that needs only an incremental fetch.
-		checkouts := &build.Pool{Root: filepath.Join(eng.DataDir, "checkouts"), Warm: 1}
+		// Mirrors of the repositories agents read (repos:), which also seed
+		// a build's new clone.
+		eng.Repos = &repos.Mirrors{Root: filepath.Join(eng.DataDir, "mirrors")}
+		checkouts := &build.Pool{Root: filepath.Join(eng.DataDir, "checkouts"), Warm: 1, Seed: eng.Repos.Has}
 		eng.Builder = &build.Runner{WorkRoot: filepath.Join(eng.DataDir, "builds"), Pool: checkouts}
 		life, endLife := context.WithCancel(context.WithoutCancel(ctx))
 		defer endLife()
@@ -458,7 +468,8 @@ func serve(ctx context.Context, log *slog.Logger) error {
 
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
-			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher}
+			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher,
+			Boxes: boxClient(func() spec.Deployment { return eng.Current().Config.Deployment }), WorkspaceOrigins: auth.SplitList(os.Getenv("ORBIT_WORKSPACE_ORIGINS"))}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		// Bind before any executor starts: an instance that cannot serve
@@ -499,6 +510,19 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			}).Run(claimCtx)
 		}()
 
+		// The usage poller is best effort and off without usage_poll; it
+		// stops with claims, and two instances share one poll per interval
+		// (subusage.Poller.maybePoll).
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			(&subusage.Poller{
+				Store: s, Client: &http.Client{}, Env: os.LookupEnv, Worker: eng.Worker, Version: revision,
+				Config: func() *spec.Deployment { return &eng.Current().Config.Deployment },
+				Log:    log.With("component", "usage"),
+			}).Run(claimCtx)
+		}()
+
 		// The scheduler only enqueues, so it keeps leading through a drain
 		// (fires stay on time, the ready instance claims them) and lets go
 		// of the lock when this process ends.
@@ -526,7 +550,11 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			defer loops.Done()
 			all := true
 			for life.Err() == nil {
-				if n, err := s.BackfillJournal(life, all); err != nil {
+				n, failed, err := s.BackfillJournal(life, all)
+				for _, f := range failed {
+					log.Error("journal backfill skipped a run", "err", f)
+				}
+				if err != nil {
 					if life.Err() == nil {
 						log.Error("journal backfill", "err", err)
 					}
@@ -698,6 +726,33 @@ const writeTimeout = 5 * time.Minute
 // reader syncs the run it reads itself, so this only bounds how stale the
 // steps of a run nobody streams can be while an older instance writes it.
 const journalSyncEvery = 30 * time.Second
+
+// boxClient is sandboxd's client for agents' boxes: the sandboxd chats use
+// (spec.Deployment.SandboxService) with its token, made again only when
+// either changes.
+func boxClient(deployment func() spec.Deployment) func() (*sandbox.Client, error) {
+	var mu sync.Mutex
+	var key string
+	var c *sandbox.Client
+	return func() (*sandbox.Client, error) {
+		addr, tokenEnv := deployment().SandboxService()
+		if addr == "" {
+			return nil, errors.New("orbit.yaml names no sandboxd (a sandbox: or build: section)")
+		}
+		token := os.Getenv(tokenEnv)
+		mu.Lock()
+		defer mu.Unlock()
+		if c != nil && key == addr+"\x00"+token {
+			return c, nil
+		}
+		nc, err := sandbox.NewClient(addr, token)
+		if err != nil {
+			return nil, fmt.Errorf("%w (%s)", err, tokenEnv)
+		}
+		c, key = nc, addr+"\x00"+token
+		return c, nil
+	}
+}
 
 func httpServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: writeTimeout}

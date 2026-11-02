@@ -129,27 +129,36 @@ func (s *Store) AttemptChain(ctx context.Context, runID string, attempt int) (ch
 	if attempt < 1 {
 		return nil, true, nil
 	}
-	rows, err := s.Pool.Query(ctx, `
-		WITH RECURSIVE c(attempt, recovered_from) AS (
-		    SELECT attempt, recovered_from FROM run_attempts WHERE run_id = $1 AND attempt = $2
-		    UNION ALL
-		    SELECT a.attempt, a.recovered_from FROM run_attempts a JOIN c ON a.run_id = $1 AND a.attempt = c.recovered_from
-		)
-		SELECT attempt FROM c ORDER BY attempt`, runID, attempt)
+	// One snapshot: a SetRecovery between the two reads would give the
+	// chain before it with settled after it, and a stream would start a new
+	// narration for an attempt that continues the last.
+	err = pgx.BeginTxFunc(ctx, s.Pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			WITH RECURSIVE c(attempt, recovered_from) AS (
+			    SELECT attempt, recovered_from FROM run_attempts WHERE run_id = $1 AND attempt = $2
+			    UNION ALL
+			    SELECT a.attempt, a.recovered_from FROM run_attempts a JOIN c ON a.run_id = $1 AND a.attempt = c.recovered_from
+			)
+			SELECT attempt FROM c ORDER BY attempt`, runID, attempt)
+		if err != nil {
+			return err
+		}
+		if chain, err = pgx.CollectRows(rows, pgx.RowTo[int]); err != nil {
+			return err
+		}
+		if len(chain) == 0 {
+			chain, settled = []int{attempt}, true
+			return nil
+		}
+		return tx.QueryRow(ctx, `
+			SELECT $2 = 1 OR a.recovered_from IS NOT NULL OR a.recover_skipped IS NOT NULL
+			       OR r.status IN ('succeeded', 'failed', 'cancelled', 'skipped')
+			       OR EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = $1 AND e.attempt = $2)
+			FROM run_attempts a JOIN runs r ON r.id = a.run_id
+			WHERE a.run_id = $1 AND a.attempt = $2`, runID, attempt).Scan(&settled)
+	})
 	if err != nil {
 		return nil, false, err
 	}
-	if chain, err = pgx.CollectRows(rows, pgx.RowTo[int]); err != nil {
-		return nil, false, err
-	}
-	if len(chain) == 0 {
-		return []int{attempt}, true, nil
-	}
-	err = s.Pool.QueryRow(ctx, `
-		SELECT $2 = 1 OR a.recovered_from IS NOT NULL OR a.recover_skipped IS NOT NULL
-		       OR r.status IN ('succeeded', 'failed', 'cancelled', 'skipped')
-		       OR EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = $1 AND e.attempt = $2)
-		FROM run_attempts a JOIN runs r ON r.id = a.run_id
-		WHERE a.run_id = $1 AND a.attempt = $2`, runID, attempt).Scan(&settled)
-	return chain, settled, err
+	return chain, settled, nil
 }

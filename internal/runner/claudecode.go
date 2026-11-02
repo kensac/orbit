@@ -117,6 +117,9 @@ func harnessMCP(h *Harness, workdir, home string) string {
 	if h.Search != "" {
 		args = append(args, "--search", h.Search)
 	}
+	if h.Repos != "" {
+		args = append(args, "--repos", h.Repos)
+	}
 	b, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{
 		harness.MCPServer: map[string]any{"type": "stdio", "command": h.Bin, "args": args},
 	}})
@@ -137,6 +140,9 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 		allowed = append(allowed, harness.ToolQuery, harness.ToolCalc)
 		if req.Harness.Search != "" {
 			allowed = append(allowed, harness.ToolSearch)
+		}
+		if req.Harness.Repos != "" {
+			allowed = append(allowed, harness.RepoToolNames()...)
 		}
 		hooks = harnessHooks(req.Harness, req.Workdir, home)
 	}

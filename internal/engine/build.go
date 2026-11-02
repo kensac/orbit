@@ -19,10 +19,6 @@ import (
 	"github.com/kensac/orbit/internal/tokens"
 )
 
-// buildCredential is the one secret a build sandbox receives: what the CLI
-// needs to reach its own backend (sandbox.AllowedEnv).
-const buildCredential = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // G101: the variable's name, not a value
-
 // errDraining stops a build attempt from starting its sandbox on an
 // instance that is leaving: the run is handed back to the ready instance.
 var errDraining = errors.New("this instance is draining")
@@ -57,7 +53,7 @@ func (e *Engine) executeBuild(ctx, actx context.Context, snap *Snapshot, a *spec
 		metrics.RunFinished(c.Agent, "failed", kind, time.Since(start), cost)
 		e.deliver(ctx, snap, a, &c.ID, nil, "failure", notify.Message{
 			Title: a.Name + " build failed", Body: err.Error(), Priority: notify.High,
-			Tags: []string{"orbit", "warning"}, Link: e.runLink(snap, c.ID),
+			Tags: []string{"orbit", "warning"}, Link: snap.Config.Deployment.RunURL(c.ID),
 		})
 		return nil
 	}
@@ -131,7 +127,6 @@ func (e *Engine) build(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 	if err != nil {
 		return nil, fmt.Errorf("sandboxd: %w (%s)", err, d.Build.TokenEnv)
 	}
-	cred, _ := e.Env(buildCredential)
 	ticket, err := e.ticketJSON(ctx, t)
 	if err != nil {
 		return nil, err
@@ -162,7 +157,7 @@ func (e *Engine) build(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 		Plan: b.Plan, PlanVersion: b.PlanVersion, Ticket: ticket, Purpose: b.Purpose, Failure: b.Failure, Review: review,
 		StackBranch: stackBranch, StackPR: stackPR,
 		Policy: policy, Model: rs.Model, MaxTurns: rs.MaxTurns, Timeout: time.Duration(a.Timeout),
-		Credential: cred, Author: author,
+		Env: build.SandboxEnv(e.Env), Author: author,
 	}
 	deps := build.Deps{
 		App: app, Sandbox: sb, Emit: emit,

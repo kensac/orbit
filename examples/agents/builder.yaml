@@ -8,6 +8,10 @@ charter: |
 # A build runs inside the sandbox's one-hour lifetime (spec.MaxBuildTimeout).
 timeout: 45m
 wake_on_message: true
+# The repository at main's head for every run, with orbit's history and
+# pull request tools; only a host with the GitHub App's key fetches it.
+repos: [{repo: kensac/orbit, ref: main}]
+needs: [github]
 actions:
   # For orbit's own repository every merge waits for a person whatever this
   # says (docs/tickets.md, Self-hosting).
