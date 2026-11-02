@@ -100,7 +100,7 @@ func (p *Poller) Poll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer mb.Close()
+	defer func() { _ = mb.Close() }()
 	mails, err := mb.Unseen(perPoll)
 	if err != nil {
 		return err
