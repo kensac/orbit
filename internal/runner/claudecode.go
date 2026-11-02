@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/spec"
 )
@@ -29,21 +30,12 @@ type claudeCode struct {
 // rest, so the model cannot read orbit's own files or /proc.
 var readTools = []string{"Read", "Glob", "Grep"}
 
-// claudeAuthEnv are the credentials the CLI accepts; env hands it one.
-var claudeAuthEnv = []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}
-
 func newClaudeCode(rs spec.RunnerSpec, getenv func(string) (string, bool)) (Runner, error) {
 	bin := rs.Binary
 	if bin == "" {
 		bin = "claude"
 	}
-	found := false
-	for _, n := range claudeAuthEnv {
-		if v, ok := getenv(n); ok && v != "" {
-			found = true
-		}
-	}
-	if !found {
+	if claudeproto.Credential(getenv) == "" {
 		return nil, fmt.Errorf("claude-code: set CLAUDE_CODE_OAUTH_TOKEN (claude setup-token) or ANTHROPIC_API_KEY")
 	}
 	return &claudeCode{bin: bin, rs: rs, getenv: getenv}, nil
@@ -106,9 +98,12 @@ func harnessHooks(h *Harness, workdir, home string) map[string]any {
 
 // harnessMCP is the --mcp-config that starts `orbit mcp` for the run.
 func harnessMCP(h *Harness, workdir, home string) string {
+	args := []string{"mcp", "--root", workdir, "--state", harness.StateDir(home)}
+	if h.Search != "" {
+		args = append(args, "--search", h.Search)
+	}
 	b, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{
-		harness.MCPServer: map[string]any{"type": "stdio", "command": h.Bin,
-			"args": []string{"mcp", "--root", workdir, "--state", harness.StateDir(home)}},
+		harness.MCPServer: map[string]any{"type": "stdio", "command": h.Bin, "args": args},
 	}})
 	return string(b)
 }
@@ -116,8 +111,7 @@ func harnessMCP(h *Harness, workdir, home string) string {
 // shellQuote quotes s for the sh -c the CLI runs a hook command with.
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
-// baseArgs is the invocation every run shares, without the prompt's
-// transport or the session flags.
+// baseArgs is the invocation every run shares, without the transport's flags (the prompt's format, the session's), which claudeproto.Args adds.
 func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 	tools := append(append([]string{}, readTools...), req.Tools...)
 	allowed := append([]string{}, req.Tools...)
@@ -126,11 +120,20 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 		// MCP tools are not built-ins, so --tools does not list them; in
 		// dontAsk mode a tool runs only when allowed by name.
 		allowed = append(allowed, harness.ToolQuery, harness.ToolCalc)
+		if req.Harness.Search != "" {
+			allowed = append(allowed, harness.ToolSearch)
+		}
 		hooks = harnessHooks(req.Harness, req.Workdir, home)
 	}
+	if req.SkillsPlugin != "" {
+		// Skills load from the plugin (setting sources are off, so no other skill is found) and run through the Skill tool, which in dontAsk mode runs only when allowed by name; orbit's skill tool serves their text.
+		tools = append(tools, "Skill")
+		allowed = append(allowed, "Skill")
+		if req.Harness != nil {
+			allowed = append(allowed, harness.ToolSkill)
+		}
+	}
 	args := []string{
-		"-p",
-		"--output-format", "stream-json", "--verbose",
 		"--json-schema", string(req.OutputSchema),
 		"--append-system-prompt", req.System,
 		"--tools", strings.Join(tools, ","),
@@ -140,6 +143,9 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 	}
 	if req.Harness != nil {
 		args = append(args, "--mcp-config", harnessMCP(req.Harness, req.Workdir, home))
+	}
+	if req.SkillsPlugin != "" {
+		args = append(args, "--plugin-dir", req.SkillsPlugin)
 	}
 	if len(allowed) > 0 {
 		args = append(args, "--allowedTools", strings.Join(allowed, ","))
@@ -158,35 +164,16 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 	return args
 }
 
-// resumeArgs continue a session. Every resume forks (a new session id, the
-// parent's transcript copied), so an attempt that is interrupted or fails
-// leaves the session it continued exactly as the last good run left it.
-func resumeArgs(id string) []string {
-	if id == "" {
-		return nil
-	}
-	return []string{"--resume", id, "--fork-session"}
-}
-
-// env gives the CLI one credential. With a subscription token present the
-// API key is withheld: an API key the CLI is handed takes precedence over
-// the subscription and is billed per token, so a stray key in orbit's
-// environment must never turn subscription runs into API spend.
-// CLAUDE_CONFIG_DIR is pinned to HOME's .claude, where SessionFile looks,
-// whatever the CLI's default becomes.
+// env gives the CLI one credential (claudeproto.Credential: with a subscription token present the API key is withheld, so a stray key in orbit's environment never turns subscription runs into API spend), and claudeproto.Env drops every other credential and session stamp from the allowlist. CLAUDE_CONFIG_DIR is pinned to HOME's .claude, where SessionFile looks, whatever the CLI's default becomes.
 func (c *claudeCode) env(home string) []string {
-	oauth, apiKey := claudeAuthEnv[0], claudeAuthEnv[1]
-	cred := apiKey
-	if v, ok := c.getenv(oauth); ok && v != "" {
-		cred = oauth
-	}
-	env := childEnv(home, c.getenv, cred)
-	return append(env,
+	cred := claudeproto.Credential(c.getenv)
+	env := append(childEnv(home, c.getenv, cred),
 		"CLAUDE_CONFIG_DIR="+filepath.Join(home, ".claude"),
 		"DISABLE_AUTOUPDATER=1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
 		"DISABLE_TELEMETRY=1",
 	)
+	return claudeproto.Env(env, cred)
 }
 
 func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*Result, error) {
@@ -203,8 +190,11 @@ func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*R
 	args := c.baseArgs(req, home, keepDays)
 	env := c.env(home)
 	if sess == nil {
-		args = append(args, "--no-session-persistence")
-		final, err := c.oneShot(ctx, args, env, req, emit)
+		full, err := claudeproto.Args(claudeproto.Transport{Ephemeral: true}, args)
+		if err != nil {
+			return nil, err
+		}
+		final, err := c.oneShot(ctx, full, env, req, emit)
 		if final == nil {
 			return nil, err
 		}
@@ -260,7 +250,11 @@ func (c *claudeCode) resumed(ctx context.Context, sess *Session, args, env []str
 	if err := sess.Started(mode, sess.Resume); err != nil {
 		return nil, err
 	}
-	return c.oneShot(ctx, append(args, resumeArgs(sess.Resume)...), env, req, emit)
+	full, err := claudeproto.Args(claudeproto.Transport{Resume: sess.Resume}, args)
+	if err != nil {
+		return nil, err
+	}
+	return c.oneShot(ctx, full, env, req, emit)
 }
 
 // oneShot runs the CLI with the prompt on stdin and returns its result line,
@@ -285,32 +279,20 @@ func (c *claudeCode) oneShot(ctx context.Context, args, env []string, req Reques
 
 func isResult(kind string) bool { return kind == "result" || strings.HasPrefix(kind, "result.") }
 
-// parseClaudeResult reads the stream's final `result` line. is_error is the
-// field to trust: a failed login reports subtype "success" with is_error.
+// parseClaudeResult reads the stream's final `result` line. is_error is the field to trust: a failed login reports subtype "success" with is_error (claudeproto.Result.Failure).
 func parseClaudeResult(line []byte) (*Result, error) {
-	var r struct {
-		IsError          bool            `json:"is_error"`
-		Subtype          string          `json:"subtype"`
-		Result           string          `json:"result"`
-		TerminalReason   string          `json:"terminal_reason"`
-		StructuredOutput json.RawMessage `json:"structured_output"`
-		TotalCostUSD     *float64        `json:"total_cost_usd"`
-		Usage            json.RawMessage `json:"usage"`
-		ModelUsage       json.RawMessage `json:"modelUsage"`
-		SessionID        string          `json:"session_id"`
-		NumTurns         int             `json:"num_turns"`
-	}
-	if err := json.Unmarshal(line, &r); err != nil {
-		return nil, fmt.Errorf("parse claude result: %w", err)
+	r, err := claudeproto.ParseResult(line)
+	if err != nil {
+		return nil, err
 	}
 	usage, _ := json.Marshal(map[string]any{
 		"usage": r.Usage, "model_usage": r.ModelUsage, "num_turns": r.NumTurns,
 	})
 	res := &Result{Usage: usage, CostUSD: r.TotalCostUSD, SessionID: r.SessionID}
 	if r.IsError {
-		return res, fmt.Errorf("%w: claude-code %s/%s: %s", ErrBackend, r.Subtype, r.TerminalReason, firstLine(r.Result))
+		return res, fmt.Errorf("%w: claude-code %s/%s: %s", ErrBackend, r.Subtype, r.TerminalReason, firstLine(r.Failure()))
 	}
-	if len(r.StructuredOutput) == 0 || string(r.StructuredOutput) == "null" {
+	if !r.HasOutput() {
 		return res, fmt.Errorf("%w: claude-code finished (%s) without structured output: %s", ErrBackend, r.TerminalReason, firstLine(r.Result))
 	}
 	res.Output = r.StructuredOutput

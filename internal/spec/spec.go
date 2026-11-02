@@ -6,6 +6,7 @@
 package spec
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 
+	"github.com/kensac/orbit/internal/rrule"
 	"github.com/kensac/orbit/internal/transforms"
 )
 
@@ -60,6 +62,8 @@ type Deployment struct {
 	// Build is how orbit builds approved tickets (build.go). Without it no
 	// ticket is built.
 	Build *Build `yaml:"build,omitempty" json:"build,omitempty"`
+	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
+	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -165,6 +169,14 @@ type Agent struct {
 	// money amount in the summary and report must be in the inputs or in a
 	// result of orbit's query or calc tool.
 	Verify []string `yaml:"verify,omitempty" json:"verify,omitempty"`
+	// Topics are the shared memory topics (finance, homelab) whose entries
+	// every run of this agent is shown, beside the profile's and its own.
+	// The API can attach more (docs/api.md, Memory entries).
+	Topics []string `yaml:"topics,omitempty" json:"topics,omitempty"`
+	// Skills are skills from orbit's library (docs/api.md, Skills) this agent runs with; the API can attach more.
+	Skills []string `yaml:"skills,omitempty" json:"skills,omitempty"`
+	// Learn is how orbit learns from this agent's conversations once they go quiet (engine/learn.go). Absent is on, with the defaults.
+	Learn *LearnSpec `yaml:"learn,omitempty" json:"learn,omitempty"`
 	// Needs names the capabilities a host must have to run this agent
 	// ("docker-network:hetzner", "sure", "browser", "sandbox"). A worker
 	// claims a run only when its ORBIT_CAPABILITIES cover every one; an
@@ -173,7 +185,19 @@ type Agent struct {
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
+	// Origin is where the agent is defined: OriginFile, OriginDatabase or
+	// OriginBuiltin. Only database agents are changed through the API.
+	Origin string `yaml:"-" json:"-"`
+	// Version is a database agent's definition version (agent_definitions).
+	Version int `yaml:"-" json:"-"`
 }
+
+// Where an agent is defined.
+const (
+	OriginFile     = "file"
+	OriginDatabase = "database"
+	OriginBuiltin  = "builtin"
+)
 
 // SessionSpec is an agent's opt-in to continuing its Claude Code session.
 type SessionSpec struct {
@@ -187,6 +211,25 @@ type SessionSpec struct {
 	// starting a process per run. Zero means no live process.
 	Live Duration `yaml:"live,omitempty" json:"live,omitempty"`
 }
+
+// LearnSpec configures an agent's learning runs.
+type LearnSpec struct {
+	// Enabled false turns learning off for the agent.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Idle is how long a conversation must be quiet before it is learned from.
+	Idle Duration `yaml:"idle,omitempty" json:"idle,omitempty"`
+	// Runner runs learning runs instead of the agent's own (a cheaper model).
+	Runner string `yaml:"runner,omitempty" json:"runner,omitempty"`
+}
+
+// DefaultLearnIdle is the quiet a conversation needs before it is learned from: long enough that the person has moved on, short enough that what they said is kept the same day.
+const DefaultLearnIdle = 30 * time.Minute
+
+// MinLearnIdle and MaxLearnIdle bound learn.idle: under five minutes a learning run would interrupt a conversation still going (and each one is a backend call); past a day, what was said waits too long to be kept.
+const (
+	MinLearnIdle = 5 * time.Minute
+	MaxLearnIdle = 24 * time.Hour
+)
 
 // DefaultSessionIdle is the resume window when a spec names none: a
 // working day's conversation, short enough that a stale session does not
@@ -204,12 +247,65 @@ const MaxSessionIdle = 24 * time.Hour
 // resume picks up after it closes.
 const MaxSessionLive = time.Hour
 
-// Trigger is one way an agent wakes. Exactly one of Schedule is set today;
-// the struct leaves room for event triggers.
+// Trigger is one way an agent wakes: a cron Schedule, or an RRule (RFC
+// 5545, internal/rrule) anchored at Start. Exactly one is set; the struct
+// leaves room for event triggers.
 type Trigger struct {
 	Schedule string `yaml:"schedule" json:"schedule"`
+	// RRule is a recurrence rule ("FREQ=WEEKLY;INTERVAL=2;BYDAY=TU"), for
+	// what cron cannot say: every other week, the last Friday, a series
+	// that ends.
+	RRule string `yaml:"rrule,omitempty" json:"rrule,omitempty"`
+	// Start anchors an RRule: its first period, and the time of day it
+	// does not name, as local time in the agent's timezone
+	// ("2026-11-02T09:00").
+	Start string `yaml:"start,omitempty" json:"start,omitempty"`
 	// Prompt is the reason for this wake, appended to the charter.
 	Prompt string `yaml:"prompt,omitempty" json:"prompt,omitempty"`
+}
+
+// Schedule is when a trigger fires: the first fire strictly after a time,
+// or the zero time when it never fires again. A cron schedule and an
+// RRULE are both one.
+type Schedule interface {
+	Next(time.Time) time.Time
+}
+
+// startLayouts are the forms Trigger.Start is written in.
+var startLayouts = []string{"2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-02 15:04"}
+
+// TriggerSchedule is a trigger's schedule, read in loc (the agent's
+// timezone).
+func TriggerSchedule(t Trigger, loc *time.Location) (Schedule, error) {
+	switch {
+	case t.Schedule != "" && t.RRule != "":
+		return nil, errors.New("schedule and rrule cannot both be set")
+	case t.Schedule != "":
+		if t.Start != "" {
+			return nil, errors.New("start is for an rrule")
+		}
+		return ParseSchedule(t.Schedule)
+	case t.RRule != "":
+		if t.Start == "" {
+			return nil, errors.New("an rrule needs a start (local time, 2026-11-02T09:00)")
+		}
+		var start time.Time
+		var err error
+		for _, l := range startLayouts {
+			if start, err = time.ParseInLocation(l, t.Start, loc); err == nil {
+				break
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("start %q: want local time as 2026-11-02T09:00", t.Start)
+		}
+		r, err := rrule.Parse(t.RRule, start)
+		if err != nil {
+			return nil, fmt.Errorf("rrule: %w", err)
+		}
+		return r, nil
+	}
+	return nil, errors.New("schedule or rrule is required")
 }
 
 // Source is data the harness fetches before a run and hands to the agent as
@@ -246,17 +342,30 @@ type Transform struct {
 // Gate is a check, in code, that ends a scheduled run as skipped before
 // any backend call. Kinds: unchanged (every input the model would see is
 // byte for byte what the agent's newest succeeded run saw, under the same
-// spec) and items_above (Input, a source or transform, has at most N
-// records at Items: nothing to review).
+// spec), items_above (Input, a source or transform, has at most N records
+// at Items: nothing to review) and precheck (Command, a shell command the
+// person wrote, exits 1: nothing to do; 0 runs, anything else fails).
 type Gate struct {
 	Kind  string `yaml:"kind" json:"kind"`
 	Input string `yaml:"input,omitempty" json:"input,omitempty"`
 	Items string `yaml:"items,omitempty" json:"items,omitempty"`
 	N     int    `yaml:"n,omitempty" json:"n,omitempty"`
+	// Command is a precheck's shell command (sh -c), run in the run's
+	// workdir with the inputs fetched; Timeout bounds it.
+	Command string   `yaml:"command,omitempty" json:"command,omitempty"`
+	Timeout Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 }
 
 // GateKinds lists every gate kind.
-var GateKinds = []string{"unchanged", "items_above"}
+var GateKinds = []string{"unchanged", "items_above", "precheck"}
+
+// Precheck bounds: the default and the longest a precheck may run. It runs
+// before every scheduled run of its agent, on the executor, so it is a
+// quick test, not a job.
+const (
+	DefaultPrecheckTimeout = 30 * time.Second
+	MaxPrecheckTimeout     = 2 * time.Minute
+)
 
 // Withheld reports whether the model is not shown source: a transform reads
 // it and none keeps it.
@@ -355,8 +464,11 @@ var ReservedAgentNames = map[string]bool{
 	"orbit-admin": true,
 }
 
+// AgentNamePattern is an agent's name (and a source's, a transform's).
+const AgentNamePattern = `^[a-z][a-z0-9-]{0,62}$`
+
 var (
-	nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	nameRE = regexp.MustCompile(AgentNamePattern)
 	// CapabilityRE is a capability's shape: a name, optionally qualified
 	// (docker-network:hetzner).
 	CapabilityRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}(:[a-z0-9][a-z0-9._-]{0,62})?$`)
@@ -380,7 +492,41 @@ func ParseSchedule(expr string) (cron.Schedule, error) { return cronParse.Parse(
 // Load reads orbit.yaml and every agents/*.yaml under dir, then validates the
 // whole configuration. An invalid file fails the load: a deployment never
 // runs with part of its configuration silently skipped.
-func Load(dir string) (*Config, error) {
+func Load(dir string) (*Config, error) { return load(dir, nil, false) }
+
+// Definition is an agent defined in the database (agent_definitions): its
+// newest version, which LoadAll merges with the files.
+type Definition struct {
+	Name    string
+	Version int
+	Enabled bool
+	// Spec is the agent as JSON, the same fields as an agents/*.yaml file.
+	Spec json.RawMessage
+}
+
+// LoadAll is the configuration orbit runs: the files under dir, the
+// database's agent definitions, and the built-in agents (builtin.go). A
+// database agent named like a file agent is a configuration error; a
+// built-in agent yields to a file or database agent of its name, so a
+// deployment can replace it.
+func LoadAll(dir string, defs []Definition) (*Config, error) { return load(dir, defs, true) }
+
+// DecodeAgent reads one agent's JSON as strictly as a file is read: an
+// unknown field is an error.
+func DecodeAgent(b []byte) (*Agent, error) {
+	a := &Agent{}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(a); err != nil {
+		return nil, err
+	}
+	if dec.More() {
+		return nil, errors.New("more than one JSON value")
+	}
+	return a, nil
+}
+
+func load(dir string, defs []Definition, all bool) (*Config, error) {
 	cfg := &Config{Agents: map[string]*Agent{}}
 	if err := decodeFile(filepath.Join(dir, "orbit.yaml"), &cfg.Deployment); err != nil {
 		return nil, err
@@ -401,7 +547,30 @@ func Load(dir string) (*Config, error) {
 		if _, dup := cfg.Agents[a.Name]; dup {
 			return nil, fmt.Errorf("%s: duplicate agent %q", f, a.Name)
 		}
+		a.Origin = OriginFile
 		cfg.Agents[a.Name] = a
+	}
+	for _, d := range defs {
+		a, err := DecodeAgent(d.Spec)
+		if err != nil {
+			return nil, fmt.Errorf("database agent %q version %d: %w", d.Name, d.Version, err)
+		}
+		if a.Name != d.Name {
+			return nil, fmt.Errorf("database agent %q version %d: its spec names %q", d.Name, d.Version, a.Name)
+		}
+		if _, dup := cfg.Agents[a.Name]; dup {
+			return nil, fmt.Errorf("agent %q is defined twice: in agents/%s.yaml and in the database", a.Name, a.Name)
+		}
+		enabled := d.Enabled
+		a.Enabled, a.Origin, a.Version = &enabled, OriginDatabase, d.Version
+		cfg.Agents[a.Name] = a
+	}
+	if all {
+		for _, a := range Builtins(cfg.Deployment) {
+			if _, taken := cfg.Agents[a.Name]; !taken {
+				cfg.Agents[a.Name] = a
+			}
+		}
 	}
 	cfg.applyDefaults()
 	cfg.applyBuildDefaults()
@@ -443,6 +612,7 @@ func (c *Config) applyDefaults() {
 		// needs more names its own.
 		d.Defaults.Timeout = Duration(15 * time.Minute)
 	}
+	c.applyMailDefaults()
 	if d.Defaults.MemoryMaxBytes == 0 {
 		// About 4k tokens: memory rides in every prompt, so it must stay a
 		// small fraction of the context the run needs for its inputs.
@@ -559,6 +729,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, c.validateAgent(c.Agents[n])...)
 	}
 	errs = append(errs, c.validateBuild()...)
+	errs = append(errs, c.validateMail()...)
 	return errors.Join(errs...)
 }
 
@@ -582,12 +753,12 @@ func (c *Config) validateAgent(a *Agent) []error {
 	if _, ok := c.Deployment.Runners[a.Runner]; !ok {
 		at("unknown runner %q", a.Runner)
 	}
+	loc, err := time.LoadLocation(a.Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
 	for i, t := range a.Triggers {
-		if t.Schedule == "" {
-			at("trigger %d: schedule is required", i)
-			continue
-		}
-		if _, err := ParseSchedule(t.Schedule); err != nil {
+		if _, err := TriggerSchedule(t, loc); err != nil {
 			at("trigger %d: %v", i, err)
 		}
 	}
@@ -643,10 +814,28 @@ func (c *Config) validateAgent(a *Agent) []error {
 	for i, g := range a.Gates {
 		switch g.Kind {
 		case "unchanged":
+			if g.Input != "" || g.Items != "" || g.N != 0 || g.Command != "" || g.Timeout != 0 {
+				at("gate %d: unchanged takes no input, items, n, command or timeout", i)
+			}
+		case "precheck":
+			if a.Origin != OriginFile {
+				// The API and agent:define write database agents; a
+				// command on orbit's host is for reviewed files only.
+				at("gate %d: a precheck runs a command on orbit's host, so only an agent in the configuration files may have one", i)
+			}
+			if strings.TrimSpace(g.Command) == "" {
+				at("gate %d: precheck needs a command", i)
+			}
 			if g.Input != "" || g.Items != "" || g.N != 0 {
-				at("gate %d: unchanged takes no input, items or n", i)
+				at("gate %d: precheck takes a command and a timeout only", i)
+			}
+			if g.Timeout < 0 || time.Duration(g.Timeout) > MaxPrecheckTimeout {
+				at("gate %d: timeout is at most %s", i, MaxPrecheckTimeout)
 			}
 		case "items_above":
+			if g.Command != "" || g.Timeout != 0 {
+				at("gate %d: items_above takes no command or timeout", i)
+			}
 			if !seen[g.Input] {
 				at("gate %d: input %q is not a source or transform of this agent", i, g.Input)
 			}
@@ -662,7 +851,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("action %q: rule must be auto, approve or deny", typ)
 		}
 		switch {
-		case typ == "notify", typ == "continue":
+		case typ == "notify", typ == "continue", typ == "agent:define":
 		case strings.HasPrefix(typ, "webhook:"):
 			if _, ok := c.Deployment.Endpoints[strings.TrimPrefix(typ, "webhook:")]; !ok {
 				at("action %q: unknown endpoint", typ)
@@ -672,7 +861,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 				at("action %q: needs a github block in orbit.yaml", typ)
 			}
 		default:
-			at("action %q: unknown action type (want notify, continue, webhook:<endpoint> or github:merge)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, webhook:<endpoint> or github:merge)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
@@ -686,6 +875,36 @@ func (c *Config) validateAgent(a *Agent) []error {
 	for _, v := range a.Verify {
 		if !slices.Contains(verifyChecks, v) {
 			at("verify: unknown check %q (want one of %v)", v, verifyChecks)
+		}
+	}
+	seenSkill := map[string]bool{}
+	for _, k := range a.Skills {
+		if !nameRE.MatchString(k) {
+			at("skills: %q must match %s", k, nameRE)
+		}
+		if seenSkill[k] {
+			at("skills: %q is listed twice", k)
+		}
+		seenSkill[k] = true
+	}
+	seenTopic := map[string]bool{}
+	for _, t := range a.Topics {
+		if !nameRE.MatchString(t) {
+			at("topics: %q must match %s", t, nameRE)
+		}
+		if seenTopic[t] {
+			at("topics: %q is listed twice", t)
+		}
+		seenTopic[t] = true
+	}
+	if l := a.Learn; l != nil {
+		if l.Idle != 0 && (time.Duration(l.Idle) < MinLearnIdle || time.Duration(l.Idle) > MaxLearnIdle) {
+			at("learn.idle must be between %s and %s", MinLearnIdle, MaxLearnIdle)
+		}
+		if l.Runner != "" {
+			if _, ok := c.Deployment.Runners[l.Runner]; !ok {
+				at("learn.runner: unknown runner %q", l.Runner)
+			}
 		}
 	}
 	seenNeed := map[string]bool{}

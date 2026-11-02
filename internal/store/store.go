@@ -65,7 +65,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 func (s *Store) MigrateTo(ctx context.Context, version int64) error {
 	db := stdlib.OpenDBFromPool(s.Pool)
 	defer db.Close()
-	p, err := goose.NewProvider(goose.DialectPostgres, db, mustSub(migrations, "migrations"))
+	p, err := newProvider(db)
 	if err != nil {
 		return err
 	}
@@ -73,8 +73,13 @@ func (s *Store) MigrateTo(ctx context.Context, version int64) error {
 	return err
 }
 
+// newProvider is the one goose provider. Out-of-order is allowed because agents land migrations in parallel: new files are named by UTC timestamp (YYYYMMDDHHMMSS_name.sql, docs/agents/store.md), so a migration merged after a later-numbered one still applies instead of failing the start.
+func newProvider(db *sql.DB) (*goose.Provider, error) {
+	return goose.NewProvider(goose.DialectPostgres, db, mustSub(migrations, "migrations"), goose.WithAllowOutofOrder(true))
+}
+
 func migrate(ctx context.Context, db *sql.DB) error {
-	p, err := goose.NewProvider(goose.DialectPostgres, db, mustSub(migrations, "migrations"))
+	p, err := newProvider(db)
 	if err != nil {
 		return err
 	}
@@ -142,6 +147,11 @@ type AgentRow struct {
 	// NeedsInput is true while the agent waits on its person: an open
 	// question or an action pending approval.
 	NeedsInput bool `json:"needs_input"`
+	// Origin and Version are where the configuration in force defines the
+	// agent (file, database, builtin) and a database agent's version; the
+	// API fills them, empty for an agent no longer configured.
+	Origin  string `json:"origin,omitempty"`
+	Version int    `json:"version,omitempty"`
 }
 
 // RunSummary is the short form of a run.
@@ -260,8 +270,11 @@ const MaxAttempts = 3
 
 // ClaimRun moves the oldest queued run whose agent has nothing running to
 // running, owned by worker, and records the claim as a new attempt. It
-// returns nil when there is nothing to claim. FOR UPDATE SKIP LOCKED gives
-// one row to one claimer across processes; runs_one_running is what makes
+// returns nil when there is nothing to claim. FOR NO KEY UPDATE SKIP
+// LOCKED gives one row to one claimer across processes, and does not skip
+// a run another transaction only references (an event or journal row of a
+// superseded attempt being written holds a KEY SHARE lock on it, which FOR
+// UPDATE would skip); runs_one_running is what makes
 // "nothing running" true under concurrency: a second claimer for the same
 // agent fails the index and tries the next row.
 func (s *Store) ClaimRun(ctx context.Context, worker string) (*ClaimedRun, error) {
@@ -285,7 +298,7 @@ func (s *Store) claim(ctx context.Context, worker, filter string, args ...any) (
 				      `+filter+`
 				    ORDER BY q.created_at
 				    LIMIT 1
-				    FOR UPDATE SKIP LOCKED
+				    FOR NO KEY UPDATE SKIP LOCKED
 				)
 				RETURNING id::text, attempt, agent, spec_sha, trigger, prompt, chain, conversation_id::text`, append([]any{worker}, args...)...).
 				Scan(&c.ID, &c.Attempt, &c.Agent, &c.SpecSHA, &c.Trigger, &c.Prompt, &c.Chain, &c.ConversationID); err != nil {
@@ -381,10 +394,12 @@ func (s *Store) HandBack(ctx context.Context, runID string, attempt int, cost, s
 		if err := requeue(ctx, tx, runID, attempt); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `UPDATE run_attempts SET outcome = 'handed_back', ended_at = now(),
+		if _, err := tx.Exec(ctx, `UPDATE run_attempts SET outcome = 'handed_back', ended_at = now(),
 			cost_usd = $3, session_cost_usd = $4
-			WHERE run_id = $1 AND attempt = $2`, runID, attempt, cost, sessionCost)
-		return err
+			WHERE run_id = $1 AND attempt = $2`, runID, attempt, cost, sessionCost); err != nil {
+			return err
+		}
+		return syncInTx(ctx, tx, runID, attempt)
 	})
 }
 
@@ -402,10 +417,12 @@ func requeue(ctx context.Context, tx pgx.Tx, runID string, attempt int) error {
 
 // endAttempt records how an attempt ended. An attempt claimed before
 // run_attempts existed has no row, which is not an error.
-func endAttempt(ctx context.Context, db execer, runID string, attempt int, outcome string) error {
-	_, err := db.Exec(ctx, `UPDATE run_attempts SET outcome = $3, ended_at = now()
-		WHERE run_id = $1 AND attempt = $2 AND outcome IS NULL`, runID, attempt, outcome)
-	return err
+func endAttempt(ctx context.Context, tx pgx.Tx, runID string, attempt int, outcome string) error {
+	if _, err := tx.Exec(ctx, `UPDATE run_attempts SET outcome = $3, ended_at = now()
+		WHERE run_id = $1 AND attempt = $2 AND outcome IS NULL`, runID, attempt, outcome); err != nil {
+		return err
+	}
+	return syncInTx(ctx, tx, runID, attempt)
 }
 
 // releaseMessages hands a run's consumed messages back to the inbox, so the
@@ -490,8 +507,8 @@ type execer interface {
 // failed stays failed, and an attempt that lost its claim to a newer one
 // writes nothing. The run's cost is every attempt's: this one's (r.CostUSD)
 // plus what earlier, interrupted attempts were recorded to have spent.
-func finishRun(ctx context.Context, db execer, runID string, r RunResult) error {
-	tag, err := db.Exec(ctx, `
+func finishRun(ctx context.Context, tx pgx.Tx, runID string, r RunResult) error {
+	tag, err := tx.Exec(ctx, `
 		UPDATE runs SET status = $2, finished_at = now(), error = NULLIF($3, ''),
 		       summary = NULLIF($4, ''), report = NULLIF($5, ''), output = $6, usage = $7,
 		       cost_usd = CASE WHEN $8::numeric IS NULL THEN NULL ELSE $8::numeric + COALESCE(
@@ -506,11 +523,16 @@ func finishRun(ctx context.Context, db execer, runID string, r RunResult) error 
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("finish run %s attempt %d: %w (not its running claim)", runID, r.Attempt, ErrConflict)
 	}
-	_, err = db.Exec(ctx, `UPDATE run_attempts SET outcome = $3, ended_at = now(), cost_usd = $4, session_cost_usd = $5,
+	if _, err = tx.Exec(ctx, `UPDATE run_attempts SET outcome = $3, ended_at = now(), cost_usd = $4, session_cost_usd = $5,
 		session_id = COALESCE(NULLIF($6, ''), session_id)
 		WHERE run_id = $1 AND attempt = $2 AND outcome IS NULL`,
-		runID, r.Attempt, r.Status, r.CostUSD, r.SessionCostUSD, r.SessionID)
-	return err
+		runID, r.Attempt, r.Status, r.CostUSD, r.SessionCostUSD, r.SessionID); err != nil {
+		return err
+	}
+	if r.Attempt < 1 {
+		return nil
+	}
+	return syncInTx(ctx, tx, runID, r.Attempt)
 }
 
 // Run is a run as the API reports it.
@@ -544,8 +566,8 @@ type Run struct {
 	RunAfter      *time.Time `json:"run_after,omitempty"`
 	Continues     *string    `json:"continues,omitempty"`
 	Chain         int        `json:"chain,omitempty"`
-	// Steps is the number of tool calls in the latest attempt, as a
-	// thread's run item counts them (stepsCount).
+	// Steps is the number of tool calls in the latest attempt's
+	// timeline, as a thread's run item counts them (stepsCount).
 	Steps int `json:"steps"`
 	// Gate names what ended a skipped run.
 	Gate *string `json:"gate,omitempty"`
@@ -629,15 +651,30 @@ type Event struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-// AppendEvent stores the next transcript entry. Payloads that are not valid
-// JSON are stored as a JSON string, so a malformed line from a runner is
-// kept rather than dropped.
+// AppendEvent stores the next transcript entry and projects it into the
+// run's journal. Payloads that are not valid JSON are stored as a JSON
+// string, so a malformed line from a runner is kept rather than dropped.
+// An error wrapping ErrJournal means the event was stored and only its
+// journal rows wait for a sync.
 func (s *Store) AppendEvent(ctx context.Context, runID string, attempt, seq int, kind string, payload []byte) error {
 	if !json.Valid(payload) {
 		payload, _ = json.Marshal(string(payload))
 	}
-	_, err := s.Pool.Exec(ctx, `INSERT INTO run_events (run_id, attempt, seq, kind, payload) VALUES ($1, $2, $3, $4, $5)`,
-		runID, attempt, seq, kind, payload)
+	var projectErr error
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO run_events (run_id, attempt, seq, kind, payload) VALUES ($1, $2, $3, $4, $5)`,
+			runID, attempt, seq, kind, payload); err != nil {
+			return err
+		}
+		// The journal row commits with its event. A projection that fails
+		// keeps the event (the transcript is the record) and is retried
+		// by the next sync.
+		projectErr = pgx.BeginFunc(ctx, tx, func(sp pgx.Tx) error { return syncInTx(ctx, sp, runID, attempt) })
+		return nil
+	})
+	if err == nil && projectErr != nil {
+		err = fmt.Errorf("%w: run %s attempt %d event %d: %w", ErrJournal, runID, attempt, seq, projectErr)
+	}
 	return err
 }
 
@@ -720,17 +757,40 @@ type MemoryVersion struct {
 	RunID     *string   `json:"run_id,omitempty"`
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
+	// Author is the person who wrote or restored it through the API; RestoredFrom the version a restore copied.
+	Author       *string `json:"author"`
+	RestoredFrom *int64  `json:"restored_from"`
 }
 
 // MemoryHistory returns an agent's memory versions, newest first.
 func (s *Store) MemoryHistory(ctx context.Context, agent string, limit int) ([]MemoryVersion, error) {
 	limit = clampLimit(limit, 20, 200)
-	rows, err := s.Pool.Query(ctx, `SELECT id, run_id::text, content, created_at FROM memory_versions
+	rows, err := s.Pool.Query(ctx, `SELECT id, run_id::text, content, created_at, author, restored_from FROM memory_versions
 		WHERE agent = $1 ORDER BY id DESC LIMIT $2`, agent, limit)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[MemoryVersion])
+}
+
+// WriteMemory writes the next version of an agent's memory document: content as given, or, with restore above 0, a copy of that earlier version of the same agent's (ErrNotFound for another's). Nothing is replaced; the new version is the newest.
+func (s *Store) WriteMemory(ctx context.Context, agent, content string, restore int64, author string) (*MemoryVersion, error) {
+	var v MemoryVersion
+	var err error
+	if restore > 0 {
+		err = s.Pool.QueryRow(ctx, `INSERT INTO memory_versions (agent, content, author, restored_from)
+			SELECT agent, content, NULLIF($3, ''), id FROM memory_versions WHERE id = $2 AND agent = $1
+			RETURNING id, run_id::text, content, created_at, author, restored_from`, agent, restore, author).
+			Scan(&v.ID, &v.RunID, &v.Content, &v.CreatedAt, &v.Author, &v.RestoredFrom)
+	} else {
+		err = s.Pool.QueryRow(ctx, `INSERT INTO memory_versions (agent, content, author) VALUES ($1, $2, NULLIF($3, ''))
+			RETURNING id, run_id::text, content, created_at, author, restored_from`, agent, content, author).
+			Scan(&v.ID, &v.RunID, &v.Content, &v.CreatedAt, &v.Author, &v.RestoredFrom)
+	}
+	if errors.Is(err, pgx.ErrNoRows) || isForeignKeyViolation(err) {
+		return nil, ErrNotFound
+	}
+	return &v, err
 }
 
 // ---------------------------------------------------------------- messages
@@ -845,6 +905,10 @@ type Outcome struct {
 	Actions   []ProposedAction
 	// Plan is a plan the run proposed for its ticket (tickets.go).
 	Plan *PlanProposal
+	// Entries are the memory entry writes the run made, applied in order; each one's Result is set (entry_writes.go).
+	Entries []*EntryWrite
+	// Skills are the skill writes the run made (skills.go), applied after its entries.
+	Skills []*AgentSkillWrite
 }
 
 // PlanProposal is a ticket plan a run proposed. RecordOutcome sets Version
@@ -888,6 +952,12 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 				return err
 			}
 			p.Version = v
+		}
+		if err := applyEntryWrites(ctx, tx, runID, o.Entries); err != nil {
+			return err
+		}
+		if err := applySkillWrites(ctx, tx, runID, agent, o.Skills); err != nil {
+			return err
 		}
 		for _, a := range o.Actions {
 			id, err := insertAction(ctx, tx, runID, agent, a)

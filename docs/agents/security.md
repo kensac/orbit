@@ -51,12 +51,27 @@ more than its agent's rules allow.
   gains no reach it lacked (it could already Read those files). The hook fails
   closed: an event it cannot parse is denied. Hooks come only from orbit's
   `--settings`; a workdir's `.claude/settings.json` is never read.
+- **The search tool** (`mcp__orbit__search`) holds no database credential:
+  the tool server asks the engine over a unix socket (`--search`, a 0600
+  file under the temp directory) that the engine serves for one agent, and
+  the engine sets the agent on every query, so a run finds only its own
+  agent's records, which it could already have been shown. Results are
+  past writing, so they are data like any input, and they never back a
+  figure (they are kept out of the tool ledger).
+
+## Memory entries a model writes
+
+A run writes memory entries directly, and a learning run writes them from a conversation, so a poisoned input or message can plant an entry that later runs of every agent reading its scope are shown. What bounds it: entries are shown as data (the system prompt says they never authorize an action the rules do not, and an instruction in one is not to be followed); a run may write only to the profile, itself and the topics it reads, at most 10 writes, and only change entries it was shown at the version it was shown; every version is kept with the run and conversation it came from (`GET /memory/entries?run_id=`), so a bad one is found and retired or restored. A learning run reads the person's messages and the agent's reports (which can quote inputs), not the inputs themselves.
+
+## Skills
+
+A skill is instructions a run follows, and agents write their own, so a run steered by a poisoned input can write a skill that steers its later runs, and those of every agent the skill is attached to. What bounds it: a run writes at most 3 skills, only new ones or ones it was given (at the version given), and a written skill is attached to that agent only; every version is kept with its run (`source_run_id`), so a bad one is found, restored or retired. The skill tool reads only the run's own copy, inside each skill's directory after symlinks; it records nothing in the ledger, so a skill's text never backs a figure. Supporting files are stored as given and never executed by orbit; a script in a skill runs only if the agent's own `tools` let it.
 
 ## What the model can cause
 
 Only actions its spec enables, through executors here, to destinations in
 configuration. `continue` can make an agent run again on its own, so it is
-bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body, never a URL or a header.
+bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body, never a URL or a header. `agent:define` lets a model rewrite an agent defined in the database, itself included: its charter, tools, sources and rules, so an agent with it enabled can widen any database agent's reach up to what orbit.yaml offers (endpoints, channels, repositories); never a file agent's, and never past the configuration. Every change is a version with its run, so it is seen and reverted through the API.
 `deny` is the default for every type an agent does not name, and denied
 types are not even offered.
 
@@ -85,13 +100,24 @@ types are not even offered.
   login. The GET only shows; deciding is a POST from the page, so a link
   preview cannot approve anything. Rotating the token invalidates every
   outstanding link.
+- **Signed upload URLs** (`PUT /api/v1/uploads/signed`, docs/api.md) are the one `/api/` route without a token: the HMAC in the URL, keyed from `ORBIT_API_TOKEN`, names one conversation, file name, type, size bound, person and a 15-minute expiry, and its nonce is unique in `uploads`, so a URL writes one file once. Anyone holding a live URL can upload that one file into that conversation; nothing else. Uploaded files are served as downloads (images inline) with `nosniff` and a CSP that runs nothing, never as pages.
 - `/ui/runs/{id}` is read-only and relies on forward-auth. Reports can hold
   personal data; never route `/ui/` around authentik.
 - **`/mcp`** is the API as tools, with the same check: an authentik token (the person decides and authors), the operator token only on the internal listener. Its tools can do what `/api/v1` can (post, approve, reject); nothing more.
 - **The MCP OAuth proxy** (`oauth.go`) lets anyone register a client, so the redirect host list (`ORBIT_MCP_REDIRECT_HOSTS`, default the Claude apps) is what stops a link that would send a signed-in person's code to a stranger's host; the code is useless without the PKCE verifier its client holds. A code is single-use per instance only (a replay to the other instance of a rollout within its 2 minutes is the gap), and every sealed value is keyed from `ORBIT_API_TOKEN`. The client receives the person's authentik access token for the `orbit-mcp` provider, which orbit accepts like the portfolio's; the refresh token it receives is sealed and works only through orbit, which holds the client secret.
-- `GET /runs/{id}/stream` shows the agent's narration and tool summaries
-  (file paths, commands, URLs): the same data `/events` already serves to
-  the same callers.
+- `GET /runs/{id}/stream` and `/journal` show the agent's prose, thinking,
+  tool inputs and outputs: the same data `/events` already serves to the
+  same callers.
+
+## Mail
+
+A mail is a message from a person, so it is held to who may send one (`internal/mail`):
+
+- **Who.** Only a sender in `mail.allow` (default: the smtp channels' recipients) is acted on. `From` can be forged, so a mail whose `Authentication-Results` says `dmarc=fail` is refused; a mail with no such header has the allow list as its only check. Requiring a DKIM pass would be stronger.
+- **Where.** A reply reaches a conversation only through a token signed with the operator token, so knowing a conversation id is not enough to write into it; any other mail opens a new conversation with `mail.agent`.
+- **What.** The text becomes a message like one typed into the API: the agent sees it as its person's words. Nothing in a mail is executed, and attachments reach the agent only as names.
+- **Loops.** Automatic mail is never acted on, so an auto-reply to orbit's report does not wake a run that mails again.
+- The IMAP password is in orbit's environment only, like every channel secret; a port other than 993 must offer STARTTLS before login.
 
 ## Workers
 
@@ -218,6 +244,10 @@ run; `internal/build`):
 - **Not guaranteed**: the backend credential is in the sandbox (above);
   everything the sandbox section says it does not guarantee holds for a
   build.
+
+## Prechecks
+
+A `precheck` gate runs a shell command from an agent's spec in orbit's own process tree, as orbit's user, before the model is called. Its environment is the fixed list in `engine.precheckEnv` (no secret, no credential), but the same user can read what orbit can, `/proc/<orbit>/environ` included. So a precheck is accepted only in an agent defined in the configuration files, which a person writes and reviews in git: a database agent (written through the API, or by an agent's `agent:define`) with one fails validation, so nothing a model writes ever becomes a command. Its output reaches only the run's events, never a prompt.
 
 ## Adding a capability
 

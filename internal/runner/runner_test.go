@@ -498,7 +498,7 @@ func TestClaudeCodeHarnessToolsAndHooks(t *testing.T) {
 	r, _ := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
 	work := t.TempDir()
 	if _, err := r.Run(context.Background(), Request{Workdir: work, OutputSchema: json.RawMessage(`{}`),
-		Harness: &Harness{Bin: "/opt/orbit", Figures: true}}, func(Event) {}); err != nil {
+		Harness: &Harness{Bin: "/opt/orbit", Figures: true, Search: "/tmp/orbit-search-x.sock"}}, func(Event) {}); err != nil {
 		t.Fatal(err)
 	}
 	argv := strings.Split(read(t, filepath.Join(dir, "argv")), "\n")
@@ -521,10 +521,10 @@ func TestClaudeCodeHarnessToolsAndHooks(t *testing.T) {
 	if err := json.Unmarshal([]byte(flag("--mcp-config")), &mcp); err != nil {
 		t.Fatal(err)
 	}
-	if s := mcp.MCPServers["orbit"]; s.Command != "/opt/orbit" || strings.Join(s.Args, " ") != "mcp --root "+work+" --state "+state {
+	if s := mcp.MCPServers["orbit"]; s.Command != "/opt/orbit" || strings.Join(s.Args, " ") != "mcp --root "+work+" --state "+state+" --search /tmp/orbit-search-x.sock" {
 		t.Fatalf("mcp server = %+v", s)
 	}
-	if got := flag("--allowedTools"); got != "mcp__orbit__query,mcp__orbit__calc" {
+	if got := flag("--allowedTools"); got != "mcp__orbit__query,mcp__orbit__calc,mcp__orbit__search" {
 		t.Fatalf("allowedTools = %q", got)
 	}
 	var settings struct {
@@ -563,5 +563,40 @@ func TestClaudeCodeWithoutHarnessDisablesHooks(t *testing.T) {
 func TestShellQuote(t *testing.T) {
 	if got := shellQuote("/a b/it's"); got != `'/a b/it'\''s'` {
 		t.Fatalf("got %s", got)
+	}
+}
+
+func TestClaudeCodeArgsAreTheTransportsThenOrbits(t *testing.T) {
+	bin, dir := fakeCLI(t, `echo '{"type":"result","subtype":"success","is_error":false,"structured_output":{}}'`)
+	r, _ := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
+	if _, err := r.Run(context.Background(), Request{Workdir: t.TempDir(), OutputSchema: json.RawMessage(`{}`)}, func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	if argv := read(t, filepath.Join(dir, "argv")); !strings.HasPrefix(argv, "-p\n--output-format\nstream-json\n--verbose\n--no-session-persistence\n--json-schema\n") {
+		t.Fatalf("argv:\n%s", argv)
+	}
+}
+
+func TestClaudeCodeReportsTheErrorsOfAFailedTurn(t *testing.T) {
+	bin, _ := fakeCLI(t, `echo '{"type":"result","subtype":"error_max_turns","is_error":true,"terminal_reason":"max_turns","errors":["Reached maximum number of turns (3)"]}'`)
+	r, _ := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
+	_, err := r.Run(context.Background(), Request{Workdir: t.TempDir(), OutputSchema: json.RawMessage(`{}`)}, func(Event) {})
+	if !errors.Is(err, ErrBackend) || !strings.Contains(err.Error(), "Reached maximum number of turns (3)") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSkillsPluginArgs(t *testing.T) {
+	c := &claudeCode{bin: "claude", getenv: func(string) (string, bool) { return "", false }}
+	args := c.baseArgs(Request{Workdir: "/w", OutputSchema: []byte(`{}`), SkillsPlugin: "/h/.claude/orbit-skills-abc", Harness: &Harness{Bin: "/orbit"}}, "/h", 1)
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--plugin-dir /h/.claude/orbit-skills-abc", "Read,Glob,Grep,Skill", "mcp__orbit__skill"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args lack %q: %s", want, joined)
+		}
+	}
+	none := strings.Join(c.baseArgs(Request{Workdir: "/w", OutputSchema: []byte(`{}`)}, "/h", 1), " ")
+	if strings.Contains(none, "--plugin-dir") || strings.Contains(none, "Skill") {
+		t.Fatalf("args without skills: %s", none)
 	}
 }

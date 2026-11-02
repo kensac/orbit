@@ -1,10 +1,14 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"net/http"
+	"strings"
 
+	"github.com/kensac/orbit/internal/journal"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -53,15 +57,26 @@ button{font:inherit;padding:10px 18px;border-radius:6px;border:1px solid var(--l
 {{if .Report}}<pre>{{.Report}}</pre>{{end}}
 </div>
 {{end}}{{end}}
+{{if .Timeline}}<div class="card"><div class="muted">Journal{{if gt .Epoch 0}} · timeline {{.Epoch}}{{end}}</div>
+{{range .Timeline}}<div class="step" style="margin-left:{{.Indent}}em"><span class="muted">{{.Kind}}</span> <b>{{.Title}}</b>{{if .Detail}}<pre>{{.Detail}}</pre>{{end}}</div>
+{{end}}</div>{{end}}
 {{if .Message}}<p>{{.Message}}</p>{{end}}
 </main></body></html>`))
 
 type page struct {
-	Title   string
-	Action  *store.Action
-	Run     *store.Run
-	Sig     string
-	Message string
+	Title    string
+	Action   *store.Action
+	Run      *store.Run
+	Sig      string
+	Message  string
+	Epoch    int
+	Timeline []timelineRow
+}
+
+// timelineRow is one journal item as the run page shows it.
+type timelineRow struct {
+	Kind, Title, Detail string
+	Indent              int
 }
 
 func render(w http.ResponseWriter, status int, p page) {
@@ -123,5 +138,104 @@ func (s *Server) runPage(w http.ResponseWriter, r *http.Request) {
 		render(w, http.StatusNotFound, page{Title: "Run not found"})
 		return
 	}
-	render(w, http.StatusOK, page{Title: run.Agent + " run", Run: run})
+	p := page{Title: run.Agent + " run", Run: run}
+	if err := s.Store.SyncJournal(r.Context(), run.ID); err != nil {
+		s.Log.Warn("run page journal sync", "run", run.ID, "err", err)
+	}
+	if h, err := s.Store.GetJournalHead(r.Context(), run.ID, 0); err == nil && h.Epoch > 0 {
+		p.Epoch = h.Epoch
+		var revs []journal.Item
+		after := 0
+		for {
+			items, more, err := s.Store.ReadJournal(r.Context(), run.ID, h.Epoch, after, store.MaxJournalLimit)
+			if err != nil {
+				break
+			}
+			revs = append(revs, items...)
+			if !more {
+				break
+			}
+			after = items[len(items)-1].Seq
+		}
+		p.Timeline = timeline(journal.Fold(revs))
+	}
+	render(w, http.StatusOK, p)
+}
+
+// timeline renders folded journal items, a subagent's nested under the
+// call that spawned it.
+func timeline(items []journal.Item) []timelineRow {
+	depth := map[string]int{}
+	var out []timelineRow
+	for _, it := range items {
+		d := 0
+		if it.Parent != nil {
+			d = depth[*it.Parent] + 1
+		}
+		depth[it.ID] = d
+		row := timelineRow{Kind: strings.ReplaceAll(it.Kind, "_", " "), Indent: 2 * d}
+		switch it.Kind {
+		case journal.KindMessage:
+			var m journal.Message
+			_ = json.Unmarshal(it.Body, &m)
+			row.Title, row.Detail = m.Role, m.Text
+		case journal.KindThinking:
+			var t journal.Thinking
+			_ = json.Unmarshal(it.Body, &t)
+			row.Title, row.Detail = fmt.Sprintf("about %d tokens", t.TokensEstimate), t.Text.Head
+		case journal.KindToolCall:
+			var c journal.ToolCall
+			_ = json.Unmarshal(it.Body, &c)
+			row.Title = c.Name + " " + c.Summary + " (" + c.State + ")"
+			if c.Result != nil {
+				row.Detail = c.Result.Head
+			}
+		case journal.KindDiff:
+			var d journal.Diff
+			_ = json.Unmarshal(it.Body, &d)
+			row.Title = d.Change + " " + d.Path
+			if d.Patch != nil {
+				row.Detail = d.Patch.Head
+			}
+		case journal.KindPlan:
+			var p journal.Plan
+			_ = json.Unmarshal(it.Body, &p)
+			var b strings.Builder
+			for _, e := range p.Entries {
+				fmt.Fprintf(&b, "[%s] %s\n", e.Status, e.Text)
+			}
+			row.Title, row.Detail = plural(len(p.Entries), "step"), b.String()+p.Text
+		case journal.KindApproval:
+			var a journal.Approval
+			_ = json.Unmarshal(it.Body, &a)
+			row.Title, row.Detail = a.Tool+" ("+a.State+")", a.Message
+		case journal.KindQuestion:
+			var q journal.Question
+			_ = json.Unmarshal(it.Body, &q)
+			row.Title = q.Text
+		case journal.KindStatus:
+			var st journal.Status
+			_ = json.Unmarshal(it.Body, &st)
+			row.Title = st.Code
+		case journal.KindTurn:
+			var t journal.Turn
+			_ = json.Unmarshal(it.Body, &t)
+			row.Title = t.State
+			if t.Outcome != "" {
+				row.Title += ", " + t.Outcome
+			}
+			row.Detail = t.Error
+		default:
+			row.Detail = string(it.Body)
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+func plural(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return fmt.Sprintf("%d %ss", n, word)
 }

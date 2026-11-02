@@ -105,6 +105,10 @@ func TestGatesAreValidatedAtLoad(t *testing.T) {
 		"[{kind: unchanged, n: 3}]",
 		"[{kind: items_above, input: ghost}]",
 		"[{kind: items_above, input: s, n: -1}]",
+		"[{kind: precheck}]",
+		"[{kind: precheck, command: 'true', timeout: 5m}]",
+		"[{kind: precheck, command: 'true', input: s}]",
+		"[{kind: unchanged, command: 'true'}]",
 	} {
 		_, err := Load(write(t, map[string]string{"orbit.yaml": base,
 			"agents/a.yaml": "name: a\ncharter: x\nsources: [{name: s, kind: file, path: /x}]\ngates: " + bad + "\n"}))
@@ -256,5 +260,75 @@ build:
 	if _, err := Load(write(t, map[string]string{"orbit.yaml": base + "build: {sandboxd: unix:/s, agent: b, author: \"A <a@b>\", repositories: {kensac/orbit: {commands: [ls]}}}\n",
 		"agents/b.yaml": "name: b\ncharter: x\n"})); err == nil || !strings.Contains(err.Error(), "needs a github block") {
 		t.Fatalf("build without github = %v", err)
+	}
+}
+
+func TestLoadAllMergesTheDatabaseAndBuiltins(t *testing.T) {
+	dir := write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\n"})
+	cfg, err := LoadAll(dir, []Definition{{Name: "b", Version: 3, Enabled: false, Spec: []byte(`{"name":"b","charter":"y"}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := cfg.Agents["a"]; a.Origin != OriginFile {
+		t.Fatalf("a = %+v", a)
+	}
+	if b := cfg.Agents["b"]; b.Origin != OriginDatabase || b.Version != 3 || b.IsEnabled() || b.Runner != "r" {
+		t.Fatalf("b = %+v: defaults apply to database agents", b)
+	}
+	if o := cfg.Agents[BuiltinName]; o == nil || o.Origin != OriginBuiltin || o.Runner != "r" {
+		t.Fatalf("builtin = %+v", o)
+	}
+	if _, err := LoadAll(dir, []Definition{{Name: "a", Version: 1, Enabled: true, Spec: []byte(`{"name":"a","charter":"y"}`)}}); err == nil ||
+		!strings.Contains(err.Error(), "defined twice") {
+		t.Fatalf("a name in both = %v", err)
+	}
+	if _, err := LoadAll(dir, []Definition{{Name: "c", Version: 1, Enabled: true, Spec: []byte(`{"name":"c","charter":"y","runner":"none"}`)}}); err == nil {
+		t.Fatal("a database agent is validated like a file")
+	}
+	// A file agent named like the builtin replaces it.
+	cfg, err = LoadAll(write(t, map[string]string{"orbit.yaml": base, "agents/orbit.yaml": "name: orbit\ncharter: mine\n"}), nil)
+	if err != nil || cfg.Agents[BuiltinName].Origin != OriginFile {
+		t.Fatalf("override = %v %+v", err, cfg)
+	}
+}
+
+func TestTriggersTakeCronOrAnRRule(t *testing.T) {
+	load := func(triggers string) error {
+		_, err := Load(write(t, map[string]string{"orbit.yaml": base,
+			"agents/a.yaml": "name: a\ncharter: x\ntimezone: America/New_York\ntriggers: " + triggers + "\n"}))
+		return err
+	}
+	for _, ok := range []string{
+		`[{schedule: "0 9 * * *"}]`,
+		`[{rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU", start: "2026-11-03T09:00"}]`,
+		`[{rrule: "RRULE:FREQ=MONTHLY;BYDAY=-1FR", start: "2026-11-01 17:30"}]`,
+	} {
+		if err := load(ok); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for bad, want := range map[string]string{
+		`[{}]`: "schedule or rrule is required",
+		`[{schedule: "0 9 * * *", rrule: "FREQ=DAILY", start: "2026-11-03T09:00"}]`: "schedule and rrule cannot both",
+		`[{rrule: "FREQ=DAILY"}]`:                                  "an rrule needs a start",
+		`[{rrule: "FREQ=DAILY", start: "tomorrow"}]`:               `start "tomorrow": want local time`,
+		`[{rrule: "FREQ=FORTNIGHTLY", start: "2026-11-03T09:00"}]`: "rrule: FREQ=FORTNIGHTLY",
+		`[{schedule: "0 9 * * *", start: "2026-11-03T09:00"}]`:     "start is for an rrule",
+	} {
+		if err := load(bad); err == nil || !strings.Contains(err.Error(), "trigger 0: "+want) {
+			t.Errorf("%s: err = %v, want %q", bad, err, want)
+		}
+	}
+}
+
+func TestAPrecheckIsForFileAgentsOnly(t *testing.T) {
+	dir := write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\ngates: [{kind: precheck, command: 'exit 0'}]\n"})
+	if _, err := LoadAll(dir, nil); err != nil {
+		t.Fatalf("a file agent's precheck: %v", err)
+	}
+	_, err := LoadAll(dir, []Definition{{Name: "b", Version: 1, Enabled: true,
+		Spec: []byte(`{"name":"b","charter":"y","gates":[{"kind":"precheck","command":"cat /proc/1/environ"}]}`)}})
+	if err == nil || !strings.Contains(err.Error(), "only an agent in the configuration files") {
+		t.Fatalf("a database agent's precheck = %v", err)
 	}
 }

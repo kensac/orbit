@@ -20,7 +20,7 @@ This document is the design. What exists today:
 | the `build:` section of `orbit.yaml` | **Built**, unit-tested | `internal/spec/build.go` |
 | the build runner: clone, sandbox, the CLI under orbit's permission handler, readback, diff policy, commit, push, PR; decisions and sandboxes recorded per attempt | **Built**; tested against a fake sandboxd and a fake GitHub, with a real git remote; the permission protocol **seen** against the real CLI 2.1.316 (`TestRealCLIPermissionProtocol`); the whole run against a real sandboxd and docker in CI (`TestIntegrationBuild`) | `internal/build`, `internal/engine/build.go`, `internal/store/builds.go`, `migrations/00007_builds.sql` |
 | the ticket loop: build enqueue, PR and checks polling, proposing the merge, reruns of failed jobs (its own and a person's), fix attempts with the failure report, done on deploy, reconciliation, closing an abandoned ticket's PR, the self-hosting rules | **Built**, tested against a fake GitHub and real Postgres | `internal/tickets` |
-| review comments: drafts, edits as new versions, one structured message per review, the revise build that applies them, delivered when it succeeds | **Built**, tested against real Postgres and a fake GitHub | `internal/store/reviews.go`, `internal/api/reviews.go`, `migrations/00011_review_comments.sql` |
+| review comments: drafts, edits as new versions, one structured message per review, the revise build that applies them, delivered when it succeeds | **Built**, tested against real Postgres and a fake GitHub | `internal/store/reviews.go`, `internal/api/reviews.go`, `migrations/20261102032212_review_comments.sql` |
 | stacked tickets: built on the ticket below, merge held, restacked by code onto its new head and onto the default branch once it merges | **Built**; the restack against a real git remote, the loop against a fake GitHub and real Postgres | `internal/tickets/stack.go`, `internal/build/restack.go` |
 | `skipped` as a run status for gates | **Built** for a build that redelivers an earlier attempt's push | `store.FinishBuild` |
 
@@ -488,8 +488,7 @@ pinned in `deploy/cli`):
   (`SDKControlPermissionRequest`, `sdk.d.ts`) and waits for a
   `control_response` carrying `{behavior: "allow", updatedInput}` or
   `{behavior: "deny", message}` (`PermissionResult`). orbit is Go and does
-  not use the SDK; it speaks this protocol directly, which the SDK is the
-  readable reference for.
+  not use the SDK; it speaks this protocol directly (`internal/claudeproto`), which the SDK is the readable reference for.
 - `canUseTool` is asked only when the decision is "ask": `allowedTools`
   entries "execute automatically without asking" (`Options.allowedTools`),
   and in `dontAsk` mode an ask is denied without asking anyone
@@ -716,7 +715,7 @@ and, to build tickets (without it approved tickets wait):
 build:
   sandboxd: 100.123.116.85:8091        # host:port on the tailnet, or unix:/path
   token_env: ORBIT_SANDBOX_TOKEN       # the default
-  agent: orbit                         # whose runner, timeout and merge rule a build uses
+  agent: builder                       # whose runner, timeout and merge rule a build uses
   author: "orbit-kensac[bot] <351241810+orbit-kensac[bot]@users.noreply.github.com>"
   repositories:
     kensac/orbit:

@@ -71,6 +71,13 @@ func (s *Server) routes(internal bool) http.Handler {
 	api := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.authenticate(internal, h)) }
 	api("GET /api/v1/agents", s.listAgents)
 	api("GET /api/v1/agents/{name}", s.getAgent)
+	api("POST /api/v1/agents", s.createAgent)
+	api("PUT /api/v1/agents/{name}", s.updateAgent)
+	api("POST /api/v1/agents/{name}/enable", s.setAgentState("enable"))
+	api("POST /api/v1/agents/{name}/disable", s.setAgentState("disable"))
+	api("POST /api/v1/agents/{name}/archive", s.setAgentState("archive"))
+	api("GET /api/v1/agents/{name}/definitions", s.agentDefinitions)
+	api("POST /api/v1/agents/{name}/definitions/{version}/revert", s.revertAgent)
 	api("GET /api/v1/agents/{name}/thread", s.thread)
 	api("GET /api/v1/agents/{name}/conversations", s.listConversations)
 	api("POST /api/v1/agents/{name}/conversations", s.createConversation)
@@ -78,6 +85,11 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
 	api("POST /api/v1/conversations/{id}/messages", s.conversationMessage)
+	api("POST /api/v1/conversations/{id}/uploads", s.createUpload)
+	api("POST /api/v1/conversations/{id}/uploads/url", s.uploadURL)
+	api("GET /api/v1/conversations/{id}/uploads/{upload}", s.getUpload)
+	// The signature in the URL is the credential (uploads.go).
+	mux.HandleFunc("PUT /api/v1/uploads/signed", s.signedUpload)
 	api("GET /api/v1/agents/{name}/memory", s.memoryHistory)
 	api("POST /api/v1/agents/{name}/runs", s.startRun)
 	api("GET /api/v1/agents/{name}/messages", s.listMessages)
@@ -87,9 +99,13 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/runs/{id}/cancel", s.cancelRun)
 	api("GET /api/v1/runs/{id}/events", s.listEvents)
 	api("GET /api/v1/runs/{id}/stream", s.streamRun)
+	api("GET /api/v1/runs/{id}/journal", s.readJournal)
+	api("GET /api/v1/runs/{id}/journal/items/{item}", s.journalItem)
+	api("GET /api/v1/runs/{id}/journal/bodies/{sha256}", s.journalBody)
 	api("GET /api/v1/runs/{id}/artifacts", s.listArtifacts)
 	api("GET /api/v1/runs/{id}/deliveries", s.listDeliveries)
 	api("GET /api/v1/artifacts/{id}", s.getArtifact)
+	api("GET /api/v1/search", s.searchHTTP)
 	api("GET /api/v1/usage", s.usage)
 	api("GET /api/v1/health", s.health)
 	api("GET /api/v1/actions", s.listActions)
@@ -109,6 +125,8 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/comments/{comment}/edit", s.editComment)
 	api("POST /api/v1/tickets/{id}/comments/{comment}/withdraw", s.withdrawComment)
 	api("POST /api/v1/tickets/{id}/review", s.submitReview)
+	s.memoryRoutes(api)
+	s.skillsRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
 
@@ -197,7 +215,19 @@ func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	agents, err := s.Store.ListAgents(r.Context())
+	s.withOrigin(agents)
 	respond(w, map[string]any{"agents": orEmpty(agents)}, err)
+}
+
+// withOrigin fills each row's origin and version from the configuration in
+// force.
+func (s *Server) withOrigin(rows []store.AgentRow) {
+	cfg := s.Engine.Current().Config
+	for i := range rows {
+		if a, ok := cfg.Agents[rows[i].Name]; ok {
+			rows[i].Origin, rows[i].Version = a.Origin, a.Version
+		}
+	}
 }
 
 func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +237,7 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
+	s.withOrigin(agents)
 	for _, a := range agents {
 		if a.Name == name {
 			mem, err := s.Store.Memory(r.Context(), name)
@@ -305,13 +336,15 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 		Wake *bool `json:"wake"`
 		// ClientMessageID makes a retry return the first result.
 		ClientMessageID string `json:"client_message_id"`
+		// Attachments are uploads of this conversation the message carries.
+		Attachments []string `json:"attachments"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if strings.TrimSpace(body.Body) == "" {
-		writeErr(w, http.StatusBadRequest, "body is required")
+	if strings.TrimSpace(body.Body) == "" && len(body.Attachments) == 0 {
+		writeErr(w, http.StatusBadRequest, "body or attachments is required")
 		return
 	}
 	wake := a.MessagesTrigger
@@ -320,7 +353,7 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 	}
 	res, replayed, err := s.Store.PostMessageOnce(r.Context(), store.PostMessage{
 		Agent: a.Name, SpecSHA: a.SHA, Body: body.Body, Author: actor(r, body.Author), ReplyTo: body.ReplyTo,
-		Wake: wake, ClientID: body.ClientMessageID, ConversationID: conversationID,
+		Wake: wake, ClientID: body.ClientMessageID, ConversationID: conversationID, Attachments: body.Attachments,
 	})
 	if err != nil {
 		respond(w, nil, err)

@@ -12,6 +12,19 @@ one of `spec.ReservedAgentNames`: the UI's own top-level routes under
 `/orbit/` (`admin`, `api`, `c`, `new`, `components`, `lib`) and
 `orbit-admin`. Such an agent fails the load, naming the reason.
 
+## Agents in the database
+
+Agents are also defined through the API (docs/api.md, Defining agents),
+stored as versions in `agent_definitions` and loaded with the files by
+`spec.LoadAll`: the same decoding (unknown fields fail), defaults and
+validation. A name defined both in a file and in the database fails the
+load. The built-in agents (`spec.Builtins`: `orbit`) yield to a file or
+database agent of their name. Each instance reloads when the directory's
+content or the newest definition changes, so a definition written on one
+instance is in force on all within the 30 s poll.
+
+An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one.
+
 ## Secrets
 
 Never in YAML. Channels name variables with `*_env`; source headers, query
@@ -38,6 +51,21 @@ globs and `max_diff_lines`. Each repository must be in
 Open decisions). Without the section no ticket is built; approved tickets
 wait. orbit also needs `CLAUDE_CODE_OAUTH_TOKEN`, the one credential the
 sandbox receives. `orbit validate` lists both variables.
+
+## Mail
+
+`mail:` in `orbit.yaml` gives orbit a mailbox, so a person can answer its mails and write to it (`internal/mail`, docs/ARCHITECTURE.md, Mail):
+
+```yaml
+mail:
+  address: orbit@example.com      # bare, no plus part; replies go to its plus form
+  imap: {host: mail.example.com, port: 993, username_env: SMTP_USER, password_env: SMTP_PASS, mailbox: INBOX}
+  allow: [me@example.com]         # default: every smtp channel's `to`
+  agent: assistant                # a mail that is not a reply opens a conversation here
+  poll: 1m
+```
+
+`port` defaults to 993 (implicit TLS); any other port must offer STARTTLS. `mailbox` defaults to `INBOX` and must be orbit's own: every unseen mail in it is read and marked seen. The server must deliver `local+anything@domain` to the mailbox (Postfix's `recipient_delimiter`). Without `agent`, a mail that is not a reply is recorded and ignored. `poll` is at least 10s. With the section, every mail orbit sends carries a reply address and Message-ID naming its run's conversation.
 
 ## Capabilities
 
@@ -74,8 +102,20 @@ fails the run, naming it. A new kind is a function in
 |---|---|---|
 | `unchanged` | none | every input the model would see (by file name and sha256) is what the agent's newest succeeded run saw, under the same spec |
 | `items_above` | `input` (a source or transform), `items`, `n` | `input` has at most `n` records at `items` |
+| `precheck` | `command`, `timeout` (default 30s, at most 2m) | `sh -c <command>` exits 1 |
+
+A precheck runs in the run's workdir with the inputs written (`$ORBIT_INPUTS` is their directory), with only `PATH`, `HOME` (the workdir), `LANG`, `TZ`, `ORBIT_AGENT` and `ORBIT_RUN_ID` in its environment. Exit 0 goes on to the model; exit 1 skips, as grep's no match does, and the first line it printed is the skip's reason; any other status, a timeout or a command that cannot start fails the run, naming the status and the last line of stderr. Every precheck is an `orbit.precheck` event with its status, duration and output (4 KB of each). It runs as orbit, so only an agent in the configuration files may have one; a database agent with a precheck fails validation (docs/agents/security.md, Prechecks).
 
 A skipped run counts as a success for staleness (docs/agents/store.md).
+
+## Triggers
+
+`triggers:` in an agent are when it wakes on its own. Each is one of:
+
+- `schedule`: a five-field cron expression or a descriptor (`@daily`), read in the agent's `timezone`.
+- `rrule` and `start`: an RFC 5545 recurrence rule (`internal/rrule`), anchored at `start`, a local time in the agent's timezone (`2026-11-03T09:00`). For what cron cannot say: `FREQ=WEEKLY;INTERVAL=2;BYDAY=TU` (every other Tuesday), `FREQ=MONTHLY;BYDAY=-1FR` (the last Friday), `FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=2` (the second weekday), and series that end (`COUNT`, `UNTIL`). `start` sets the first period and the time of day the rule does not name. Supported: `FREQ` from `MINUTELY` to `YEARLY`, `INTERVAL`, `COUNT` (at most 10000), `UNTIL`, `BYMONTH`, `BYMONTHDAY`, `BYDAY` (ordinals in `MONTHLY` and `YEARLY`), `BYHOUR`, `BYMINUTE`, `BYSECOND`, `BYSETPOS`, `WKST`; anything else fails the load. Days and longer are wall-clock (09:00 stays 09:00 across daylight saving); hours and minutes are elapsed time.
+
+Either kind takes `prompt`, the reason for the wake. Both go through the same scheduler (one fire per trigger and time, `runs_one_per_fire`; after downtime only the newest missed fire), and an ended series never fires again.
 
 ## Templates in sources
 
@@ -118,6 +158,18 @@ charter or memory gets those amounts sent back and then noted.
 unattended runs: schedule, manual, continue, build. A run answering a
 person's message never notifies, whatever it says: the person is reading
 the chat. Failures and pending approvals of unattended runs always notify.
+
+## Memory topics
+
+`topics: [finance]` names the shared memory topics whose entries every run of the agent reads, beside the profile's and its own (docs/ARCHITECTURE.md, Memory entries). A topic exists as soon as an entry or an agent names it; the API can attach more (`PUT /agents/{name}/topics/{topic}`).
+
+## Skills
+
+`skills: [monthly-close]` names skills from orbit's library the agent runs with (docs/ARCHITECTURE.md, Skills). A name no skill has is skipped at run time and shown as `missing` in `GET /agents/{name}/context`; the API attaches more.
+
+## Learning
+
+Every agent is learned from (docs/ARCHITECTURE.md, Memory entries): a conversation quiet for `learn.idle` (default 30m, between 5m and 24h) with something new from the person gets one learning run. `learn: {enabled: false}` turns it off; `learn.runner` names a runner for learning runs instead of the agent's own (a cheaper model).
 
 ## Changing a running deployment
 

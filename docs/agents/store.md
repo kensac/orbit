@@ -6,7 +6,7 @@ the engine never write SQL.
 ## Migrations
 
 `internal/store/migrations/` is the schema, applied by `orbit serve` at start
-(goose, embedded). A migration is additive and never edited once merged. A
+(goose, embedded). A migration is additive and never edited once merged. Name a new migration by UTC timestamp, `YYYYMMDDHHMMSS_name.sql` (`date -u +%Y%m%d%H%M%S`), never the next small number: agents merge in parallel and two of them picking the same number made every orbit start fail. Out-of-order apply is on, and `TestMigrationVersionsAreUnique` fails on a duplicate. A
 change that drops or renames is expand, then contract, across two releases,
 because the previous image may still be running during a deploy.
 
@@ -15,6 +15,10 @@ because the previous image may still be running during a deploy.
 Nothing ages out. Rows that look disposable are the record: `run_events` is
 the transcript, `artifacts` is what the model saw, `memory_versions` is how
 an agent's beliefs changed.
+
+## The journal
+
+`journal_items` is derived from `run_events` by `journal.Project`, a pure function of an attempt's events in order. Keep it pure: the live write (in `AppendEvent`'s transaction) and the backfill (`syncAttempt`, run at start and every 30 s for recent runs, and by a reader before it reads) must write the same rows, and `TestBackfillWritesWhatTheLiveWriterWould` holds them together. Rows are append-only: a change is a new revision, never an UPDATE. A body's shape changes only with a new `journal.Version` and an upcaster in `journal.Upcast`; stored rows keep their version. Every journal write of a run holds its advisory lock (`lockJournal`), which is what keeps `seq` gapless. A transition that ends an attempt (`finishRun`, `endAttempt`, `HandBack`) syncs that attempt in its own transaction, so the turn it left open closes with it.
 
 ## State machines
 
@@ -41,6 +45,8 @@ an agent's beliefs changed.
 - session transcripts (`session_transcripts`): written once per session id (`ON CONFLICT DO NOTHING`; a resume forks to a new id), never updated.
 - deployment (`deployment_specs`, `deployment_current`): every version kept, as `agent_specs`; `SyncDeployment` moves the pointer before `SyncAgents` records the agents loaded with it.
 
+- search (`search_docs`): derived, not written by any store method. Triggers on `messages`, `runs` (summary, report, error), `run_events` (the backends' prose and tool calls), `memory_versions` and `memory_entry_versions` insert one document per searchable piece, keyed by the row it came from (`ref`), so every writer indexes alike; a document that cannot be built raises a warning and never fails the write. A new searchable table gets its trigger and its backfill in one migration.
+
 A client request id (`receipts`) is written in the same transaction as the
 message or decision it records, so a retry returns the first result and a
 failure leaves no receipt.
@@ -51,6 +57,8 @@ to the agent's default conversation (`orbit_conversation_fill`, which also
 moves `last_activity_at`). Every query that reads a thread for a run filters
 by the run's conversation. Conversations are archived, never deleted, and
 the default one cannot be archived.
+
+A mail (`mail_in`, keyed by Message-ID) is recorded in the same transaction as the message and run it becomes (`IngestMail`), so a mail fetched twice, by two instances or after a crash before it was marked seen, is acted on once. An ignored mail is recorded with its reason; every row keeps the raw mail.
 
 Every transition is a guarded UPDATE (`WHERE status = ...`); zero rows
 affected is `ErrConflict`, not success.

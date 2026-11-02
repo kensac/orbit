@@ -9,6 +9,7 @@
   stdin line, and can crash, hang, or send a control request mid-turn.
 - **The engine is tested end to end** with a fake runner and an httptest
   server standing in for sources, channels and endpoints.
+- **The CLI protocol has its own real-CLI check**: `ORBIT_REAL_CLAUDE=claude go test -run RealCLI ./internal/claudeproto/` (initialize with a host hook, set_permission_mode, can_use_tool allowed and denied, a hook_callback per call, an interrupt that withdraws a pending permission request). Run it after a CLI bump; it uses the person's own login, so it never runs in CI.
 
 ## The real-CLI smoke
 
@@ -28,9 +29,11 @@ orbit any placeholder token so the runner builds.
 
 After changing `internal/harness` or its wiring, run an agent with
 `verify: [figures]` and a JSON `file` source: the init event lists
-`mcp__orbit__query` and `mcp__orbit__calc`, the totals come from query calls,
+`mcp__orbit__query`, `mcp__orbit__calc` and `mcp__orbit__search`, a search for a word of an earlier run's report finds it, the totals come from query calls,
 a Read of `../x` is denied with orbit's message, and a figure asked for "in
 your head" is sent back and recomputed with a tool.
+
+After changing skills or their wiring, run an agent with one skill whose `SKILL.md` tells it to read a file of the skill: the run's events show the `Skill` tool on `orbit:<name>`, then `mcp__orbit__skill` for `SKILL.md` and for the file, and the answer uses the file's content (seen on 2.1.316).
 
 After changing sessions or the live process, also run an agent with
 `session: {resume: true, live: 10m}` and `continue: approve`: a message (run

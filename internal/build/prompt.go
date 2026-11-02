@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/kensac/orbit/internal/claudeproto"
 )
 
 // cliTools are the build CLI's tools: the read tools, and the write and
@@ -69,27 +71,28 @@ var outputSchema = func() json.RawMessage {
 	return b
 }()
 
-// cliArgs is the build CLI's command line. The prompt goes on stdin as one
-// stream-json user message; stdin stays open for permission answers.
+// cliArgs is the build CLI's command line. The prompt goes on stdin as one stream-json user message; stdin stays open for permission answers, and nothing is kept of the session.
 func cliArgs(binary, model string, maxTurns int, system string) []string {
-	args := []string{
-		binary, "-p",
-		"--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-		"--permission-prompt-tool", "stdio", "--permission-mode", "default",
+	extra := []string{
+		"--permission-mode", "default",
 		"--tools", cliTools,
 		"--strict-mcp-config", "--setting-sources", "",
 		"--settings", buildSettings(),
 		"--json-schema", string(outputSchema),
 		"--append-system-prompt", system,
-		"--no-session-persistence",
 	}
 	if model != "" {
-		args = append(args, "--model", model)
+		extra = append(extra, "--model", model)
 	}
 	if maxTurns > 0 {
-		args = append(args, "--max-turns", strconv.Itoa(maxTurns))
+		extra = append(extra, "--max-turns", strconv.Itoa(maxTurns))
 	}
-	return args
+	args, err := claudeproto.Args(claudeproto.Transport{Stream: true, PermissionPrompt: true, Ephemeral: true}, extra)
+	if err != nil {
+		// extra names no transport flag; TestBuildDeliversAPullRequest runs this.
+		panic(err)
+	}
+	return append([]string{binary}, args...)
 }
 
 // systemPrompt is the build contract, separate from the plan.

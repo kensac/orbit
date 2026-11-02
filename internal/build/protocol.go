@@ -1,41 +1,17 @@
 package build
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
-	"sync"
+
+	"github.com/kensac/orbit/internal/claudeproto"
 )
 
-// The CLI's stdio permission protocol, as the Agent SDK speaks it
-// (@anthropic-ai/claude-agent-sdk 0.3.316, core.mjs: the transport passes
-// --permission-prompt-tool=stdio when a host supplies canUseTool, and
-// Query.handleControlRequest answers). With that flag the CLI writes, for
-// every tool call its permission rules leave as "ask",
-//
-//	{"type":"control_request","request_id":"<id>",
-//	 "request":{"subtype":"can_use_tool","tool_name":"Write","input":{...},"tool_use_id":"..."}}
-//
-// on stdout and waits for, on stdin,
-//
-//	{"type":"control_response","response":{"subtype":"success","request_id":"<id>",
-//	 "response":{"behavior":"allow","updatedInput":{...}}}}
-//
-// or {"behavior":"deny","message":"..."}. Any other control request gets
-// {"subtype":"error","request_id":"<id>","error":"..."}, as the SDK answers
-// a subtype it has no handler for. Seen against the real CLI 2.1.316
-// (TestRealCLIPermissionProtocol): an allowed Write wrote, a denied one did
-// not and the model was told orbit's message, and a deny rule refused a
-// command without asking.
-
-// maxLine bounds one line of the CLI's stream: a tool result echoing a large
-// file is one line.
-const maxLine = 16 << 20
+// The CLI's stdio permission protocol (internal/claudeproto): with --permission-prompt-tool stdio the CLI sends a can_use_tool control request for every tool call its permission rules leave as "ask" and waits for orbit's answer; any other control request is refused. Seen against the real CLI 2.1.316 (TestRealCLIPermissionProtocol): an allowed Write wrote, a denied one did not and the model was told orbit's message, and a deny rule refused a command without asking.
 
 // PermissionRequest is one can_use_tool request.
 type PermissionRequest struct {
@@ -52,34 +28,6 @@ type Permissions struct {
 	Record func(PermissionRequest, Decision) error
 }
 
-// decide is the whole answer to one request, recorded first.
-func (p Permissions) decide(req PermissionRequest) Decision {
-	d := p.Policy.Decide(req.Tool, req.Input)
-	if p.Record == nil {
-		return deny("orbit cannot record decisions, so it allows nothing")
-	}
-	if err := p.Record(req, d); err != nil {
-		if d.Allow {
-			return deny("orbit could not record this decision, so it is denied; try again")
-		}
-	}
-	return d
-}
-
-// cliResult is the CLI's final result line, the parts orbit uses.
-type cliResult struct {
-	IsError           bool            `json:"is_error"`
-	Subtype           string          `json:"subtype"`
-	Result            string          `json:"result"`
-	TerminalReason    string          `json:"terminal_reason"`
-	StructuredOutput  json.RawMessage `json:"structured_output"`
-	TotalCostUSD      *float64        `json:"total_cost_usd"`
-	Usage             json.RawMessage `json:"usage"`
-	NumTurns          int             `json:"num_turns"`
-	PermissionDenials json.RawMessage `json:"permission_denials"`
-	raw               []byte
-}
-
 // Process runs the CLI with these streams and returns its exit code: a
 // sandbox attach in production, a local process in the real-CLI check.
 type Process func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) (int, error)
@@ -92,14 +40,40 @@ type conversation struct {
 	emit  func(kind string, payload []byte)
 }
 
+// handler answers the CLI's requests: can_use_tool through the policy,
+// each decision recorded before it is sent (claudeproto.Recorded); every
+// other subtype is refused.
+func (cv *conversation) handler() claudeproto.Handler {
+	decide := func(_ context.Context, r claudeproto.PermissionRequest) claudeproto.Permission {
+		d := cv.perms.Policy.Decide(r.Tool, r.Input)
+		return claudeproto.Permission{Allow: d.Allow, Message: d.Message}
+	}
+	var record func(claudeproto.PermissionRequest, claudeproto.Permission) error
+	if cv.perms.Record != nil {
+		record = func(r claudeproto.PermissionRequest, p claudeproto.Permission) error {
+			return cv.perms.Record(PermissionRequest{RequestID: r.RequestID, Tool: r.Tool, Input: r.Input}, Decision{Allow: p.Allow, Message: p.Message})
+		}
+	}
+	recorded := claudeproto.Recorded(decide, record)
+	return claudeproto.Handler{
+		Name: "orbit's build",
+		CanUseTool: func(ctx context.Context, r claudeproto.PermissionRequest) (claudeproto.Permission, error) {
+			p, err := recorded(ctx, r)
+			ev, _ := json.Marshal(map[string]any{"request_id": r.RequestID, "tool": r.Tool, "allowed": p.Allow, "message": p.Message})
+			cv.emit("orbit.permission", ev)
+			return p, err
+		},
+	}
+}
+
 // run drives proc to its result. It returns the result line, or an error
 // when the process ended without one.
-func (cv *conversation) run(ctx context.Context, proc Process, prompt string) (*cliResult, error) {
+func (cv *conversation) run(ctx context.Context, proc Process, prompt string) (*claudeproto.Result, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	stderr := &tailBuffer{}
+	stderr := &claudeproto.Tail{}
 	type exit struct {
 		code int
 		err  error
@@ -112,29 +86,24 @@ func (cv *conversation) run(ctx context.Context, proc Process, prompt string) (*
 		done <- exit{code, err}
 	}()
 
-	w := &lineWriter{w: inW}
-	msg, _ := json.Marshal(map[string]any{
-		"type": "user", "message": map[string]any{"role": "user", "content": prompt},
-		"parent_tool_use_id": nil, "session_id": "default",
-	})
-	var res *cliResult
-	convErr := w.line(msg)
-	if convErr == nil {
-		res, convErr = cv.read(outR, w)
-	}
+	conn := claudeproto.NewConn(outR, inW, cv.handler())
+	res, convErr := conn.Turn(ctx, prompt, func(l claudeproto.Line) { cv.emit(l.Kind, l.Raw) })
 	// The result ends the conversation: closing stdin makes the CLI exit.
 	// On any error, cancelling ends the attach too.
-	_ = inW.Close()
+	_ = conn.CloseInput()
 	if convErr != nil {
 		cancel()
 	}
-	_, _ = io.Copy(io.Discard, outR)
+	<-conn.Done()
 	ex := <-done
 	if res != nil {
 		return res, nil
 	}
-	if convErr == nil {
+	if convErr == nil || errors.Is(convErr, claudeproto.ErrEnded) {
 		convErr = errors.New("the CLI exited without a result")
+		if err := conn.Err(); err != nil {
+			convErr = err
+		}
 	}
 	if ex.err != nil && !errors.Is(ex.err, context.Canceled) {
 		convErr = fmt.Errorf("%w (%w)", convErr, ex.err)
@@ -145,113 +114,6 @@ func (cv *conversation) run(ctx context.Context, proc Process, prompt string) (*
 		convErr = fmt.Errorf("%w: %s", convErr, lastLine(tail))
 	}
 	return nil, convErr
-}
-
-// read consumes the stream until the result line.
-func (cv *conversation) read(out io.Reader, w *lineWriter) (*cliResult, error) {
-	sc := bufio.NewScanner(out)
-	sc.Buffer(make([]byte, 64<<10), maxLine)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		line = append([]byte(nil), line...)
-		var head struct {
-			Type      string `json:"type"`
-			Subtype   string `json:"subtype"`
-			RequestID string `json:"request_id"`
-			Request   struct {
-				Subtype  string          `json:"subtype"`
-				ToolName string          `json:"tool_name"`
-				Input    json.RawMessage `json:"input"`
-			} `json:"request"`
-		}
-		if json.Unmarshal(line, &head) != nil {
-			cv.emit("raw", line)
-			continue
-		}
-		kind := head.Type
-		if head.Subtype != "" {
-			kind += "." + head.Subtype
-		}
-		cv.emit(kind, line)
-		switch head.Type {
-		case "control_request":
-			if err := w.line(cv.answer(head.RequestID, head.Request.Subtype, head.Request.ToolName, head.Request.Input)); err != nil {
-				return nil, fmt.Errorf("answer the CLI's %s request: %w", head.Request.Subtype, err)
-			}
-		case "result":
-			res := &cliResult{raw: line}
-			if err := json.Unmarshal(line, res); err != nil {
-				return nil, fmt.Errorf("parse the CLI's result: %w", err)
-			}
-			return res, nil
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("read the CLI's stream: %w", err)
-	}
-	return nil, nil
-}
-
-// answer builds the control_response for one control request.
-func (cv *conversation) answer(id, subtype, tool string, input json.RawMessage) []byte {
-	var resp map[string]any
-	if subtype == "can_use_tool" && id != "" {
-		if len(input) == 0 || input[0] != '{' {
-			input = json.RawMessage(`{}`)
-		}
-		d := cv.perms.decide(PermissionRequest{RequestID: id, Tool: tool, Input: input})
-		ev, _ := json.Marshal(map[string]any{"request_id": id, "tool": tool, "allowed": d.Allow, "message": d.Message})
-		cv.emit("orbit.permission", ev)
-		r := map[string]any{"behavior": "deny", "message": d.Message}
-		if d.Allow {
-			// The input exactly as asked: orbit decides, never rewrites.
-			r = map[string]any{"behavior": "allow", "updatedInput": input}
-		}
-		resp = map[string]any{"subtype": "success", "request_id": id, "response": r}
-	} else {
-		resp = map[string]any{"subtype": "error", "request_id": id,
-			"error": "orbit does not handle " + subtype + " requests in a build"}
-	}
-	b, _ := json.Marshal(map[string]any{"type": "control_response", "response": resp})
-	return b
-}
-
-// lineWriter writes whole lines to the CLI's stdin.
-type lineWriter struct {
-	mu sync.Mutex
-	w  io.Writer
-}
-
-func (l *lineWriter) line(b []byte) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	_, err := l.w.Write(append(b, '\n'))
-	return err
-}
-
-// tailBuffer keeps the last 8 KB written to it, for an error message.
-type tailBuffer struct {
-	mu sync.Mutex
-	b  []byte
-}
-
-func (t *tailBuffer) Write(p []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.b = append(t.b, p...)
-	if len(t.b) > 8<<10 {
-		t.b = append(t.b[:0], t.b[len(t.b)-8<<10:]...)
-	}
-	return len(p), nil
-}
-
-func (t *tailBuffer) String() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return string(t.b)
 }
 
 func lastLine(s string) string {
