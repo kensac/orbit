@@ -134,6 +134,9 @@ type Runner struct {
 	// CloneURL is where a repository is fetched from and pushed to;
 	// https://github.com/<repo>.git by default (tests point it elsewhere).
 	CloneURL func(repo string) string
+	// Pool, when set, keeps one clone per ticket and spare ones; nil makes
+	// a fresh clone per attempt.
+	Pool *Pool
 }
 
 // trustGlobs are the paths of orbit's own repository whose change alters
@@ -208,13 +211,18 @@ func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
 	if bin == "" {
 		bin = "git"
 	}
-	top := git{bin: bin, dir: work, home: filepath.Join(work, "home")}
-	if _, err := top.run(ctx, nil, "init", "--quiet", "repo"); err != nil {
-		return nil, err
-	}
-	g := git{bin: bin, dir: filepath.Join(work, "repo"), home: top.home}
-	if _, err := g.run(ctx, nil, "remote", "add", "origin", r.cloneURL(j.Repo)); err != nil {
-		return nil, err
+	home := filepath.Join(work, "home")
+	var g git
+	if r.Pool != nil {
+		// The ticket's clone, kept between its builds, or a spare one.
+		if g, err = r.Pool.Acquire(ctx, TicketKey(j.TicketID), j.Repo, home); err != nil {
+			return nil, err
+		}
+	} else {
+		g = git{bin: bin, dir: filepath.Join(work, "repo"), home: home}
+		if err := initClone(ctx, bin, g.dir, home, r.cloneURL(j.Repo)); err != nil {
+			return nil, err
+		}
 	}
 
 	read, err := d.App.Token(ctx, j.Repo, github.ReadContents)
@@ -266,13 +274,20 @@ func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
 		}
 		res.BaseSHA = defSHA
 	}
-	if _, err := g.run(ctx, nil, "checkout", "--quiet", "--detach", start); err != nil {
+	if err := g.prepare(ctx, start); err != nil {
 		return nil, err
 	}
 	revokeRead()
+	scripts, err := readScripts(g.dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := scripts.trusted(j.Repo, j.Policy.TrustedScripts); err != nil {
+		return nil, err
+	}
 	d.emit("orbit.build", map[string]any{"step": "checkout", "repo": j.Repo, "start": start, "purpose": j.Purpose, "branch": branch})
 
-	out, cost, err := r.sandboxed(ctx, j, d, g)
+	out, cost, err := r.sandboxed(ctx, j, d, g, scripts)
 	if out == nil {
 		return nil, err
 	}
@@ -317,7 +332,7 @@ type costs struct {
 // sandboxed runs the CLI in a fresh sandbox over the clone's tree and
 // writes the sandbox's tree back into the clone. The sandbox is destroyed
 // whatever happens. out is nil when the model never produced a result.
-func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git) (*Output, costs, error) {
+func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git, scripts Scripts) (*Output, costs, error) {
 	tree, err := packTree(g.dir)
 	if err != nil {
 		return nil, costs{}, err
@@ -369,6 +384,11 @@ func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git) (*Output, 
 	}
 	defer destroy()
 	d.emit("orbit.build", map[string]any{"step": "sandbox", "id": cr.ID, "expires_at": cr.ExpiresAt})
+	if scripts.Setup != "" {
+		if err := runScript(ctx, sb, cr.ID, "setup", scripts.Setup, d); err != nil {
+			return nil, costs{}, err
+		}
+	}
 
 	policy := Policy{Root: sandbox.WorkDir, Protected: j.Policy.Protected, Commands: j.Policy.Argv()}
 	binary := r.Binary
@@ -415,6 +435,11 @@ func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git) (*Output, 
 	}
 	if d.Artifact != nil {
 		if err := d.Artifact("out", "output.json", "application/json", cli.StructuredOutput); err != nil {
+			return &out, c, err
+		}
+	}
+	if scripts.Cleanup != "" {
+		if err := runScript(ctx, sb, cr.ID, "cleanup", scripts.Cleanup, d); err != nil {
 			return &out, c, err
 		}
 	}
