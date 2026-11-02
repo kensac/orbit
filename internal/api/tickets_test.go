@@ -109,3 +109,45 @@ func TestTicketsAndTheOperatorToken(t *testing.T) {
 		t.Fatalf("abandon a done question = %d", code)
 	}
 }
+
+func TestRerunningChecksOverTheAPI(t *testing.T) {
+	v := newEnv(t, nil)
+	kanishk := v.person("kanishk")
+	u := v.srv.URL + "/api/v1/tickets"
+	_, r := call(t, "POST", u, kanishk, `{"kind":"request","title":"t","body":"b","agent":"a","repo":"kensac/orbit","wake":false}`)
+	id := r["ticket_id"].(string)
+	if code, _ := call(t, "POST", u+"/"+id+"/checks/rerun", kanishk, ""); code != 409 {
+		t.Fatalf("rerun with no PR = %d", code)
+	}
+	if _, err := v.s.ProposePlan(ctx, id, "", "plan"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.s.ApprovePlan(ctx, id, 1, "kanishk", ""); err != nil {
+		t.Fatal(err)
+	}
+	a := v.e.Current().Config.Agents["a"]
+	run, err := v.s.StartBuild(ctx, store.StartBuild{TicketID: id, Agent: "a", SpecSHA: a.SHA, Purpose: store.BuildPurposeBuild})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := v.s.ClaimRun(ctx, "w")
+	pr := 7
+	if c == nil || c.ID != run {
+		t.Fatalf("claim = %+v", c)
+	}
+	if err := v.s.FinishBuild(ctx, run, store.RunResult{Attempt: c.Attempt, Summary: "built"},
+		store.TicketUpdate{Branch: "orbit/x", PRNumber: &pr, HeadSHA: "1111111111111111111111111111111111111111"}); err != nil {
+		t.Fatal(err)
+	}
+	code, r := call(t, "POST", u+"/"+id+"/checks/rerun", kanishk, `{"by":"mallory"}`)
+	rr, _ := r["rerun"].(map[string]any)
+	if code != 202 || rr["requested_by"] != "kanishk" || rr["done_at"] != nil {
+		t.Fatalf("rerun = %d %v", code, r)
+	}
+	if code, _ := call(t, "POST", u+"/"+id+"/checks/rerun", kanishk, ""); code != 409 {
+		t.Fatalf("a second rerun while one waits = %d", code)
+	}
+	if _, r := call(t, "GET", u+"/"+id, kanishk, ""); len(r["reruns"].([]any)) != 1 {
+		t.Fatalf("get = %v", r)
+	}
+}

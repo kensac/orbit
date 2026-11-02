@@ -99,6 +99,7 @@ func TestTicketLifecycleTable(t *testing.T) {
 		{"request", "merging", "merged", true}, {"request", "merged", "done", true},
 		{"request", "failed", "approved", true}, {"request", "failed", "open", true},
 		{"request", "failed", "merged", true}, {"request", "review", "abandoned", true},
+		{"request", "failed", "review", true},
 		{"request", "open", "done", false}, {"request", "merged", "abandoned", false},
 		{"request", "done", "open", false}, {"request", "open", "building", false},
 		{"question", "open", "done", true}, {"question", "open", "planned", false},

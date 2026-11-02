@@ -51,6 +51,8 @@ type Request struct {
 	// Chat, when set, makes a claude-code run a chat run (chat.go): no
 	// OutputSchema, the reply its final message.
 	Chat *Chat
+	// SkillsPlugin is a plugin directory holding the run's skills (engine/skills.go), loaded with --plugin-dir; claude-code only.
+	SkillsPlugin string
 }
 
 // Harness is orbit's own code inside the CLI's process tree.

@@ -63,6 +63,10 @@ more than its agent's rules allow.
 
 A run writes memory entries directly, and a learning run writes them from a conversation, so a poisoned input or message can plant an entry that later runs of every agent reading its scope are shown. What bounds it: entries are shown as data (the system prompt says they never authorize an action the rules do not, and an instruction in one is not to be followed); a run may write only to the profile, itself and the topics it reads, at most 10 writes, and only change entries it was shown at the version it was shown; every version is kept with the run and conversation it came from (`GET /memory/entries?run_id=`), so a bad one is found and retired or restored. A learning run reads the person's messages and the agent's reports (which can quote inputs), not the inputs themselves.
 
+## Skills
+
+A skill is instructions a run follows, and agents write their own, so a run steered by a poisoned input can write a skill that steers its later runs, and those of every agent the skill is attached to. What bounds it: a run writes at most 3 skills, only new ones or ones it was given (at the version given), and a written skill is attached to that agent only; every version is kept with its run (`source_run_id`), so a bad one is found, restored or retired. The skill tool reads only the run's own copy, inside each skill's directory after symlinks; it records nothing in the ledger, so a skill's text never backs a figure. Supporting files are stored as given and never executed by orbit; a script in a skill runs only if the agent's own `tools` let it.
+
 ## What the model can cause
 
 Only actions its spec enables, through executors here, to destinations in
@@ -130,6 +134,8 @@ grants more than was asked. `github:merge` lets a compromised model ask to
 merge an orbit PR whose checks are green; the executor re-checks the head
 commit, the branch and every check itself, and the rule decides whether a
 person approves first. In the fleet a merge is a deploy: keep it `approve`.
+
+`actions: write` (rerunning failed jobs) also covers dispatching and cancelling workflows; orbit mints it alone, only in the ticket loop, for `RerunJob` on the job ids of checks that failed, and no model sees it.
 
 ## The build sandbox
 
@@ -241,6 +247,10 @@ run; `internal/build`):
 - **Not guaranteed**: the backend credential is in the sandbox (above);
   everything the sandbox section says it does not guarantee holds for a
   build.
+
+## Prechecks
+
+A `precheck` gate runs a shell command from an agent's spec in orbit's own process tree, as orbit's user, before the model is called. Its environment is the fixed list in `engine.precheckEnv` (no secret, no credential), but the same user can read what orbit can, `/proc/<orbit>/environ` included. So a precheck is accepted only in an agent defined in the configuration files, which a person writes and reviews in git: a database agent (written through the API, or by an agent's `agent:define`) with one fails validation, so nothing a model writes ever becomes a command. Its output reaches only the run's events, never a prompt.
 
 ## Adding a capability
 

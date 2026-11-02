@@ -122,7 +122,9 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/abandon", s.ticketMove(store.TicketAbandoned))
 	api("POST /api/v1/tickets/{id}/retry", s.ticketMove(store.TicketApproved))
 	api("POST /api/v1/tickets/{id}/reopen", s.ticketMove(store.TicketOpen))
+	api("POST /api/v1/tickets/{id}/checks/rerun", s.rerunChecks)
 	s.memoryRoutes(api)
+	s.skillsRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
 

@@ -353,12 +353,14 @@ const (
 
 // TicketsInFlight returns the requests the ticket loop reconciles, oldest
 // first: every state between approved and done, failed tickets that reached
-// merging recently, and recently abandoned tickets with a PR.
+// merging recently or wait on a person's rerun, and recently abandoned
+// tickets with a PR.
 func (s *Store) TicketsInFlight(ctx context.Context) ([]Ticket, error) {
 	rows, err := s.Pool.Query(ctx, `SELECT `+ticketCols+` FROM tickets
 		WHERE kind = 'request' AND (
 		    status IN ('approved', 'building', 'review', 'merging', 'merged')
 		    OR (status = 'failed' AND merge_action_id IS NOT NULL AND updated_at > now() - $1::interval)
+		    OR (status = 'failed' AND EXISTS (SELECT 1 FROM ticket_check_reruns r WHERE r.ticket_id = tickets.id AND r.done_at IS NULL))
 		    OR (status = 'abandoned' AND pr_number IS NOT NULL AND updated_at > now() - $2::interval))
 		ORDER BY created_at`, failedWatch.String(), abandonedWatch.String())
 	if err != nil {

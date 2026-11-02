@@ -97,6 +97,9 @@ const SandboxConfigDir = sandbox.WorkDir + "/.orbit/claude"
 // session installs or configures there is kept between sandboxes.
 const SandboxHome = sandbox.WorkDir + "/.orbit/home"
 
+// SandboxPlugin is where a sandboxed run's skills plugin is placed.
+const SandboxPlugin = sandbox.WorkDir + "/.orbit/plugin"
+
 // workstation is the profile whose session has Claude Code's full tool set.
 const workstation = "workstation"
 
@@ -145,6 +148,10 @@ func (c *claudeCode) chatArgs(req Request, home string, keepDays int) []string {
 		hooks = harnessHooks(req.Harness, req.Workdir, home)
 	}
 	mcp, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{ChatServer: map[string]any{"type": "sdk", "name": ChatServer}}})
+	if req.SkillsPlugin != "" && !full {
+		tools = append(tools, "Skill")
+		allowed = append(allowed, "Skill")
+	}
 	if full {
 		// Every built-in tool: no --tools list, nothing to allow by name.
 		allowed = allowed[len(req.Tools):]
@@ -161,6 +168,13 @@ func (c *claudeCode) chatArgs(req Request, home string, keepDays int) []string {
 	)
 	if sandboxed {
 		args = append(args, "--permission-mode", "bypassPermissions")
+	}
+	if req.SkillsPlugin != "" {
+		dir := req.SkillsPlugin
+		if sandboxed {
+			dir = SandboxPlugin
+		}
+		args = append(args, "--plugin-dir", dir)
 	}
 	if c.rs.Model != "" {
 		args = append(args, "--model", c.rs.Model)

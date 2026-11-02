@@ -94,7 +94,7 @@ func skipCache(rel string) bool { return rel == ".cache" || strings.HasPrefix(re
 // sandbox and back. The local session transcripts ride along under the
 // CLI's config directory there, so a session resumes in any sandbox; on the
 // way back they land in HOME where orbit's session code looks for them.
-func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.ClaimedRun, workdir, home string, emit func(string, any)) (*runner.Sandbox, error) {
+func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.ClaimedRun, workdir, home, plugin string, emit func(string, any)) (*runner.Sandbox, error) {
 	addr, tokenEnv := d.SandboxService()
 	token, _ := e.Env(tokenEnv)
 	newClient := e.NewSandbox
@@ -120,7 +120,8 @@ func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.Claimed
 			tree, _, err := workspace.Pack(
 				workspace.Tree{Dir: workdir, Skip: func(rel string) bool { return rel == ".orbit" || strings.HasPrefix(rel, ".orbit/") }},
 				workspace.Tree{Prefix: sandboxProject, Dir: project},
-				workspace.Tree{Prefix: sandboxHome, Dir: boxHome, Skip: skipCache})
+				workspace.Tree{Prefix: sandboxHome, Dir: boxHome, Skip: skipCache},
+				workspace.Tree{Prefix: runner.SandboxPlugin[len(sandbox.WorkDir)+1:], Dir: plugin})
 			return tree, err
 		},
 		PackFiles: func(paths []string) ([]byte, error) {
@@ -368,6 +369,10 @@ type chatTurn struct {
 	emit                     func(string, any)
 	cancel                   <-chan struct{}
 	rec                      *recovery
+	// extra is the system prompt's memory-entry and skills sections.
+	extra string
+	// plugin is the skills plugin directory, when the run has skills.
+	plugin string
 }
 
 // errCancelled is a run a person stopped; Execute records it cancelled.
@@ -387,6 +392,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	if t.run.Known != "" {
 		system += "\n" + knownContract
 	}
+	system += t.extra
 	prompt := chatPrompt(a, t.now, t.run, t.rc, t.convo)
 	if t.rec != nil {
 		prompt = recoveryPrompt(t.rec, t.rc, t.now.Location())
@@ -400,7 +406,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	chat := e.chatTools(a, t.types, d.Defaults.MemoryMaxBytes, st)
 	chat.Interrupt = t.cancel
 	if a.Sandbox != "" {
-		sb, err := e.sandboxPlan(d, a.Sandbox, c, t.workdir, t.home, t.emit)
+		sb, err := e.sandboxPlan(d, a.Sandbox, c, t.workdir, t.home, t.plugin, t.emit)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -418,7 +424,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	defer cancel()
 	res, err := r.Run(runCtx, runner.Request{
 		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
-		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat,
+		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin,
 	}, func(ev runner.Event) { t.emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))

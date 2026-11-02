@@ -125,6 +125,14 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 		}
 		hooks = harnessHooks(req.Harness, req.Workdir, home)
 	}
+	if req.SkillsPlugin != "" {
+		// Skills load from the plugin (setting sources are off, so no other skill is found) and run through the Skill tool, which in dontAsk mode runs only when allowed by name; orbit's skill tool serves their text.
+		tools = append(tools, "Skill")
+		allowed = append(allowed, "Skill")
+		if req.Harness != nil {
+			allowed = append(allowed, harness.ToolSkill)
+		}
+	}
 	args := []string{
 		"--json-schema", string(req.OutputSchema),
 		"--append-system-prompt", req.System,
@@ -135,6 +143,9 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 	}
 	if req.Harness != nil {
 		args = append(args, "--mcp-config", harnessMCP(req.Harness, req.Workdir, home))
+	}
+	if req.SkillsPlugin != "" {
+		args = append(args, "--plugin-dir", req.SkillsPlugin)
 	}
 	if len(allowed) > 0 {
 		args = append(args, "--allowedTools", strings.Join(allowed, ","))

@@ -86,6 +86,10 @@ The API is `--api` (default `ORBIT_API_URL`, else the internal listener) with `-
   docker exec orbit rm -r /tmp/memory
   ```
 
+## Seeding skills from Claude Code
+
+`orbit import skills <dir>` reads each directory under `dir` that holds a `SKILL.md` (`~/.claude/skills`, a project's `.claude/skills`) with every file beside it, and sends them to `POST /api/v1/skills/import`: a dry run unless `--apply`, `--only a,b` to pick some, `--attach <agent>` to attach them (with `--apply`), `--print` to list what was read without a server. A directory without a `SKILL.md` (a plugin, a sync bucket) or with a symlink is skipped with a warning. The API and token are as for memory above; on hetzner, `docker cp` the directory into the container and run it there.
+
 ## sandboxd and egress
 
 sandboxd and egress run on hetzner today (`hetzner-vps-config/compose.orbit-sandbox.yml`; orbit reaches sandboxd at `10.250.250.2:8091` on the internal `orbit-sandboxd-api` network). The layout below was written for oci (tailnet `100.123.116.85`), where a container escape would reach CI runners rather than every secret in the fleet; the services and their options are the same either way.
