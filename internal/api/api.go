@@ -66,6 +66,9 @@ type Server struct {
 	// WorkspaceReadRate and WorkspaceWriteRate override the workspace's
 	// per-person rates (readRate, writeRate) when set; tests raise them.
 	WorkspaceReadRate, WorkspaceWriteRate float64
+	// ChangesPoll overrides how often a workspace change stream looks for
+	// new snapshots (changesPoll) when set; tests shorten it.
+	ChangesPoll time.Duration
 
 	wsOnce sync.Once
 	ws     *workspaceState
@@ -285,23 +288,23 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 // thread serves an agent's default conversation, a page at a time
 // (store.Thread).
 func (s *Server) thread(w http.ResponseWriter, r *http.Request) {
-	servePage(w, r, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
+	s.servePage(w, r, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
 		return s.Store.Thread(r.Context(), r.PathValue("name"), before, limit)
 	})
 }
 
 // servePage is the one way a thread page is served over HTTP, whichever conversation (threadPage).
-func servePage(w http.ResponseWriter, r *http.Request, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) {
+func (s *Server) servePage(w http.ResponseWriter, r *http.Request, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) {
 	var limit int
 	if !queryInt(w, r, "limit", &limit) {
 		return
 	}
-	resp, err := threadPage(r.URL.Query().Get("before"), limit, fetch)
+	resp, err := s.threadPage(r.Context(), r.URL.Query().Get("before"), limit, fetch)
 	respond(w, resp, err)
 }
 
 // threadPage reads a thread page for HTTP and MCP alike: the before cursor and limit in, items, has_more and next_before out (listPage).
-func threadPage(before string, limit int, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) (map[string]any, error) {
+func (s *Server) threadPage(ctx context.Context, before string, limit int, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) (map[string]any, error) {
 	var c *store.ThreadCursor
 	if before != "" {
 		var err error
@@ -311,6 +314,9 @@ func threadPage(before string, limit int, fetch func(before *store.ThreadCursor,
 	}
 	page, err := fetch(c, limit)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.withRunChanges(ctx, page.Items); err != nil {
 		return nil, err
 	}
 	return listPage("items", page.Items, page.HasMore, page.NextBefore), nil
@@ -442,11 +448,19 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 		f.Before = &t
 	}
 	runs, err := s.Store.ListRuns(r.Context(), f)
+	if err == nil {
+		err = s.withRunsChanges(r.Context(), runs)
+	}
 	respond(w, map[string]any{"runs": orEmpty(runs)}, err)
 }
 
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 	run, err := s.Store.GetRun(r.Context(), r.PathValue("id"))
+	if err == nil {
+		runs := []store.Run{*run}
+		err = s.withRunsChanges(r.Context(), runs)
+		run = &runs[0]
+	}
 	if err != nil {
 		respond(w, nil, err)
 		return

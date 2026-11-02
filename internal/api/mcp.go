@@ -271,7 +271,7 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 			default:
 				return nil, nil, errors.New("give agent or conversation_id")
 			}
-			out, err := threadPage(in.Before, limit, fetch)
+			out, err := s.threadPage(ctx, in.Before, limit, fetch)
 			if err != nil {
 				return nil, nil, mcpErr(err)
 			}
@@ -356,6 +356,9 @@ func (s *Server) mcpWait(ctx context.Context, req *mcp.CallToolRequest, id strin
 		}
 	}
 	run, err := s.Store.ThreadRunByID(ctx, id)
+	if err == nil {
+		err = s.withRunChanges(ctx, []store.ThreadItem{{Run: run}})
+	}
 	if err != nil {
 		return mcpErr(err)
 	}

@@ -172,6 +172,9 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 	}
 	finish := func() {
 		run, err := s.Store.ThreadRunByID(r.Context(), id)
+		if err == nil {
+			err = s.withRunChanges(r.Context(), []store.ThreadItem{{Run: run}})
+		}
 		if err != nil {
 			s.Log.Warn("stream done", "run", id, "err", err)
 			return

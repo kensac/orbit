@@ -55,6 +55,8 @@ an agent's beliefs changed.
 - workspace trash (`workspace_trash`): written with the person's snapshot that removed the path; its content is the snapshot before (`snapshot_id`). `restored_at` is the only update, set by each restore. There is no delete.
 - workspace identity (`workspace_trees`): one row per conversation of a chat agent (`scope = 'conversation'`, made on first ask or with the first snapshot, `PutWorkspace`) or per agent (`scope = 'agent'`, a box, one per agent by `workspace_trees_one_per_agent`); never updated. Its id is the API's `workspace_id`.
 - workspace audit (`workspace_events`): one row per workspace operation, append-only, written in the write's transaction; a signed upload's `nonce` is unique, so its URL uploads once.
+- workspace change index (`workspace_change_sets`, `workspace_changes`): what one snapshot changed against the one before it in its conversation, one row per path, computed by code from the two kept snapshots and written once with its set row (`IndexSnapshot`, `ON CONFLICT DO NOTHING`); never updated. Readers stop at the first snapshot not indexed yet (`IndexedHead`), so none is skipped.
+- run changes (`run_changes`): a finished run's summary (files, lines added and removed) between the snapshots before and after it, written once the first time it is read (`PutRunChanges`), never updated: both snapshots are fixed once the run is final.
 - session transcripts (`session_transcripts`): written once per session id (`ON CONFLICT DO NOTHING`; a resume forks to a new id), never updated.
 - deployment (`deployment_specs`, `deployment_current`): every version kept, as `agent_specs`; `SyncDeployment` moves the pointer before `SyncAgents` records the agents loaded with it.
 

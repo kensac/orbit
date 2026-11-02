@@ -101,6 +101,10 @@ type ThreadRun struct {
 	// NeedsInput is true when the run is waiting on its person: one of its
 	// questions is open or one of its actions awaits approval.
 	NeedsInput bool `json:"needs_input"`
+	// Changes is what the run changed in its workspace, counted; nil for a
+	// run without a workspace or not yet finished. The API fills it
+	// (docs/api.md, A reply's changes).
+	Changes *ChangeSummary `json:"changes"`
 }
 
 // ThreadQuestion is a question a run asked; ID is its from_agent message,

@@ -597,6 +597,8 @@ type Run struct {
 	Steps int `json:"steps"`
 	// Gate names what ended a skipped run.
 	Gate *string `json:"gate,omitempty"`
+	// Changes is as ThreadRun's, filled by the API.
+	Changes *ChangeSummary `json:"changes"`
 }
 
 // runCols reads a run aliased r: stepsCount names it.
