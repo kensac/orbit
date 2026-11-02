@@ -18,6 +18,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/runner"
@@ -128,9 +129,13 @@ func storedConfig(ctx context.Context, s *store.Store) (*spec.Config, error) {
 	return spec.FromStored(dep, agents)
 }
 
+// claudeBackend names the claude-code runner's credential: either variable will do (claudeproto.Credential picks the token when both are set).
+const claudeBackend = claudeproto.OAuthToken + " or " + claudeproto.APIKey
+
 // missingEnv lists the variables the agents this host may run reference and its environment lacks: a source credential for a capability it advertises, or the backend's.
 func missingEnv(cfg *spec.Config, caps spec.Capabilities, lookup func(string) (string, bool)) []string {
 	want := map[string]bool{}
+	var backend bool
 	for _, a := range cfg.Agents {
 		if !caps.Covers(a) {
 			continue
@@ -145,9 +150,7 @@ func missingEnv(cfg *spec.Config, caps spec.Capabilities, lookup func(string) (s
 		case rs.APIKeyEnv != "":
 			want[rs.APIKeyEnv] = true
 		case rs.Kind == "claude-code":
-			if _, ok := lookup("ANTHROPIC_API_KEY"); !ok {
-				want["CLAUDE_CODE_OAUTH_TOKEN"] = true
-			}
+			backend = true
 		}
 	}
 	var out []string
@@ -155,6 +158,9 @@ func missingEnv(cfg *spec.Config, caps spec.Capabilities, lookup func(string) (s
 		if _, ok := lookup(k); !ok {
 			out = append(out, k)
 		}
+	}
+	if backend && claudeproto.Credential(lookup) == "" {
+		out = append(out, claudeBackend)
 	}
 	sort.Strings(out)
 	return out

@@ -250,16 +250,6 @@ func (s *Store) MarkRead(ctx context.Context, conversationID string, through *ti
 	return at, err
 }
 
-// DefaultConversationID returns an agent's default conversation.
-func (s *Store) DefaultConversationID(ctx context.Context, agent string) (string, error) {
-	var id string
-	err := s.Pool.QueryRow(ctx, `SELECT id::text FROM conversations WHERE agent = $1 AND is_default`, agent).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrNotFound
-	}
-	return id, err
-}
-
 // ---------------------------------------------------------------- changes
 
 // Change is one record of the change feed (GET /events): what kind of thing

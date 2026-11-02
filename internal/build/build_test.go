@@ -125,6 +125,7 @@ func TestDiffPolicyRefusesWhatTheHandlerCannotSee(t *testing.T) {
 		"deploy written by a command":         {[]map[string]any{{"sneak": "/work/deploy/x", "content": "x"}}, "protected"},
 		"credential leaked into a file":       {[]map[string]any{{"leak": "/work/notes.txt"}}, "backend credential"},
 		"secret pattern":                      {[]map[string]any{{"sneak": "/work/k.pem", "content": "-----BEGIN RSA PRIVATE KEY-----\n"}}, "credential"},
+		"credential proxy token":              {[]map[string]any{{"sneak": "/work/t.txt", "content": "orbit-cp1.AbCdEfGhIjKlMnOpQrStUvWxYz_-0123\n"}}, "credential"},
 		"symlink out of the tree":             {[]map[string]any{{"sneak": "/work/link", "target": "../../etc/passwd"}}, "outside the repository"},
 		"absolute symlink":                    {[]map[string]any{{"sneak": "/work/link", "target": "/etc/passwd"}}, "outside the repository"},
 		"symlink into .git":                   {[]map[string]any{{"sneak": "/work/cfg", "target": ".git/config"}}, "into .git"},

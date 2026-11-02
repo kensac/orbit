@@ -43,6 +43,7 @@ const (
 	KindPlan     = "plan"
 	KindApproval = "approval"
 	KindQuestion = "question"
+	KindSteer    = "steer"
 	KindStatus   = "status"
 	KindTurn     = "turn"
 )
@@ -191,6 +192,13 @@ type Approval struct {
 	Input     json.RawMessage `json:"input"`
 	State     string          `json:"state"`
 	Message   string          `json:"message,omitempty"`
+}
+
+// Steer is a person's message the turn in progress took (delivery steer): from here on the turn answers it too.
+type Steer struct {
+	MessageID string `json:"message_id"`
+	Text      string `json:"text"`
+	Author    string `json:"author,omitempty"`
 }
 
 // Question is something the agent asked its person: one of its output's

@@ -65,7 +65,16 @@ func (s *Server) serveThread(w http.ResponseWriter, r *http.Request, id string) 
 	if !queryInt(w, r, "limit", &limit) {
 		return
 	}
-	resp, err := s.readThread(r.Context(), id, r.URL.Query().Get("before"), limit, queryFlag(r, "mark_read"))
+	fold := true
+	switch r.URL.Query().Get("fold") {
+	case "", "true":
+	case "false":
+		fold = false
+	default:
+		writeErr(w, http.StatusBadRequest, "fold: want true or false")
+		return
+	}
+	resp, err := s.readThread(r.Context(), id, r.URL.Query().Get("before"), limit, fold, queryFlag(r, "mark_read"))
 	respond(w, resp, err)
 }
 
@@ -73,12 +82,12 @@ func (s *Server) serveThread(w http.ResponseWriter, r *http.Request, id string) 
 // read point the conversation had before this read (read_through). markRead
 // moves it to the database's clock as of before the page was read, so
 // nothing that finished after the page was read counts as seen.
-func (s *Server) readThread(ctx context.Context, id, before string, limit int, markRead bool) (map[string]any, error) {
+func (s *Server) readThread(ctx context.Context, id, before string, limit int, fold, markRead bool) (map[string]any, error) {
 	prev, now, err := s.Store.ReadPoint(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := threadPage(before, limit, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
+	resp, err := threadPage(before, limit, fold, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
 		return s.Store.ConversationThread(ctx, id, before, limit)
 	})
 	if err != nil {
