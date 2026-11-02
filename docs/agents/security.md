@@ -200,7 +200,7 @@ without docker):
   GitHub, a host off the allowlist and any port but 443 are refused (403).
   The proxy never dials a private, loopback, link-local or CGNAT address
   (every tailnet address), so an allowed name that resolves to one cannot
-  reach the host's networks.
+  reach the host's networks. A build tunnel must open with a TLS ClientHello whose server name is the allowed host, read before anything is dialed, so a tunnel to an allowed front (a CDN, Google's module proxy) cannot ask it for another name (`TestServerName`).
 - The environment is sandboxd's fixed list plus one backend credential (`sandbox.AllowedEnv` permits `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, and an attach carrying both is refused); no orbit secret, no GitHub token. orbit chooses it as for an ordinary run, for builds and sandboxed chats alike (`build.SandboxEnv` through `claudeproto.Credential` and `claudeproto.Env`): the subscription token when set, else the API key.
 - Callers cannot pass docker options: the create request is the tar and a
   run id, the attach request is argv and env (unknown fields refused); the
@@ -241,7 +241,25 @@ without docker):
 
 ## Sandboxed chats
 
-A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as a workstation when sandboxd is configured) runs Claude Code in a sandboxd container with `bypassPermissions`; a workstation has every tool. There is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the backend credential is in the container, readable by any command the model runs. A workstation's egress reaches any public host (`orbit egress` with `*`, still never a private, loopback, link-local or tailnet address), so the credential and anything the session read can leave the box, by design: it holds no GitHub token, no orbit secret, and nothing of the person's beyond what they gave the conversation. Pushing, merging, mail and spend stay orbit's actions, under the agent's rules. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
+A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as a workstation when sandboxd is configured) runs Claude Code in a sandboxd container with `bypassPermissions`; a workstation has every tool. There is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the backend credential is in the container, readable by any command the model runs. A workstation's egress is the open web (Workstation egress, below), so the credential and anything the session read can leave the box, by design: it holds no GitHub token, no orbit secret, and nothing of the person's beyond what they gave the conversation. Pushing, merging, mail and spend stay orbit's actions, under the agent's rules. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
+
+## Workstation egress
+
+`orbit egress` with `ORBIT_EGRESS_PROFILE=workstation` (`internal/egress`, `TestWorkstationProfile`, `TestRebinding`, `TestServerName`, `TestPlainHTTP`) is a workstation's or box's only route out: a laptop's open web, minus the places a box on a fleet host must never reach.
+
+**Guaranteed by egress's code:**
+
+- Any public host on any port is tunnelled (CONNECT), and plain HTTP is forwarded with the URL's host as its `Host`, except SMTP's ports (25, 465, 587), in every profile.
+- Never dialed: loopback, RFC 1918 and ULA (every docker network), link-local (`169.254.0.0/16`, cloud metadata included, and `fe80::/10`), CGNAT (`100.64.0.0/10`, every tailnet address, so orbit-db and orbit's internal listener), multicast and reserved ranges (`egress.Public`), and every prefix in `ORBIT_EGRESS_DENY_NETS` (the fleet hosts' own public addresses, where hetzner's public ports and orbit's origin listen).
+- Never tunnelled: a name in `ORBIT_EGRESS_DENY_HOSTS` (`name` exactly, `.name` for it and everything under it; the person's zone, so orbit's API, authentik and Infisical), as the CONNECT target, as a plain request's host, or as the TLS server name of a tunnel on 443. On 443 the ClientHello is read before anything is dialed, and a server name other than the name asked for is refused, so a tunnel to any CDN address cannot be fronted to a denied host.
+- DNS rebinding: a name is resolved once, its answers are checked, and the checked address is the one dialed; an answer naming any refused range is skipped, and a name with no other answer is refused.
+
+**Not guaranteed:**
+
+- **Data leaves.** The open web is the point: anything the box holds can be sent anywhere public.
+- **A non-TLS tunnel, or TLS on another port, is not inspected.** Plain HTTP over a CONNECT tunnel, or TLS to port 8443, can name a denied host in its own `Host` or server name if the address it reaches serves that host (a CDN). Denied hosts behind a CDN still enforce their own authentication (orbit's API checks an authentik token, authentik and Infisical their logins), which is what stands between a box and them there.
+- **The deny lists are configuration.** A fleet host's public address missing from `ORBIT_EGRESS_DENY_NETS` is reachable, with every public port on it (hetzner has no firewall); deployment.md lists what each host's egress must carry.
+- **Abuse from the fleet's address.** Traffic leaves from the host's public IP, so what a box sends is attributed to it.
 
 ## Build runs
 

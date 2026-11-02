@@ -115,7 +115,12 @@ The build sandbox runs on hetzner today, beside orbit, in `hetzner-vps-config` a
 - **Images:** `ghcr.io/kensac/orbit-build` is pushed by `build-push-ghcr.yml` beside the orbit image. sandboxd pulls it through the Engine API without credentials, so the package must be public (it is built from this public repository and holds nothing private) or pulled on the host before sandboxd starts.
 - **Claiming it is deployed:** `docker logs orbit-sandboxd` shows `sandboxd: serving` (it exits on a failed host check: no seccomp, a network that is not internal, an image it cannot get), and `docker logs orbit-egress` shows `egress: serving` with the allowlist.
 
-**Workstation profile** (sandboxed chats, `sandbox: workstation`): a second `orbit egress` with `ORBIT_EGRESS_ALLOW=*` (any public host on 443, never a private or tailnet address) on the `orbit-sandbox` and `orbit-egress` networks, named for example `orbit-egress-open`, and sandboxd's environment gains `ORBIT_SANDBOX_WORKSTATION_PROXY=orbit-egress-open:3128`. Without it sandboxd refuses that profile (400), and the built-in agent's runs fail naming the variable.
+**Workstation profile** (sandboxed chats, `sandbox: workstation`, and agents' boxes): a second `orbit egress` with `ORBIT_EGRESS_PROFILE=workstation` (the open web: any public host on any port but SMTP's, plain HTTP too; docs/agents/security.md, Workstation egress) on the `orbit-sandbox` and `orbit-egress` networks, named for example `orbit-egress-open`, and sandboxd's environment gains `ORBIT_SANDBOX_WORKSTATION_PROXY=orbit-egress-open:3128`. Without it sandboxd refuses that profile (400), and the built-in agent's runs fail naming the variable. Its deny lists, the same on every host that runs boxes:
+
+- `ORBIT_EGRESS_DENY_HOSTS=.kanishksachdev.com`: the person's zone (orbit, authentik, Infisical and every other service).
+- `ORBIT_EGRESS_DENY_NETS`: every fleet host's own public addresses: hetzner's `46.224.149.5/32` and its global IPv6 `/64` (`ip -6 addr show scope global` on hetzner), oci's public IPv4 (`curl -4s https://ifconfig.me` on oci) and its IPv6 if it has one. Tailnet, docker and metadata ranges are refused without listing them.
+
+`ORBIT_EGRESS_ALLOW=*` (the build profile with any public host, 443 only) still loads, for an egress set up before the workstation profile existed; a workstation should use the profile. Claiming it is deployed: `egress: serving` with `profile=workstation` and both deny lists in `docker logs orbit-egress-open`, and from a workstation sandbox `curl -sS -o /dev/null -w '%{http_code}' https://orbit.kanishksachdev.com/healthz` failing to connect while `https://example.com` answers 200.
 
 ## Building tickets: what hetzner needs
 

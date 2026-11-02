@@ -448,7 +448,7 @@ only egress is `orbit egress`, an allowlisting CONNECT proxy in its own
 container on that network and one other (`HTTPS_PROXY`), which allows the
 backend's API host and the package registries the repository's build needs
 (for Go: `proxy.golang.org`, `sum.golang.org`), on port 443 only, to public
-addresses only, and nothing else. It refuses to load an allowlist naming
+addresses only, for TLS whose server name is the allowed host, and nothing else. It refuses to load an allowlist naming
 GitHub: the checkout is already inside, and a sandbox that cannot reach
 GitHub cannot push even with a token it found.
 

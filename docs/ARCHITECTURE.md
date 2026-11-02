@@ -424,9 +424,9 @@ orbit (hetzner) --internal network, bearer token--> orbit sandboxd (hetzner, hol
   bits only, no extended attributes, a size and entry cap. The readback is
   spooled first, so a refusal is a clean error, never a truncated tar.
 - **`orbit egress`** (`internal/egress`) is the container's only route out:
-  a CONNECT proxy on the internal network and one other, allowing exact
-  hostnames on port 443 to public addresses, logging every decision, and
-  refusing to load an allowlist that names GitHub.
+  a proxy on the internal network and one other, logging every decision. The build profile tunnels to exact
+  hostnames on port 443 at public addresses, only for TLS naming that host, and
+  refuses to load an allowlist that names GitHub; the workstation profile is the open web (any public host and port but SMTP's, plain HTTP too) minus deny lists of hosts and networks. Neither dials a private, loopback, link-local or tailnet address.
 - **Attach** is an HTTP upgrade: orbit writes the process's stdin and
   half-closes it; sandboxd sends framed stdout, stderr and a final exit
   status (`protocol.go`). Claude Code's stdio permission protocol (tickets.md,
