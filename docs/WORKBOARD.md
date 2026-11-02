@@ -19,6 +19,7 @@ A self-hosted Go service on Kanishk's server (hetzner) that runs Claude Code on 
 | Tickets and builds | tickets on conversations, GitHub App tokens (App `orbit-kensac`, id 5571920), the build runner (sandboxed Claude Code, orbit commits and pushes), the ticket loop, `github:merge` gated on green checks | #9 #14 #17 |
 | Define limits | database and built-in agents held to orbit.yaml: no `file` source, `${VAR}` only from `credentials:` (each bound to a URL prefix, checked on every request and redirect), without a sandbox, tools only from `spec.UnsandboxedTools`; an `agent:define` that widens an agent waits for a person | #71 |
 | Sandbox | `orbit sandboxd` (one locked-down container per build or workspace), `orbit egress` (allowlist proxy, never GitHub), the build image | #15 |
+| Workstation image | `ghcr.io/kensac/orbit-workstation` (`deploy/workstation.Dockerfile`), amd64 and arm64: an agent's persistent box with a laptop's toolset, Docker for an inner dockerd, gh and git reading `/run/orbit/gh-token`, tmux for browser terminals, the pinned Claude Code; PRs build both arches and smoke every tool. Not yet used by sandboxd (its `box` profile is W9 in #78) | #81 |
 | Operations | seamless upgrades (readiness, drain, resuming interrupted attempts), the worker fleet (capabilities, control vs worker, sessions across hosts), usage and health APIs | #11 #16 #25 |
 | Surfaces | thread and SSE API with authentik JWT auth, MCP server with OAuth proxy, mail (replies continue a conversation), uploads | #4 #21 #31 #45 |
 | Orchestration | `delegate` to other agents or fresh workers, each task in its own conversation; task DAGs; parent and child mailboxes (`task:message`, questions to the parent first); decision gates only a person resolves; `delegation` wakeups when tasks settle (never polling); the built-in `orbit` agent delegates to every agent; tasks in the thread, `/tasks` API and a live tasks stream (ARCHITECTURE.md, Delegation) | #46 |
@@ -36,6 +37,29 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | Hook-driven live agent status | #37 agent-status | |
 | Worktrees, review comments on PR diffs, stacked PRs, check reruns, RRULE schedules with a precheck | #32 #43 | |
 | Migration fix (duplicate version 14) | #50 | |
+| Workspace: an IDE in the portfolio chat (explorer, editor, terminals with Claude Code (direct), diffs with line comments), one shell with the chat | #78 docs/workspace-contract (design); items below | design [docs/workspace.md](workspace.md), contract docs/api.md, Workspace (planned) |
+
+### Workspace: implementation items, in order
+
+Each is one PR. A portfolio item (kensac/personal-portfolio, `app/orbit`) meets workspace.md, One shell, and says how in its description. An orbit item drops "planned" from the api.md routes it builds.
+
+| # | Repo | Item | Needs |
+|---|---|---|---|
+| W1 | orbit | Workspace resolver and snapshot reads: `GET /conversations/{id}/workspace`, `/agents/{name}/workspace`, `workspace_id` on conversations, tree, stat, files (2 MiB, binary detection), download; `workspace_events`; the workspace group and the rate and size limits | #59 (workspaces) |
+| W2 | portfolio | The shell: layout, rail and tabs, one command palette, tokens for every panel, the shared store and `open(ref)` with deep links | |
+| W3 | orbit | Snapshot writes: `PUT` with `If-Match`, mkdir, rename, trash and restore, upload and signed upload, `busy`, pushing into a live sandbox, the next turn told what the person changed | W1 |
+| W4 | portfolio | Explorer: lazy tree, create, rename, trash and restore, upload by drop, download | W2, W1 (W3 for writes) |
+| W5 | portfolio | Editor on CodeMirror 6 (below): tabs, save with `If-Match` and a merge on `412`, binary and too-large states, image preview | W2, W3 |
+| W6 | orbit | Change stream (snapshot backend), history, `changes` on run items and `GET /runs/{id}/changes` | W3 |
+| W7 | orbit | Review comments and `POST /conversations/{id}/review` | W6 |
+| W8 | portfolio | Diff view (`@codemirror/merge`, unified and side by side) for a reply's changes, line comments and sending the review; the explorer and editor live from the change stream | W5, W6, W7 |
+| W9 | orbit | sandboxd `box` profile (persistent, runsc required, volumes, no lifetime) and TTY attach with resize; the multi-arch box image with the toolset, gh, tmux, the pinned CLI and the `orbit box` helper | |
+| W10 | orbit | Box backend: file routes through `orbit box`, the inotify watcher behind the change stream, per-turn checkpoints, the agent's chat turns in its box, box snapshots and restore on either host | W9, W6 |
+| W11 | orbit | Terminals: tmux lifecycle, attach tickets, the socket with Origin check, the SSE and POST fallback, scrollback, the `claude` preset, Claude sessions list, gh credential in terminal environments | W10, the WebSocket spike's answer |
+| W12 | portfolio | Terminals on xterm.js (fit, WebGL with a canvas fallback, web links, search), several per workspace, a mobile key bar (Esc, Ctrl, Tab, arrows), direct socket with the proxied fallback | W2, W11 |
+| W13 | orbit | Git routes in the box (repos, status, diff, log, show, branches, commit and push as the person) and the `workspace:push` action | W10 |
+
+Editor: CodeMirror 6, not Monaco. Monaco's editor and its language workers are megabytes before compression, it is not supported on mobile browsers, and it brings its own theming; CodeMirror 6 is modular (a basic setup with a few languages is low hundreds of KB), works with touch, native selection and IME on phones, themes from CSS variables (the portfolio's tokens), and `@codemirror/merge` gives the diff view the same engine. Measure both bundles in W5's PR and record the numbers there.
 
 The Claude side also plans: agent templates and more sources (Gmail, Calendar, Drive, GitHub, Prometheus/Loki, RSS, the DuckDB lake), a homelab-ops agent, presence-aware notifications across devices, the "safeguard later" pass (a credential proxy so the Claude token stays out of the sandbox, a review of self-edit rights, rate limits), and deploying the worker fleet. Ask before starting any of these.
 

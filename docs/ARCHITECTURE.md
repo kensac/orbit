@@ -461,3 +461,4 @@ The direction, so changes now do not close it off:
 
 - **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)).
 - **Event triggers** from webhooks (a ticket assigned, a comment).
+- **The workspace**: an IDE in the portfolio chat over files, terminals and git in a conversation's snapshot or an agent's box ([workspace.md](workspace.md)).
