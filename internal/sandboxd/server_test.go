@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -49,7 +50,13 @@ type fakeDocker struct {
 	// sessions are the tmux sessions has-session reports alive.
 	sessions map[string]bool
 	exits    map[string]int
+	// home, when set, is the HOME a box's fixed scripts (sh -c with a
+	// $0 of runScripts) really run against on this machine.
+	home string
 }
+
+// runScripts are the $0 names of a box's fixed scripts the fake runs.
+var runScripts = map[string]bool{"orbit-account": true}
 
 type fakeContainer struct {
 	spec    containerCreate
@@ -314,7 +321,6 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 			f.fakeCommand(r.PathValue("id"), e.Cmd)
 			return
 		}
-		in, _ := io.ReadAll(buf.Reader)
 		frame := func(stream byte, p []byte) {
 			var h [8]byte
 			h[0] = stream
@@ -322,6 +328,20 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 			_, _ = conn.Write(h[:])
 			_, _ = conn.Write(p)
 		}
+		if f.home != "" && len(e.Cmd) > 3 && e.Cmd[0] == "sh" && runScripts[e.Cmd[3]] {
+			var stdin []byte
+			if e.AttachStdin {
+				stdin, _ = io.ReadAll(buf.Reader)
+			}
+			out, errb, code := f.runScript(t, e, stdin)
+			frame(1, out)
+			frame(2, errb)
+			f.mu.Lock()
+			f.exits[r.PathValue("id")] = code
+			f.mu.Unlock()
+			return
+		}
+		in, _ := io.ReadAll(buf.Reader)
 		frame(1, in)
 		frame(2, []byte("bye"))
 	})
@@ -340,6 +360,26 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		f.mu.Unlock()
 		mux.ServeHTTP(w, r)
 	})
+}
+
+// runScript runs a box's fixed script here, as the box would: HOME is the
+// fake's home and the exec's environment is added.
+func (f *fakeDocker) runScript(t *testing.T, e execCreate, stdin []byte) (stdout, stderr []byte, code int) {
+	cmd := exec.Command(e.Cmd[0], e.Cmd[1:]...)
+	cmd.Env = append([]string{"HOME=" + f.home, "PATH=" + os.Getenv("PATH")}, e.Env...)
+	cmd.Stdin = bytes.NewReader(stdin)
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	err := cmd.Run()
+	var ee *exec.ExitError
+	switch {
+	case errors.As(err, &ee):
+		code = ee.ExitCode()
+	case err != nil:
+		t.Errorf("script %v: %v", e.Cmd[3:], err)
+		code = -1
+	}
+	return out.Bytes(), errb.Bytes(), code
 }
 
 // socketDir is short: a unix socket path is limited to about 100 bytes, and

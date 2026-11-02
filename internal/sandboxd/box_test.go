@@ -77,7 +77,7 @@ func (f *fakeDocker) fakeCommand(execID string, cmd []string) {
 // keeps of a build's options and what it gives up, reviewed as the security
 // change any edit to it is.
 func TestBoxSpecDocument(t *testing.T) {
-	b, err := json.Marshal(boxSpec(boxConfig(), "orbit"))
+	b, err := json.Marshal(boxSpec(boxConfig(), "orbit", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestBoxSpecDocument(t *testing.T) {
 	}
 	cfg := boxConfig()
 	cfg.BoxRuntime = "runsc"
-	if rt := boxSpec(cfg, "orbit").HostConfig.Runtime; rt != "runsc" {
+	if rt := boxSpec(cfg, "orbit", nil).HostConfig.Runtime; rt != "runsc" {
 		t.Fatalf("runtime %q", rt)
 	}
 }
@@ -159,7 +159,7 @@ func TestTTYExecSpec(t *testing.T) {
 	want := execCreate{
 		AttachStdin: true, AttachStdout: true, AttachStderr: false, Tty: true,
 		User: "10001:10001", WorkingDir: "/work",
-		Cmd:         []string{"sh", "-c", `echo "$$"; exec tmux new-session -A -s "$1" claude`, "orbit-tty", "claude-1a2b3c4d"},
+		Cmd:         []string{"sh", "-c", ttyScript, "orbit-tty", "claude-1a2b3c4d", "claude"},
 		Env:         []string{"CLAUDE_CODE_OAUTH_TOKEN=tok", "TERM=xterm-256color"},
 		ConsoleSize: []int{32, 120},
 	}
@@ -170,7 +170,7 @@ func TestTTYExecSpec(t *testing.T) {
 	want = execCreate{
 		AttachStdin: true, AttachStdout: true, Tty: true,
 		User: "10001:10001", WorkingDir: "/work/conversations/x",
-		Cmd:         []string{"sh", "-c", `echo "$$"; exec tmux new-session -A -s "$1"`, "orbit-tty", "sh-1"},
+		Cmd:         []string{"sh", "-c", ttyScript, "orbit-tty", "sh-1"},
 		Env:         []string{"TERM=xterm-256color"},
 		ConsoleSize: []int{24, 80},
 	}
@@ -183,7 +183,7 @@ func TestTTYExecSpec(t *testing.T) {
 	for i := range tt.NumField() {
 		fields = append(fields, tt.Field(i).Name)
 	}
-	if !reflect.DeepEqual(fields, []string{"Preset", "Session", "Cwd", "Cols", "Rows", "Env"}) {
+	if !reflect.DeepEqual(fields, []string{"Preset", "Session", "Cwd", "Cols", "Rows", "Env", "Account"}) {
 		t.Fatalf("TTYRequest fields %v: a new caller-controlled field is a security change", fields)
 	}
 }
@@ -255,7 +255,7 @@ func TestVerifyBox(t *testing.T) {
 func TestBoxLifecycle(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
-	if _, err := h.client.EnsureBox(ctx, "orbit"); err == nil {
+	if _, err := h.client.EnsureBox(ctx, "orbit", nil); err == nil {
 		t.Fatal("a box was made without ORBIT_SANDBOX_BOX_IMAGE")
 	}
 	h.srv.cfg = boxConfig()
@@ -265,17 +265,17 @@ func TestBoxLifecycle(t *testing.T) {
 	if err != nil || st.State != sandbox.BoxNone {
 		t.Fatalf("before: %+v %v", st, err)
 	}
-	st, err = h.client.EnsureBox(ctx, "orbit")
+	st, err = h.client.EnsureBox(ctx, "orbit", nil)
 	if err != nil || st.State != sandbox.BoxRunning || st.Image != testBoxImage || !sandbox.ValidID(st.ID) {
 		t.Fatalf("ensure: %+v %v", st, err)
 	}
 	h.fd.mu.Lock()
 	created, query := h.fd.created[0], h.fd.createQueries[0]
 	h.fd.mu.Unlock()
-	if mustJSON(t, created) != mustJSON(t, boxSpec(h.srv.cfg, "orbit")) || query != "name=orbit-box-orbit" {
+	if mustJSON(t, created) != mustJSON(t, boxSpec(h.srv.cfg, "orbit", nil)) || query != "name=orbit-box-orbit" {
 		t.Fatalf("docker received %s for %s", mustJSON(t, created), query)
 	}
-	again, err := h.client.EnsureBox(ctx, "orbit")
+	again, err := h.client.EnsureBox(ctx, "orbit", nil)
 	if err != nil || again.ID != st.ID || len(h.fd.created) != 1 {
 		t.Fatalf("second ensure made another: %+v %v", again, err)
 	}
@@ -304,7 +304,7 @@ func TestBoxLifecycle(t *testing.T) {
 	// A new image pin reaches a stopped box: recreated, volumes by name.
 	newImage := strings.Replace(testBoxImage, "abcdef", "012345", 1)
 	h.srv.cfg.BoxImage = newImage
-	st2, err := h.client.EnsureBox(ctx, "orbit")
+	st2, err := h.client.EnsureBox(ctx, "orbit", nil)
 	if err != nil || st2.State != sandbox.BoxRunning || st2.Image != newImage || st2.ID == st.ID {
 		t.Fatalf("recreate: %+v %v", st2, err)
 	}
@@ -313,7 +313,7 @@ func TestBoxLifecycle(t *testing.T) {
 	}
 	// A running box keeps its image when the pin moves.
 	h.srv.cfg.BoxImage = testBoxImage
-	if st3, _ := h.client.EnsureBox(ctx, "orbit"); st3.ID != st2.ID {
+	if st3, _ := h.client.EnsureBox(ctx, "orbit", nil); st3.ID != st2.ID {
 		t.Fatal("a running box was recreated")
 	}
 
@@ -322,7 +322,7 @@ func TestBoxLifecycle(t *testing.T) {
 	h.fd.containers[st2.ID].labels = map[string]string{"com.docker.compose.service": "orbit"}
 	h.fd.mu.Unlock()
 	var se *sandbox.Error
-	if _, err := h.client.EnsureBox(ctx, "orbit"); !errors.As(err, &se) || se.Status != http.StatusConflict {
+	if _, err := h.client.EnsureBox(ctx, "orbit", nil); !errors.As(err, &se) || se.Status != http.StatusConflict {
 		t.Fatalf("foreign container: %v", err)
 	}
 	if _, err := h.client.Box(ctx, "Bad/Name"); err == nil {
@@ -335,7 +335,7 @@ func TestBoxTTY(t *testing.T) {
 	h.srv.cfg = boxConfig()
 	h.srv.cfg.Docker = h.srv.d.sock
 	ctx := context.Background()
-	if _, err := h.client.EnsureBox(ctx, "orbit"); err != nil {
+	if _, err := h.client.EnsureBox(ctx, "orbit", nil); err != nil {
 		t.Fatal(err)
 	}
 	tty, err := h.client.AttachTTY(ctx, "orbit", sandbox.TTYRequest{Preset: "claude", Session: "claude-1", Cols: 100, Rows: 30,

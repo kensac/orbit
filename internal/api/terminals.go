@@ -55,6 +55,8 @@ const (
 	claudeCredential = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // G101: the variable's name, not a value
 )
 
+// presetTitles are the presets a terminal create may name, with their
+// default titles. TTYLogin is started by the accounts routes only.
 var presetTitles = map[string]string{sandbox.TTYShell: "Shell", sandbox.TTYClaude: "Claude Code (direct)"}
 
 func writeCheck(w http.ResponseWriter, status int, check, msg string) {
@@ -102,7 +104,7 @@ func boxWorkspace(b store.Box, st sandbox.BoxStatus) map[string]any {
 		"id": b.ID, "scope": "agent", "conversation_id": nil, "agent": b.Agent,
 		"backend": "box", "cwd": "",
 		"capabilities": map[string]any{"read": false, "write": false, "terminals": true, "git": false,
-			"watch": false, "presets": []string{sandbox.TTYShell, sandbox.TTYClaude}},
+			"watch": false, "presets": []string{sandbox.TTYShell, sandbox.TTYClaude}, "accounts": true},
 		"as_of": nil,
 		"box":   map[string]any{"host": st.Host, "arch": st.Arch, "state": state, "image": st.Image},
 		// created_at is the workspace's, not the container's.
@@ -155,12 +157,13 @@ func (s *Server) workspaceBox(w http.ResponseWriter, r *http.Request) (store.Box
 
 func (s *Server) createTerminal(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Preset string          `json:"preset"`
-		Cwd    string          `json:"cwd"`
-		Cols   int             `json:"cols"`
-		Rows   int             `json:"rows"`
-		Title  string          `json:"title"`
-		Claude json.RawMessage `json:"claude"`
+		Preset  string          `json:"preset"`
+		Cwd     string          `json:"cwd"`
+		Cols    int             `json:"cols"`
+		Rows    int             `json:"rows"`
+		Title   string          `json:"title"`
+		Claude  json.RawMessage `json:"claude"`
+		Account string          `json:"account"`
 	}
 	if !decode(w, r, 8<<10, &body, bodyRequired) {
 		return
@@ -190,24 +193,71 @@ func (s *Server) createTerminal(w http.ResponseWriter, r *http.Request) {
 	if body.Title != "" {
 		title = body.Title
 	}
+	var acct *store.BoxAccount
+	if body.Account != "" {
+		a, ok := s.workspaceAccount(w, r, b, body.Account)
+		if !ok {
+			return
+		}
+		acct = &a
+	}
 	c, ok := s.boxClient(w)
 	if !ok {
 		return
 	}
 	// The box is made or started here, so a terminal that cannot run says
 	// so now rather than on its socket.
-	if _, err := c.EnsureBox(r.Context(), b.Agent); err != nil {
-		writeErr(w, http.StatusBadGateway, err.Error())
+	if !s.readyBox(w, r, c, b, acct) {
 		return
 	}
-	t, err := s.Store.CreateTerminal(r.Context(), store.NewBoxTerminal{WorkspaceID: b.ID, Preset: body.Preset, Title: title,
+	s.startTerminal(w, r, b, acct, store.NewBoxTerminal{WorkspaceID: b.ID, Preset: body.Preset, Title: title,
 		Cwd: body.Cwd, Cols: body.Cols, Rows: body.Rows, CreatedBy: actor(r, "operator")})
+}
+
+// ensureBox makes or starts an agent's box with every account of its
+// workspace among its mounts (a running box keeps what it has).
+func (s *Server) ensureBox(ctx context.Context, c *sandbox.Client, b store.Box) (sandbox.BoxStatus, error) {
+	slots, err := s.Store.AccountSlots(ctx, b.ID)
+	if err != nil {
+		return sandbox.BoxStatus{}, err
+	}
+	return c.EnsureBox(ctx, b.Agent, slots)
+}
+
+// readyBox ensures the box and, for an account, that the box mounts it and
+// its directory links the shared profile, writing an error otherwise.
+func (s *Server) readyBox(w http.ResponseWriter, r *http.Request, c *sandbox.Client, b store.Box, acct *store.BoxAccount) bool {
+	st, err := s.ensureBox(r.Context(), c, b)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return false
+	}
+	if acct == nil {
+		return true
+	}
+	if !slices.Contains(st.Accounts, acct.Slot) {
+		writeCheck(w, http.StatusConflict, "restart", "the box does not mount this account yet: it mounts new accounts when it restarts")
+		return false
+	}
+	if err := c.PrepareAccount(r.Context(), b.Agent, acct.Slot); err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return false
+	}
+	return true
+}
+
+// startTerminal records a terminal and answers 201 with it.
+func (s *Server) startTerminal(w http.ResponseWriter, r *http.Request, b store.Box, acct *store.BoxAccount, n store.NewBoxTerminal) {
+	if acct != nil {
+		n.AccountID = acct.ID
+	}
+	t, err := s.Store.CreateTerminal(r.Context(), n)
 	if errors.Is(err, store.ErrLimit) {
 		writeCheck(w, http.StatusConflict, "limit", err.Error())
 		return
 	}
 	if err == nil {
-		s.Log.Info("terminal created", "terminal", t.ID, "agent", b.Agent, "preset", t.Preset, "by", t.CreatedBy)
+		s.Log.Info("terminal created", "terminal", t.ID, "agent", b.Agent, "preset", t.Preset, "account", n.AccountID, "by", t.CreatedBy)
 	}
 	respondStatus(w, http.StatusCreated, map[string]any{"terminal": s.withClients(t)}, err)
 }
@@ -487,12 +537,14 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.dropClient(t.ID)
-	if _, err := c.EnsureBox(ctx, t.Agent); err != nil {
+	if _, err := s.ensureBox(ctx, c, store.Box{ID: t.WorkspaceID, Agent: t.Agent}); err != nil {
 		fail("box", err.Error())
 		return
 	}
-	tr := sandbox.TTYRequest{Preset: t.Preset, Session: t.Session, Cwd: t.Cwd, Cols: t.Cols, Rows: t.Rows}
-	if t.Preset == sandbox.TTYClaude {
+	tr := sandbox.TTYRequest{Preset: t.Preset, Session: t.Session, Cwd: t.Cwd, Cols: t.Cols, Rows: t.Rows, Account: t.AccountSlot}
+	// An account's terminal uses that account's own login: it is given no
+	// credential (sandboxd also removes the token from its session).
+	if t.Preset == sandbox.TTYClaude && t.AccountSlot == "" {
 		if cred, _ := s.Engine.Env(claudeCredential); cred != "" {
 			tr.Env = map[string]string{claudeCredential: cred}
 		}
@@ -624,6 +676,13 @@ func (s *Server) ended(ctx context.Context, c *sandbox.Client, t store.BoxTermin
 	code := ex.ExitCode
 	if _, err := s.Store.EndTerminal(ctx, t.ID, store.EndExit, &code); err != nil && !errors.Is(err, store.ErrConflict) {
 		s.Log.Warn("terminal: record exit", "terminal", t.ID, "err", err)
+	}
+	if t.AccountID != nil {
+		// A login just ended: what the account's files now say is read
+		// before the client hears of the exit and lists its accounts.
+		if a, err := s.Store.GetAccount(ctx, *t.AccountID); err == nil {
+			_ = s.refreshAccount(ctx, c, a)
+		}
 	}
 	_ = writeJSON(map[string]any{"type": "exit", "code": code, "reason": store.EndExit})
 }
