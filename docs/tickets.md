@@ -475,12 +475,23 @@ executes whatever the model wrote, as the same user as the CLI, and can read
 `/proc/<cli pid>/environ`. Two measures, in order of preference:
 
 1. **Keep the token out of the container**: point the CLI at a credential
-   proxy in sandboxd (`ANTHROPIC_BASE_URL`) that adds the real credential on
-   the way out, and give the container a placeholder. To be verified against
-   the real CLI with a subscription token before it is relied on.
+   proxy (`ANTHROPIC_BASE_URL`) that adds the real credential on the way
+   out, and give the container a placeholder. Verified against the real CLI
+   (below); not yet built.
 2. **Catch it on the way out**: the diff policy refuses any diff containing
    the exact credential value (orbit knows it) or a secret pattern, before
    anything is committed, since orbit's repository is public.
+
+### Credential proxy: what the CLI does (seen on 2.1.316)
+
+Seen on 2026-11-02 against the real CLI (2.1.316, the `deploy/cli` pin) on macOS, with a throwaway reverse proxy on loopback forwarding to `https://api.anthropic.com` and replacing whatever credential arrived with the real one. The CLI ran with an empty HOME, `env -i`, `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` (and once `http://localhost:<port>`), `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and `HTTPS_PROXY`/`HTTP_PROXY` pointing at a listener that refuses and logs every request, with `NO_PROXY` naming the proxy's host, as a sandbox's environment would. Reproduce: the same environment, any placeholder, and a proxy that logs paths and header names, never values.
+
+- **Subscription OAuth token** (`CLAUDE_CODE_OAUTH_TOKEN=<any string>`; no `sk-ant-` prefix is needed): every request is `POST /v1/messages?beta=true` to the base URL with `Authorization: Bearer <placeholder>` and `anthropic-beta` including `oauth-2025-04-20`. With the proxy putting the real token (the keychain login's access token) in `Authorization`, these all succeeded: a one-word reply, a streamed reply of about 100 `content_block_delta` events arriving over 4 seconds (`text/event-stream`, the body forwarded as it arrived, with the CLI's `Accept-Encoding: gzip` passed through and with `identity`), a turn with a `Read` tool call (two requests), and orbit's own shape (`--input-format stream-json`, `--json-schema`, `--strict-mcp-config`, `--setting-sources ""`) returning `structured_output`.
+- **API key** (`ANTHROPIC_API_KEY=<any string>`): the same single path, with `x-api-key: <placeholder>`, no `Authorization` and no OAuth beta; `apiKeySource` in the init event is `ANTHROPIC_API_KEY`. The CLI side is seen: the placeholder is sent only to the base URL, and a streamed tool turn completed when the proxy authenticated the request upstream. Not seen: upstream accepting a real API key put in `x-api-key` by a proxy (no API key on the test machine); that is the API's ordinary header, not CLI behaviour.
+- **Nothing bypassed the base URL**: the refusing listener behind `HTTPS_PROXY` received no request in any run, and the only path the proxy saw was `/v1/messages`. `NO_PROXY` was honoured for an IP and for a hostname.
+- **A refusal fails the turn at once**: a proxy answer of 403 gave one request and the result `Failed to authenticate. API Error: 403 denied` (`is_error: true`, exit 1), with no retry.
+
+So the proxy needs to allow only `POST /v1/messages` (and `POST /v1/messages/count_tokens`, the same API's token count) and to forward the response body unbuffered; a per-run placeholder can itself be the token the proxy checks.
 
 ### Tool policy inside the sandbox
 
@@ -712,8 +723,7 @@ confirmed them.
 - **Which PRs orbit merges.** Default: only its own `orbit/*` branches in
   the same repository, not Renovate's or anyone else's. Owner to confirm.
 - **Keeping the backend credential out of the build container** (the
-  credential proxy above). Open. **Precondition:** until it is verified
-  against the real CLI, build runs target only `kensac/orbit`, whose
+  credential proxy above). Verified against the real CLI (Credential proxy: what the CLI does); not yet built. **Precondition:** until it is built and deployed, build runs target only `kensac/orbit`, whose
   diff is reviewed before every merge, and no other repository.
 
 ## Configuration
