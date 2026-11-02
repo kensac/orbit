@@ -48,6 +48,7 @@ import (
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
+	"github.com/kensac/orbit/internal/push"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
@@ -94,6 +95,8 @@ func main() {
 		err = sandboxdCmd(ctx, log)
 	case "egress":
 		err = egressCmd(ctx, log)
+	case "vapid":
+		err = vapid()
 	case "version":
 		fmt.Println(revision)
 	default:
@@ -127,7 +130,7 @@ func harnessCmd(name string, args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress")
 	os.Exit(2)
 }
 
@@ -250,6 +253,10 @@ func validate(args []string) error {
 	}
 	if b := cfg.Deployment.Build; b != nil {
 		refs[b.TokenEnv] = true
+		refs["CLAUDE_CODE_OAUTH_TOKEN"] = true
+	}
+	if addr, tokenEnv := cfg.Deployment.SandboxService(); addr != "" {
+		refs[tokenEnv] = true
 		refs["CLAUDE_CODE_OAUTH_TOKEN"] = true
 	}
 	names := make([]string, 0, len(cfg.Agents))
@@ -379,7 +386,10 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		// the drain's cap, which hands the remaining runs back.
 		drain := engine.NewDrain()
 		eng.Drain = drain
-		eng.Builder = &build.Runner{WorkRoot: filepath.Join(eng.DataDir, "builds")}
+		// One spare clone per build repository: a build starts from a
+		// checkout that needs only an incremental fetch.
+		checkouts := &build.Pool{Root: filepath.Join(eng.DataDir, "checkouts"), Warm: 1}
+		eng.Builder = &build.Runner{WorkRoot: filepath.Join(eng.DataDir, "builds"), Pool: checkouts}
 		life, endLife := context.WithCancel(context.WithoutCancel(ctx))
 		defer endLife()
 		runCtx, cancelRuns := context.WithCancel(life)
@@ -398,6 +408,13 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			metrics.Draining.Set(1)
 		}()
 
+		pusher, err := push.FromEnv(s, log.With("component", "push"))
+		if err != nil {
+			return err
+		}
+		if pusher == nil {
+			log.Info("ORBIT_VAPID_* not set: Web Push is off (the inbox still lists what needs attention)")
+		}
 		// reloadNow puts the files and the database's definitions in force,
 		// for the poll below and for the API after it writes a definition.
 		var reloadMu sync.Mutex
@@ -422,7 +439,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
-			ConfigState: configState, Drain: drain, OAuth: oauth}
+			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		// Bind before any executor starts: an instance that cannot serve
@@ -449,7 +466,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			(&tickets.Loop{
 				Store: s, Config: func() *spec.Config { return eng.Current().Config }, Env: os.LookupEnv,
 				Client: &http.Client{Timeout: 2 * time.Minute}, Revision: revision, Log: log.With("component", "tickets"),
-				Approval: eng.NotifyApproval, Wake: nudge, Restack: eng.Builder.Restack,
+				Approval: eng.NotifyApproval, Wake: nudge, Restack: eng.Builder.Restack, Checkouts: checkouts,
 			}).Run(claimCtx)
 		}()
 
@@ -516,6 +533,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 					}
 					reconcileTasks(claimCtx, eng, log)
 					deliverOutbox(claimCtx, eng, log)
+					deliverPush(claimCtx, pusher, log)
 				}
 			},
 		}).start(claimCtx, runCtx)
@@ -538,6 +556,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 					continue
 				}
 				deliverOutbox(claimCtx, eng, log)
+				deliverPush(claimCtx, pusher, log)
 				if err := eng.ExecuteActions(claimCtx); err != nil && claimCtx.Err() == nil {
 					log.Error("actions", "err", err)
 				}

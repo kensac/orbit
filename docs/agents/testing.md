@@ -3,6 +3,7 @@
 - **Database tests run against real Postgres.** `make testdb-up` starts this
   checkout's own container; `internal/testdb` creates a fresh database per
   test. Without `ORBIT_TEST_DATABASE_URL` they skip locally and fail under CI.
+  `make test` uses `ORBIT_TEST_DATABASE_URL` from the environment when set (CI sets it, so an unreachable server fails the run), else this checkout's container when it is running, else none, and says so. `make check-sandbox` always skips them and drops `-race` (it needs cgo), for the build sandbox; a green sandbox run is not a green `make check`.
 - **Runners are tested with fake CLIs** (`runner_test.go`): a script that
   records its argv, environment and stdin. That is where "the model never
   sees orbit's secrets" is enforced. A fake live CLI answers one result per
@@ -45,3 +46,5 @@ session alone (`resumed`, a new `session_id`), an approved `continue` that
 runs at its `run_after`, and a `kill -9` of the live process mid-turn (that
 run fails with "claude exited during the turn"; the next starts fresh), with a
 Read outside the workdir denied in the live turn.
+
+After changing chat runs (`runner/chat.go`), run `ORBIT_REAL_CLAUDE=<wrapper> go test -run RealCLIChat ./internal/runner/`: orbit's SDK MCP tool is listed and called over the control channel, the reply is the final message, the second turn is `live` in the same process, and an interrupt ends the third turn with a result. The sandboxed path is covered by `TestASandboxedChatKeepsItsWorkspace` against a fake sandboxd that runs the argv locally; a real sandbox is seen only on hetzner.

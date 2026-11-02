@@ -28,6 +28,11 @@ type Config struct {
 	// Proxy is the egress proxy's host:port on that network
 	// (ORBIT_SANDBOX_PROXY).
 	Proxy string
+	// WorkstationProxy is the egress proxy a workstation profile's
+	// sandboxes use instead of Proxy, on the same network
+	// (ORBIT_SANDBOX_WORKSTATION_PROXY): one that allows any public host.
+	// Unset refuses that profile.
+	WorkstationProxy string
 	// Runtime is "" (runc) or "runsc" (gVisor, when the host has it)
 	// (ORBIT_SANDBOX_RUNTIME).
 	Runtime string
@@ -60,7 +65,9 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		Network: def("ORBIT_SANDBOX_NETWORK", "orbit-sandbox"),
 		Proxy:   def("ORBIT_SANDBOX_PROXY", "orbit-egress:3128"),
 		Runtime: getenv("ORBIT_SANDBOX_RUNTIME"),
-		Docker:  def("ORBIT_SANDBOX_DOCKER_SOCKET", "/var/run/docker.sock"),
+
+		WorkstationProxy: getenv("ORBIT_SANDBOX_WORKSTATION_PROXY"),
+		Docker:           def("ORBIT_SANDBOX_DOCKER_SOCKET", "/var/run/docker.sock"),
 	}
 	return c, c.Validate()
 }
@@ -82,6 +89,11 @@ func (c Config) Validate() error {
 	}
 	if host, port, err := net.SplitHostPort(c.Proxy); err != nil || host == "" || port == "" || strings.ContainsAny(host, "/@ ") {
 		errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_PROXY %q must be host:port", c.Proxy))
+	}
+	if p := c.WorkstationProxy; p != "" {
+		if host, port, err := net.SplitHostPort(p); err != nil || host == "" || port == "" || strings.ContainsAny(host, "/@ ") {
+			errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_WORKSTATION_PROXY %q must be host:port", p))
+		}
 	}
 	if c.Runtime != "" && c.Runtime != "runsc" {
 		errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_RUNTIME %q: only runsc may replace the default runtime", c.Runtime))

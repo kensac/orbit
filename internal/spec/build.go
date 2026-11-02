@@ -46,6 +46,8 @@ type Build struct {
 	Repositories map[string]BuildRepo `yaml:"repositories" json:"repositories"`
 }
 
+var sha256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // BuildRepo is one repository's build policy.
 type BuildRepo struct {
 	// Commands are the argv prefixes a build's Bash calls may start with,
@@ -57,6 +59,11 @@ type BuildRepo struct {
 	// MaxDiffLines bounds added plus deleted lines; DefaultMaxDiffLines
 	// when zero.
 	MaxDiffLines int `yaml:"max_diff_lines,omitempty" json:"max_diff_lines,omitempty"`
+	// TrustedScripts are the sha256 (hex) of every setup and cleanup
+	// script in the repository's .orbit/build.yaml a person reviewed. A
+	// script whose text hashes to anything else is never run, and fails
+	// the build (docs/tickets.md, Setup and cleanup scripts).
+	TrustedScripts []string `yaml:"trusted_scripts,omitempty" json:"trusted_scripts,omitempty"`
 }
 
 // Argv returns the repository's command prefixes as argv slices.
@@ -108,6 +115,38 @@ func ValidGlob(p string) bool {
 		}
 	}
 	return true
+}
+
+// Sandbox profiles: what a sandboxed chat's container is. sandboxd maps
+// each to its container options and egress (internal/sandboxd).
+const (
+	SandboxWorkstation = "workstation"
+	SandboxBuild       = "build"
+)
+
+// SandboxProfiles lists them.
+var SandboxProfiles = []string{SandboxWorkstation, SandboxBuild}
+
+// SandboxService is sandboxd's address and the variable holding its token.
+type SandboxService struct {
+	Sandboxd string `yaml:"sandboxd" json:"sandboxd"`
+	// TokenEnv defaults to ORBIT_SANDBOX_TOKEN.
+	TokenEnv string `yaml:"token_env,omitempty" json:"token_env,omitempty"`
+}
+
+// SandboxService is the sandboxd sandboxed chats use: the sandbox
+// section's, else the build section's; "" when there is none.
+func (d Deployment) SandboxService() (addr, tokenEnv string) {
+	switch {
+	case d.Sandbox != nil && d.Sandbox.Sandboxd != "":
+		addr, tokenEnv = d.Sandbox.Sandboxd, d.Sandbox.TokenEnv
+	case d.Build != nil:
+		addr, tokenEnv = d.Build.Sandboxd, d.Build.TokenEnv
+	}
+	if tokenEnv == "" {
+		tokenEnv = "ORBIT_SANDBOX_TOKEN"
+	}
+	return addr, tokenEnv
 }
 
 func (c *Config) validateBuild() []error {
@@ -183,6 +222,11 @@ func (c *Config) validateBuild() []error {
 		for _, p := range br.Protected {
 			if !ValidGlob(p) {
 				at("repository %q: protected path %q is not a relative glob", r, p)
+			}
+		}
+		for _, h := range br.TrustedScripts {
+			if !sha256RE.MatchString(h) {
+				at("repository %q: trusted script %q is not a sha256 in lower-case hex", r, h)
 			}
 		}
 		if br.MaxDiffLines < 0 || br.MaxDiffLines > maxDiffLinesCap {

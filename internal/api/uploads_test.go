@@ -7,8 +7,12 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kensac/orbit/internal/workspace"
 )
 
 func multipartFile(t *testing.T, name, ctype string, content []byte) (*bytes.Buffer, string) {
@@ -127,5 +131,44 @@ func TestUploadsAndAttachments(t *testing.T) {
 	}
 	if code := put(signed, "0123456789"); code != 409 {
 		t.Fatalf("second put = %d", code)
+	}
+}
+
+func TestWorkspaceFiles(t *testing.T) {
+	v := newEnv(t, nil)
+	kanishk := v.person("kanishk")
+	base := v.srv.URL + "/api/v1"
+	_, r := call(t, "POST", base+"/agents/a/conversations", kanishk, `{"title":"ws","body":"hi","wake":true}`)
+	conv, run := r["conversation_id"].(string), r["run_id"].(string)
+	if code, r := call(t, "GET", base+"/conversations/"+conv+"/files", kanishk, ""); code != 200 || len(r["files"].([]any)) != 0 {
+		t.Fatalf("empty = %d %v", code, r)
+	}
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "src"), 0o700)
+	_ = os.MkdirAll(filepath.Join(dir, ".orbit", "claude"), 0o700)
+	_ = os.WriteFile(filepath.Join(dir, "src", "main.go"), []byte("package main\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(dir, ".orbit", "claude", "x.jsonl"), []byte("{}"), 0o600)
+	tree, n, err := workspace.Pack(workspace.Tree{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.s.PutWorkspace(ctx, conv, run, 1, n, tree); err != nil {
+		t.Fatal(err)
+	}
+	code, r := call(t, "GET", base+"/conversations/"+conv+"/files", kanishk, "")
+	files := r["files"].([]any)
+	if code != 200 || len(files) != 1 || files[0].(map[string]any)["path"] != "src/main.go" || files[0].(map[string]any)["bytes"].(float64) != 13 {
+		t.Fatalf("files = %d %v", code, r)
+	}
+	req, _ := http.NewRequest("GET", base+"/conversations/"+conv+"/files/src/main.go", nil)
+	req.Header.Set("Authorization", "Bearer "+kanishk)
+	code, h, b := do(t, req)
+	if code != 200 || string(b) != "package main\n" || !strings.HasPrefix(h.Get("Content-Disposition"), "attachment") {
+		t.Fatalf("file = %d %v %q", code, h, b)
+	}
+	req, _ = http.NewRequest("GET", base+"/conversations/"+conv+"/files/.orbit/claude/x.jsonl", nil)
+	req.Header.Set("Authorization", "Bearer "+kanishk)
+	if code, _, _ := do(t, req); code != 404 {
+		t.Fatalf("orbit's state = %d", code)
 	}
 }
