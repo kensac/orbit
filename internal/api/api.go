@@ -68,9 +68,18 @@ type Server struct {
 	WorkspaceOrigins []string
 	// TerminalPing overrides terminalPing when set; tests shorten it.
 	TerminalPing time.Duration
+	// WorkspaceGroup is ORBIT_WORKSPACE_GROUP: the group a person must be
+	// in to change a workspace. Empty is ORBIT_OIDC_GROUP's, which every
+	// verified person is in.
+	WorkspaceGroup string
+	// WorkspaceReadRate and WorkspaceWriteRate override the workspace's
+	// per-person rates (readRate, writeRate) when set; tests raise them.
+	WorkspaceReadRate, WorkspaceWriteRate float64
 
 	termMu      sync.Mutex
 	termClients map[string]int
+	wsOnce      sync.Once
+	ws          *workspaceState
 }
 
 // Handler returns the public listener's routes, the ones traefik serves.
@@ -167,9 +176,13 @@ func (s *Server) routes(internal bool) http.Handler {
 	// The ticket in Sec-WebSocket-Protocol is the credential (terminals.go).
 	mux.HandleFunc("GET /api/v1/terminals/{tid}/ws", s.terminalSocket)
 	s.memoryRoutes(api)
+	s.workspaceRoutes(api)
+	s.workspaceWriteRoutes(api, mux)
 	s.skillsRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
+	// The signature is the credential (hooks.go); traefik routes /hooks/ past forward-auth.
+	mux.HandleFunc("POST /hooks/{agent}/{trigger}", s.hook)
 
 	if internal {
 		// Only the host's rollout reaches this listener; a person cannot
@@ -395,8 +408,15 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 		ClientMessageID string `json:"client_message_id"`
 		// Attachments are uploads of this conversation the message carries.
 		Attachments []string `json:"attachments"`
+		// Delivery is "queue" (the default) or "steer": into the reply
+		// being written, when one is.
+		Delivery string `json:"delivery"`
 	}
 	if !decode(w, r, 64<<10, &body, bodyRequired) {
+		return
+	}
+	if body.Delivery != "" && body.Delivery != store.DeliveryQueue && body.Delivery != store.DeliverySteer {
+		writeErr(w, http.StatusBadRequest, `delivery is "queue" or "steer"`)
 		return
 	}
 	if strings.TrimSpace(body.Body) == "" && len(body.Attachments) == 0 {
@@ -410,15 +430,16 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 	res, replayed, err := s.Store.PostMessageOnce(r.Context(), store.PostMessage{
 		Agent: a.Name, SpecSHA: a.SHA, Body: body.Body, Author: actor(r, body.Author), ReplyTo: body.ReplyTo,
 		Wake: wake, ClientID: body.ClientMessageID, ConversationID: conversationID, Attachments: body.Attachments,
+		Delivery: body.Delivery, Steerable: a.Chat,
 	})
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	if res.RunID != "" && !replayed {
+	if res.RunID != "" && !replayed && res.Delivered == store.DeliveredQueued {
 		s.Wake()
 	}
-	resp := map[string]any{"message_id": res.MessageID}
+	resp := map[string]any{"message_id": res.MessageID, "delivered": res.Delivered}
 	if res.RunID != "" {
 		resp["run_id"] = res.RunID
 	}
@@ -643,6 +664,12 @@ const (
 // what the field was for (a dropped client_request_id loses idempotency).
 // It writes the 400 itself; false means the handler returns.
 func decode(w http.ResponseWriter, r *http.Request, limit int64, into any, rule bodyRule) bool {
+	return decodeOr(w, r, limit, into, rule, func(msg string) { writeErr(w, http.StatusBadRequest, msg) })
+}
+
+// decodeOr is decode with the 400 written by fail, for routes whose errors
+// have their own shape (the workspace's carry a check).
+func decodeOr(w http.ResponseWriter, r *http.Request, limit int64, into any, rule bodyRule, fail func(msg string)) bool {
 	if rule == bodyOptional && r.ContentLength == 0 {
 		return true
 	}
@@ -654,14 +681,14 @@ func decode(w http.ResponseWriter, r *http.Request, limit int64, into any, rule 
 		// An empty body sent without a length (chunked).
 		return true
 	case errors.Is(err, io.EOF):
-		writeErr(w, http.StatusBadRequest, "a JSON body is required")
+		fail("a JSON body is required")
 		return false
 	case err != nil:
-		writeErr(w, http.StatusBadRequest, err.Error())
+		fail(err.Error())
 		return false
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		writeErr(w, http.StatusBadRequest, "the body must be one JSON value")
+		fail("the body must be one JSON value")
 		return false
 	}
 	return true

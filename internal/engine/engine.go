@@ -136,6 +136,7 @@ func (e *Engine) SetConfig(cfg *spec.Config) error {
 	e.mu.Lock()
 	e.cfg = &Snapshot{Config: cfg, Channels: chans}
 	e.mu.Unlock()
+	metrics.SetExpiries(cfg.Deployment.Expiries())
 	return nil
 }
 
@@ -169,6 +170,9 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		return e.executeLearn(ctx, actx, snap, a, c, start, log)
 	}
 
+	if sk := missed(a, c, time.Now()); sk != nil {
+		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
+	}
 	st := &attemptState{cancel: make(chan struct{})}
 	go e.watchCancel(actx, c, st, a.Chat, lose)
 	out, res, err := e.attempt(actx, snap, a, c, log, st)
@@ -218,7 +222,8 @@ const cancelPoll = 2 * time.Second
 
 // watchCancel stops the attempt when its person asks: a chat turn is
 // interrupted through the CLI's control channel (it ends with what it has),
-// any other run's backend is cancelled.
+// any other run's backend is cancelled. While a chat turn runs, the same
+// poll hands it the conversation's steer messages (steer.go).
 func (e *Engine) watchCancel(ctx context.Context, c *store.ClaimedRun, st *attemptState, chat bool, lose context.CancelCauseFunc) {
 	t := time.NewTicker(cancelPoll)
 	defer t.Stop()
@@ -229,6 +234,9 @@ func (e *Engine) watchCancel(ctx context.Context, c *store.ClaimedRun, st *attem
 		case <-t.C:
 			asked, err := e.Store.CancelRequested(ctx, c.ID)
 			if err != nil || !asked {
+				if f := st.steer.Load(); f != nil && err == nil {
+					e.pollSteers(ctx, c, f)
+				}
 				continue
 			}
 			st.stop()
@@ -323,6 +331,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	keepScratch := func() bool { return ctx.Err() != nil }
 	withSession := a.Session != nil && a.Session.Resume && claudeCode
 	chat := a.Chat && claudeCode
+	// What the person changed in a chat's workspace since the last turn.
+	var wsNote string
+	var wsFresh bool
 	if withSession || chat {
 		base := filepath.Join(e.DataDir, "agents", a.Name)
 		workdir, home = filepath.Join(base, "work"), filepath.Join(base, "home")
@@ -330,6 +341,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			// A chat's workspace is its conversation's, kept between
 			// messages and stored after every run.
 			workdir, home = e.chatDirs(c.ConversationID)
+			var err error
+			if wsNote, wsFresh, err = e.personChanges(ctx, c.ConversationID); err != nil {
+				return nil, nil, err
+			}
 			if err := e.restoreWorkspace(ctx, c.ConversationID, workdir); err != nil {
 				return nil, nil, err
 			}
@@ -413,6 +428,16 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env,
 		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted()}
+	if c.Trigger == store.TriggerWebhook {
+		d, err := e.Store.WebhookForRun(ctx, c.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if d != nil {
+			fetcher.Delivery = &sources.Fetched{MediaType: d.MediaType, Content: d.Body,
+				Meta: map[string]any{"delivery_id": d.DeliveryID, "event": d.Event, "trigger": d.TriggerName}}
+		}
+	}
 	vars := sources.Vars(now)
 	var inputs []runner.Input
 	if rec != nil {
@@ -432,6 +457,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			break
 		}
 		f, err := fetcher.Fetch(ctx, s, vars)
+		if errors.Is(err, sources.ErrAbsent) {
+			// Its transforms are skipped and a gate on it counts no records (transform.go, gate.go).
+			emit("orbit.source_absent", map[string]any{"source": s.Name, "reason": err.Error()})
+			continue
+		}
 		if err != nil {
 			emit("orbit.source_failed", map[string]any{"source": s.Name, "error": err.Error()})
 			return nil, nil, fmt.Errorf("source %s: %w", s.Name, err)
@@ -588,8 +618,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	if chat {
 		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
-			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
-			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec, instructor: st.instructor,
+			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached,
+				WorkspaceChanges: wsNote}, fresh: wsFresh,
+			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, steer: &st.steer, rec: rec, instructor: st.instructor,
 			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun})
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
