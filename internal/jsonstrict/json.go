@@ -1,5 +1,5 @@
-// Package extensionjson holds the bounded JSON and exact-number policy for extensions.
-package extensionjson
+// Package jsonstrict holds bounded JSON and exact-number validation policy.
+package jsonstrict
 
 import (
 	"bytes"
@@ -13,8 +13,8 @@ import (
 	"unicode/utf8"
 )
 
-// Validate rejects oversized, non-UTF-8, duplicate-key, deep or trailing JSON.
-func Validate(data []byte, maxBytes int) error {
+// ValidateJSON rejects oversized, non-UTF-8, duplicate-key, deep or trailing JSON.
+func ValidateJSON(data []byte, maxBytes int) error {
 	if len(data) > maxBytes {
 		return errors.New("JSON exceeds byte limit")
 	}
@@ -74,9 +74,9 @@ func uniqueValue(d *json.Decoder, depth int) error {
 	return err
 }
 
-// Number parses bounded decimal text exactly, without binary floating point.
+// ParseNumber parses bounded decimal text exactly, without binary floating point.
 // Its argument must already be a valid JSON number from a JSON decoder.
-func Number(n json.Number) (*big.Rat, bool) {
+func ParseNumber(n json.Number) (*big.Rat, bool) {
 	if len(n) > 128 {
 		return nil, false
 	}

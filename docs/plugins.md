@@ -38,7 +38,7 @@ Given identical package bytes, request and input bytes, an operation must produc
 
 ## Inert source envelope codec
 
-`internal/extensionproto` implements only bounded encoding and decoding of the ordinary-source envelope below. It reads no descriptor paths, creates no artifacts, validates no schema instances and executes no package. Its successful validation grants no authority. Operation selection and declared input-slot names are explicit decoder arguments; the caller must obtain them from the reviewed source operation. Manifest validation shares its duplicate-key, nesting and exact-number helpers through `internal/extensionjson`.
+`internal/extensionproto` implements only bounded encoding and decoding of the ordinary-source envelope below. It reads no descriptor paths, creates no artifacts, validates no schema instances and executes no package. Its successful validation grants no authority. Operation selection and declared input-slot names are explicit decoder arguments; the caller must obtain them from the reviewed source operation. Manifest validation shares its duplicate-key, nesting and exact-number helpers through `internal/jsonstrict`.
 
 The request is an object with exactly these required, non-null fields:
 

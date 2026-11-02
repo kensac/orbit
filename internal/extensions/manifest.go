@@ -12,7 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/kensac/orbit/internal/extensionjson"
+	"github.com/kensac/orbit/internal/jsonstrict"
 )
 
 // Limits bound validation before an extension can be considered for use.
@@ -65,7 +65,7 @@ func Parse(data []byte) (*Manifest, error) {
 	if len(data) > MaxManifestBytes {
 		return nil, errors.New("manifest exceeds 256 KiB")
 	}
-	if err := extensionjson.Validate(data, MaxManifestBytes); err != nil {
+	if err := jsonstrict.ValidateJSON(data, MaxManifestBytes); err != nil {
 		return nil, fmt.Errorf("manifest: %w", err)
 	}
 	var raw map[string]any
@@ -241,7 +241,7 @@ func schema(s map[string]any, depth int) error {
 			}
 			b, _ := json.Marshal(v)
 			if n, ok := v.(json.Number); ok {
-				r, _ := extensionjson.Number(n)
+				r, _ := jsonstrict.ParseNumber(n)
 				b = []byte(r.RatString())
 			}
 			if seen[string(b)] {
@@ -268,7 +268,7 @@ func scalarMatches(v any, t string) bool {
 		if !ok {
 			return false
 		}
-		r, ok := extensionjson.Number(n)
+		r, ok := jsonstrict.ParseNumber(n)
 		return ok && (t != "integer" || r.IsInt())
 	}
 	return false
@@ -280,7 +280,7 @@ func bounds(s map[string]any, lo, hi string, integer bool, ceiling int64) error 
 		if !ok {
 			return nil, fmt.Errorf("%s must be a number", k)
 		}
-		r, ok := extensionjson.Number(n)
+		r, ok := jsonstrict.ParseNumber(n)
 		if !ok || (integer && !r.IsInt()) {
 			return nil, fmt.Errorf("invalid %s", k)
 		}
@@ -314,7 +314,7 @@ func enumBounds(v any, typ string, s map[string]any) error {
 		n := int64(utf8.RuneCountInString(v.(string)))
 		for _, k := range []string{"minLength", "maxLength"} {
 			if b, ok := s[k].(json.Number); ok {
-				r, _ := extensionjson.Number(b)
+				r, _ := jsonstrict.ParseNumber(b)
 				cmp := new(big.Rat).SetInt64(n).Cmp(r)
 				if (k == "minLength" && cmp < 0) || (k == "maxLength" && cmp > 0) {
 					return errors.New("enum string violates length bounds")
@@ -322,9 +322,9 @@ func enumBounds(v any, typ string, s map[string]any) error {
 			}
 		}
 	case "integer", "number":
-		r, _ := extensionjson.Number(v.(json.Number))
-		lo, _ := extensionjson.Number(s["minimum"].(json.Number))
-		hi, _ := extensionjson.Number(s["maximum"].(json.Number))
+		r, _ := jsonstrict.ParseNumber(v.(json.Number))
+		lo, _ := jsonstrict.ParseNumber(s["minimum"].(json.Number))
+		hi, _ := jsonstrict.ParseNumber(s["maximum"].(json.Number))
 		if r.Cmp(lo) < 0 || r.Cmp(hi) > 0 {
 			return errors.New("enum number violates bounds")
 		}

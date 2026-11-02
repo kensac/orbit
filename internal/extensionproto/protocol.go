@@ -13,7 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/kensac/orbit/internal/extensionjson"
+	"github.com/kensac/orbit/internal/jsonstrict"
 )
 
 // Protocol is the only supported envelope version.
@@ -213,7 +213,7 @@ func read(r io.Reader) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = extensionjson.Validate(b, MaxJSONBytes); err != nil {
+	if err = jsonstrict.ValidateJSON(b, MaxJSONBytes); err != nil {
 		return nil, err
 	}
 	return b, nil
@@ -261,7 +261,7 @@ func value(b []byte) error {
 func numbers(v any) error {
 	switch x := v.(type) {
 	case json.Number:
-		if _, ok := extensionjson.Number(x); !ok {
+		if _, ok := jsonstrict.ParseNumber(x); !ok {
 			return errors.New("number outside decimal policy")
 		}
 	case []any:
