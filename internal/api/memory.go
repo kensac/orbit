@@ -183,8 +183,17 @@ func (s *Server) listTopics(w http.ResponseWriter, r *http.Request) {
 	for _, t := range stored {
 		byName[t.Name] = t
 	}
-	for _, a := range s.Engine.Current().Config.Agents {
-		for _, name := range a.Topics {
+	cfg := s.Engine.Current().Config
+	for _, a := range cfg.Agents {
+		names := a.Topics
+		if a.ReadsAllTopics() {
+			var err error
+			if names, err = engine.AgentTopics(r.Context(), s.Store, cfg, a); err != nil {
+				respond(w, nil, err)
+				return
+			}
+		}
+		for _, name := range names {
 			t, ok := byName[name]
 			if !ok {
 				t = store.Topic{Name: name, Agents: []string{}}
@@ -232,11 +241,18 @@ func (s *Server) agentContext(w http.ResponseWriter, r *http.Request) {
 		topics = append(topics, topic{Name: name, From: []string{from}})
 		names = append(names, name)
 	}
-	for _, t := range a.Topics {
-		add(t, "spec")
+	reads, err := engine.AgentTopics(r.Context(), s.Store, s.Engine.Current().Config, a)
+	if err != nil {
+		respond(w, nil, err)
+		return
 	}
-	for _, t := range attached {
-		add(t, "api")
+	for _, t := range reads {
+		if a.ReadsAllTopics() || slices.Contains(a.Topics, t) {
+			add(t, "spec")
+		}
+		if slices.Contains(attached, t) {
+			add(t, "api")
+		}
 	}
 	slices.SortFunc(topics, func(x, y topic) int { return strings.Compare(x.Name, y.Name) })
 	entries, err := s.Store.EntriesFor(r.Context(), a.Name, names)
@@ -246,7 +262,7 @@ func (s *Server) agentContext(w http.ResponseWriter, r *http.Request) {
 	}
 	index := ""
 	if len(entries) > 0 {
-		index = engine.KnownIndex(entries)
+		index = engine.KnownIndex(entries, s.Engine.Searchable(a))
 	}
 	attachedSkills, err := s.Store.AttachedNames(r.Context(), a.Name, store.AttachSkill)
 	if err != nil {
