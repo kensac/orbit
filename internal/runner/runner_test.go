@@ -570,11 +570,14 @@ func TestClaudeCodeHarnessToolsAndHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 	pre := settings.Hooks["PreToolUse"]
-	if settings.DisableAllHooks || len(settings.Hooks) != 1 || len(pre) != 1 || pre[0].Matcher != "Read|Glob|Grep|StructuredOutput" {
+	if settings.DisableAllHooks || len(settings.Hooks) != 2 || len(pre) != 1 || pre[0].Matcher != "Read|Glob|Grep|StructuredOutput" {
 		t.Fatalf("settings = %+v", settings)
 	}
 	if want := "'/opt/orbit' hook --root '" + work + "' --state '" + state + "' --figures"; pre[0].Hooks[0].Command != want {
 		t.Fatalf("hook command = %q, want %q", pre[0].Hooks[0].Command, want)
+	} // Every prompt asks the hook for the run's pinned entries.
+	if p := settings.Hooks["UserPromptSubmit"]; len(p) != 1 || p[0].Matcher != "" || p[0].Hooks[0].Command != "'/opt/orbit' hook --root '"+work+"' --state '"+state+"' --figures" {
+		t.Fatalf("UserPromptSubmit = %+v", p)
 	}
 }
 

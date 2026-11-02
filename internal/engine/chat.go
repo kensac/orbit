@@ -435,6 +435,8 @@ type chatTurn struct {
 	fresh bool
 	// instructor is the person the run answers (runInstructor).
 	instructor string
+	// pinned leads the prompt where no orbit hook adds the pinned entries (pinnedTurn).
+	pinned string
 	// repos is what the agent's repositories add (repos.go), or nil.
 	repos *repoRun
 }
@@ -464,6 +466,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	if t.rec != nil {
 		prompt = recoveryPrompt(t.rec, t.rc, t.now.Location())
 	}
+	prompt = t.pinned + prompt
 	for name, b := range map[string]string{"system.md": system, "prompt.md": prompt} {
 		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", name, "text/markdown", []byte(b)); err != nil {
 			return nil, nil, err

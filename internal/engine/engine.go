@@ -643,6 +643,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err != nil {
 		return nil, nil, err
 	}
+	// A sandboxed chat's CLI runs no orbit hook (runner/chat.go).
+	pinned, err := pinnedTurn(knownEntries, hr != nil && (!chat || a.Sandbox == ""), harness.StateDir(home))
+	if err != nil {
+		return nil, nil, err
+	}
 	gw, conns, connSection := e.prepareConnectors(ctx, snap, a, c, workdir, inputsDir, emit, func(kind string, v any) error {
 		b, _ := json.Marshal(v)
 		return events.write(kind, b)
@@ -658,7 +663,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached,
 				WorkspaceChanges: wsNote}, fresh: wsFresh,
 			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, steer: &st.steer, rec: rec, instructor: st.instructor,
-			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun, connectors: conns})
+			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun, connectors: conns, pinned: pinned})
 		if out != nil {
 			out.connectorCalls = gw.pendingCalls()
 		}
@@ -690,6 +695,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if rec != nil {
 		prompt = recoveryPrompt(rec, rc, now.Location())
 	}
+	prompt = pinned + prompt
 	for name, b := range map[string]string{"system.md": system, "prompt.md": prompt, "schema.json": string(schema)} {
 		mt := "text/markdown"
 		if strings.HasSuffix(name, ".json") {
