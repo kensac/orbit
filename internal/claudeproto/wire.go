@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 // MaxLine bounds one line of the CLI's stream. A tool result echoing a large input file arrives as one line; 16 MB is twice orbit's default source cap.
@@ -156,7 +158,7 @@ func (l Line) InitFrame() (SystemInit, bool) {
 // Has reports whether the CLI advertised capability c.
 func (si SystemInit) Has(c string) bool { return slices.Contains(si.Capabilities, c) }
 
-// Result is a turn's final line, the fields orbit reads.
+// Result is a turn's final line, the fields orbit reads. Usage and ModelUsageSince are the turn's own; ModelUsage is the process's running total by model.
 type Result struct {
 	IsError           bool            `json:"is_error"`
 	Subtype           string          `json:"subtype"`
@@ -167,6 +169,7 @@ type Result struct {
 	TotalCostUSD      *float64        `json:"total_cost_usd"`
 	Usage             json.RawMessage `json:"usage"`
 	ModelUsage        json.RawMessage `json:"modelUsage"`
+	ModelUsageSince   json.RawMessage `json:"model_usage_since_last_result"`
 	SessionID         string          `json:"session_id"`
 	NumTurns          int             `json:"num_turns"`
 	PermissionDenials json.RawMessage `json:"permission_denials"`
@@ -181,6 +184,11 @@ func ParseResult(raw []byte) (*Result, error) {
 		return nil, fmt.Errorf("parse the CLI's result: %w", err)
 	}
 	return r, nil
+}
+
+// Tokens is the turn's token counts, nil when the line has none.
+func (r *Result) Tokens() *tokens.Usage {
+	return tokens.FromClaude(r.Usage, r.ModelUsageSince, r.ModelUsage, r.NumTurns)
 }
 
 // Failure is what went wrong in an error result, empty for a success. is_error is the field to trust: a failed login reports subtype "success" with is_error set and the reason in result; the other error subtypes (error_max_turns, error_during_execution, ...) carry theirs in errors.

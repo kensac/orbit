@@ -136,3 +136,44 @@ func TestHealth(t *testing.T) {
 		t.Fatalf("last success = %+v, pending %d", h.LastSuccess, h.PendingActions)
 	}
 }
+
+// The startup seed of the last-success gauge counts a skipped run as a
+// success and a failure as none.
+func TestLastSuccessTimesCountSkipped(t *testing.T) {
+	s := testdb.New(t)
+	seed(t, s, "a", "b", "c")
+	finished(t, s, "a", store.StatusSucceeded, nil, "2026-01-01T00:00:00Z")
+	skip := manual(t, s, "b")
+	if c, err := s.ClaimRun(ctx, "w"); err != nil || c == nil || c.ID != skip {
+		t.Fatalf("claim = %v %v", c, err)
+	}
+	if err := s.FinishRun(ctx, skip, store.RunResult{Attempt: 1, Status: store.StatusSkipped, Gate: "unchanged"}); err != nil {
+		t.Fatal(err)
+	}
+	finished(t, s, "c", store.StatusFailed, nil, "2026-01-01T00:00:00Z")
+	last, err := s.LastSuccessTimes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := last["a"]; !ok || len(last) != 2 {
+		t.Fatalf("last = %v, want a and b", last)
+	}
+	if _, ok := last["b"]; !ok {
+		t.Fatalf("last = %v, want b's skipped run", last)
+	}
+}
+
+// The gauges count pending actions and only the queued runs due now.
+func TestGaugeCountsQueuedDueOnly(t *testing.T) {
+	s := testdb.New(t)
+	seed(t, s, "a")
+	manual(t, s, "a")
+	later := manual(t, s, "a")
+	if _, err := s.Pool.Exec(ctx, `UPDATE runs SET run_after = now() + interval '1 hour' WHERE id = $1`, later); err != nil {
+		t.Fatal(err)
+	}
+	pending, queued, err := s.GaugeCounts(ctx)
+	if err != nil || pending != 0 || queued != 1 {
+		t.Fatalf("gauges = %d pending, %d queued, %v; want 0, 1", pending, queued, err)
+	}
+}
