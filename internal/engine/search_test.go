@@ -27,8 +27,8 @@ func TestRunsSearchTheirOwnAgentsHistoryOverTheSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	results := res["results"].([]any)
-	if res["total"] != 1.0 || !strings.Contains(results[0].(map[string]any)["snippet"].(string), "**baseline**") {
-		t.Fatalf("search = %v, want the memory with the match in bold", res)
+	if res["total"] != 1.0 || !strings.Contains(results[0].(map[string]any)["snippet"].(string), "«baseline»") {
+		t.Fatalf("search = %v, want the memory with the match marked", res)
 	}
 	if _, err := orbitharness.Search(sock, orbitharness.SearchRequest{Q: "x", Kind: "nope"}); err == nil || !strings.Contains(err.Error(), "nope") {
 		t.Fatalf("an unknown kind = %v, want it named", err)
