@@ -10,14 +10,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
+	"github.com/kensac/orbit/internal/usage"
 )
-
-// lockKey is orbit's advisory lock id: "orbit" in ASCII.
-const lockKey = 0x6f72626974
 
 // Scheduler enqueues schedule fires.
 type Scheduler struct {
@@ -42,11 +38,11 @@ type fire struct {
 // Run blocks until ctx ends. It waits for the leader lock, catches up, then
 // sleeps until each next fire.
 func (s *Scheduler) Run(ctx context.Context) error {
-	conn, err := s.acquire(ctx)
+	lock, err := s.acquire(ctx)
 	if err != nil {
 		return err
 	}
-	defer conn.Release()
+	defer lock.Release(ctx)
 	s.Log.Info("scheduler is leader")
 
 	// Fires missed while no process was leader come from the database;
@@ -55,10 +51,13 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		return err
 	}
 	prev := s.Now()
+	deferTick := time.NewTicker(DeferCheckEvery)
+	defer deferTick.Stop()
 	for {
 		cfg := s.Config()
 		now := s.Now()
 		s.Tick(ctx, cfg, prev, now)
+		s.DeferPass(ctx, cfg)
 		prev = now
 
 		// Wake at the next fire, and at least hourly so a clock step or a
@@ -71,10 +70,11 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-s.Reload:
+		case <-deferTick.C:
 		case <-time.After(d):
 		}
 		// Keep the lock's connection alive and detect losing it.
-		if err := conn.Ping(ctx); err != nil {
+		if err := lock.Ping(ctx); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -83,24 +83,17 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	}
 }
 
-// acquire blocks until this process holds the scheduler lock. The lock lives
-// on one pooled connection held for the scheduler's lifetime; if that
-// connection drops, Postgres releases the lock and Run returns an error.
-func (s *Scheduler) acquire(ctx context.Context) (*pgxpool.Conn, error) {
+// acquire blocks until this process holds the scheduler lock
+// (store.SchedulerLock).
+func (s *Scheduler) acquire(ctx context.Context) (*store.SchedulerLock, error) {
 	for {
-		conn, err := s.Store.Pool.Acquire(ctx)
+		lock, err := s.Store.TrySchedulerLock(ctx)
 		if err != nil {
 			return nil, err
 		}
-		var ok bool
-		if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, int64(lockKey)).Scan(&ok); err != nil {
-			conn.Release()
-			return nil, err
+		if lock != nil {
+			return lock, nil
 		}
-		if ok {
-			return conn, nil
-		}
-		conn.Release()
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -134,7 +127,7 @@ func (s *Scheduler) catchUp(ctx context.Context, cfg *spec.Config) error {
 				continue
 			}
 			if due, ok := newestFire(sched, last.In(loc), now); ok {
-				s.enqueue(ctx, fire{agent: a, index: i, at: due, trigger: t})
+				s.enqueue(ctx, cfg, fire{agent: a, index: i, at: due, trigger: t})
 			}
 		}
 	}
@@ -166,7 +159,7 @@ func (s *Scheduler) Tick(ctx context.Context, cfg *spec.Config, since, now time.
 				continue
 			}
 			if due, ok := newestFire(sched, since.In(loc), now); ok {
-				s.enqueue(ctx, fire{agent: a, index: i, at: due, trigger: t})
+				s.enqueue(ctx, cfg, fire{agent: a, index: i, at: due, trigger: t})
 			}
 		}
 	}
@@ -183,19 +176,37 @@ func newestFire(sched spec.Schedule, since, now time.Time) (time.Time, bool) {
 	return due, found
 }
 
-func (s *Scheduler) enqueue(ctx context.Context, f fire) {
+// enqueue records one fire. A low agent's fire while a window is over is
+// enqueued already held (run_after set in the insert), so no executor can
+// claim it in between, and the hold is recorded.
+func (s *Scheduler) enqueue(ctx context.Context, cfg *spec.Config, f fire) {
 	idx := f.index
 	at := f.at.UTC()
-	id, err := s.Store.EnqueueRun(ctx, store.NewRun{
+	nr := store.NewRun{
 		Agent: f.agent.Name, SpecSHA: f.agent.SHA, Trigger: "schedule",
 		TriggerIndex: &idx, ScheduledFor: &at, Prompt: f.trigger.Prompt,
-	})
+	}
+	var w *usage.Window
+	if f.agent.Low() {
+		if w = s.over(ctx, cfg); w != nil {
+			until := s.now().Add(usage.DeferRecheck)
+			nr.RunAfter = &until
+		}
+	}
+	id, err := s.Store.EnqueueRun(ctx, nr)
 	if err != nil {
 		s.Log.Error("enqueue fire", "agent", f.agent.Name, "trigger", f.index, "at", at, "err", err)
 		return
 	}
-	if id != "" {
-		s.Log.Info("enqueued", "agent", f.agent.Name, "trigger", f.index, "at", at, "run", id)
+	if id == "" {
+		return
+	}
+	s.Log.Info("enqueued", "agent", f.agent.Name, "trigger", f.index, "at", at, "run", id)
+	if w != nil {
+		if _, err := s.Store.DeferRun(ctx, id, *nr.RunAfter, w.Deferral()); err != nil {
+			s.Log.Warn("defer: hold", "run", id, "err", err)
+		}
+		s.Log.Info("deferred", "agent", f.agent.Name, "run", id, "window", w.Window, "utilization", *w.Utilization)
 	}
 }
 
