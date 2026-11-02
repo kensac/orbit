@@ -625,6 +625,7 @@ Full-text search across everything orbit stores, ranked best first.
  "results": [
    {"kind": "report", "agent": "finance", "conversation_id": "uuid", "run_id": "uuid",
     "attempt": 1, "seq": null, "message_id": null, "memory_version_id": null,
+    "entry_id": null, "entry_version": null, "scope": null, "owner": null, "title": null,
     "author": null, "tool": null, "at": "...", "rank": 0.083,
     "snippet": "The electricity bill rose because of a rate change ...",
     "snippet_parts": [{"text": "The ", "match": false}, {"text": "electricity", "match": true},
@@ -634,11 +635,11 @@ Full-text search across everything orbit stores, ranked best first.
               "conversation": "/api/v1/conversations/uuid/thread"}}]}
 ```
 
-- **`kind`** is what matched: `message` (a person's message to an agent; `author`, `message_id`), `question` (an agent's question; `message_id`, `run_id`), `report` (a run's summary and report), `error` (a failed run's error), `narration` (the prose a backend wrote while working, one transcript line; `attempt`, `seq` locate it in `GET /runs/{id}/events`), `tool_call` (one tool call's input as JSON, `tool` its name; tool results are not searched), `memory` (an agent's memory document; `memory_version_id`). Of an agent's memory versions only the newest matching one is returned. The `kind` parameter is a comma list of these.
+- **`kind`** is what matched: `message` (a person's message to an agent; `author`, `message_id`), `question` (an agent's question; `message_id`, `run_id`), `report` (a run's summary and report), `error` (a failed run's error), `narration` (the prose a backend wrote while working, one transcript line; `attempt`, `seq` locate it in `GET /runs/{id}/events`), `tool_call` (one tool call's input as JSON, `tool` its name; tool results are not searched), `memory` (an agent's memory document; `memory_version_id`), `memory_entry` (a memory entry: `entry_id`, `entry_version`, `scope`, `owner`, `title`, and `agent` for an agent's own, `null` for a profile or topic entry). Of an agent's memory versions only the newest matching one is returned; a memory entry only as its current version, and never once retired. The `kind` parameter is a comma list of these.
 - **`q`** is web-search syntax: words (all must match, stemmed: `bills` finds `bill`), `"a quoted phrase"`, `or` between alternatives, `-word` to exclude. Required (`400` without one). A query of only stop words matches nothing.
-- **Ranking** is Postgres `ts_rank_cd` normalised by document length (`rank`, comparable only within one response), ties newest first. A tool's name weighs more than its input.
+- **Ranking** is Postgres `ts_rank_cd` normalised by document length (`rank`, comparable only within one response), ties newest first. A memory entry's title weighs more than its body, and a tool's name more than its input.
 - **`snippet`** is up to two fragments of the matching text joined by ` ... `; `snippet_parts` is the same text split into runs, `match` true on matched words, so a client highlights without parsing markup (the text is never escaped or marked up).
-- **Filters:** `agent`, `conversation_id`, `run_id` (a UUID, else `400`); `from` and `to` are a calendar day in the deployment's timezone (`to` includes its day) or an RFC 3339 time (`to` excluded), by the document's `at` (a message's or memory version's creation, a run's finish, a transcript line's time). `limit` defaults to 20, at most 100; `offset` pages, at most 1000. `total` counts every match within the filters, whatever the page.
+- **Filters:** `agent` (that agent's documents; a profile or topic entry belongs to none), `conversation_id`, `run_id` (a UUID, else `400`); `from` and `to` are a calendar day in the deployment's timezone (`to` includes its day) or an RFC 3339 time (`to` excluded), by the document's `at` (a message's or memory version's creation, a run's finish, a transcript line's time). `limit` defaults to 20, at most 100; `offset` pages, at most 1000. `total` counts every match within the filters, whatever the page.
 - **`links`** are where the result is read in full: the run (`run`, and `run_page` when `public_url` is set) and its conversation's thread. A memory version names its run's conversation when it has one.
 - Documents are derived by triggers as rows are written, and existing rows were indexed by the migration that added search, so a result is there as soon as its row is.
 

@@ -44,7 +44,7 @@ var SearchSchema = map[string]any{
 		"q": map[string]any{"type": "string",
 			"description": `what to find: words, "a quoted phrase", "or" between alternatives, -word to exclude`},
 		"kind": map[string]any{"type": "string",
-			"description": "comma list of message (your person's), question (yours), report, error, narration (what you wrote while working), tool_call (a tool's input), memory"},
+			"description": "comma list of message (your person's), question (yours), report, error, narration (what you wrote while working), tool_call (a tool's input), memory (your memory document), memory_entry (a fact you keep)"},
 		"conversation_id": map[string]any{"type": "string", "description": "only this conversation's"},
 		"from":            map[string]any{"type": "string", "description": "on or after: YYYY-MM-DD, or an RFC 3339 time"},
 		"to":              map[string]any{"type": "string", "description": "up to: YYYY-MM-DD (that day included), or an RFC 3339 time"},

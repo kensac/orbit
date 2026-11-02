@@ -20,7 +20,7 @@ type searchParams struct {
 	Agent          string `json:"agent,omitempty" jsonschema:"only this agent's"`
 	ConversationID string `json:"conversation_id,omitempty" jsonschema:"only this conversation's"`
 	RunID          string `json:"run_id,omitempty" jsonschema:"only this run's"`
-	Kind           string `json:"kind,omitempty" jsonschema:"comma list of message, question, report, error, narration, tool_call, memory"`
+	Kind           string `json:"kind,omitempty" jsonschema:"comma list of message, question, report, error, narration, tool_call, memory, memory_entry"`
 	From           string `json:"from,omitempty" jsonschema:"on or after: YYYY-MM-DD in the deployment's timezone, or an RFC 3339 time"`
 	To             string `json:"to,omitempty" jsonschema:"up to: YYYY-MM-DD (that day included), or an RFC 3339 time (excluded)"`
 	Limit          int    `json:"limit,omitempty" jsonschema:"at most this many results (default 20, at most 100)"`
