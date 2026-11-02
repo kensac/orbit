@@ -358,8 +358,7 @@ ticket loop, every 30 s: checks green -> github:merge proposed (approve for orbi
 
 The direction, so changes now do not close it off:
 
-- **Tickets, what is left**: review comments on a PR's diff, and webhook
-  events in place of the loop's polling ([tickets.md](tickets.md)).
+- **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)).
 - **Event triggers** from webhooks (a ticket assigned, a comment).
 - **A worker fleet.** Executors on several hosts, as jobtracker's are; the
   queue already allows it (SKIP LOCKED claims, `runs_one_running`,

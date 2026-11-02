@@ -35,6 +35,7 @@ an agent's beliefs changed.
   `building` in one transaction; `FinishBuild` and `FailBuild` finish the
   run and move the ticket together. `build_decisions` and `build_sandboxes`
   rows are written only by the attempt holding the run's claim.
+- review comment: `draft -> submitted -> delivered`, or `withdrawn` (a draft) or `superseded` (an edit, a new row). The status is derived (`commentSelect`): `message_id` says submitted, a succeeded or skipped run in `ticket_build_comments` says delivered. `StartBuild` gives a build every comment still waiting, in its transaction.
 
 A client request id (`receipts`) is written in the same transaction as the
 message or decision it records, so a retry returns the first result and a

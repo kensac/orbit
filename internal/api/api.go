@@ -102,6 +102,11 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/retry", s.ticketMove(store.TicketApproved))
 	api("POST /api/v1/tickets/{id}/reopen", s.ticketMove(store.TicketOpen))
 	api("POST /api/v1/tickets/{id}/checks/rerun", s.rerunChecks)
+	api("GET /api/v1/tickets/{id}/comments", s.listComments)
+	api("POST /api/v1/tickets/{id}/comments", s.addComment)
+	api("POST /api/v1/tickets/{id}/comments/{comment}/edit", s.editComment)
+	api("POST /api/v1/tickets/{id}/comments/{comment}/withdraw", s.withdrawComment)
+	api("POST /api/v1/tickets/{id}/review", s.submitReview)
 
 	if internal {
 		// Only the host's rollout reaches this listener; a person cannot
