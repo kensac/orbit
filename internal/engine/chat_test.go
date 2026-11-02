@@ -306,3 +306,83 @@ func TestStoppingARunningRun(t *testing.T) {
 		t.Fatal("a finished run cancelled again")
 	}
 }
+
+// actRunner is a chat backend that calls orbit's act tool once and replies
+// with what the tool said.
+type actRunner struct{ args string }
+
+func (actRunner) Kind() string  { return "claude-code" }
+func (actRunner) Model() string { return "fake" }
+func (f actRunner) Run(ctx context.Context, req runner.Request, _ func(runner.Event)) (*runner.Result, error) {
+	if req.Chat == nil {
+		return nil, errors.New("not a chat run")
+	}
+	text, isErr := req.Chat.Call(ctx, "act", []byte(f.args))
+	if isErr {
+		text = "error: " + text
+	}
+	return &runner.Result{Reply: text, SessionID: "s1"}, nil
+}
+
+func TestThePersonsMessageIsTheInstruction(t *testing.T) {
+	s := testdb.New(t)
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "agents"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "orbit.yaml"), []byte("defaults: {runner: cc, channels: [log]}\nrunners: {cc: {kind: claude-code}}\nchannels: {log: {kind: log}}\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "agents", "helper.yaml"), []byte("name: helper\ncharter: Help.\nchat: true\nwake_on_message: true\nactions: {agent:define: approve}\n"), 0o644)
+	args := `{"type": "agent:define", "reason": "asked", "params": {"spec": {"name": "news", "charter": "News."}}}`
+	e := &engine.Engine{Store: s, DataDir: t.TempDir(), ConfigDir: dir, Env: func(string) (string, bool) { return "", false },
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		NewRunner: func(string, spec.RunnerSpec, func(string) (string, bool)) (runner.Runner, error) {
+			return actRunner{args}, nil
+		}}
+	if err := e.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	a := e.Current().Config.Agents["helper"]
+	run := func(wake func() string) *store.ThreadRun {
+		t.Helper()
+		id := wake()
+		c, err := s.ClaimRun(ctx, "test")
+		if err != nil || c == nil {
+			t.Fatalf("claim: %v %v", c, err)
+		}
+		if err := e.Execute(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		r, err := s.ThreadRunByID(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	// Unattended: the approve rule holds.
+	manual := run(func() string {
+		id, err := s.EnqueueRun(ctx, store.NewRun{Agent: "helper", SpecSHA: a.SHA, Trigger: "manual"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	})
+	if !strings.Contains(deref(manual.Report), "waits for the person's approval") || len(manual.Actions) != 1 || manual.Actions[0].Status != "pending" {
+		t.Fatalf("manual = %q %+v", deref(manual.Report), manual.Actions)
+	}
+	// The person asked: it executes in the turn, approved by them.
+	asked := run(func() string {
+		r, _, err := s.PostMessageOnce(ctx, store.PostMessage{Agent: "helper", SpecSHA: a.SHA, Body: "make a news agent", Author: "kanishk", Wake: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.RunID
+	})
+	if !strings.Contains(deref(asked.Report), "agent:define executed") || len(asked.Actions) != 1 || asked.Actions[0].Status != "executed" {
+		t.Fatalf("asked = %q %+v", deref(asked.Report), asked.Actions)
+	}
+	act, err := s.GetAction(ctx, asked.Actions[0].ID)
+	if err != nil || act.DecidedBy == nil || *act.DecidedBy != "kanishk" || act.InstructedBy == nil || *act.InstructedBy != "kanishk" {
+		t.Fatalf("action = %+v %v", act, err)
+	}
+	if e.Current().Config.Agents["news"] == nil {
+		t.Fatal("the defined agent is not in force")
+	}
+}

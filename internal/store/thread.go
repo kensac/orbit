@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/kensac/orbit/internal/status"
 )
 
 // ThreadItem is one entry of an agent's conversation: exactly one of
@@ -93,7 +95,9 @@ type ThreadRun struct {
 	Questions []ThreadQuestion `json:"questions"`
 	Error     *string          `json:"error"`
 	CostUSD   *float64         `json:"cost_usd"`
-	Actions   []ThreadAction   `json:"actions"`
+	// Tokens is every attempt's token counts together, null when none were reported.
+	Tokens  *Tokens        `json:"tokens"`
+	Actions []ThreadAction `json:"actions"`
 	// Gate names what ended a skipped run; null otherwise.
 	Gate *string `json:"gate"`
 	// Tasks are the tasks the run delegated, in the order it listed them.
@@ -101,6 +105,8 @@ type ThreadRun struct {
 	// NeedsInput is true when the run is waiting on its person: one of its
 	// questions is open or one of its actions awaits approval.
 	NeedsInput bool `json:"needs_input"`
+	// AgentStatus is the agent's status in this run (status.Derive).
+	AgentStatus status.Status `json:"agent_status"`
 	// Changes is what the run changed in its workspace, counted; nil for a
 	// run without a workspace or not yet finished. The API fills it
 	// (docs/api.md, A reply's changes).
@@ -169,7 +175,7 @@ const latestTurn = `(
 // in one round trip; the correlated aggregates use messages_run,
 // actions_run and journal_items' key, so a page costs the same queries
 // however many runs it holds.
-const threadRunSelect = `
+var threadRunSelect = `
 	SELECT r.id::text, r.created_at, r.trigger, r.status, r.attempt, r.started_at, r.finished_at,
 	       ` + stepsCount + `, ` + latestTurn + `, r.summary, r.report, r.error, r.cost_usd::float8, r.gate,
 	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', (` + openQuestion + `)) ORDER BY m.created_at, m.id)
@@ -185,14 +191,16 @@ const threadRunSelect = `
 	                                                       FROM task_deps x JOIN tasks d ON d.id = x.depends_on
 	                                                       WHERE x.task_id = k.id), '[]'))
 	                                 ORDER BY k.created_at, k.id)
-	                 FROM tasks k WHERE k.parent_run_id = r.id), '[]')
+	                 FROM tasks k WHERE k.parent_run_id = r.id), '[]'),
+	       r.hook_status,
+	       ` + runTokens + `
 	FROM runs r`
 
 func scanThreadRun(row pgx.Row) (*ThreadRun, error) {
 	r := ThreadRun{Kind: "run"}
-	var questions, actions, tasks []byte
+	var questions, actions, tasks, hook []byte
 	if err := row.Scan(&r.ID, &r.At, &r.Trigger, &r.Status, &r.Attempt, &r.StartedAt, &r.FinishedAt, &r.Steps,
-		&r.Turn, &r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions, &tasks); err != nil {
+		&r.Turn, &r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions, &tasks, &hook, &r.Tokens); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -207,12 +215,17 @@ func scanThreadRun(row pgx.Row) (*ThreadRun, error) {
 	if err := json.Unmarshal(tasks, &r.Tasks); err != nil {
 		return nil, err
 	}
+	openQ, pending := false, false
 	for _, q := range r.Questions {
-		r.NeedsInput = r.NeedsInput || q.Open
+		openQ = openQ || q.Open
 	}
 	for _, a := range r.Actions {
-		r.NeedsInput = r.NeedsInput || a.Status == "pending"
+		pending = pending || a.Status == "pending"
 	}
+	r.NeedsInput = openQ || pending
+	r.AgentStatus = status.Derive(status.Run{ID: r.ID, Status: r.Status, Attempt: r.Attempt, CreatedAt: r.At,
+		StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, Error: r.Error, OpenQuestion: openQ, PendingAction: pending,
+		Hook: hookSnapshot(hook)})
 	return &r, nil
 }
 
@@ -420,20 +433,27 @@ func (c ThreadCursor) less(o ThreadCursor) bool {
 	return c.ID < o.ID
 }
 
-// RunProgress is what a stream polls: where the run is.
+// RunProgress is what a stream polls: where the run is, and the agent's
+// status in it.
 type RunProgress struct {
-	Status     string
-	Attempt    int
-	RunnerKind string
+	Status      string
+	Attempt     int
+	RunnerKind  string
+	AgentStatus status.Status
 }
 
-// GetRunProgress returns a run's status, attempt and backend.
+// GetRunProgress returns a run's status, attempt, backend and agent status.
 func (s *Store) GetRunProgress(ctx context.Context, id string) (*RunProgress, error) {
 	var p RunProgress
-	err := s.Pool.QueryRow(ctx, `SELECT status, attempt, COALESCE(runner_kind, '') FROM runs WHERE id = $1`, id).
-		Scan(&p.Status, &p.Attempt, &p.RunnerKind)
+	var f RunFacts
+	err := s.Pool.QueryRow(ctx, `SELECT r.status, r.attempt, COALESCE(r.runner_kind, ''), `+runFacts("r")+`
+		FROM runs r WHERE r.id = $1`, id).
+		Scan(&p.Status, &p.Attempt, &p.RunnerKind, &f)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
+	}
+	if err == nil {
+		p.AgentStatus = status.Derive(*f.run())
 	}
 	return &p, err
 }

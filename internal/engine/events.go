@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 
+	"github.com/kensac/orbit/internal/journal"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -18,6 +20,8 @@ type eventEmitter struct {
 	warn       func(error)
 	capture    bool
 	transcript [][]byte
+	// said are the lines that can hold the agent's prose, for fullReport.
+	said []journal.Event
 }
 
 func (e *Engine) events(ctx context.Context, c *store.ClaimedRun, log *slog.Logger, capture bool) *eventEmitter {
@@ -45,7 +49,17 @@ func (e *eventEmitter) write(kind string, payload []byte) error {
 	if e.capture && (kind == "assistant" || kind == "user") {
 		e.transcript = append(e.transcript, bytes.Clone(payload))
 	}
+	if kind == "assistant" || kind == "response" || strings.HasPrefix(kind, "item.") {
+		e.said = append(e.said, journal.Event{Seq: e.seq, Kind: kind, Payload: bytes.Clone(payload)})
+	}
 	return e.persist(e.seq, kind, payload)
+}
+
+// prose is the attempt's final prose so far (journal.FinalProse).
+func (e *eventEmitter) prose() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return journal.FinalProse(e.said)
 }
 
 // messages takes an owned snapshot so figure checks cannot race new callbacks.
