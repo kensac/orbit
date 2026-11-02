@@ -60,6 +60,8 @@ type Conversation struct {
 	NeedsInput bool `json:"needs_input"`
 	// TicketID is set when the conversation is a ticket's.
 	TicketID *string `json:"ticket_id"`
+	// Purpose is learning for the agent's learning conversation, where its learning runs are (archived); null for a person's.
+	Purpose *string `json:"purpose"`
 	// TaskID is set when the conversation is a delegated task's own. Its
 	// questions are to the delegating agent, so they do not count as
 	// waiting on the person.
@@ -71,7 +73,7 @@ const conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived
 	 AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.conversation_id = c.id))
 	OR EXISTS (SELECT 1 FROM actions x JOIN runs xr ON xr.id = x.run_id
 	           WHERE xr.conversation_id = c.id AND x.status = 'pending'),
-	(SELECT t.id::text FROM tickets t WHERE t.conversation_id = c.id),
+	(SELECT t.id::text FROM tickets t WHERE t.conversation_id = c.id), c.purpose,
 	(SELECT k.id::text FROM tasks k WHERE k.conversation_id = c.id)`
 
 // GetConversation returns one conversation.

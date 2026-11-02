@@ -7,7 +7,7 @@
 -- parent because its tasks settled has trigger delegation.
 ALTER TABLE runs DROP CONSTRAINT runs_trigger_check;
 ALTER TABLE runs ADD CONSTRAINT runs_trigger_check
-    CHECK (trigger IN ('schedule', 'manual', 'message', 'continue', 'build', 'task', 'delegation'));
+    CHECK (trigger IN ('schedule', 'manual', 'message', 'continue', 'build', 'learn', 'task', 'delegation'));
 
 -- One task: a brief for one agent, from one delegate action of a parent
 -- run. The tasks of one action are a batch, and their dependencies (by
@@ -72,4 +72,4 @@ DROP TABLE task_deps;
 DROP TABLE tasks;
 ALTER TABLE runs DROP CONSTRAINT runs_trigger_check;
 ALTER TABLE runs ADD CONSTRAINT runs_trigger_check
-    CHECK (trigger IN ('schedule', 'manual', 'message', 'continue', 'build'));
+    CHECK (trigger IN ('schedule', 'manual', 'message', 'continue', 'build', 'learn'));

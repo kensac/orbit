@@ -31,12 +31,17 @@ const conversationRows = conversationBudget / 100
 // arrive newest first (store.Conversation). Every step is deterministic:
 // the same thread gives the same bytes.
 func conversationText(items []store.ConversationItem, loc *time.Location) (string, []store.ConversationItem) {
+	return packConversation(items, loc, conversationBudget, conversationItemMax)
+}
+
+// packConversation is conversationText with its bounds as arguments: items arrive newest first, each clipped to itemMax, the newest kept within budget, returned oldest first.
+func packConversation(items []store.ConversationItem, loc *time.Location, budget, itemMax int) (string, []store.ConversationItem) {
 	var chosen []store.ConversationItem
 	used := 0
 	for _, it := range items {
-		it.Body = clip(it.Body, conversationItemMax)
+		it.Body = clip(it.Body, itemMax)
 		n := len(renderItem(it, loc))
-		if used+n > conversationBudget {
+		if used+n > budget {
 			break
 		}
 		used += n
