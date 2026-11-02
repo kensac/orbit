@@ -405,7 +405,10 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		// the drain's cap, which hands the remaining runs back.
 		drain := engine.NewDrain()
 		eng.Drain = drain
-		eng.Builder = &build.Runner{WorkRoot: filepath.Join(eng.DataDir, "builds")}
+		// One spare clone per build repository: a build starts from a
+		// checkout that needs only an incremental fetch.
+		checkouts := &build.Pool{Root: filepath.Join(eng.DataDir, "checkouts"), Warm: 1}
+		eng.Builder = &build.Runner{WorkRoot: filepath.Join(eng.DataDir, "builds"), Pool: checkouts}
 		life, endLife := context.WithCancel(context.WithoutCancel(ctx))
 		defer endLife()
 		runCtx, cancelRuns := context.WithCancel(life)
@@ -482,7 +485,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			(&tickets.Loop{
 				Store: s, Config: func() *spec.Config { return eng.Current().Config }, Env: os.LookupEnv,
 				Client: &http.Client{Timeout: 2 * time.Minute}, Revision: revision, Log: log.With("component", "tickets"),
-				Approval: eng.NotifyApproval, Wake: nudge, Restack: eng.Builder.Restack,
+				Approval: eng.NotifyApproval, Wake: nudge, Restack: eng.Builder.Restack, Checkouts: checkouts,
 			}).Run(claimCtx)
 		}()
 

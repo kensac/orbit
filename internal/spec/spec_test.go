@@ -244,7 +244,7 @@ build:
   agent: b
   author: orbit
   repositories:
-    kensac/other: {commands: ["go test $(x)"], protected: ["/etc/**"], max_diff_lines: 999999}
+    kensac/other: {commands: ["go test $(x)"], protected: ["/etc/**"], max_diff_lines: 999999, trusted_scripts: [ABC]}
     kensac/third: {commands: []}
 `
 	_, err = Load(write(t, map[string]string{"orbit.yaml": bad, "agents/b.yaml": "name: b\ncharter: x\nrunner: x\ntimeout: 2h\n"}))
@@ -253,7 +253,7 @@ build:
 	}
 	for _, want := range []string{"neither host:port", "must be \"Name <email>\"", "claude-code runner", "exceeds 50m0s",
 		`"kensac/third" is not in github.repositories`, "only kensac/orbit", "is not a plain word", "not a relative glob",
-		"max_diff_lines", "at least one command"} {
+		"max_diff_lines", "at least one command", `trusted script "ABC" is not a sha256`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error lacks %q:\n%v", want, err)
 		}

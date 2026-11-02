@@ -24,6 +24,7 @@ func onMain(t *testing.T, bare, from string, files map[string]string) string {
 		runGit(t, c, "merge", "--quiet", "--squash", "origin/"+from)
 	}
 	for name, body := range files {
+		_ = os.MkdirAll(filepath.Dir(filepath.Join(c, name)), 0o755)
 		if err := os.WriteFile(filepath.Join(c, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
