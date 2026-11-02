@@ -23,6 +23,8 @@ database agent of their name. Each instance reloads when the directory's
 content or the newest definition changes, so a definition written on one
 instance is in force on all within the 30 s poll.
 
+An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one.
+
 ## Secrets
 
 Never in YAML. Channels name variables with `*_env`; source headers, query
@@ -148,6 +150,10 @@ the chat. Failures and pending approvals of unattended runs always notify.
 ## Memory topics
 
 `topics: [finance]` names the shared memory topics whose entries every run of the agent reads, beside the profile's and its own (docs/ARCHITECTURE.md, Memory entries). A topic exists as soon as an entry or an agent names it; the API can attach more (`PUT /agents/{name}/topics/{topic}`).
+
+## Skills
+
+`skills: [monthly-close]` names skills from orbit's library the agent runs with (docs/ARCHITECTURE.md, Skills). A name no skill has is skipped at run time and shown as `missing` in `GET /agents/{name}/context`; the API attaches more.
 
 ## Learning
 

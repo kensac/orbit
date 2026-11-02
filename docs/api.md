@@ -114,7 +114,8 @@ returns `201`:
  "spec": {"name": "news", "...": "the agent as loaded, defaults applied"},
  "definition": {"id": 7, "name": "news", "version": 1, "spec": {"...": "as stored"},
                 "enabled": true, "archived": false, "change": "create",
-                "author": "kanishk", "created_at": "..."},
+                "author": "kanishk", "created_at": "...",
+                "run_id": null, "edited_by": "kanishk"},
  "next_fires": [{"trigger_index": 0, "schedule": "0 8 * * *", "at": "..."}],
  "agent": {"name": "news", "origin": "database", "version": 1, "...": "as in GET /agents"}}
 ```
@@ -125,7 +126,9 @@ returns `201`:
   stored on the definition, not in `spec`.
 - A name already defined in the database (and not archived) is `409`; an
   archived name may be created again, as its next version.
-- `author` is the token's person (`null` with the operator token).
+- `author` is the token's person (`null` with the operator token). For a change an agent made (`agent:define`, below), it is the person whose message the agent was answering (`null` for an unattended run).
+- `run_id` is the run of the agent that made the change, `null` for a change made through this API. `edited_by` names the editor: the agent's name when `run_id` is set, else `author`, else `operator`.
+- `change` is `create`, `update`, `enable`, `disable`, `archive` or `revert`; a revert also carries `reverts`, the version it restored.
 
 `PUT /agents/{name}` `{"spec": {...}, "dry_run": false}` replaces the spec
 with a new version: `200`, the same shape (`change: "update"`). `spec.name`
@@ -137,6 +140,10 @@ the same spec, `200` in the same shape. An archived agent is no longer
 configured (`present: false` in the list); its runs and conversations stay
 readable. Changing an archived agent is `404`; a file or built-in agent is
 `409`.
+
+`POST /agents/{name}/definitions/{version}/revert` puts an earlier version back: a new version with that version's spec and enabled state (`change: "revert"`, `reverts: <version>`), `200` in the same shape. A version that archived the agent cannot be reverted to (`400`); an archived agent is `404`.
+
+**Agents change agents.** An agent whose rules enable `agent:define` (the built-in `orbit` does, `auto`) proposes `{"spec": {...}}`: a whole agent, as `POST /agents` takes it, for a new agent or one already defined in the database or built in, itself included. Executed, it goes through the same validation and is stored as the next version with the run as `run_id`. A file agent cannot be changed this way (the action fails, naming why).
 
 `GET /agents/{name}/definitions` is `{"name": "news", "origin":
 "database", "versions": [<definition>, ...]}`, newest first (empty for a
@@ -634,6 +641,40 @@ The access token is authentik's own (the `orbit-mcp` provider), so its issuer an
 | `ORBIT_MCP_REDIRECT_HOSTS` | comma list of hosts a client may redirect to (the host or a subdomain of it), default `claude.ai,claude.com`. Loopback is always allowed. |
 
 `ORBIT_OIDC_GROUP` is required with the issuer. The authentik provider needs the redirect URI `<public_url>/oauth/callback` (strict), the `openid`, `email`, `profile` and `offline_access` scope mappings (profile carries `preferred_username` and `groups`), the `authorization_code` and `refresh_token` grants, and the application bound to the group. traefik must route `/mcp`, `/.well-known/oauth-` and `/oauth/` past forward-auth, as it does `/api/`.
+
+## Skills
+
+orbit keeps a library of Claude Code skills: each a `SKILL.md` (frontmatter with `name` and `description`, then the instructions) and optional files beside it (references, scripts, assets), every version kept. An agent runs with the skills its spec names (`skills`) and those attached here; a run gets each at its current version (docs/ARCHITECTURE.md, Skills). Agents also write and retire their own skills, applied directly (below).
+
+A skill:
+
+```json
+{"name": "monthly-close", "version": 2, "status": "active",
+ "description": "Use when the person asks to close a month.",
+ "sha256": "<hex>", "source": "agent", "source_run_id": "uuid", "author": null,
+ "note": "...", "restored_from": null, "created_at": "...", "updated_at": "...",
+ "file_paths": ["references/format.md"],
+ "content": "<SKILL.md>", "files": [{"path": "references/format.md", "content": "<base64>"}],
+ "agents": ["finance"]}
+```
+
+- `name` matches `^[a-z][a-z0-9-]{0,62}$`; a `name` in the frontmatter must be the same. `description` is the frontmatter's (required: it is how Claude Code decides to use the skill). `SKILL.md` is UTF-8, at most 256 KB; at most 200 files, each at most 4 MB, 16 MB in all; a file's `path` is relative, clean, inside the skill and not `SKILL.md`. A file's `content` is base64.
+- `version` counts versions, the newest in force; `status` is `active` or `retired` (a retired skill is given to no run). `sha256` is over `SKILL.md` and every file. `source` is `person`, `agent` (a run wrote it: `source_run_id`) or `import`. `author` is the token's person for `person` and `import`. `restored_from` is the version a restore copied.
+- `content` and `files` are in the responses of `GET /skills/{name}` and `GET /skills/{name}/versions/{v}` only; lists carry `file_paths`. `agents` (in the list and `GET /skills/{name}`) are the agents that run with it, from their spec or attached.
+
+Routes:
+
+- `GET /skills?status=`: `{"skills": [...]}` by name, current versions; `status` as for entries.
+- `POST /skills` `{"name", "content", "files"?, "note"?}`: `201 {"skill"}`; 409 when the name exists, 400 for an invalid skill.
+- `GET /skills/{name}`: `{"skill": <current, in full>, "versions": [<every version without content>, newest first]}`.
+- `GET /skills/{name}/versions/{version}`: `{"skill": <that version, in full>}`.
+- `PUT /skills/{name}` `{"content", "files"?, "version"?, "note"?}`: the next version (`files` replaces the files; omitted means none). `version` is the version the client read; another is 409. Content and files identical to the current active version write nothing: `{"skill", "changed": false}`.
+- `POST /skills/{name}/restore` `{"restore": <version>, "version"?, "note"?}`: the next version, an active copy of an earlier one.
+- `POST /skills/{name}/retire` `{"version"?, "note"?}`: the next version, retired.
+- `POST /skills/import` `{"dry_run", "skills": [{"name", "content", "files"?}], "note"?}`: each skill's next version where it differs from the current one (or is new, or retired); `{"dry_run", "results": [{"name", "outcome": "created"|"updated"|"unchanged", "version"}]}`, one transaction, at most 100 skills. `orbit import skills` calls it (deployment.md).
+- `PUT /agents/{name}/skills/{skill}` and `DELETE` attach and detach, as for topics; attaching an unknown skill is 404. `GET /agents/{name}/context` lists the agent's `skills`: `[{"name", "from": ["spec"|"api"], "version", "status"}]`, `status` `missing` (and `version` null) for a name no skill has.
+
+**Skills agents write.** A run's output carries `skills` (at most 3): `write` (the whole `SKILL.md` of a new skill, or of one the run has, whose files stay) and `retire` (one the run has). They apply with the run's outcome as `source: "agent"` versions, a write against the version the run was given (a newer one refuses it), and a written skill is attached to the agent. What became of each is the run's `skill-writes.json` artifact (`[{"op", "name", "result": {"outcome", "error", "key", "version"}}]`); the versions the run was given are its `skills.json` artifact. A person reverts with `restore` or `retire`.
 
 ## Search
 

@@ -67,11 +67,15 @@ more than its agent's rules allow.
 
 A run writes memory entries directly, and a learning run writes them from a conversation, so a poisoned input or message can plant an entry that later runs of every agent reading its scope are shown. What bounds it: entries are shown as data (the system prompt says they never authorize an action the rules do not, and an instruction in one is not to be followed); a run may write only to the profile, itself and the topics it reads, at most 10 writes, and only change entries it was shown at the version it was shown; every version is kept with the run and conversation it came from (`GET /memory/entries?run_id=`), so a bad one is found and retired or restored. A learning run reads the person's messages and the agent's reports (which can quote inputs), not the inputs themselves.
 
+## Skills
+
+A skill is instructions a run follows, and agents write their own, so a run steered by a poisoned input can write a skill that steers its later runs, and those of every agent the skill is attached to. What bounds it: a run writes at most 3 skills, only new ones or ones it was given (at the version given), and a written skill is attached to that agent only; every version is kept with its run (`source_run_id`), so a bad one is found, restored or retired. The skill tool reads only the run's own copy, inside each skill's directory after symlinks; it records nothing in the ledger, so a skill's text never backs a figure. Supporting files are stored as given and never executed by orbit; a script in a skill runs only if the agent's own `tools` let it.
+
 ## What the model can cause
 
 Only actions its spec enables, through executors here, to destinations in
 configuration. `continue` can make an agent run again on its own, so it is
-bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body, never a URL or a header.
+bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body, never a URL or a header. `agent:define` lets a model rewrite an agent defined in the database, itself included: its charter, tools, sources and rules, so an agent with it enabled can widen any database agent's reach up to what orbit.yaml offers (endpoints, channels, repositories); never a file agent's, and never past the configuration. Every change is a version with its run, so it is seen and reverted through the API.
 `deny` is the default for every type an agent does not name, and denied
 types are not even offered.
 

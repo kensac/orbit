@@ -256,7 +256,41 @@ func (s *Server) agentContext(w http.ResponseWriter, r *http.Request) {
 	if len(entries) > 0 {
 		index = engine.KnownIndex(entries)
 	}
-	respond(w, map[string]any{"agent": a.Name, "topics": orEmpty(topics), "entries": len(entries), "index": index}, nil)
+	attachedSkills, err := s.Store.AttachedNames(r.Context(), a.Name, store.AttachSkill)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	type skill struct {
+		Name    string   `json:"name"`
+		From    []string `json:"from"`
+		Version *int     `json:"version"`
+		Status  string   `json:"status"`
+	}
+	var skills []skill
+	addSkill := func(name, from string) {
+		for i := range skills {
+			if skills[i].Name == name {
+				skills[i].From = append(skills[i].From, from)
+				return
+			}
+		}
+		skills = append(skills, skill{Name: name, From: []string{from}, Status: "missing"})
+	}
+	for _, k := range a.Skills {
+		addSkill(k, "spec")
+	}
+	for _, k := range attachedSkills {
+		addSkill(k, "api")
+	}
+	for i := range skills {
+		if k, err := s.Store.GetSkill(r.Context(), skills[i].Name, 0, false); err == nil {
+			v := k.Version
+			skills[i].Version, skills[i].Status = &v, k.Status
+		}
+	}
+	slices.SortFunc(skills, func(x, y skill) int { return strings.Compare(x.Name, y.Name) })
+	respond(w, map[string]any{"agent": a.Name, "topics": orEmpty(topics), "entries": len(entries), "index": index, "skills": orEmpty(skills)}, nil)
 }
 
 func (s *Server) attach(kind, param string) http.HandlerFunc {
@@ -265,6 +299,12 @@ func (s *Server) attach(kind, param string) http.HandlerFunc {
 		if !ok {
 			respond(w, nil, store.ErrNotFound)
 			return
+		}
+		if kind == store.AttachSkill {
+			if _, err := s.Store.GetSkill(r.Context(), r.PathValue(param), 0, false); err != nil {
+				respond(w, nil, err)
+				return
+			}
 		}
 		created, err := s.Store.Attach(r.Context(), a.Name, kind, r.PathValue(param), actor(r, ""))
 		respond(w, map[string]any{"attached": err == nil, "created": created}, err)
