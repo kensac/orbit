@@ -1,0 +1,8 @@
+#!/bin/sh
+# gh with orbit's GitHub token when orbit has put one in the box
+# (/run/orbit/gh-token); without it, plain gh, so `gh auth login` works too.
+if [ -s /run/orbit/gh-token ]; then
+	GH_TOKEN=$(cat /run/orbit/gh-token)
+	export GH_TOKEN
+fi
+exec /usr/bin/gh "$@"
