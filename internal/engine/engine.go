@@ -328,7 +328,8 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if c.Attempt > 1 && claudeCode {
 		emit("orbit.recovery", map[string]any{"recovers_attempt": recFrom(rec), "skipped_because": skipped})
 	}
-	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env}
+	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env,
+		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted()}
 	vars := sources.Vars(now)
 	var inputs []runner.Input
 	if rec != nil {
@@ -646,6 +647,13 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			// same bound for an action that reaches it anyway.
 			pa.Rule, pa.Error = string(spec.RuleDeny), fmt.Sprintf("continuation limit reached: this run is continuation %d of at most %d", c.Chain, actions.MaxContinueChain)
 		}
+		if act.Type == actions.DefineType && pa.Error == "" && pa.Rule == string(spec.RuleAuto) {
+			// A change that widens an agent waits for a person, whatever the rule: a model steered by its input must not grant itself reach.
+			if w := e.defineWidening(ctx, act.Params); len(w) > 0 {
+				pa.Rule = string(spec.RuleApprove)
+				e.Log.Info("agent:define widens an agent; held for approval", "run", c.ID, "widens", strings.Join(w, "; "))
+			}
+		}
 		if len(pa.Params) == 0 {
 			pa.Params = json.RawMessage(`{}`)
 		}
@@ -906,7 +914,7 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 			return err
 		}
 		actx, cancel := context.WithTimeout(ctx, ActionTimeout)
-		result, xerr := ex.Execute(actx, actions.Call{Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params})
+		result, xerr := ex.Execute(actx, actions.Call{Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)})
 		cancel()
 		if err := e.Store.FinishAction(context.WithoutCancel(ctx), act.ID, result, xerr); err != nil {
 			return err

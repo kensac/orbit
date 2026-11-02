@@ -73,7 +73,9 @@ func defineType(a *spec.Agent) Type {
 		Description: "Create an agent or change one (yourself included, \"" + a.Name + "\"): spec is the whole agent, " +
 			"the same fields as an agents/<name>.yaml file (name, description, charter, triggers, sources, tools, actions, " +
 			"session, notify, ...; durations as strings like \"15m\"). It replaces the agent's spec as a new version; " +
-			"every version is kept and can be reverted. Agents defined in configuration files cannot be changed this way.",
+			"every version is kept and can be reverted. Agents defined in configuration files cannot be changed this way. " +
+			"A change that adds a tool, source, credential or need, or allows an action more readily, waits for a person's approval. " +
+			"Such an agent may use only the tools " + strings.Join(spec.UnsandboxedTools, ", ") + ", no file source, and no ${VAR} but orbit.yaml's credentials.",
 		ParamsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -309,6 +311,8 @@ type Call struct {
 	RunID  string
 	Type   string
 	Params json.RawMessage
+	// Rule is the rule it was recorded under: auto, or approve when a person approved it.
+	Rule spec.Rule
 }
 
 // Execute performs one action and returns a JSON result to store.

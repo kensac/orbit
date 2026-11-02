@@ -23,13 +23,25 @@ database agent of their name. Each instance reloads when the directory's
 content or the newest definition changes, so a definition written on one
 instance is in force on all within the 30 s poll.
 
-An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one.
+An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential or need it adds, a source it changes, an action type allowed more readily) waits for a person's approval whatever the rule.
+
+Database and built-in agents are held to what orbit.yaml offers (`spec.validateTrust`): no `file` source, no `${VAR}` that is not in `credentials:`, only the tools in `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, TodoWrite), and no precheck. A spec breaking one fails validation, naming it.
 
 ## Secrets
 
-Never in YAML. Channels name variables with `*_env`; source headers, query
-values and endpoint headers use `${VAR}`. An unset variable is an error, never
+Never in YAML. Channels name variables with `*_env`; source urls, headers, query
+values, Prometheus expressions and endpoint headers use `${VAR}`. An unset variable is an error, never
 an empty string.
+
+`credentials:` in `orbit.yaml` names the variables sources may send, each bound to the URLs it may go to:
+
+```yaml
+credentials:
+  SURE_API_KEY:
+    url_prefix: https://sure.example.com/api/
+```
+
+`url_prefix` is an http(s) URL with a host and a path ending in `/`, without user, query or fragment. A source sends a credential only in a request whose URL starts with it (redirects included); where the URL has no template, a mismatch fails the load. A database or built-in agent may reference only credentials; a file agent may also name any other variable (docs/agents/security.md, What a model can define).
 
 ## GitHub
 

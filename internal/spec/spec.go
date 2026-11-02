@@ -64,6 +64,8 @@ type Deployment struct {
 	Build *Build `yaml:"build,omitempty" json:"build,omitempty"`
 	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
+	// Credentials are the variables a source may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
+	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -728,6 +730,7 @@ func (c *Config) Validate() error {
 	for _, n := range names {
 		errs = append(errs, c.validateAgent(c.Agents[n])...)
 	}
+	errs = append(errs, c.validateCredentials()...)
 	errs = append(errs, c.validateBuild()...)
 	errs = append(errs, c.validateMail()...)
 	return errors.Join(errs...)
@@ -818,7 +821,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 				at("gate %d: unchanged takes no input, items, n, command or timeout", i)
 			}
 		case "precheck":
-			if a.Origin != OriginFile {
+			if a.Restricted() {
 				// The API and agent:define write database agents; a
 				// command on orbit's host is for reviewed files only.
 				at("gate %d: a precheck runs a command on orbit's host, so only an agent in the configuration files may have one", i)
@@ -917,6 +920,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		seenNeed[n] = true
 	}
+	errs = append(errs, c.validateTrust(a)...)
 	if ss := a.Session; ss != nil {
 		rs := c.Deployment.Runners[a.Runner]
 		if rs.Kind != "claude-code" {
