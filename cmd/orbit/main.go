@@ -446,6 +446,29 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			}
 		}()
 
+		// The journal catches up on what its live writes did not project:
+		// every run once at start (the backfill of runs from before it
+		// existed), then recent runs, which an older instance may still be
+		// writing during a deploy.
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			all := true
+			for life.Err() == nil {
+				if n, err := s.BackfillJournal(life, all); err != nil {
+					if life.Err() == nil {
+						log.Error("journal backfill", "err", err)
+					}
+				} else {
+					if n > 0 {
+						log.Info("journal synced", "runs", n, "all", all)
+					}
+					all = false
+				}
+				sleep(life, journalSyncEvery)
+			}
+		}()
+
 		var executors sync.WaitGroup
 		for i := 0; i < workers; i++ {
 			executors.Add(1)
@@ -595,6 +618,11 @@ func failOrphanedActions(ctx context.Context, s *store.Store, log *slog.Logger) 
 // does not hold a handler forever. Generous, because an artifact can be
 // several MB to a phone; a run stream clears it (api.streamRun).
 const writeTimeout = 5 * time.Minute
+
+// journalSyncEvery is how often the journal catches up on recent runs. A
+// reader syncs the run it reads itself, so this only bounds how stale the
+// steps of a run nobody streams can be while an older instance writes it.
+const journalSyncEvery = 30 * time.Second
 
 func httpServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: writeTimeout}
