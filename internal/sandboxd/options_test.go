@@ -196,6 +196,9 @@ func TestConfigValidate(t *testing.T) {
 		func(c *Config) { c.Listen = "[fd7a:115c:a1e0::1]:8091" },
 		func(c *Config) { c.Image = "sha256:" + strings.Repeat("0", 64) },
 		func(c *Config) { c.Runtime = "runsc" },
+		func(c *Config) {
+			c.WorkstationProxy, c.WorkstationNetwork = "orbit-egress-open:3128", "orbit-workstation"
+		},
 	}
 	for i, m := range ok {
 		c := testConfig()
@@ -219,6 +222,12 @@ func TestConfigValidate(t *testing.T) {
 		"proxy no port":    func(c *Config) { c.Proxy = "orbit-egress" },
 		"other runtime":    func(c *Config) { c.Runtime = "kata" },
 		"relative docker":  func(c *Config) { c.Docker = "docker.sock" },
+		"workstation beside builds": func(c *Config) {
+			c.WorkstationProxy, c.WorkstationNetwork = "orbit-egress-open:3128", c.Network
+		},
+		"workstation without its network": func(c *Config) { c.WorkstationProxy = "orbit-egress-open:3128" },
+		"workstation network alone":       func(c *Config) { c.WorkstationNetwork = "orbit-workstation" },
+		"workstation on host":             func(c *Config) { c.WorkstationProxy, c.WorkstationNetwork = "orbit-egress-open:3128", "host" },
 	} {
 		c := testConfig()
 		m(&c)
