@@ -34,6 +34,7 @@ func TestPhrases(t *testing.T) {
 		{"every sunday at 12am", "BYDAY=SU", "2026-11-08T00:00:00-05:00"},
 		{"every friday at 12:30pm", "BYDAY=FR", "2026-11-06T12:30:00-05:00"},
 		{"every other monday at 8pm", "INTERVAL=2;BYDAY=MO", "2026-11-02T20:00:00-05:00"},
+		{"the 1st at 9am", "BYMONTHDAY=1", "2026-12-01T09:00:00-05:00"},
 		{"the 21st of every month at 23:59", "BYMONTHDAY=21", "2026-11-21T23:59:00-05:00"},
 		{"every month on the 31st at 09:00", "BYMONTHDAY=31", "2026-12-31T09:00:00-05:00"},
 	} {

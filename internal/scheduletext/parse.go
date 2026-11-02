@@ -13,7 +13,7 @@ import (
 )
 
 var clockRE = regexp.MustCompile(`^(?:([0-9]{2}):([0-9]{2})|([0-9]{1,2})(?::([0-9]{2}))?\s?(am|pm))$`)
-var monthlyRE = regexp.MustCompile(`^(?:the ([0-9]{1,2})(st|nd|rd|th) of every month|every month on the ([0-9]{1,2})(st|nd|rd|th))$`)
+var monthlyRE = regexp.MustCompile(`^(?:the ([0-9]{1,2})(st|nd|rd|th)(?: of every month)?|every month on the ([0-9]{1,2})(st|nd|rd|th))$`)
 var days = map[string]string{"monday": "MO", "tuesday": "TU", "wednesday": "WE", "thursday": "TH", "friday": "FR", "saturday": "SA", "sunday": "SU"}
 
 // Parse accepts daily, every weekday, every named weekday, every other named weekday, and an ordinal date of every month, each followed by "at" and an explicit time. loc is required; anchor selects the first eligible local date and the week of a fortnightly rule. The trigger must run in loc as the agent's timezone.
