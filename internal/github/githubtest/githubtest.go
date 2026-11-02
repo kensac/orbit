@@ -72,6 +72,8 @@ type Server struct {
 	// Compare answers compare/{base}...{head}, keyed "base...head";
 	// "identical" when base and head are equal, "diverged" otherwise.
 	Compare map[string]string
+	// CompareFiles are the files every compare reports changed.
+	CompareFiles []string
 	// JobLogs are Actions job logs by job id, served through a redirect
 	// as GitHub does.
 	JobLogs map[int64]string
@@ -234,7 +236,11 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 				st = "identical"
 			}
 		}
-		f.write(w, 200, map[string]any{"status": st})
+		files := []any{}
+		for _, n := range f.CompareFiles {
+			files = append(files, map[string]any{"filename": n})
+		}
+		f.write(w, 200, map[string]any{"status": st, "files": files})
 	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/actions/jobs/") && strings.HasSuffix(r.URL.Path, "/logs"):
 		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/repos/kensac/orbit/actions/jobs/"), "/logs")
 		http.Redirect(w, r, f.Srv.URL+"/joblogs/"+id, http.StatusFound)

@@ -38,6 +38,7 @@ import (
 
 	"github.com/kensac/orbit/internal/api"
 	"github.com/kensac/orbit/internal/auth"
+	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/metrics"
@@ -45,6 +46,7 @@ import (
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
+	"github.com/kensac/orbit/internal/tickets"
 )
 
 // revision is set at build time (-ldflags -X main.revision=<sha>).
@@ -228,6 +230,10 @@ func validate(args []string) error {
 	if g := cfg.Deployment.GitHub; g != nil {
 		refs[g.PrivateKeyEnv] = true
 	}
+	if b := cfg.Deployment.Build; b != nil {
+		refs[b.TokenEnv] = true
+		refs["CLAUDE_CODE_OAUTH_TOKEN"] = true
+	}
 	names := make([]string, 0, len(cfg.Agents))
 	for n := range cfg.Agents {
 		names = append(names, n)
@@ -364,6 +370,8 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		// the signal until the drain is over; runCtx is cancelled only at
 		// the drain's cap, which hands the remaining runs back.
 		drain := engine.NewDrain()
+		eng.Drain = drain
+		eng.Builder = &build.Runner{WorkRoot: filepath.Join(eng.DataDir, "builds")}
 		life, endLife := context.WithCancel(context.WithoutCancel(ctx))
 		defer endLife()
 		runCtx, cancelRuns := context.WithCancel(life)
@@ -402,10 +410,22 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			}()
 		}
 
+		var loops sync.WaitGroup
+		// The ticket loop starts builds and proposes merges, so it stops
+		// with claims: a draining instance leaves both to the ready one.
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			(&tickets.Loop{
+				Store: s, Config: func() *spec.Config { return eng.Current().Config }, Env: os.LookupEnv,
+				Client: &http.Client{Timeout: 2 * time.Minute}, Revision: revision, Log: log.With("component", "tickets"),
+				Approval: eng.NotifyApproval, Wake: nudge,
+			}).Run(claimCtx)
+		}()
+
 		// The scheduler only enqueues, so it keeps leading through a drain
 		// (fires stay on time, the ready instance claims them) and lets go
 		// of the lock when this process ends.
-		var loops sync.WaitGroup
 		sched := &scheduler.Scheduler{
 			Store: s, Log: log.With("component", "scheduler"), Reload: reload, Now: time.Now,
 			Config: func() *spec.Config { return eng.Current().Config },

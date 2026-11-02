@@ -422,3 +422,27 @@ func (s *Store) TicketEvents(ctx context.Context, id string) ([]TicketEvent, err
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[TicketEvent])
 }
+
+// TicketMessage is one message of a ticket's thread, as a model is shown it.
+type TicketMessage struct {
+	Author    *string   `json:"author,omitempty"`
+	Direction string    `json:"direction"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// maxTicketMessages bounds the thread a ticket's input carries: the newest
+// ones, which hold the discussion that settled the plan.
+const maxTicketMessages = 200
+
+// TicketMessages returns a ticket's thread, oldest first, at most the
+// newest maxTicketMessages.
+func (s *Store) TicketMessages(ctx context.Context, id string) ([]TicketMessage, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT author, direction, body, created_at FROM (
+		SELECT m.author, m.direction, m.body, m.created_at FROM messages m JOIN tickets t ON t.conversation_id = m.conversation_id
+		WHERE t.id = $1 ORDER BY m.created_at DESC LIMIT $2) x ORDER BY created_at`, id, maxTicketMessages)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[TicketMessage])
+}

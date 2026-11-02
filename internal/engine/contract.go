@@ -32,6 +32,12 @@ type Output struct {
 		Params json.RawMessage `json:"params"`
 		Reason string          `json:"reason"`
 	} `json:"actions"`
+	// Plan is a plan for the run's ticket (ticket.go); only a run in an
+	// open or planned request's conversation is offered the field.
+	Plan string `json:"plan"`
+	// planTicket is the ticket a non-empty Plan is for, set by the engine,
+	// never read from the output.
+	planTicket string
 }
 
 // summaryMax keeps a summary to one notification title line.

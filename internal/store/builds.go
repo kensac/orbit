@@ -361,3 +361,27 @@ func (s *Store) TicketsInFlight(ctx context.Context) ([]Ticket, error) {
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[Ticket])
 }
+
+// ticketLoopLock is the advisory lock the ticket loop runs under: "orbit-tk"
+// in ASCII. During a deploy two instances run, and one loop at a time keeps
+// their GitHub reads and proposals from doubling (the guarded transitions
+// would refuse the second anyway).
+const ticketLoopLock = 0x6f72626974746b
+
+// WithTicketLoopLock runs fn while holding the ticket loop's lock, or
+// returns false without running it when another instance holds it.
+func (s *Store) WithTicketLoopLock(ctx context.Context, fn func() error) (bool, error) {
+	conn, err := s.Pool.Acquire(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Release()
+	var ok bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, int64(ticketLoopLock)).Scan(&ok); err != nil || !ok {
+		return false, err
+	}
+	defer func() {
+		_, _ = conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, int64(ticketLoopLock))
+	}()
+	return true, fn()
+}

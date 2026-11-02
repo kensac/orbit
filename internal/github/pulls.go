@@ -86,20 +86,28 @@ func (c *Client) ClosePR(ctx context.Context, repo string, number int) error {
 }
 
 // Compare reports how head relates to base: "identical", "ahead" (head
-// descends from base), "behind" or "diverged".
-func (c *Client) Compare(ctx context.Context, repo, base, head string) (string, error) {
+// descends from base), "behind" or "diverged", and the files that differ
+// (GitHub lists at most 300).
+func (c *Client) Compare(ctx context.Context, repo, base, head string) (string, []string, error) {
 	p, err := repoPath(repo)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var r struct {
 		Status string `json:"status"`
+		Files  []struct {
+			Filename string `json:"filename"`
+		} `json:"files"`
 	}
-	path := fmt.Sprintf("%s/compare/%s...%s?per_page=1", p, url.PathEscape(base), url.PathEscape(head))
+	path := fmt.Sprintf("%s/compare/%s...%s", p, url.PathEscape(base), url.PathEscape(head))
 	if err := c.do(ctx, http.MethodGet, path, nil, &r); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return r.Status, nil
+	files := make([]string, 0, len(r.Files))
+	for _, f := range r.Files {
+		files = append(files, f.Filename)
+	}
+	return r.Status, files, nil
 }
 
 // JobLogTail returns the last max bytes of an Actions job's log. GitHub
