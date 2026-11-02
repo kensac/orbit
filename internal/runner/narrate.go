@@ -2,10 +2,9 @@ package runner
 
 import (
 	"encoding/json"
-	"regexp"
-	"strconv"
 	"strings"
-	"unicode/utf8"
+
+	"github.com/kensac/orbit/internal/journal"
 )
 
 // Narration is one thing a person watching a run sees: prose the agent
@@ -22,9 +21,6 @@ type ToolUse struct {
 	Name    string `json:"name"`
 	Summary string `json:"summary"`
 }
-
-// summaryMax bounds a tool summary: one line on a phone.
-const summaryMax = 160
 
 // submitTools are the calls through which a backend returns its final
 // answer (Claude Code's --json-schema tool, the anthropic runner's forced
@@ -95,56 +91,12 @@ func narrateBlocks(blocks []contentBlock) []Narration {
 			}
 		case "tool_use":
 			if !submitTools[b.Name] {
-				out = append(out, Narration{Tool: &ToolUse{Name: b.Name, Summary: toolSummary(b.Name, b.Input)}})
+				out = append(out, Narration{Tool: &ToolUse{Name: b.Name, Summary: journal.Summary(b.Name, b.Input)}})
 			}
 		}
 	}
 	return out
 }
-
-// toolSummary is the one input that says what a call was about: the file,
-// the pattern, the command, the URL.
-func toolSummary(name string, in map[string]any) string {
-	str := func(k string) string { s, _ := in[k].(string); return s }
-	var s string
-	switch name {
-	case "Read", "Write", "Edit", "MultiEdit":
-		s = relPath(str("file_path"))
-	case "NotebookEdit":
-		s = relPath(str("notebook_path"))
-	case "Glob", "Grep":
-		s = str("pattern")
-		if p := relPath(str("path")); p != "" {
-			s += " in " + p
-		}
-	case "Bash":
-		s = str("command")
-	case "WebFetch":
-		s = str("url")
-	case "WebSearch":
-		s = str("query")
-	case "Task", "Agent":
-		s = str("description")
-	case "TodoWrite":
-		if todos, ok := in["todos"].([]any); ok {
-			s = plural(len(todos), "item")
-		}
-	default:
-		for _, k := range []string{"file_path", "path", "pattern", "query", "url", "command", "description"} {
-			if s = str(k); s != "" {
-				break
-			}
-		}
-	}
-	return clip(s)
-}
-
-// runDir matches a run's workdir prefix (<data>/runs/<id>-<attempt>/), so a
-// summary names inputs/x.json rather than a scratch path that differs per
-// attempt.
-var runDir = regexp.MustCompile(`^.*/runs/[^/]+/`)
-
-func relPath(p string) string { return runDir.ReplaceAllString(p, "") }
 
 // narrateCodex reads `codex exec --json` items: reasoning summaries and
 // messages are prose, commands, file changes, searches and MCP calls are
@@ -175,37 +127,17 @@ func narrateCodex(kind string, payload []byte) []Narration {
 			return []Narration{{Text: it.Text}}
 		}
 	case kind == "item.started" && it.Type == "command_execution":
-		return []Narration{{Tool: &ToolUse{Name: "shell", Summary: clip(it.Command)}}}
+		return []Narration{{Tool: &ToolUse{Name: "shell", Summary: journal.Clip(it.Command)}}}
 	case kind == "item.started" && it.Type == "web_search":
-		return []Narration{{Tool: &ToolUse{Name: "web_search", Summary: clip(it.Query)}}}
+		return []Narration{{Tool: &ToolUse{Name: "web_search", Summary: journal.Clip(it.Query)}}}
 	case kind == "item.started" && it.Type == "mcp_tool_call":
 		return []Narration{{Tool: &ToolUse{Name: it.Server + "." + it.Tool}}}
 	case kind == "item.completed" && it.Type == "file_change":
 		var paths []string
 		for _, c := range it.Changes {
-			paths = append(paths, relPath(c.Path))
+			paths = append(paths, journal.RelPath(c.Path))
 		}
-		return []Narration{{Tool: &ToolUse{Name: "edit", Summary: clip(strings.Join(paths, ", "))}}}
+		return []Narration{{Tool: &ToolUse{Name: "edit", Summary: journal.Clip(strings.Join(paths, ", "))}}}
 	}
 	return nil
-}
-
-// clip makes s one line of at most summaryMax runes.
-func clip(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = strings.TrimSpace(s[:i]) + " ..."
-	}
-	if utf8.RuneCountInString(s) > summaryMax {
-		r := []rune(s)
-		s = string(r[:summaryMax-3]) + "..."
-	}
-	return s
-}
-
-func plural(n int, word string) string {
-	if n == 1 {
-		return "1 " + word
-	}
-	return strconv.Itoa(n) + " " + word + "s"
 }
