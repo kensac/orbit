@@ -149,6 +149,21 @@ func (l *Live) drop(p *liveProc) {
 	p.stop(true)
 }
 
+// discard closes the idle live process of key, if there is one.
+func (l *Live) discard(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	p := l.procs[key]
+	if p == nil || p.busy {
+		return
+	}
+	if p.timer != nil {
+		p.timer.Stop()
+	}
+	delete(l.procs, key)
+	l.async(func() { p.stop(false) })
+}
+
 func (l *Live) expire(p *liveProc) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -167,6 +182,9 @@ type liveProcess interface {
 	Kill()
 	Exited() <-chan struct{}
 	Interrupt(ctx context.Context, cancelQueued bool) (*claudeproto.InterruptReceipt, error)
+	SendUUID(text, uuid string) error
+	CancelQueued(ctx context.Context, uuid string) (bool, error)
+	Capable(name string) bool
 }
 
 // closeIdle closes every idle live process, for a sandbox slot or memory.

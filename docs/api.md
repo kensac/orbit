@@ -37,6 +37,7 @@ JWT check is its gate (the portfolio on Vercel calls it server-side). `/hooks/` 
 | `ORBIT_OIDC_ISSUER` | comma list of accepted issuers, one per authentik provider (`https://auth.kanishksachdev.com/application/o/<slug>/`, trailing slash included). Each provider signs with its own key, so each issuer's keys come from its own discovery document (`<issuer>.well-known/openid-configuration`, then `jwks_uri`). Unset: the public `/api/v1` refuses every request. |
 | `ORBIT_OIDC_CLIENT_IDS` | comma list of accepted `aud` values (the providers' client ids). Required with the issuer. |
 | `ORBIT_OIDC_GROUP` | the group a person must be in (today `infra-admins`). Required with the issuer. |
+| `ORBIT_WORKSPACE_GROUP` | the group a person must also be in to change a workspace (Workspace, below). Unset: `ORBIT_OIDC_GROUP`'s members may. |
 | `ORBIT_LISTEN` | the public listener, default `:8080`. traefik routes here. |
 | `ORBIT_DRAIN_MAX` | the longest a drain waits for the runs it holds before handing the rest back (a Go duration). Default: the longest agent `timeout` plus 5 minutes. |
 | `ORBIT_INTERNAL_LISTEN` | the internal listener, default `127.0.0.1:8081`: `/api/v1` (operator token or authentik token), `/healthz`, `/metrics`; no `/ui`. traefik never routes to it, so the operator token is told apart by the socket a request arrived on, not by a header anyone can forge. The default is reachable only inside the container (`docker exec orbit ...`); bind `:8081` to let other containers on the network reach it. |
@@ -173,6 +174,21 @@ A database or built-in agent's spec may not have a `file` source, a `${VAR}` tha
 
 **Agents change agents.** An agent whose rules enable `agent:define` (the built-in `orbit` does, `auto`) proposes `{"spec": {...}}`: a whole agent, as `POST /agents` takes it, for a new agent or one already defined in the database or built in, itself included. Executed, it goes through the same validation and is stored as the next version with the run as `run_id`. A file agent cannot be changed this way (the action fails, naming why). A change that widens the agent compared with its current version (a tool, source, credential, delegate target or need it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily; for a new agent, any of these) is recorded with `rule: "approve"` and waits as `pending` for a person, whatever the agent's rule; one executing by rule that widens the agent as it is by then fails, naming what it widens.
 
+**Schedules by talking.** `schedule:add`, `schedule:pause`, `schedule:resume` and `schedule:remove` change one database or built-in agent's triggers as the next version (`change: "update"`, the run as `run_id`), and `run:now` starts a manual run (docs/agents/configuration.md, Changing schedules by talking). Times are the person's words, parsed by orbit in the agent's timezone. An executed one's `result`, and a pending one's `preview` (Actions, below), is:
+
+```json
+{"agent": "news", "timezone": "America/New_York", "triggers": [0],
+ "trigger": {"rrule": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=8;BYMINUTE=0;BYSECOND=0", "start": "2026-11-02T00:00:00", "prompt": "headlines"},
+ "rule": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=8;BYMINUTE=0;BYSECOND=0",
+ "paused_until": "2026-11-09T05:00:00Z",
+ "next_fires": ["2026-11-03T08:00:00-05:00", "2026-11-04T08:00:00-05:00", "2026-11-05T08:00:00-05:00"],
+ "version": 4}
+```
+
+`triggers` are the indexes changed (as `next_fires`' `trigger_index`); `trigger` is the one added or removed; `rule` is set when one trigger changed; `paused_until` only for a pause with an end; `next_fires` are the changed triggers' next three fires, merged, as local times (`[]` when paused with no end); `version` only once executed. `run:now`'s result is `{"agent": "news", "run_id": "uuid"}`.
+
+**Save this conversation as an agent.** An agent with `agent:save` (the built-in `orbit`, `approve`) proposes `{"name", "description", "charter", "starters"}`. orbit drafts the rest from what the conversation did (docs/agents/configuration.md, Saving a conversation as an agent) and records the proposal as an `agent:define` with the drafted spec, `rule: "approve"` and `status: "pending"`; it never appears as an `agent:save` action unless it is refused (`denied`, with `error`, for example a name in use). Its `preview` is the dry-run diff (Actions, below); approving it creates the agent. `spec.starters` (on every agent row) are prompts a client offers for a new conversation.
+
 `GET /agents/{name}/definitions` is `{"name": "news", "origin":
 "database", "versions": [<definition>, ...]}`, newest first (empty for a
 file or built-in agent).
@@ -196,7 +212,7 @@ conversation is never deleted, only archived.
   "is_default": false, "archived": false,
   "created_at": "...", "last_activity_at": "...", "needs_input": true,
   "agent_status": {"state": "done", "since": "...", "source": "run", "run_id": "uuid"},
-  "ticket_id": null}],
+  "ticket_id": null, "workspace_id": null}],
  "has_more": false, "next_before": null}
 ```
 
@@ -205,7 +221,7 @@ Newest activity first (a message or a run in it is activity). `archived`
 thread: `next_before` is an opaque cursor, `null` exactly when `has_more`
 is false; `limit` defaults to 50, at most 200. `needs_input` is true while
 one of its questions is open or one of its runs' actions is pending.
-`ticket_id` is set when the conversation is a ticket's (below), `task_id` when it is a delegated task's own (Delegation, below); a task conversation's open questions are to the delegating agent, so they do not set `needs_input`.
+`ticket_id` is set when the conversation is a ticket's (below), `workspace_id` when it has a workspace (Workspace, below), `task_id` when it is a delegated task's own (Delegation, below); a task conversation's open questions are to the delegating agent, so they do not set `needs_input`.
 
 `POST /agents/{name}/conversations`
 
@@ -231,10 +247,11 @@ messages below.
 ```json
 {"files": [{"path": "src/main.go", "bytes": 13, "modified_at": "..."}],
  "snapshot": {"id": 4, "conversation_id": "uuid", "run_id": "uuid", "attempt": 1,
+              "source": "run", "author": null,
               "sha256": "hex", "bytes": 10240, "files": 3, "created_at": "..."}}
 ```
 
-Regular files only, by path; orbit's own state (`.orbit/`, the run's `inputs/`) is left out. `snapshot` is `null` (and `files` empty) for a conversation without one. `GET /conversations/{id}/files/{path}` is one file, always as a download (`application/octet-stream`, `Content-Disposition: attachment`, `nosniff`, a CSP that runs nothing), 404 for a path the snapshot does not have.
+Regular files only, by path; orbit's own state (`.orbit/`, the run's `inputs/`) is left out. `snapshot` is `null` (and `files` empty) for a conversation without one; one a person's workspace write stored has `source: "person"`, `author` the person, and `run_id` and `attempt` null. `GET /conversations/{id}/files/{path}` is one file, always as a download (`application/octet-stream`, `Content-Disposition: attachment`, `nosniff`, a CSP that runs nothing), 404 for a path the snapshot does not have.
 
 `PATCH /conversations/{id}` `{"title": "...", "archived": true}` (either
 field) returns the updated `{"conversation": {...}}`. A title is at most 240
@@ -329,7 +346,7 @@ conversation:
   asked). `author` is the person who wrote it (absent for questions).
   `reply_to`, when set, is the message it answers. `attachments` are the uploads it carries (Uploads, above), in order; always an array. `run_id` is the run that
   holds a person's message (`null` while it waits for a run: none has read it, or every attempt that did handed it back) or the run that asked a
-  question. `reads` (a person's message, once a run has read it) is every attempt that read it, oldest first: `{"run_id", "attempt", "read_at", "released_at"}`, where `released_at` is when a failed or interrupted attempt handed it back, `null` for the one holding it.
+  question. `reads` (a person's message, once a run has read it) is every attempt that read it, oldest first: `{"run_id", "attempt", "read_at", "released_at"}`, where `released_at` is when a failed or interrupted attempt handed it back, `null` for the one holding it. `steered_into`, present only on a person's message a running reply took mid-turn (`delivery: "steer"`, below), is that run.
 - **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again), `build` (a ticket's build run, docs/tickets.md), `learn` (a learning run, below; only in an agent's learning conversation), `task` (in a delegated task's conversation: the task starting, or its parent writing to it), `delegation` (the agent woken because tasks it delegated settled, one failed or one asks it something; below) or `webhook` (a signed delivery to one of its webhook triggers; Webhooks, below). `status` is
   `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
   ended without a backend call because a gate, code, found nothing to judge;
@@ -364,14 +381,16 @@ conversation:
 
 ```json
 {"body": "text", "reply_to": "optional message id", "wake": true,
- "attachments": ["optional upload ids"],
+ "attachments": ["optional upload ids"], "delivery": "queue",
  "client_message_id": "optional, minted by the client"}
 ```
 
 posts to the default conversation, and returns
-`201 {"message_id": "uuid", "run_id": "uuid"}`. `run_id` is present
+`201 {"message_id": "uuid", "run_id": "uuid", "delivered": "queued"}`. `run_id` is present
 when the message woke a run (`wake`, default: the agent's `wake_on_message`).
 Stream that run to show the reply as it is written.
+
+**Delivery.** `delivery` is `queue` (the default) or `steer` (anything else is 400). A queued message waits for the conversation's next run, as above, even while a run is working. A steered one goes into the reply being written: when the conversation has a running run of a chat agent (one nobody asked to stop), the answer is `"delivered": "steered"` with that run's `run_id`, no run is woken, and the running reply takes the message within a few seconds, at its next tool call (the agent sees it mid-turn and answers it in the same reply); keep streaming that run. Its journal then has a `steer` item, and the thread's message carries `steered_into` (and `run_id`) naming the run. A steered message the reply ends without taking (it made no further tool call, or the person stopped it) is answered by the conversation's next run, which orbit queues when the run ends: its thread message stays without `run_id` until that run starts (a message already written into the turn gets an `orbit.steer_withdrawn` status in the reply's journal). With nothing running, for an agent that is not a chat agent, or with `attachments`, a steer is queued exactly as `queue` would be (`wake` applies) and the answer says `"delivered": "queued"`. `delivered` is always present.
 
 **Retries.** With `client_message_id` (1 to 200 characters, unique per agent;
 a UUID), a retry returns the first result, the same `message_id` and
@@ -474,7 +493,7 @@ An attempt (`store.Attempt`), oldest first:
 {"attempt": 1, "seq": 12, "at": "...", "kind": "assistant", "payload": {}}
 ```
 
-`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.figures_unverified`, and a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`.
+`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.figures_unverified`, a chat turn's `orbit.steer` (`{"message_id", "text", "author"}`: it took a steered message) and `orbit.steer_withdrawn` (`{"message_id", "confirmed"}`: a steered message written into the turn and not taken was withdrawn when it ended; `confirmed` false means the backend did not confirm it, and its process was closed), and a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`.
 
 ### The journal
 
@@ -529,6 +548,7 @@ A row:
 | `plan` | `plan` (one per epoch) | `{"entries": [{"text": "read the inputs", "status": "completed"}], "text": "..."}`; the agent's working plan. `entries` is its todo list (Claude Code's `TodoWrite`, Codex's `todo_list`), each `status` `pending`, `in_progress` or `completed`. `text` (when present) is a plan it presented (`ExitPlanMode`). Each update is a revision. |
 | `approval` | `approval:<request id>` | `{"request_id": "...", "tool": "Bash", "input": {...}, "state": "pending", "message": "..."}`; a build's backend asking orbit's policy whether a tool call may run. Revision 1 is the request (`pending`); the decision is the next, `allowed` or `denied`, with orbit's `message`. Actions waiting for a person are a run's `actions`, not these. |
 | `question` | `question:<a>.<s>.<i>` (a question tool's: `question:<call id>.<n>`) | `{"text": "Which card?", "header": "...", "options": [{"label": "...", "description": "..."}], "multi_select": true}`; something the agent asked its person: a question in its final answer (`options` empty), or a question tool's, with what it offered. The thread's question messages are the ones a person replies to. |
+| `steer` | `steer:<message id>` | `{"message_id": "uuid", "text": "...", "author": "kanishk"}`; a person's message the turn took while it worked (`delivery: "steer"`), from the point the backend started on it: what follows answers it too. `author` is absent when none was recorded. |
 | `status` | `status:<a>.<s>.0` | `{"code": "orbit.source_fetched", "detail": <bounded>}`; something that happened to the run that is not the model's output: orbit's steps (`orbit.*`, as in Events), the backend's session start (`system.init`), a rate limit report (`rate_limit_event`), a line that was not JSON (`raw`). `detail` is the event's payload. |
 | `turn` | `turn:<a>.<n>` | below |
 
@@ -570,7 +590,7 @@ A row:
 
 ## Actions
 
-`GET /actions?agent=&status=&run_id=&before=<cursor>&limit=<n>` is `{"actions": [<action>], "has_more": false, "next_before": null}`, newest first. `status` is as in a thread action; `run_id` narrows to one run's proposals (400 when it is not a UUID). Paging is as for a thread: `next_before` is an opaque cursor, `null` exactly when `has_more` is false; `limit` defaults to 100, at most 500. `GET /actions/{id}` is `{"action": <action>}`:
+`GET /actions?agent=&status=&run_id=&before=<cursor>&limit=<n>` is `{"actions": [<action>], "has_more": false, "next_before": null}`, newest first. `status` is as in a thread action; `run_id` narrows to one run's proposals (400 when it is not a UUID). Paging is as for a thread: `next_before` is an opaque cursor, `null` exactly when `has_more` is false; `limit` defaults to 100, at most 500. `GET /actions/{id}` is `{"action": <action>, "preview": {...}}`. `preview` is what a `pending` action would do if it executed now, computed by orbit for the person deciding: for the schedule actions, the shape in Defining agents above; for `agent:define`, a dry run of the change, `{"agent": "morning", "change": "create", "widens": ["tool WebFetch", "source news-example-com"], "diff": "+ {\n+   \"name\": \"morning\",\n..."}`, where `change` is `create` or `update`, `widens` is what it adds beyond the agent's current version (the same list that holds an `agent:define` for a person), and `diff` is every line of the spec as indented JSON, prefixed `  ` (unchanged), `- ` (removed) or `+ ` (added); it is omitted for a decided action and a type without one, and replaced by `preview_error` (a string) when it would fail now. The approval page shows it too.
 
 ```json
 {"id": "uuid", "run_id": "uuid", "agent": "finance", "type": "webhook:home-assistant",
@@ -588,6 +608,7 @@ A row:
   409. The
   decider is the token's person. Only with the operator token, `{"by":
   "name"}` names it (default `operator`). The body is optional; one that is malformed or has another field is a `400` and decides nothing.
+- **Approve and always allow.** `POST /actions/{id}/approve` with `{"always": true}` (and optionally `client_request_id`) approves the action and also writes the next version of its agent with the action's type under `auto`, through the same path as `PUT /agents/{name}` (`change: "update"`, the decider as `author`, no `run_id`; reverted like any version). `200 {"ok": true, "always": {"agent": "news", "type": "webhook:home-assistant", "rule": "auto", "version": 5}}`. The new version is validated first: an agent in the configuration files is `409` and decides nothing, as is a type already `auto` for the agent (such an action waits for another reason: an `agent:define` that widens an agent always waits for a person) and an agent changed meanwhile. A retry with the same `client_request_id` returns `{"ok": true}` without `always` and changes nothing again. `always` on `/reject` is `400`. A client shows the button beside Approve for a pending action whose agent is not a file agent (`origin` on the agent row).
 
 ## Attention and push
 
@@ -675,17 +696,19 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
 
 ## Workspace
 
-**Partly built.** The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). Built: `GET /agents/{name}/workspace` for an agent with a box, and Terminals (below). Every other route here is planned and answers `404` until built; each part says "built" in the PR that implements it.
+**Partly built.** The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). Built: finding a workspace on both backends, the file reads (tree, stat, files, download), the writes (write, mkdir, rename, trash and restore, upload and signed upload) and the audit on the snapshot backend, and Terminals (below) in a box. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
 
 A workspace is a file tree a person and an agent share. Routes take the authentik token as above; writes, trash, uploads, terminals and git writes also require membership of `ORBIT_WORKSPACE_GROUP` (default `ORBIT_OIDC_GROUP`; `403`, `check: "group"`). Errors carry a `check` beside `error`, as authentication errors do:
 
 | `check` | status | meaning |
 |---|---|---|
-| `path` | 400 | not clean, absolute, outside the tree, or through a symlink out of it |
+| `request` | 400 | a malformed parameter: a cursor not from `next_cursor` or `next_before` |
+| `path` | 400 | not clean (`a/`, `./a`, `a//b`), absolute, outside the tree, or through a symlink; the wrong kind for the route (a directory to `files`, a file to `tree`, a symlink to `files` or `download`) |
 | `not_found` | 404 | no such path, ref, terminal or comment |
-| `exists` | 409 | the target of a create, rename or restore exists |
+| `exists` | 409 | the target of a create, rename, restore or upload exists (the body carries `current`, the entry there, for a write or an upload), or a signed upload URL was used |
 | `version` | 412 | `If-Match` is not the current version; the body carries `current` (the entry, or `null` when it is gone) |
 | `version_required` | 428 | a write to an existing file without `If-Match` |
+| `group` | 403 | a write by a person outside `ORBIT_WORKSPACE_GROUP` |
 | `read_only`, `no_shell`, `no_git` | 409 | the backend does not have that capability (`capabilities`, below) |
 | `busy` | 409 | a snapshot write while a run of the conversation is running |
 | `too_large` | 413 | over a size limit (workspace.md, Auth, scope and limits) |
@@ -695,23 +718,24 @@ A workspace is a file tree a person and an agent share. Routes take the authenti
 
 ### Finding a workspace
 
-`GET /conversations/{id}/workspace` and `GET /agents/{name}/workspace` return `{"workspace": <workspace>}`. Built: `GET /agents/{name}/workspace`, for an agent with a box (Terminals, below; `null` for any other agent until the snapshot backend is built); the conversation route is planned.
+`GET /conversations/{id}/workspace` and `GET /agents/{name}/workspace` return `{"workspace": <workspace>}`, one shape over both backends. `GET /agents/{name}/workspace` is the agent's box for an agent with one (Terminals, below), and otherwise its snapshot workspace. `GET /conversations/{id}/workspace` is the conversation's snapshot workspace, also for an agent with a box until its chat turns run in the box (W10).
 
 ```json
 {"id": "uuid", "scope": "conversation", "conversation_id": "uuid", "agent": "orbit",
  "backend": "snapshot", "cwd": "",
  "capabilities": {"read": true, "write": true, "terminals": false, "git": false,
-                  "watch": true, "presets": []},
+                  "watch": false, "presets": []},
  "as_of": {"snapshot_id": 4, "run_id": "uuid", "at": "..."},
  "box": null, "created_at": "..."}
 ```
 
+- A conversation of a chat agent (`chat: true`) has a workspace; it is made the first time it is asked for, or with the conversation's first snapshot. For an agent without a box, `GET /agents/{name}/workspace` is the agent's default conversation's workspace, where its agent-level routes speak.
 - `scope` is `conversation` (the snapshot backend: one per conversation) or `agent` (a box: one per agent, shared by its conversations). From a conversation, `cwd` is that conversation's directory in the tree (`""` on the snapshot backend, `conversations/<id>` in a box); a client opens there and lets the person go up. From an agent, `cwd` is `""`.
-- `backend` is informative; a client decides from `capabilities`. `presets` lists the terminal presets (`shell`, `claude`).
-- `as_of` is the snapshot read (snapshot backend), `null` in a box.
-- `box` is `{"host": "oci", "arch": "arm64", "state": "running", "image": "sha256:..."}` in a box, `state` one of `starting`, `running`, `stopped`. A request to a stopped box starts it, waits up to 30 s, then answers `box_starting`. Built: `host` and `arch` are sandboxd's docker host's, `image` the reference the container runs (`ghcr.io/kensac/orbit-workstation@sha256:...`), `state` `running` or `stopped` (also before the box's first start); reading the workspace does not start the box, creating or attaching a terminal does, and `box_starting` is not used yet. Until the box serves files and git (W10, W13) its `capabilities` are `terminals: true` and `presets: ["shell", "claude"]` with every other capability false.
+- `backend` is informative; a client decides from `capabilities`. `presets` lists the terminal presets (`shell`, `claude`). `capabilities` is the backend's, narrowed for the person asking: `write` is false for a person outside `ORBIT_WORKSPACE_GROUP`. On the snapshot backend today it is `{"read": true, "write": true, "terminals": false, "git": false, "watch": false, "presets": []}`: its change stream is planned. In a box today it is `{"read": false, "write": false, "terminals": true, "git": false, "watch": false, "presets": ["shell", "claude"]}`, until the box serves files and git (W10, W13).
+- `as_of` is the snapshot read (snapshot backend), `null` before the first one and in a box. Its `run_id` is `null` when a person's write stored it.
+- `box` is `{"host": "oci", "arch": "arm64", "state": "running", "image": "sha256:..."}` in a box (`null` on the snapshot backend), `state` one of `starting`, `running`, `stopped`. A request to a stopped box starts it, waits up to 30 s, then answers `box_starting`. Built: `host` and `arch` are sandboxd's docker host's, `image` the reference the container runs (`ghcr.io/kensac/orbit-workstation@sha256:...`), `state` `running` or `stopped` (also before the box's first start); reading the workspace does not start the box, creating or attaching a terminal does, and `box_starting` is not used yet.
 - A conversation of an agent without chat workspaces returns `{"workspace": null}`.
-- Conversations gain `workspace_id` (the same id; `null` without one) in every conversation shape above.
+- Every conversation shape above carries `workspace_id` (the same id): set for each conversation of a chat agent and any conversation with a snapshot, `null` otherwise.
 
 ### Files
 
@@ -723,33 +747,38 @@ Every path is a query parameter, `path`, relative to the root. An entry:
  "target": null, "ignored": false, "git": "M", "has_children": null}
 ```
 
-`kind` is `file`, `dir` or `symlink` (`target` its link text; a symlink is never followed out of the tree). `version` is for files only. `ignored` is from `.gitignore`. `git` is the porcelain status letters in a box (`null` outside a repository and on the snapshot backend). `has_children` is for directories.
+`kind` is `file`, `dir` or `symlink` (`target` its link text, `null` for the others; a symlink is never followed, so a path through one is a `path` error). `bytes` is a file's size, `0` for the others. `mode` is the permission bits in octal. `version` is for files only, and left out of the entry otherwise. `ignored` is from the `.gitignore` files of the tree, as git decides (on the snapshot backend there is no global or `info/exclude` file). `git` is the porcelain status letters in a box (`null` outside a repository and on the snapshot backend). `has_children` is for directories, `null` for the others. orbit's own state (`.orbit/`, a run's `inputs/`) is not in the tree: such a path is `not_found`.
 
-- `GET /workspaces/{id}/tree?path=&cursor=&limit=` lists one directory: `{"path", "entries": [<entry>], "next_cursor": null}`, directories first, then by name; `limit` defaults to 500, at most 2000; `next_cursor` is opaque, `null` on the last page. `version` is omitted from tree entries (it costs a read of every file).
+Reads are limited to 100 requests a second per person per workspace (per orbit instance), with a burst of as many; over it is `429` (`rate`) with `Retry-After` in seconds.
+
+- `GET /workspaces/{id}/tree?path=&cursor=&limit=` lists one directory: `{"path", "entries": [<entry>], "next_cursor": null}`, directories first, then by name (bytewise); `limit` defaults to 500, at most 2000 (a larger one is clamped); `next_cursor` is opaque, `null` on the last page. `version` is omitted from tree entries (it costs a read of every file). An empty workspace's root is an empty list.
 - `GET /workspaces/{id}/stat?path=` is `{"entry": <entry>}`, with `version`.
-- `GET /workspaces/{id}/files?path=&ref=` is a file for the editor: `{"entry": <entry>, "text": "...", "reason": null}`. `text` is the whole file as UTF-8, byte for byte (line endings and a BOM kept). When it cannot be edited, `text` is absent and `reason` is `binary` (a NUL in the first 8000 bytes, or not UTF-8) or `too_large` (over 2 MiB). `ref` reads a past version from `history` (below). The response's `ETag` is the version.
-- `PUT /workspaces/{id}/files?path=` writes the body (raw bytes, at most 8 MiB) as the file. `If-Match: "<version>"` is required for an existing file; `If-None-Match: *` creates and fails `exists` if it is there. Parent directories are created. `200` (or `201` created) `{"entry": <entry>}`.
-- `POST /workspaces/{id}/mkdir` `{"path"}`: `201 {"entry"}`.
-- `POST /workspaces/{id}/rename` `{"from", "to", "version"?}`: `200 {"entry"}` at `to`. Never overwrites (`exists`); `version` guards a file's content as `If-Match` does.
-- `POST /workspaces/{id}/trash` `{"path", "version"?}` moves a file or directory to the trash: `200 {"trash": <item>}`. `GET /workspaces/{id}/trash?cursor=&limit=` lists items, newest first: `{"items": [...], "next_cursor"}`. `POST /workspaces/{id}/trash/{item}/restore` `{"to"?}` puts it back at its path or `to`: `200 {"entry"}`. There is no route that empties the trash.
+- `GET /workspaces/{id}/files?path=&ref=` is a file for the editor: `{"entry": <entry>, "text": "...", "reason": null}`. `text` is the whole file as UTF-8, byte for byte (line endings and a BOM kept). When it cannot be edited, `text` is absent and `reason` is `binary` (a NUL in the first 8000 bytes, or not UTF-8) or `too_large` (over 2 MiB, checked first). *(planned)* `ref` reads a past version from `history` (below); until history is built every `ref` is `not_found`. The response's `ETag` is the version, quoted.
+- `PUT /workspaces/{id}/files?path=` writes the body (raw bytes, at most 8 MiB, else `too_large`) as the file. `If-Match: "<version>"` is required for an existing file (`version_required` without it; `If-Match: *` accepts any version); `If-None-Match: *` creates and fails `exists` if it is there; an `If-Match` on a path that is not there is `version` with `current: null`. Parent directories are created; a path under a file, a directory or a symlink at the path, the root and orbit's own state are `path` errors. An existing file keeps its mode, a new one is `0644`. `200` (or `201` created) `{"entry": <entry>}`.
+- `POST /workspaces/{id}/mkdir` `{"path"}`: `201 {"entry"}`, parents created; `exists` when the path is there.
+- `POST /workspaces/{id}/rename` `{"from", "to", "version"?}`: `200 {"entry"}` at `to`, with everything under a directory. Never overwrites (`exists`); `version` guards a file's content as `If-Match` does (given for a directory, it is `version`). A move into itself or of the root is a `path` error.
+- `POST /workspaces/{id}/trash` `{"path", "version"?}` moves a file or directory to the trash: `200 {"trash": <item>}`; `version` as for rename. `GET /workspaces/{id}/trash?cursor=&limit=` lists items, newest first: `{"items": [...], "next_cursor"}` (`limit` defaults to 100, at most 500). `POST /workspaces/{id}/trash/{item}/restore` `{"to"?}` (the body is optional) puts it back at its path or `to`, with everything that was under it: `200 {"entry"}`, `exists` when the target is there. An item may be restored more than once (a copy each time); `restored_at` is the latest. There is no route that empties the trash: on the snapshot backend an item's content is the snapshot it was trashed from, kept like every snapshot. An item's `bytes` is the total of its files; `by` is the person, `null` for the operator token.
 
 ```json
 {"id": "uuid", "path": "notes/old.md", "kind": "file", "bytes": 210,
  "trashed_at": "...", "by": "kanishk", "restored_at": null}
 ```
 
-- `POST /workspaces/{id}/upload?dir=` takes `multipart/form-data`, any number of file parts, each at most 64 MiB, named by the part's file name (cleaned as conversation uploads are). An existing name is `exists` unless `overwrite=1`, which trashes the old file first. `201 {"entries": [<entry>]}`. `POST /workspaces/{id}/upload/url` `{"path", "bytes", "media_type"}` returns a signed `PUT` URL exactly as `POST /conversations/{id}/uploads/url` does, up to 1 GiB, writing to `path` (`exists` applies).
-- `GET /workspaces/{id}/download?path=&ref=` is a file as a download (`Content-Disposition: attachment`, `nosniff`, a CSP that runs nothing), or a directory as `application/gzip` (a tar.gz, `.orbit/` left out), at most 1 GiB. `inline=1` serves a raster image (not SVG) inline, for a preview.
+- `POST /workspaces/{id}/upload?dir=` takes `multipart/form-data`, any number of file parts, each at most 64 MiB (`too_large`), named by the part's file name (cleaned as conversation uploads are, without numbering), into `dir` (created when missing; default the root), all in one write. An existing name is `exists` unless `overwrite=1`, which trashes the old file first (a directory there is always `exists`); a name twice in one form is a `request` error. `201 {"entries": [<entry>]}`, in form order.
+- `POST /workspaces/{id}/upload/url` `{"path", "bytes", "media_type"?}` returns a signed `PUT` URL shaped as `POST /conversations/{id}/uploads/url`'s (`{"url", "method": "PUT", "headers", "expires_at", "max_bytes"}`), for `bytes` up to 1 GiB, writing to `path`; `exists` applies when it is issued and when it is used. The URL is `/api/v1/workspaces/signed?...`: no `Authorization` header (the signature, under a key of its own derived from `ORBIT_API_TOKEN` (`secret.WorkspaceUploadURL`), names the workspace, the path, the type, `bytes` as the most it accepts, the person, who must be in the workspace group when it is issued, and an expiry 15 minutes ahead). It uploads once (a second `PUT` is `409` `exists`); an altered or expired URL is `403`, a larger body `413` `too_large`. `media_type` sets only the `Content-Type` the browser sends. It needs `public_url` in `orbit.yaml` (`503` without it).
+- `GET /workspaces/{id}/download?path=&ref=` is a file as a download (`application/octet-stream`, `Content-Disposition: attachment`, `nosniff`, a CSP that runs nothing, its version as the `ETag`), or a directory as `application/gzip` (a tar.gz named `<directory>.tar.gz`, `workspace.tar.gz` for the root, whose paths start with the directory's name; `.orbit/` left out), at most 1 GiB. `inline=1` serves a raster image (not SVG, as its content sniffs) inline with its own type, for a preview; any other file stays an attachment. A symlink is a `path` error. `ref` is as for `GET /files`.
 
-On the snapshot backend a write, mkdir, rename, trash, restore or upload stores a new snapshot, refused with `busy` while a run of the conversation is running; `as_of` moves to it.
+On the snapshot backend a write, mkdir, rename, trash, restore or upload stores a new snapshot (`source: person`, `run_id` null), made from the newest and applied again from the newest when another write got in first; it is refused with `busy` while a run of the conversation is running, since the run's own snapshot would follow it. `as_of` moves to it. The whole snapshot holds at most 256 MiB (`too_large`), so a signed upload larger than that is refused when it is asked for. Writes are limited to 20 a second per person per workspace (per instance), as reads are. A request's `X-Request-Id` (up to 128 printable characters; one is made when it has none) is echoed in the response and recorded with its events.
+
+The next turn of the conversation's agent is told, by code, which files the person changed since the agent last saw the workspace (added, modified, removed, renamed; at most 100 lines), and its working directory has the person's version: a live session process, whose sandbox holds the old copy, is not reused, and the session resumes in a new one started from the workspace as it is.
 
 ### History
 
-`GET /workspaces/{id}/history?path=&before=&limit=` is a file's versions, newest first: `{"versions": [{"ref": "opaque", "version": "sha256:<hex>", "at": "...", "by": {"kind": "run", "run_id": "uuid", "person": null, "terminal_id": null}, "source": "snapshot"}], "next_before": null}`. `source` is `snapshot`, `checkpoint` (a box's per-turn record) or `git` (a commit; `rev` is set). `by.kind` is `run`, `person`, `terminal` or `unknown` (a change seen between turns that nothing attributed). Read one with `GET /workspaces/{id}/files?path=&ref=`.
+*(planned)* `GET /workspaces/{id}/history?path=&before=&limit=` is a file's versions, newest first: `{"versions": [{"ref": "opaque", "version": "sha256:<hex>", "at": "...", "by": {"kind": "run", "run_id": "uuid", "person": null, "terminal_id": null}, "source": "snapshot"}], "next_before": null}`. `source` is `snapshot`, `checkpoint` (a box's per-turn record) or `git` (a commit; `rev` is set). `by.kind` is `run`, `person`, `terminal` or `unknown` (a change seen between turns that nothing attributed). Read one with `GET /workspaces/{id}/files?path=&ref=`.
 
 ### The change stream
 
-`GET /workspaces/{id}/changes?path=` is Server-Sent Events for a subtree (default the root):
+*(planned)* `GET /workspaces/{id}/changes?path=` is Server-Sent Events for a subtree (default the root):
 
 | event | id | data |
 |---|---|---|
@@ -761,7 +790,7 @@ On the snapshot backend a write, mkdir, rename, trash, restore or upload stores 
 
 ### A reply's changes
 
-Thread run items and runs gain `changes`: `{"files": 3, "additions": 40, "deletions": 2}`, `null` for a run with no workspace.
+*(planned)* Thread run items and runs gain `changes`: `{"files": 3, "additions": 40, "deletions": 2}`, `null` for a run with no workspace.
 
 `GET /runs/{id}/changes` is what the run changed in its workspace:
 
@@ -789,7 +818,7 @@ A diff file, here and in git diffs:
 
 ### Git (box only)
 
-`capabilities.git` false answers `no_git`. `repo` is a repository's path in the tree (a directory with `.git`, found up to three levels deep).
+*(planned)* `capabilities.git` false answers `no_git`. `repo` is a repository's path in the tree (a directory with `.git`, found up to three levels deep).
 
 - `GET /workspaces/{id}/git/repos`: `{"repos": [{"path": "orbit", "branch": "main", "head": "sha", "upstream": "origin/main", "ahead": 1, "behind": 0, "remote": "https://github.com/kensac/orbit"}]}`, at most 50.
 - `GET /workspaces/{id}/git/status?repo=`: `{"repo", "branch", "head", "files": [{"path", "orig_path": null, "index": "M", "worktree": ".", "conflict": false}]}` (porcelain v2 letters, `.` for unchanged).
@@ -849,7 +878,7 @@ Close codes: `4001` when the instance drains or shuts down: reconnect with a new
 
 ### Review comments
 
-Comments on lines, sent to the conversation's agent as one message, as a ticket's review comments are (tickets.md).
+*(planned)* Comments on lines, sent to the conversation's agent as one message, as a ticket's review comments are (tickets.md).
 
 - `POST /conversations/{id}/comments` `{"path", "start_line", "end_line", "side": "new", "anchor": {"kind": "run", "run_id": "uuid"}, "body"}`: `201 {"comment"}`, a draft. `anchor.kind` is `run` (a reply's changes), `git` (`repo`, `base`, `head` as for a git diff) or `worktree` (the file as it is). `side` is `new` or `old`. Lines `0` and `0` mean the whole file; a body is at most 8 KB.
 - `GET /conversations/{id}/comments?status=`: `{"comments": [...]}`. `status` is `draft`, `sent`, `superseded` or `withdrawn`.
@@ -858,7 +887,7 @@ Comments on lines, sent to the conversation's agent as one message, as a ticket'
 
 ### Audit
 
-`GET /workspaces/{id}/events?before=&limit=`: `{"events": [{"id", "at", "person", "op", "path", "from", "version_before", "version_after", "bytes", "terminal_id", "run_id", "request_id"}], "next_before"}`, newest first. `op` is each write route's name (`write`, `mkdir`, `rename`, `trash`, `restore`, `upload`, `commit`, `push`, `terminal.create`, `terminal.attach`, `terminal.detach`, `terminal.kill`, `review`). Terminal input is never recorded.
+`GET /workspaces/{id}/events?before=&limit=`: `{"events": [{"id", "at", "person", "op", "path", "from", "version_before", "version_after", "bytes", "terminal_id", "run_id", "request_id"}], "next_before"}`, newest first. `id` is a number; `limit` defaults to 100, at most 500; `next_before` is opaque, `null` on the last page. Fields an operation has no value for are `null` (`person` for the operator token, `version_before` for a create, `version_after` for a trash, `bytes` for a mkdir). Built today: `write`, `mkdir`, `rename`, `trash` (also before an upload's overwrite), `restore` and `upload`, one row per file. Reads are not recorded. `op` is each write route's name (`write`, `mkdir`, `rename`, `trash`, `restore`, `upload`, `commit`, `push`, `terminal.create`, `terminal.attach`, `terminal.detach`, `terminal.kill`, `review`). Terminal input is never recorded.
 
 ## Memory
 
@@ -937,7 +966,7 @@ After a conversation goes quiet, orbit runs a short learning pass over it (trigg
 | `wait_for_reply` | `run_id`, `wait_seconds` | `reply`, the run as a thread run item |
 | `read_thread` | `agent` or `conversation_id`, `limit` (default 20, at most 200), `before` | as a thread page: `items`, `has_more`, `next_before` |
 | `list_actions` | `agent`, `status` (default `pending`; `all` for every status), `run_id`, `limit`, `before` | as `GET /actions`: `actions`, `has_more`, `next_before` |
-| `approve_action`, `reject_action` | `action_id` | the decided `action`; a decided one is an error |
+| `approve_action`, `reject_action` | `action_id`; `approve_action` also `always` | the decided `action`; a decided one is an error. With `always: true`, as `POST /actions/{id}/approve` with `always` (Actions), plus `always` |
 | `search` | `q`, and as `GET /search`: `agent`, `conversation_id`, `run_id`, `kind`, `from`, `to`, `limit`, `offset` | as `GET /search` |
 
 - **Waiting.** `send_message` and `create_conversation` wait for the run they woke up to `wait_seconds` (default 45, at most 300; `-1` returns at once). A run still going when the wait ends is returned with its status and a `note` to call `wait_for_reply`. A message that woke no run (`wake_on_message` off) says so in `note`.

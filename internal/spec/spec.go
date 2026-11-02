@@ -192,7 +192,9 @@ type Agent struct {
 	Name        string `yaml:"name" json:"name"`
 	Description string `yaml:"description" json:"description"`
 	// Charter is the standing instruction every run starts from.
-	Charter  string    `yaml:"charter" json:"charter"`
+	Charter string `yaml:"charter" json:"charter"`
+	// Starters are prompts a client offers for a new conversation with the agent (at most MaxStarters, each MaxStarterLen bytes).
+	Starters []string  `yaml:"starters,omitempty" json:"starters,omitempty"`
 	Enabled  *bool     `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	Timezone string    `yaml:"timezone,omitempty" json:"timezone,omitempty"`
 	Runner   string    `yaml:"runner,omitempty" json:"runner,omitempty"`
@@ -343,6 +345,12 @@ const (
 	MaxHookTimeout     = time.Minute
 )
 
+// Bounds on an agent's starters: a handful of buttons in a new chat, each a sentence or two.
+const (
+	MaxStarters   = 6
+	MaxStarterLen = 500
+)
+
 // LearnSpec configures an agent's learning runs.
 type LearnSpec struct {
 	// Enabled false turns learning off for the agent.
@@ -393,6 +401,9 @@ type Trigger struct {
 	Start string `yaml:"start,omitempty" json:"start,omitempty"`
 	// Prompt is the reason for this wake, appended to the charter.
 	Prompt string `yaml:"prompt,omitempty" json:"prompt,omitempty"`
+	// Paused stops the trigger firing; PausedUntil, a local time in the agent's timezone as Start is, ends the pause there (fires before it are skipped, never caught up). The schedule:pause and schedule:resume actions write them.
+	Paused      bool   `yaml:"paused,omitempty" json:"paused,omitempty"`
+	PausedUntil string `yaml:"paused_until,omitempty" json:"paused_until,omitempty"`
 	// Webhook names an inbound route, POST /hooks/<agent>/<webhook>: a delivery signed with Secret starts a run.
 	Webhook string `yaml:"webhook,omitempty" json:"webhook,omitempty"`
 	// Secret is the variable holding the webhook's signing secret, one of orbit.yaml's webhook_secrets bound to this agent.
@@ -401,6 +412,36 @@ type Trigger struct {
 	MaxBytes int64 `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
 	// MissedGrace is how late a schedule fire may start; a later one is skipped as missed (MissedGraceFor).
 	MissedGrace Duration `yaml:"missed_grace,omitempty" json:"missed_grace,omitempty"`
+}
+
+// paused is a schedule with a pause: no fire before until, and none at all when until is zero.
+type paused struct {
+	Schedule
+	until time.Time
+}
+
+// Next is the inner schedule's first fire strictly after t that is not before until.
+func (p paused) Next(t time.Time) time.Time {
+	if p.until.IsZero() {
+		return time.Time{}
+	}
+	if from := p.until.Add(-time.Second); t.Before(from) {
+		// Fires are whole seconds (rrule.Rule.Start is truncated, cron has none), so a fire at until itself is after from.
+		t = from
+	}
+	return p.Schedule.Next(t)
+}
+
+// ParseLocal reads a local time in loc in the forms Trigger.Start is written in.
+func ParseLocal(s string, loc *time.Location) (time.Time, error) {
+	var err error
+	for _, l := range startLayouts {
+		var t time.Time
+		if t, err = time.ParseInLocation(l, s, loc); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, err
 }
 
 // Schedule is when a trigger fires: the first fire strictly after a time,
@@ -414,8 +455,28 @@ type Schedule interface {
 var startLayouts = []string{"2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-02 15:04"}
 
 // TriggerSchedule is a trigger's schedule, read in loc (the agent's
-// timezone).
+// timezone), its pause applied.
 func TriggerSchedule(t Trigger, loc *time.Location) (Schedule, error) {
+	sched, err := triggerSchedule(t, loc)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case t.PausedUntil != "" && !t.Paused:
+		return nil, errors.New("paused_until needs paused")
+	case t.PausedUntil != "":
+		until, err := ParseLocal(t.PausedUntil, loc)
+		if err != nil {
+			return nil, fmt.Errorf("paused_until %q: want local time as 2026-11-09T00:00", t.PausedUntil)
+		}
+		return paused{sched, until}, nil
+	case t.Paused:
+		return paused{Schedule: sched}, nil
+	}
+	return sched, nil
+}
+
+func triggerSchedule(t Trigger, loc *time.Location) (Schedule, error) {
 	switch {
 	case t.IsWebhook():
 		return nil, ErrWebhookTrigger
@@ -430,13 +491,7 @@ func TriggerSchedule(t Trigger, loc *time.Location) (Schedule, error) {
 		if t.Start == "" {
 			return nil, errors.New("an rrule needs a start (local time, 2026-11-02T09:00)")
 		}
-		var start time.Time
-		var err error
-		for _, l := range startLayouts {
-			if start, err = time.ParseInLocation(l, t.Start, loc); err == nil {
-				break
-			}
-		}
+		start, err := ParseLocal(t.Start, loc)
 		if err != nil {
 			return nil, fmt.Errorf("start %q: want local time as 2026-11-02T09:00", t.Start)
 		}
@@ -1056,7 +1111,8 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("action %q: rule must be auto, approve or deny", typ)
 		}
 		switch {
-		case typ == "notify", typ == "continue", typ == "agent:define":
+		case typ == "notify", typ == "continue", typ == "agent:define", typ == "agent:save",
+			typ == "schedule:add", typ == "schedule:pause", typ == "schedule:resume", typ == "schedule:remove", typ == "run:now":
 		case typ == "delegate", typ == "task:message", typ == "task:cancel", typ == "task:retry":
 			if len(a.Delegates) == 0 {
 				at("action %q: needs delegates, the agents this one may hand tasks to", typ)
@@ -1070,7 +1126,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 				at("action %q: needs a github block in orbit.yaml", typ)
 			}
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone or github:pr)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone or github:pr)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
@@ -1091,6 +1147,14 @@ func (c *Config) validateAgent(a *Agent) []error {
 	}
 	if len(a.Hooks) > MaxHooks {
 		at("hooks: at most %d", MaxHooks)
+	}
+	if len(a.Starters) > MaxStarters {
+		at("starters: at most %d", MaxStarters)
+	}
+	for i, st := range a.Starters {
+		if strings.TrimSpace(st) == "" || len(st) > MaxStarterLen {
+			at("starters[%d]: 1 to %d bytes", i, MaxStarterLen)
+		}
 	}
 	for i, h := range a.Hooks {
 		if !slices.Contains(HookEvents, h.Event) {

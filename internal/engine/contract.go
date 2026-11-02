@@ -235,6 +235,9 @@ type promptRun struct {
 	// Attached are the files the messages carry, by message id, as placed
 	// in the workdir.
 	Attached map[string][]placedUpload
+	// WorkspaceChanges is what the person changed in a chat's workspace
+	// since the agent's last turn (personChanges), "" when nothing.
+	WorkspaceChanges string
 }
 
 // userPrompt is the run's content: charter, why it woke, memory and inbox.

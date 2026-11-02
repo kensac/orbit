@@ -149,6 +149,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `name` | `^[a-z][a-z0-9-]{0,62}$` | required | The agent's name; a file's must match its file name, and it may not be reserved (configuration.md, Agent names). |
 | `description` | string | none | One line shown in agent lists and to MCP clients. |
 | `charter` | string | required | The standing instruction every run starts from. |
+| `starters` | list of strings | none | Prompts a client offers for a new conversation; at most 6, each at most 500 bytes. "Save this conversation as an agent" drafts them. |
 | `enabled` | bool | `true` | `false` stops its triggers firing; manual runs still work. A database agent's comes from its definition, not its spec. |
 | `timezone` | IANA zone | `orbit.yaml` timezone | Zone for triggers and source templates; parsed once at load (`Agent.Location`), and one the tz database does not have fails it. |
 | `runner` | runner name | `defaults.runner` | The backend. |
@@ -182,6 +183,8 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `rrule` | RFC 5545 rule | | A recurrence cron cannot say (configuration.md, Triggers). |
 | `start` | local time `2026-11-03T09:00` | required with `rrule` | The rule's first period and its time of day; not allowed with `schedule`. |
 | `prompt` | string | none | The reason for this wake, appended to the charter. |
+| `paused` | bool | `false` | The trigger does not fire (`schedule:pause` writes it). |
+| `paused_until` | local time `2026-11-09T00:00` | none | Needs `paused`: the pause ends there; fires before it are skipped, never caught up. |
 | `webhook` | `^[a-z][a-z0-9-]{0,62}$` | | A signed delivery to `POST /hooks/<agent>/<webhook>` starts a run (configuration.md, Webhooks); unique per agent. |
 | `secret` | variable | required with `webhook` | The signing secret: one of `webhook_secrets`, listing this agent. |
 | `max_bytes` | int | `1048576` (1 MiB) | `webhook` only: the largest body accepted, at most 8 MiB; a larger one is `413`. |
@@ -267,6 +270,9 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint; never a URL or header of the model's. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
 | `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |
+| `schedule:add`, `schedule:pause`, `schedule:resume`, `schedule:remove` | Changes one trigger (or, pausing and resuming, every trigger) of this agent or one in `delegates`, as a new revertible version; times are the person's words, parsed by code (configuration.md, Changing schedules by talking). `approve` applies directly in a run answering the person's message. | a database or built-in target |
+| `agent:save` | Saves the conversation as a new agent: the model writes its name, description, charter and starters; orbit adds what the conversation did and proposes it as an `agent:define` that always waits for a person (configuration.md, Saving a conversation as an agent). | |
+| `run:now` | Starts a manual run of this agent or one in `delegates`; a run no message woke cannot start its own agent. `approve` applies directly in a run answering the person's message. | |
 
 ### `notify`
 

@@ -38,6 +38,8 @@ type DefineRequest struct {
 	// database does not define it yet (agent:define).
 	Update bool
 	Upsert bool
+	// Base, when set, is the version the change was made from: a newer one is a conflict, so a change computed from a spec is never stored over a version it did not see.
+	Base int
 }
 
 // Defined is what a definition change did.
@@ -98,6 +100,8 @@ func (e *Engine) DefineAgent(ctx context.Context, req DefineRequest) (*Defined, 
 			return nil, err
 		case prev.Archived:
 			return nil, fmt.Errorf("agent %q is archived: %w", a.Name, store.ErrNotFound)
+		case req.Base > 0 && prev.Version != req.Base:
+			return nil, fmt.Errorf("agent %q changed since version %d (now %d): %w", a.Name, req.Base, prev.Version, store.ErrConflict)
 		default:
 			after, enabled = prev.Version, prev.Enabled
 		}

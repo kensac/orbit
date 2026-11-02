@@ -229,7 +229,8 @@ const cancelPoll = 2 * time.Second
 
 // watchCancel stops the attempt when its person asks: a chat turn is
 // interrupted through the CLI's control channel (it ends with what it has),
-// any other run's backend is cancelled.
+// any other run's backend is cancelled. While a chat turn runs, the same
+// poll hands it the conversation's steer messages (steer.go).
 func (e *Engine) watchCancel(ctx context.Context, c *store.ClaimedRun, st *attemptState, chat bool, lose context.CancelCauseFunc) {
 	t := time.NewTicker(cancelPoll)
 	defer t.Stop()
@@ -240,6 +241,9 @@ func (e *Engine) watchCancel(ctx context.Context, c *store.ClaimedRun, st *attem
 		case <-t.C:
 			asked, err := e.Store.CancelRequested(ctx, c.ID)
 			if err != nil || !asked {
+				if f := st.steer.Load(); f != nil && err == nil {
+					e.pollSteers(ctx, c, f)
+				}
 				continue
 			}
 			st.stop()
@@ -334,6 +338,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	keepScratch := func() bool { return ctx.Err() != nil }
 	withSession := a.Session != nil && a.Session.Resume && claudeCode
 	chat := a.Chat && claudeCode
+	// What the person changed in a chat's workspace since the last turn.
+	var wsNote string
+	var wsFresh bool
 	if withSession || chat {
 		base := filepath.Join(e.DataDir, "agents", a.Name)
 		workdir, home = filepath.Join(base, "work"), filepath.Join(base, "home")
@@ -341,6 +348,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			// A chat's workspace is its conversation's, kept between
 			// messages and stored after every run.
 			workdir, home = e.chatDirs(c.ConversationID)
+			var err error
+			if wsNote, wsFresh, err = e.personChanges(ctx, c.ConversationID); err != nil {
+				return nil, nil, err
+			}
 			if err := e.restoreWorkspace(ctx, c.ConversationID, workdir); err != nil {
 				return nil, nil, err
 			}
@@ -614,8 +625,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	if chat {
 		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
-			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
-			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec, instructor: st.instructor,
+			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached,
+				WorkspaceChanges: wsNote}, fresh: wsFresh,
+			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, steer: &st.steer, rec: rec, instructor: st.instructor,
 			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun})
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
@@ -786,7 +798,17 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		m := out.Memory.Content
 		o.Memory = &m
 	}
+	acts := make([]proposed, 0, len(out.Actions))
 	for _, act := range out.Actions {
+		acts = append(acts, proposed{act.Type, act.Params, act.Reason})
+	}
+	acts, asked := absorbSchedules(acts)
+	for _, act := range acts {
+		if _, ok := types[act.Type]; ok && act.Type == actions.SaveType {
+			// Drafted by code from the conversation, then held for a person as an agent:define.
+			o.Actions = append(o.Actions, e.saveProposal(ctx, a, c, act, asked[saveName(act.Params)]))
+			continue
+		}
 		pa := store.ProposedAction{Type: act.Type, Params: act.Params, Reason: act.Reason, Rule: string(ruleFor(a, act.Type, c.Trigger)),
 			InstructedBy: out.instructedBy}
 		if t, ok := types[act.Type]; !ok {
@@ -801,6 +823,12 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 		if act.Type == actions.DelegateType && pa.Error == "" && out.task != nil && out.task.Depth >= store.MaxTaskDepth {
 			pa.Rule, pa.Error = string(spec.RuleDeny), fmt.Sprintf("delegation is nested at most %d deep, and this task is at depth %d", store.MaxTaskDepth, out.task.Depth)
+		}
+		if actions.IsScheduleType(act.Type) && act.Type != actions.RunNowType && pa.Error == "" {
+			// Parsed now, so a phrase code cannot read, or a trigger that is not there, is refused with the reason while the person is still there to rephrase.
+			if _, err := e.PreviewSchedule(ctx, a.Name, act.Type, act.Params); err != nil {
+				pa.Rule, pa.Error = string(spec.RuleDeny), err.Error()
+			}
 		}
 		if act.Type == actions.TaskRetryType && pa.Error == "" && e.retryNeedsPerson(ctx, act.Params) {
 			// The circuit breaker: past it, a retry waits for a person even
@@ -1009,13 +1037,13 @@ func shortError(err error) string {
 // A run that read a mail is the exception: its sender is answered by mail (mailForRun).
 func Attended(trigger string) bool { return trigger == "message" }
 
-// ruleFor is the rule a run's proposal of typ gets. Delegation's types
-// under an approve rule apply directly in a run answering the person's
-// own message: they are reading the conversation and asked for the work.
-// Unattended runs follow the agent's rules as written.
+// ruleFor is the rule a run's proposal of typ gets. Delegation's types and
+// the schedule actions under an approve rule apply directly in a run
+// answering the person's own message: they are reading the conversation
+// and asked for the work. Unattended runs follow the agent's rules as written.
 func ruleFor(a *spec.Agent, typ, trigger string) spec.Rule {
 	r := a.RuleFor(typ)
-	if r == spec.RuleApprove && actions.IsTaskType(typ) && Attended(trigger) {
+	if r == spec.RuleApprove && (actions.IsTaskType(typ) || actions.IsScheduleType(typ)) && Attended(trigger) {
 		return spec.RuleAuto
 	}
 	return r
@@ -1192,7 +1220,7 @@ func (e *Engine) executor(snap *Snapshot) *actions.Executor {
 			return e.Store.EnqueueContinuation(ctx, store.Continuation{
 				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
 		},
-		Define: e.defineAction}
+		Define: e.defineAction, Schedule: e.scheduleAction}
 }
 
 // finishAction records an execution and tells the person of a failure.
