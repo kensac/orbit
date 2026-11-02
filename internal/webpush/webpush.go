@@ -243,7 +243,7 @@ func seal(asPriv *ecdh.PrivateKey, uaPub *ecdh.PublicKey, authSecret, salt, plai
 	header := make([]byte, 0, 86)
 	header = append(header, salt...)
 	header = binary.BigEndian.AppendUint32(header, recordSize)
-	header = append(header, byte(len(asPub)))
+	header = append(header, 65) // idlen: an uncompressed P-256 point is 65 bytes
 	header = append(header, asPub...)
 	// 0x02 marks the last (only) record.
 	return gcm.Seal(header, nonce, append(append([]byte{}, plaintext...), 2), nil), nil

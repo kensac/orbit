@@ -17,7 +17,7 @@ const (
 	AttentionDecision = "decision" // a ticket's plan waits for approval
 )
 
-// Attention is one thing waiting on a person (migration 00014). Title is
+// Attention is one thing waiting on a person (migration 20261102032158). Title is
 // all a notification may carry; Detail (the question, the action's reason,
 // the error, the ticket's title) is for the signed-in inbox only.
 type Attention struct {
