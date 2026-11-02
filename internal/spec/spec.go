@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -184,6 +185,15 @@ type Agent struct {
 	// claims a run only when its ORBIT_CAPABILITIES cover every one; an
 	// agent with none runs anywhere (docs/ARCHITECTURE.md, Worker fleet).
 	Needs []string `yaml:"needs,omitempty" json:"needs,omitempty"`
+	// Delegates names the agents this one may hand tasks to with the
+	// delegate action ("*" is every configured agent, itself included).
+	// The delegate rule still decides whether it may (docs/ARCHITECTURE.md,
+	// Delegation).
+	Delegates []string `yaml:"delegates,omitempty" json:"delegates,omitempty"`
+
+	// delegateTargets is Delegates resolved against the configuration,
+	// sorted; set by Validate.
+	delegateTargets []string
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
@@ -448,13 +458,24 @@ func (a *Agent) Verifies(check string) bool { return slices.Contains(a.Verify, c
 // either way.
 func (a *Agent) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
 
-// RuleFor returns the rule for an action type, deny if unnamed.
+// RuleFor returns the rule for an action type, deny if unnamed. The task
+// types (task:message, task:cancel) manage tasks the agent delegated, so
+// unnamed they follow the delegate rule.
 func (a *Agent) RuleFor(actionType string) Rule {
 	if r, ok := a.Actions[actionType]; ok {
 		return r
 	}
+	if strings.HasPrefix(actionType, "task:") {
+		if r, ok := a.Actions["delegate"]; ok {
+			return r
+		}
+	}
 	return RuleDeny
 }
+
+// DelegateTargets is the agents this one may delegate to, sorted: Delegates
+// with "*" resolved against the configuration it was validated in.
+func (a *Agent) DelegateTargets() []string { return a.delegateTargets }
 
 // ReservedAgentNames are the names an agent may not take: the portfolio
 // serves an agent at /orbit/<name>, beside these static segments of its own
@@ -855,6 +876,10 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		switch {
 		case typ == "notify", typ == "continue", typ == "agent:define":
+		case typ == "delegate", typ == "task:message", typ == "task:cancel":
+			if len(a.Delegates) == 0 {
+				at("action %q: needs delegates, the agents this one may hand tasks to", typ)
+			}
 		case strings.HasPrefix(typ, "webhook:"):
 			if _, ok := c.Deployment.Endpoints[strings.TrimPrefix(typ, "webhook:")]; !ok {
 				at("action %q: unknown endpoint", typ)
@@ -864,7 +889,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 				at("action %q: needs a github block in orbit.yaml", typ)
 			}
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, webhook:<endpoint> or github:merge)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, delegate, task:message, task:cancel, webhook:<endpoint> or github:merge)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
@@ -880,6 +905,21 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("verify: unknown check %q (want one of %v)", v, verifyChecks)
 		}
 	}
+	a.delegateTargets = nil
+	for _, d := range a.Delegates {
+		switch {
+		case d == "*":
+			a.delegateTargets = slices.Sorted(maps.Keys(c.Agents))
+		case c.Agents[d] == nil:
+			at("delegates: %q is not a configured agent", d)
+		case !slices.Contains(a.delegateTargets, d):
+			a.delegateTargets = append(a.delegateTargets, d)
+		}
+	}
+	if slices.Contains(a.Delegates, "*") && len(a.Delegates) > 1 {
+		at("delegates: \"*\" already names every agent; list nothing beside it")
+	}
+	slices.Sort(a.delegateTargets)
 	seenSkill := map[string]bool{}
 	for _, k := range a.Skills {
 		if !nameRE.MatchString(k) {

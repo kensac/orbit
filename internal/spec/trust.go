@@ -141,7 +141,7 @@ func ruleRank(r Rule) int {
 	return 0
 }
 
-// Widening lists how next reaches further than cur (nil: an agent that does not exist yet): a tool, source, credential or need it adds, a source it changes, or an action type it allows more readily. agent:define applies such a change only with a person's approval, whatever its rule.
+// Widening lists how next reaches further than cur (nil: an agent that does not exist yet): a tool, source, credential, delegate target or need it adds, a source it changes, or an action type it allows more readily. agent:define applies such a change only with a person's approval, whatever its rule.
 func Widening(cur, next *Agent) []string {
 	if cur == nil {
 		cur = &Agent{}
@@ -176,6 +176,11 @@ func Widening(cur, next *Agent) []string {
 	for _, t := range types {
 		if ruleRank(next.RuleFor(t)) > ruleRank(cur.RuleFor(t)) {
 			out = append(out, fmt.Sprintf("action %s: %s, was %s", t, next.RuleFor(t), cur.RuleFor(t)))
+		}
+	}
+	for _, d := range next.Delegates {
+		if !slices.Contains(cur.Delegates, d) && !slices.Contains(cur.Delegates, "*") {
+			out = append(out, "delegate to "+d)
 		}
 	}
 	for _, n := range next.Needs {

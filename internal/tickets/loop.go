@@ -241,8 +241,9 @@ func (k *tick) pr(ctx context.Context, t *store.Ticket) (*github.Client, *github
 	return c, pr, err
 }
 
-// review waits for the PR's checks at the head orbit built, and then
-// proposes the merge, or a fix, or fails the ticket.
+// review starts a revise for a submitted review, or waits for the PR's
+// checks at the head orbit built and then proposes the merge, or a fix, or
+// fails the ticket.
 func (k *tick) review(ctx context.Context, t *store.Ticket) error {
 	c, pr, err := k.pr(ctx, t)
 	if github.IsStatus(err, http.StatusNotFound) {
@@ -258,6 +259,15 @@ func (k *tick) review(ctx context.Context, t *store.Ticket) error {
 		return k.fail(ctx, t, fmt.Sprintf("PR #%d was closed without merging", pr.Number))
 	case t.HeadSHA == nil || pr.Head.SHA != *t.HeadSHA:
 		return k.fail(ctx, t, fmt.Sprintf("PR #%d's head moved to %s after orbit built it; orbit merges only what it built", pr.Number, short(pr.Head.SHA)))
+	}
+	// A person's submitted review comes before the checks: what they asked
+	// to change is built before anything is merged.
+	pending, err := k.l.Store.PendingReviewComments(ctx, t.ID)
+	if err != nil {
+		return err
+	}
+	if pending > 0 {
+		return k.startBuild(ctx, t, store.BuildPurposeRevise, nil)
 	}
 	required, err := c.RequiredChecks(ctx, *t.Repo, pr.Base.Ref)
 	if err != nil {

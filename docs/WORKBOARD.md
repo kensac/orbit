@@ -19,6 +19,7 @@ A self-hosted Go service on Kanishk's server (hetzner) that runs Claude Code on 
 | Sandbox | `orbit sandboxd` (one locked-down container per build or workspace), `orbit egress` (allowlist proxy, never GitHub), the build image | #15 |
 | Operations | seamless upgrades (readiness, drain, resuming interrupted attempts), the worker fleet (capabilities, control vs worker, sessions across hosts), usage and health APIs | #11 #16 #25 |
 | Surfaces | thread and SSE API with authentik JWT auth, MCP server with OAuth proxy, mail (replies continue a conversation), uploads | #4 #21 #31 #45 |
+| Orchestration | `delegate` to other agents or fresh workers, each task in its own conversation; task DAGs; parent and child mailboxes (`task:message`, questions to the parent first); decision gates only a person resolves; `delegation` wakeups when tasks settle (never polling); the built-in `orbit` agent delegates to every agent; tasks in the thread, `/tasks` API and a live tasks stream (ARCHITECTURE.md, Delegation) | #46 |
 | Define limits | database and built-in agents held to orbit.yaml: no `file` source, `${VAR}` only from `credentials:` (each bound to a URL prefix, checked on every request and redirect), tools only from `spec.UnsandboxedTools`; an `agent:define` that widens an agent waits for a person | #71 |
 | Hygiene | API fixes, exact documented shapes, reserved agent names, migration uniqueness | #18 #19 #26 #29 #30 #40 |
 
@@ -29,7 +30,6 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | Area | Branch / PR | Notes |
 |---|---|---|
 | General `orbit` agent: a plain Claude Code session per conversation in a sandboxed persistent workspace, owner messages as instructions, agent self-edit (`agent:define`), uploads/files endpoints for the chat, stopping a running reply | #47, branch general-agent work | the chat UI already calls the endpoints described in docs/api.md |
-| Orchestration: `delegate`, task DAGs, mailboxes, decision gates, wakeups | #46 delegation | |
 | Search across everything stored, plus a live usage poller and deferring low-priority runs | #42 search | |
 | Attention events, inbox API, Web Push (portfolio PWA) | #41 orbit-push-attention | the portfolio is already a PWA |
 | Skills library (versioned, real Claude Code skills per run, agents writing their own), memory restore endpoint, per-agent hooks | #49 context-skills | |

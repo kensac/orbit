@@ -23,7 +23,7 @@ database agent of their name. Each instance reloads when the directory's
 content or the newest definition changes, so a definition written on one
 instance is in force on all within the 30 s poll.
 
-An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential or need it adds, a source it changes, an action type allowed more readily) waits for a person's approval whatever the rule.
+An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential, delegate target or need it adds, a source it changes, an action type allowed more readily) waits for a person's approval whatever the rule.
 
 Database and built-in agents are held to what orbit.yaml offers (`spec.validateTrust`): no `file` source, no `${VAR}` that is not in `credentials:`, only the tools in `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, TodoWrite), and no precheck. A spec breaking one fails validation, naming it.
 
@@ -155,6 +155,10 @@ one every run after a restart starts fresh (it does not fail).
 `continue` is an action type like any other: absent means denied. Its bounds
 are constants in `internal/actions` (`ContinueMinDelay`, `ContinueMaxDelay`,
 `MaxContinueChain`).
+
+## Delegation
+
+`delegates: [<agent>, ...]` (or `["*"]`, every configured agent, itself included) names the agents an agent may hand tasks to; an unknown name fails the load. The `delegate` action needs it, and is denied unless named, like any action; `task:message` and `task:cancel` follow the `delegate` rule unless named themselves. In a run answering the person's message, `approve` on these applies directly (docs/ARCHITECTURE.md, Delegation). Bounds are constants in `internal/store` (`MaxTasksPerDelegation`, `MaxTaskDepth`, `MaxConversationTasks`).
 
 ## Checks
 

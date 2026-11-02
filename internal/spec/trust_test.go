@@ -129,15 +129,18 @@ func TestWidening(t *testing.T) {
 	same.Charter = "new words"
 	same.Actions = ActionSet{"notify": RuleDeny, "agent:define": RuleAuto}
 	same.Tools = nil
+	cur.Delegates, same.Delegates = []string{"*"}, []string{"builder"}
 	if w := Widening(cur, &same); len(w) != 0 {
 		t.Fatalf("a narrowing change widens: %v", w)
 	}
+	cur.Delegates = nil
 	moved := src
 	moved.URL = "https://evil.example/"
 	next := &Agent{Tools: []string{"WebSearch", "WebFetch"}, Sources: []Source{moved, {Name: "b", Kind: "http", URL: "https://b/", Query: map[string]string{"k": "${OTHER}"}}},
-		Needs: []string{"sure", "docker-network:hetzner"}, Actions: ActionSet{"notify": RuleAuto, "continue": RuleApprove, "webhook:x": RuleDeny}}
+		Needs: []string{"sure", "docker-network:hetzner"}, Actions: ActionSet{"notify": RuleAuto, "continue": RuleApprove, "webhook:x": RuleDeny},
+		Delegates: []string{"builder"}}
 	want := []string{"tool WebFetch", "source tx", "source b", "credential OTHER", "action continue: approve, was deny",
-		"action notify: auto, was approve", "need docker-network:hetzner"}
+		"action notify: auto, was approve", "delegate to builder", "need docker-network:hetzner"}
 	if w := Widening(cur, next); !reflect.DeepEqual(w, want) {
 		t.Fatalf("widening =\n%q\nwant\n%q", w, want)
 	}

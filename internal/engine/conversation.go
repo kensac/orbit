@@ -65,6 +65,9 @@ func renderItem(it store.ConversationItem, loc *time.Location) string {
 	switch it.Kind {
 	case "message":
 		head = "person"
+		if strings.HasPrefix(it.Summary, store.AgentAuthorPrefix) {
+			head = strings.TrimPrefix(it.Summary, store.AgentAuthorPrefix) + ", the agent that delegated this task"
+		}
 	case "report":
 		head = "you, report"
 		if it.Summary != "" {
