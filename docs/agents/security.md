@@ -22,7 +22,7 @@ more than its agent's rules allow.
   Codex runs with `-s read-only`.
 - **Network:** whatever the agent's `tools` grant (for example `WebFetch`).
   A tool that can reach the network can exfiltrate what the run read; grant it
-  only to agents whose inputs you would be fine to see leave.
+  only to agents whose inputs you would be fine to see leave. `web: {allow: [...]}` narrows WebFetch to named domains (one `WebFetch(domain:...)` allow rule each, never the bare tool) and denies the private names (`spec.PrivateWebNames`) with `--disallowedTools`, which no allow or answer overrides. Seen on 2.1.316: an allowed domain and a `*.` subdomain were fetched, another domain and `localhost` were denied, and a WebFetch to `127.0.0.1` reached the host's loopback, so an address is never a valid entry. The rules match the URL's host, not where it resolves: an allowed public name that resolves to a private or tailnet address is still reached, which only a sandbox's egress (it never dials one) prevents. An allowed domain is still a channel out for what the run read.
 
 - **Session files are model-written state.** A session agent's transcripts
   (under its persistent HOME) hold everything earlier runs read and said,

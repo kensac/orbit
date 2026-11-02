@@ -166,6 +166,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/retry", s.ticketMove(store.TicketApproved))
 	api("POST /api/v1/tickets/{id}/reopen", s.ticketMove(store.TicketOpen))
 	api("POST /api/v1/tickets/{id}/checks/rerun", s.rerunChecks)
+	api("POST /api/v1/tickets/{id}/pick", s.pickLane)
 	api("GET /api/v1/tickets/{id}/comments", s.listComments)
 	api("POST /api/v1/tickets/{id}/comments", s.addComment)
 	api("POST /api/v1/tickets/{id}/comments/{comment}/edit", s.editComment)
