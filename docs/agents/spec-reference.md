@@ -6,7 +6,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
-| `timezone` | IANA zone | `UTC` | The zone schedules and source templates are read in, unless an agent names its own. |
+| `timezone` | IANA zone | `UTC` | The zone schedules and source templates are read in, unless an agent names its own. A zone the tz database does not have fails the load. |
 | `public_url` | URL | none | Where a person reaches the API; links in notifications and search results. |
 | `defaults` | map | | Values every agent gets unless it sets its own (below). |
 | `channels` | map of name to channel | none | Notification destinations an agent's `notify.channels` names. |
@@ -17,6 +17,8 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `credentials` | map of variable to credential | none | The variables sources may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
+| `usage_poll` | map: `every` (default 5m, at least 1m), `token_env` (default `CLAUDE_CODE_OAUTH_TOKEN`) | absent | Poll the subscription's usage windows (configuration.md, Subscription usage and low-priority agents). |
+| `defer_low_priority` | bool | `false` | Hold `priority: low` agents' scheduled runs while a usage window is above `usage.DeferLowAbove`. |
 
 ### `defaults`
 
@@ -74,6 +76,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `private_key_env` | env var | required | The App's PEM private key, or base64 of it. Read by orbit, never by a model. |
 | `api_url` | URL | `https://api.github.com` | GitHub's API (tests, Enterprise). |
 | `repositories` | list of `owner/name` | required | The repositories tickets and `github:merge` may target; every token is limited to one. |
+| `read_repositories` | list of `owner/name` | none | The repositories an agent's `repos` may name: orbit mirrors them and mints read tokens for them. Reading one never permits a ticket or a merge there (configuration.md, Repositories). |
 
 ### `build`
 
@@ -137,7 +140,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `description` | string | none | One line shown in agent lists and to MCP clients. |
 | `charter` | string | required | The standing instruction every run starts from. |
 | `enabled` | bool | `true` | `false` stops its triggers firing; manual runs still work. A database agent's comes from its definition, not its spec. |
-| `timezone` | IANA zone | `orbit.yaml` timezone | Zone for triggers and source templates. |
+| `timezone` | IANA zone | `orbit.yaml` timezone | Zone for triggers and source templates; parsed once at load (`Agent.Location`), and one the tz database does not have fails it. |
 | `runner` | runner name | `defaults.runner` | The backend. |
 | `timeout` | duration | `defaults.timeout` | How long one run may take. |
 | `triggers` | list | none | When the agent wakes on its own (below). |
@@ -155,9 +158,11 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `learn` | map | on | Learning runs over quiet conversations (below). |
 | `hooks` | list | none | Claude Code hooks for the agent's runs, beside orbit's own; claude-code only, at most 20 (below). |
 | `chat` | bool | `false` | A Claude Code session whose reply is its final message, with memory, questions and actions as orbit's tools; a workspace per conversation. claude-code only. |
-| `sandbox` | `workstation`, `build` | none | Needs `chat` and a sandboxd. Runs the CLI in a sandboxd container per conversation: `workstation` has every Claude Code tool and egress to any public host; `build` has its `tools` and the build allowlist (security.md, Sandboxed chats). |
+| `sandbox` | `workstation`, `build` | none | Needs `chat` and a sandboxd. Runs the CLI in a sandboxd container per conversation: `workstation` has every Claude Code tool and egress to any public host; `build` has its `tools` and the build allowlist (security.md, Sandboxed chats). A `workstation` agent also has a box for terminals (docs/workspace.md). |
 | `needs` | list of capabilities | none | What a host must have to run the agent (`docker-network:hetzner`); without any, every host. |
 | `delegates` | list of agent names, or `["*"]` | none | Agents this one may hand tasks to; the `delegate` action also needs a rule. |
+| `repos` | list (below) | none | Repositories every run reads: the tree at a commit under `inputs/repos/<name>/`, plus orbit's history and pull request tools. Each must be in `github.read_repositories`; needs `github` in `needs` and a claude-code or codex runner. |
+| `priority` | `normal`, `low` | `normal` | `low` is work that can wait: with `defer_low_priority`, its scheduled runs are held while the subscription is nearly spent. |
 
 ### `triggers[]`
 
@@ -254,6 +259,13 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 |---|---|---|---|
 | `channels` | list of channel names | `defaults.channels` | Where unattended runs report. |
 | `when` | `always`, `agent`, `never` | `always` | `agent`: only when the run asks. Failures and pending approvals of unattended runs always notify; a run answering a message never does. |
+
+### `repos[]`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `repo` | `owner/name` | required | One of `github.read_repositories`; its name (after the owner) is unique within the agent. |
+| `ref` | branch, tag or commit sha | the default branch | What the run's tree is; resolved to a commit in orbit's mirror before each run. |
 
 ### `session`
 
