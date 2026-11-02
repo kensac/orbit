@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -80,6 +81,8 @@ type Engine struct {
 	// and every notification is recorded for control to send
 	// (DeliverOutbox), with the links only control can sign.
 	Outbox bool
+	// NewChannel builds a channel from its spec; nil is notify.New (tests replace it).
+	NewChannel func(name string, c spec.Channel, env notify.Env, client *http.Client) (notify.Channel, error)
 	// Worker names this instance in the outbox and session rows it writes.
 	Worker string
 	// Wake nudges this instance's executors when it queued runs itself
@@ -115,11 +118,15 @@ const StaleAfter = 10 * heartbeatEvery
 // with a missing credential fails the reload, not the first notification.
 func (e *Engine) SetConfig(cfg *spec.Config) error {
 	chans := map[string]notify.Channel{}
+	newChannel := e.NewChannel
+	if newChannel == nil {
+		newChannel = notify.New
+	}
 	for name, c := range cfg.Deployment.Channels {
 		if e.Outbox {
 			break
 		}
-		ch, err := notify.New(name, c, e.Env, e.Client)
+		ch, err := newChannel(name, c, e.Env, e.Client)
 		if err != nil {
 			return err
 		}
@@ -194,6 +201,11 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		// Stored before the run is recorded as succeeded, so the
 		// conversation's next run, claimed on any host, finds it.
 		e.saveSession(ctx, c, st.home, st.workdir, res.SessionID)
+	}
+	if a.Chat {
+		// A chat with its person is instructions; a report agent's
+		// proposals still wait on their rules.
+		out.instructedBy = st.instructor
 	}
 	return e.succeed(ctx, snap, a, c, start, out, res)
 }
@@ -370,6 +382,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		rc.Memory = ""
 	}
 	st.task = task
+	st.instructor = runInstructor(c, rc)
 	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "memory.md", "text/markdown", []byte(rc.Memory)); err != nil {
 		return nil, nil, err
 	}
@@ -567,7 +580,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if chat {
 		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
-			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec,
+			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec, instructor: st.instructor,
 			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun})
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
@@ -732,7 +745,8 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		o.Memory = &m
 	}
 	for _, act := range out.Actions {
-		pa := store.ProposedAction{Type: act.Type, Params: act.Params, Reason: act.Reason, Rule: string(ruleFor(a, act.Type, c.Trigger))}
+		pa := store.ProposedAction{Type: act.Type, Params: act.Params, Reason: act.Reason, Rule: string(ruleFor(a, act.Type, c.Trigger)),
+			InstructedBy: out.instructedBy}
 		if t, ok := types[act.Type]; !ok {
 			pa.Rule, pa.Error = string(spec.RuleDeny), "action type not enabled for this agent"
 		} else if err := t.Validate(act.Params); err != nil {
@@ -749,7 +763,9 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		if act.Type == actions.DefineType && pa.Error == "" && pa.Rule == string(spec.RuleAuto) {
 			// A change that widens an agent waits for a person, whatever the rule: a model steered by its input must not grant itself reach.
 			if w := e.defineWidening(ctx, act.Params); len(w) > 0 {
-				pa.Rule = string(spec.RuleApprove)
+				// Nor does its person's message in the chat approve it: the
+				// decision is theirs to make on the change itself.
+				pa.Rule, pa.InstructedBy = string(spec.RuleApprove), ""
 				e.Log.Info("agent:define widens an agent; held for approval", "run", c.ID, "widens", strings.Join(w, "; "))
 			}
 		}
@@ -778,25 +794,23 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if pr == "" {
 		pr = notify.Default
 	}
+	// A task's report and questions go to the agent that delegated it,
+	// which is woken with them; only its approvals are a person's.
+	routed := out.task != nil
+	// A person who wrote by mail is answered by mail, to them, as a reply to theirs, whatever notify.when says and however the run was triggered.
+	reply := e.mailForRun(ctx, snap, c.ID)
+	if reply != nil && !routed {
+		e.deliver(ctx, snap, a, &c.ID, nil, purposeMailReply, mailReply(reply, notify.Message{
+			Title: a.Name + ": " + out.Summary, Body: withQuestions(out.Report, out.Questions), Priority: pr, Link: link,
+		}))
+	}
 	if Attended(c.Trigger) {
 		// The person is reading the conversation this run answered in:
 		// its reply, questions and approvals are there, not in a channel.
 		return nil
 	}
-	send := a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send)
-	// A person who wrote by mail is answered by mail, as a reply to theirs.
-	var inReplyTo, mailSubject string
-	if snap.Config.Deployment.Mail != nil {
-		var merr error
-		if inReplyTo, mailSubject, merr = e.Store.MailForRun(ctx, c.ID); merr != nil {
-			e.Log.Warn("mail for run", "run", c.ID, "err", merr)
-		}
-		send = send || inReplyTo != ""
-	}
-	// A task's report and questions go to the agent that delegated it,
-	// which is woken with them; only its approvals are a person's.
-	routed := out.task != nil
-	if !routed && (send || len(out.Questions) > 0) {
+	send := reply == nil && (a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send))
+	if !routed && (send || (reply == nil && len(out.Questions) > 0)) {
 		title := out.Notify.Title
 		if title == "" {
 			title = out.Summary
@@ -806,22 +820,9 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			// Only the questions warrant a ping.
 			title, body = a.Name+" has a question", ""
 		}
-		if len(out.Questions) > 0 {
-			body += "\n\n**Questions**\n"
-			for _, q := range out.Questions {
-				body += "\n- " + q
-			}
-		}
 		m := notify.Message{
-			Title: a.Name + ": " + title, Body: strings.TrimSpace(body), Priority: pr,
+			Title: a.Name + ": " + title, Body: withQuestions(body, out.Questions), Priority: pr,
 			Tags: []string{"orbit", a.Name}, Link: link,
-		}
-		if inReplyTo != "" {
-			m.InReplyTo = inReplyTo
-			if mailSubject != "" && !strings.HasPrefix(strings.ToLower(mailSubject), "re:") {
-				mailSubject = "Re: " + mailSubject
-			}
-			m.Subject = mailSubject
 		}
 		e.deliver(ctx, snap, a, &c.ID, nil, "report", m)
 	}
@@ -846,6 +847,8 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 	e.Log.Warn("run failed", "run", c.ID, "agent", c.Agent, "err", runErr)
 	rr := store.RunResult{Attempt: c.Attempt, Status: "failed", Error: runErr.Error()}
 	fillResult(&rr, r)
+	// Read before FinishRun, which hands a failed run's messages back to the inbox.
+	reply := e.mailForRun(ctx, snap, c.ID)
 	if err := e.Store.FinishRun(context.WithoutCancel(ctx), c.ID, rr); err != nil {
 		return err
 	}
@@ -854,8 +857,18 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 	if terr != nil {
 		e.Log.Warn("task lookup", "run", c.ID, "err", terr)
 	}
-	// A task's failure goes to the agent that delegated it.
-	if a != nil && !Attended(c.Trigger) && routed == nil {
+	// A task's failure goes to the agent that delegated it; a mail's, in a short reply to it.
+	if a == nil || routed != nil {
+		return nil
+	}
+	if reply != nil {
+		e.deliver(ctx, snap, a, &c.ID, nil, purposeMailFailure, mailReply(reply, notify.Message{
+			Title: a.Name + " could not answer", Body: "The run answering your mail failed: " + shortError(runErr) + "\n\nYour mail is kept: reply to try again, and the next run reads both.",
+			Priority: notify.High, Link: snap.Config.Deployment.RunURL(c.ID),
+		}))
+		return nil
+	}
+	if !Attended(c.Trigger) {
 		e.deliver(ctx, snap, a, &c.ID, nil, "failure", notify.Message{
 			Title: a.Name + " run failed", Body: runErr.Error(), Priority: notify.High,
 			Tags: []string{"orbit", "warning"}, Link: snap.Config.Deployment.RunURL(c.ID),
@@ -864,10 +877,89 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 	return nil
 }
 
+// Mail replies are delivered to the agent's mail channel alone (mailChannel), whatever its notify.when.
+const (
+	purposeMailReply   = "mail_reply"
+	purposeMailFailure = "mail_failure"
+)
+
+func isMailReply(purpose string) bool {
+	return purpose == purposeMailReply || purpose == purposeMailFailure
+}
+
+// mailForRun is the mail run c answers, or nil: orbit has no mailbox, the run read none, or the lookup failed (logged; the run is then answered as if no mail had come).
+func (e *Engine) mailForRun(ctx context.Context, snap *Snapshot, runID string) *store.RunMail {
+	if snap.Config.Deployment.Mail == nil {
+		return nil
+	}
+	m, err := e.Store.MailForRun(context.WithoutCancel(ctx), runID)
+	if err != nil {
+		e.Log.Warn("mail for run", "run", runID, "err", err)
+		return nil
+	}
+	return m
+}
+
+// mailReply addresses m to the mail's sender as a reply to it: In-Reply-To its Message-ID and "Re:" its subject. deliver adds the conversation's Reply-To, Message-ID and References.
+func mailReply(r *store.RunMail, m notify.Message) notify.Message {
+	m.To = []string{r.From}
+	m.InReplyTo = r.MessageID
+	m.Subject = r.Subject
+	if m.Subject == "" {
+		m.Subject = m.Title
+	}
+	if !strings.HasPrefix(strings.ToLower(m.Subject), "re:") {
+		m.Subject = "Re: " + m.Subject
+	}
+	m.Tags = []string{"orbit", "mail"}
+	return m
+}
+
+// mailChannel is the channel a mail reply goes through: the agent's first smtp channel, else the deployment's first smtp channel by name, else "" (no way to mail).
+func mailChannel(cfg *spec.Config, a *spec.Agent) string {
+	for _, name := range a.Notify.Channels {
+		if cfg.Deployment.Channels[name].Kind == "smtp" {
+			return name
+		}
+	}
+	names := make([]string, 0, len(cfg.Deployment.Channels))
+	for name, ch := range cfg.Deployment.Channels {
+		if ch.Kind == "smtp" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	slices.Sort(names)
+	return names[0]
+}
+
+// withQuestions appends a run's questions to a body.
+func withQuestions(body string, questions []string) string {
+	if len(questions) > 0 {
+		body += "\n\n**Questions**\n"
+		for _, q := range questions {
+			body += "\n- " + q
+		}
+	}
+	return strings.TrimSpace(body)
+}
+
+// shortError is the first line of err, at most 300 characters: a mail says what went wrong, the run page has the rest.
+func shortError(err error) string {
+	s, _, _ := strings.Cut(strings.TrimSpace(err.Error()), "\n")
+	if r := []rune(s); len(r) > 300 {
+		s = string(r[:300]) + "..."
+	}
+	return s
+}
+
 // Attended reports whether a run's trigger means its person is watching
 // the conversation: a message they sent. Such a run
 // notifies nothing (its reply, questions, approvals and failure are in the
 // thread); channels are for unattended runs (schedule, continue, build).
+// A run that read a mail is the exception: its sender is answered by mail (mailForRun).
 func Attended(trigger string) bool { return trigger == "message" }
 
 // ruleFor is the rule a run's proposal of typ gets. Delegation's types
@@ -903,6 +995,15 @@ func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, run
 	if purpose == "report" && a.Notify.When == "never" {
 		return
 	}
+	channels := a.Notify.Channels
+	if isMailReply(purpose) {
+		name := mailChannel(snap.Config, a)
+		if name == "" {
+			e.Log.Warn("mail reply not sent: no smtp channel", "agent", a.Name, "purpose", purpose)
+			return
+		}
+		channels = []string{name}
+	}
 	ctx = context.WithoutCancel(ctx)
 	if e.Outbox {
 		// Control adds the link (an approval link is signed with a secret
@@ -919,7 +1020,7 @@ func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, run
 	}
 	// On control only: the token is signed with the secret a worker does not hold.
 	e.mailHeaders(ctx, snap, runID, &m)
-	for _, name := range a.Notify.Channels {
+	for _, name := range channels {
 		ch := snap.Channels[name]
 		sendCtx, cancel := context.WithTimeout(ctx, time.Minute)
 		err := ch.Send(sendCtx, m)
@@ -1012,21 +1113,44 @@ func (e *Engine) DeliverOutbox(ctx context.Context) error {
 // a person's approval.
 func (e *Engine) ExecuteActions(ctx context.Context) error {
 	snap := e.Current()
-	ex := &actions.Executor{Deployment: snap.Config.Deployment, Channels: snap.Channels, Client: e.Client, Env: e.Env,
+	ex := e.executor(snap)
+	for {
+		act, err := e.Store.ClaimApprovedAction(ctx)
+		if err != nil || act == nil {
+			return err
+		}
+		call := actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)}
+		var after func()
+		if a, ok := snap.Config.Agents[act.Agent]; ok && a.Chat {
+			call.Workspace, after = e.storedWorkspace(ctx, act.RunID)
+		}
+		actx, cancel := context.WithTimeout(ctx, ActionTimeout)
+		result, xerr := ex.Execute(actx, call)
+		cancel()
+		if after != nil {
+			after()
+		}
+		if err := e.finishAction(ctx, snap, act, result, xerr); err != nil {
+			return err
+		}
+	}
+}
+
+// executor executes actions with this instance's channels and credentials.
+func (e *Engine) executor(snap *Snapshot) *actions.Executor {
+	return &actions.Executor{Deployment: snap.Config.Deployment, Channels: snap.Channels, Client: e.Client, Env: e.Env,
+		Git:   build.Git{WorkRoot: filepath.Join(e.DataDir, "actions")},
 		Tasks: &taskOps{e: e, snap: snap},
 		Continue: func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (string, bool, error) {
 			return e.Store.EnqueueContinuation(ctx, store.Continuation{
 				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
 		},
 		Define: e.defineAction}
-	for {
-		act, err := e.Store.ClaimApprovedAction(ctx)
-		if err != nil || act == nil {
-			return err
-		}
-		actx, cancel := context.WithTimeout(ctx, ActionTimeout)
-		result, xerr := ex.Execute(actx, actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)})
-		cancel()
+}
+
+// finishAction records an execution and tells the person of a failure.
+func (e *Engine) finishAction(ctx context.Context, snap *Snapshot, act *store.Action, result json.RawMessage, xerr error) error {
+	{
 		if err := e.Store.FinishAction(context.WithoutCancel(ctx), act.ID, result, xerr); err != nil {
 			return err
 		}
@@ -1041,6 +1165,7 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 			}
 		}
 	}
+	return nil
 }
 
 func recFrom(r *recovery) int {

@@ -38,6 +38,9 @@ type Output struct {
 	// planTicket is the ticket a non-empty Plan is for, set by the engine,
 	// never read from the output.
 	planTicket string
+	// instructedBy is the person the run answered, set by the engine: an
+	// approve-rule action they asked for is approved by them.
+	instructedBy string
 	// Entries are memory entry writes (entries.go).
 	Entries []OutputEntry `json:"entries"`
 	// known and topics are the entries the run was shown and the topics it reads, set by the engine to resolve Entries.
@@ -155,7 +158,7 @@ How your result is used:
 	case "agent":
 		b.WriteString("Reports are delivered only when you set this to true.")
 	case "never":
-		b.WriteString("This agent's reports are never pushed; they stay in orbit.")
+		b.WriteString("This agent's reports are never pushed; they stay in orbit, except that a reply to a mail is mailed to its sender.")
 	}
 	b.WriteString(`
 - memory: your only persistence between runs. You receive the current memory below. To change it, set update to true and content to the COMPLETE new document (it replaces the old one). Keep it short: facts you will need next time, preferences the person stated, baselines to compare against. Do not copy the report into it.

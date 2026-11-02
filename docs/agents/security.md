@@ -59,6 +59,8 @@ more than its agent's rules allow.
   past writing, so they are data like any input, and they never back a
   figure (they are kept out of the tool ledger).
 
+- **The usage poller** (`usage_poll`) is orbit's own code on control, outside any run: it reads the subscription's OAuth token from orbit's environment and sends it only to the configured URL. The token never reaches a model, a sample or a log line (an error records the status and a clipped body).
+
 ## Memory entries a model writes
 
 A run writes memory entries directly, and a learning run writes them from a conversation, so a poisoned input or message can plant an entry that later runs of every agent reading its scope are shown. What bounds it: entries are shown as data (the system prompt says they never authorize an action the rules do not, and an instruction in one is not to be followed); a run may write only to the profile, itself and the topics it reads, at most 10 writes, and only change entries it was shown at the version it was shown; every version is kept with the run and conversation it came from (`GET /memory/entries?run_id=`), so a bad one is found and retired or restored. A learning run reads the person's messages and the agent's reports (which can quote inputs), not the inputs themselves.
@@ -164,7 +166,7 @@ installation's), is revoked after its operation, and is refused if GitHub
 grants more than was asked. The repository is one of `github.repositories` for tickets, builds and merges, and one of `github.read_repositories` for agents that read (below); the two lists are separate, so reading a repository never lets anything write to it. `github:merge` lets a compromised model ask to
 merge an orbit PR whose checks are green; the executor re-checks the head
 commit, the branch and every check itself, and the rule decides whether a
-person approves first. In the fleet a merge is a deploy: keep it `approve`.
+person approves first. In the fleet a merge is a deploy: keep it `approve`. A chat agent's `approve` rules are satisfied by its person's message in the conversation (`instructed_by`): a prompt injected into what the agent read during that turn can therefore get an approve-rule action executed while the person is chatting, as it could make Claude Code do anything its permissions allow. Unattended runs never get this. `github:pr` pushes only `orbit/chat/<branch>`, built by orbit from the working tree (the model's `.git` is never read or run), held to the build's diff policy; merging still needs every required check green.
 
 `actions: write` (rerunning failed jobs) also covers dispatching and cancelling workflows; orbit mints it alone, only in the ticket loop, for `RerunJob` on the job ids of checks that failed, and no model sees it.
 
@@ -201,6 +203,7 @@ without docker):
   The proxy never dials a private, loopback, link-local or CGNAT address
   (every tailnet address), so an allowed name that resolves to one cannot
   reach the host's networks.
+- A build never shares a network with the workstation profile's open proxy: workstation sandboxes join `ORBIT_SANDBOX_WORKSTATION_NETWORK`, which sandboxd requires with the open proxy and refuses to be the build network, and both must be internal (`TestWorkstationOwnNetwork`, `TestConfigValidate`). Otherwise code in a build could name the open proxy and leave its allowlist behind.
 - The environment is sandboxd's fixed list plus one backend credential (`sandbox.AllowedEnv` permits `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, and an attach carrying both is refused); no orbit secret, no GitHub token. orbit chooses it as for an ordinary run, for builds and sandboxed chats alike (`build.SandboxEnv` through `claudeproto.Credential` and `claudeproto.Env`): the subscription token when set, else the API key.
 - Callers cannot pass docker options: the create request is the tar and a
   run id, the attach request is argv and env (unknown fields refused); the
