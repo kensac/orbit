@@ -94,114 +94,26 @@ The API is `--api` (default `ORBIT_API_URL`, else the internal listener) with `-
 
 `orbit import skills <dir>` reads each directory under `dir` that holds a `SKILL.md` (`~/.claude/skills`, a project's `.claude/skills`) with every file beside it, and sends them to `POST /api/v1/skills/import`: a dry run unless `--apply`, `--only a,b` to pick some, `--attach <agent>` to attach them (with `--apply`), `--print` to list what was read without a server. A directory without a `SKILL.md` (a plugin, a sync bucket) or with a symlink is skipped with a warning. The API and token are as for memory above; on hetzner, `docker cp` the directory into the container and run it there.
 
-## sandboxd and egress
+## sandboxd and egress on hetzner
 
-sandboxd and egress run on hetzner today (`hetzner-vps-config/compose.orbit-sandbox.yml`; orbit reaches sandboxd at `10.250.250.2:8091` on the internal `orbit-sandboxd-api` network). The layout below was written for oci (tailnet `100.123.116.85`), where a container escape would reach CI runners rather than every secret in the fleet; the services and their options are the same either way.
+The build sandbox runs on hetzner today, beside orbit, in `hetzner-vps-config` as `compose.orbit-sandbox.yml` (included from `docker-compose.yml`): two services from orbit's own image, both pinned by digest. Workstation sandboxes are planned for both hetzner and oci. A container escape here reaches every secret on hetzner (docs/agents/security.md).
+
+- **orbit-sandboxd** runs as uid 10001 with the docker group (`group_add`) for the socket, read-only, no capabilities, `no-new-privileges`, and listens on `10.250.250.2:8091` on `orbit-sandboxd-api`, an internal network only orbit shares, so it has no host port (hetzner has no firewall). `ORBIT_SANDBOX_IMAGE` pins `ghcr.io/kensac/orbit-build` by digest, `ORBIT_SANDBOX_NETWORK=orbit-sandbox`, `ORBIT_SANDBOX_PROXY=orbit-egress:3128`.
+- **orbit-egress** joins `orbit-sandbox` (internal: the build containers' only way out is this proxy) and `orbit-egress`, with `ORBIT_EGRESS_ALLOW=api.anthropic.com,proxy.golang.org,sum.golang.org,registry.npmjs.org`.
+- **Token:** `ORBIT_SANDBOX_TOKEN`, at least 32 characters, `HETZNER_ORBIT_SANDBOX_TOKEN` in Infisical, read by both sandboxd and orbit (`build.token_env`).
+- **Images:** `ghcr.io/kensac/orbit-build` is pushed by `build-push-ghcr.yml` beside the orbit image. sandboxd pulls it through the Engine API without credentials, so the package must be public (it is built from this public repository and holds nothing private) or pulled on the host before sandboxd starts.
+- **Claiming it is deployed:** `docker logs orbit-sandboxd` shows `sandboxd: serving` (it exits on a failed host check: no seccomp, a network that is not internal, an image it cannot get), and `docker logs orbit-egress` shows `egress: serving` with the allowlist.
 
 **Workstation profile** (sandboxed chats, `sandbox: workstation`): a second `orbit egress` with `ORBIT_EGRESS_ALLOW=*` (any public host on 443, never a private or tailnet address) on the `orbit-sandbox` and `orbit-egress` networks, named for example `orbit-egress-open`, and sandboxd's environment gains `ORBIT_SANDBOX_WORKSTATION_PROXY=orbit-egress-open:3128`. Without it sandboxd refuses that profile (400), and the built-in agent's runs fail naming the variable.
-Two services from orbit's own image, in `oci-vps-config` as
-`compose.orbit-sandbox.yml` (included from `docker-compose.yml`, whitelisted
-in `.gitignore`):
 
-```yaml
-services:
-  orbit-sandboxd:
-    image: ghcr.io/kensac/orbit@sha256:<digest>
-    container_name: orbit-sandboxd
-    command: ["sandboxd"]
-    # The docker socket is root:docker 0660, and holding it is root on the
-    # host anyway; everything else about the container is locked down.
-    user: "0:0"
-    # Binds the tailnet address itself (sandboxd refuses every interface);
-    # it joins no docker network, so no build container can reach it.
-    network_mode: host
-    read_only: true
-    tmpfs: ["/tmp:size=600m"]   # the readback spool (256 MiB cap)
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    # The image's HEALTHCHECK probes orbit serve's /healthz.
-    healthcheck: {disable: true}
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - ORBIT_SANDBOX_TOKEN=${ORBIT_SANDBOX_TOKEN}
-      - ORBIT_SANDBOX_LISTEN=100.123.116.85:8091
-      - ORBIT_SANDBOX_IMAGE=ghcr.io/kensac/orbit-build@sha256:<digest>
-      - ORBIT_SANDBOX_NETWORK=orbit-sandbox
-      - ORBIT_SANDBOX_PROXY=orbit-egress:3128
-    depends_on: [orbit-egress]
+## Building tickets: what hetzner needs
 
-  orbit-egress:
-    image: ghcr.io/kensac/orbit@sha256:<digest>
-    container_name: orbit-egress
-    command: ["egress"]
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    healthcheck: {disable: true}
-    restart: unless-stopped
-    environment:
-      - ORBIT_EGRESS_ALLOW=api.anthropic.com,proxy.golang.org,sum.golang.org,registry.npmjs.org
-      - ORBIT_EGRESS_LISTEN=:3128
-    networks: [orbit-sandbox, orbit-egress]
+In order; each step is safe to take alone (without step 3 approved tickets just wait).
 
-networks:
-  # Build containers' network: internal, so no route out. sandboxd refuses
-  # to start if it is not.
-  orbit-sandbox:
-    name: orbit-sandbox
-    internal: true
-  # The proxy's way out; nothing else joins it.
-  orbit-egress:
-    name: orbit-egress
-```
-
-- **Token:** `ORBIT_SANDBOX_TOKEN`, at least 32 characters, in Infisical as
-  `OCI_ORBIT_SANDBOX_TOKEN` and `HETZNER_ORBIT_SANDBOX_TOKEN` (the same
-  value; rotated together). orbit reads it as `build.token_env`.
-- **Images:** both pinned by digest; `ghcr.io/kensac/orbit-build` is pushed
-  by `build-push-ghcr.yml` beside the orbit image. orbit's image is private,
-  so oci logs in to ghcr on deploy as hetzner does (`ghcr_username` in its
-  host_vars, `OCI_GHCR_TOKEN`). sandboxd pulls the build image through the
-  Engine API without credentials: make the `orbit-build` package public
-  (it is built from this public repository and holds nothing private), or
-  `docker pull` it on oci before sandboxd starts, since sandboxd uses an
-  image already present.
-- **Claiming it is deployed:** `docker logs orbit-sandboxd` shows
-  `sandboxd: serving` (it exits on a failed host check: no seccomp, a
-  network that is not internal, an image it cannot get), `docker logs
-  orbit-egress` shows `egress: serving` with the allowlist, and from
-  hetzner `curl -s -o /dev/null -w '%{http_code}' -X DELETE
-  http://100.123.116.85:8091/v1/sandboxes/$(printf 'a%.0s' {1..64})`
-  answers 401 without the token and 404 with it.
-
-## Building tickets: what hetzner and oci need
-
-In order; each step is safe to take alone (without step 4 approved tickets
-just wait).
-
-1. **oci**: sandboxd and egress as above, at the image digest that carries
-   this build runner, `ghcr.io/kensac/orbit-build` present (public package
-   or pulled), and `OCI_ORBIT_SANDBOX_TOKEN` in Infisical. Check with the
-   `curl` above.
-2. **Infisical**: `HETZNER_ORBIT_SANDBOX_TOKEN` with the same value
-   (`playbooks/secret-set.yml -e key=HETZNER_ORBIT_SANDBOX_TOKEN`), so it
-   renders into `/root/.env` as `ORBIT_SANDBOX_TOKEN`.
-3. **hetzner, `compose.orbit.yml`**: the `orbit` service's environment
-   gains `- ORBIT_SANDBOX_TOKEN=${ORBIT_SANDBOX_TOKEN}`. orbit reaches
-   `100.123.116.85:8091` over the tailnet, which the container already has
-   (it reaches Infisical and GitHub the same way). `ORBIT_DATA_DIR` holds
-   each build's clone under `builds/` while it runs; it is removed after.
-   The image carries `git` for this (deploy/Dockerfile); check with
-   `docker exec orbit git --version`.
-4. **hetzner, `orbit/orbit.yaml`**: the `build:` section
-   (docs/tickets.md, Configuration) with `sandboxd: 100.123.116.85:8091`
-   and `agent:` an agent whose spec has `timeout:` at most 50m and
-   `actions: {github:merge: approve}`. The config reloads on its own; check
-   `config reloaded` in the log and `orbit_config_valid` 1.
-5. **GitHub**: `main` of `kensac/orbit` protected (a PR and the `check`
-   status required, the App off the bypass list), as for `github:merge`.
+1. **sandboxd and egress** as above, `ghcr.io/kensac/orbit-build` present (public package or pulled), and `HETZNER_ORBIT_SANDBOX_TOKEN` in Infisical (`playbooks/secret-set.yml -e key=HETZNER_ORBIT_SANDBOX_TOKEN`), so it renders into `/root/.env` as `ORBIT_SANDBOX_TOKEN`.
+2. **`compose.orbit.yml`**: the `orbit` service's environment has `- ORBIT_SANDBOX_TOKEN=${ORBIT_SANDBOX_TOKEN}` and it joins `orbit-sandboxd-api`. `ORBIT_DATA_DIR` holds each build's clone under `builds/` while it runs; it is removed after. The image carries `git` for this (deploy/Dockerfile); check with `docker exec orbit git --version`.
+3. **`orbit/orbit.yaml`**: the `build:` section (docs/tickets.md, Configuration) with `sandboxd: 10.250.250.2:8091` and `agent:` an agent whose spec has `timeout:` at most 50m and `actions: {github:merge: approve}`. The config reloads on its own; check `config reloaded` in the log and `orbit_config_valid` 1.
+4. **GitHub**: `main` of `kensac/orbit` protected (a PR and the `check` status required, the App off the bypass list), as for `github:merge`.
 
 **Claiming it works:** file a small request ticket, approve its plan, and
 watch the ticket go `building` (the build run's stream shows
