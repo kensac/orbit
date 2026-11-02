@@ -12,6 +12,7 @@ import (
 
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
+	"github.com/kensac/orbit/internal/usage"
 )
 
 // Scheduler enqueues schedule fires.
@@ -50,10 +51,13 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		return err
 	}
 	prev := s.Now()
+	deferTick := time.NewTicker(DeferCheckEvery)
+	defer deferTick.Stop()
 	for {
 		cfg := s.Config()
 		now := s.Now()
 		s.Tick(ctx, cfg, prev, now)
+		s.DeferPass(ctx, cfg)
 		prev = now
 
 		// Wake at the next fire, and at least hourly so a clock step or a
@@ -66,6 +70,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-s.Reload:
+		case <-deferTick.C:
 		case <-time.After(d):
 		}
 		// Keep the lock's connection alive and detect losing it.
@@ -108,7 +113,7 @@ func (s *Scheduler) catchUp(ctx context.Context, cfg *spec.Config) error {
 		if !a.IsEnabled() {
 			continue
 		}
-		loc, _ := time.LoadLocation(a.Timezone)
+		loc := a.Location()
 		for i, t := range a.Triggers {
 			sched, err := spec.TriggerSchedule(t, loc)
 			if err != nil {
@@ -122,7 +127,7 @@ func (s *Scheduler) catchUp(ctx context.Context, cfg *spec.Config) error {
 				continue
 			}
 			if due, ok := newestFire(sched, last.In(loc), now); ok {
-				s.enqueue(ctx, fire{agent: a, index: i, at: due, trigger: t})
+				s.enqueue(ctx, cfg, fire{agent: a, index: i, at: due, trigger: t})
 			}
 		}
 	}
@@ -147,14 +152,14 @@ func (s *Scheduler) Tick(ctx context.Context, cfg *spec.Config, since, now time.
 		if !a.IsEnabled() {
 			continue
 		}
-		loc, _ := time.LoadLocation(a.Timezone)
+		loc := a.Location()
 		for i, t := range a.Triggers {
 			sched, err := spec.TriggerSchedule(t, loc)
 			if err != nil {
 				continue
 			}
 			if due, ok := newestFire(sched, since.In(loc), now); ok {
-				s.enqueue(ctx, fire{agent: a, index: i, at: due, trigger: t})
+				s.enqueue(ctx, cfg, fire{agent: a, index: i, at: due, trigger: t})
 			}
 		}
 	}
@@ -171,19 +176,37 @@ func newestFire(sched spec.Schedule, since, now time.Time) (time.Time, bool) {
 	return due, found
 }
 
-func (s *Scheduler) enqueue(ctx context.Context, f fire) {
+// enqueue records one fire. A low agent's fire while a window is over is
+// enqueued already held (run_after set in the insert), so no executor can
+// claim it in between, and the hold is recorded.
+func (s *Scheduler) enqueue(ctx context.Context, cfg *spec.Config, f fire) {
 	idx := f.index
 	at := f.at.UTC()
-	id, err := s.Store.EnqueueRun(ctx, store.NewRun{
+	nr := store.NewRun{
 		Agent: f.agent.Name, SpecSHA: f.agent.SHA, Trigger: "schedule",
 		TriggerIndex: &idx, ScheduledFor: &at, Prompt: f.trigger.Prompt,
-	})
+	}
+	var w *usage.Window
+	if f.agent.Low() {
+		if w = s.over(ctx, cfg); w != nil {
+			until := s.now().Add(usage.DeferRecheck)
+			nr.RunAfter = &until
+		}
+	}
+	id, err := s.Store.EnqueueRun(ctx, nr)
 	if err != nil {
 		s.Log.Error("enqueue fire", "agent", f.agent.Name, "trigger", f.index, "at", at, "err", err)
 		return
 	}
-	if id != "" {
-		s.Log.Info("enqueued", "agent", f.agent.Name, "trigger", f.index, "at", at, "run", id)
+	if id == "" {
+		return
+	}
+	s.Log.Info("enqueued", "agent", f.agent.Name, "trigger", f.index, "at", at, "run", id)
+	if w != nil {
+		if _, err := s.Store.DeferRun(ctx, id, *nr.RunAfter, w.Deferral()); err != nil {
+			s.Log.Warn("defer: hold", "run", id, "err", err)
+		}
+		s.Log.Info("deferred", "agent", f.agent.Name, "run", id, "window", w.Window, "utilization", *w.Utilization)
 	}
 }
 

@@ -178,9 +178,12 @@ func (s *Store) RateLimitEvents(ctx context.Context) ([]RateLimitEvent, error) {
 // QueueDepth counts queued runs: due ones an executor may claim now, and
 // continuations waiting for their run_after.
 type QueueDepth struct {
-	Due                  int        `json:"due"`
-	WaitingContinuations int        `json:"waiting_continuations"`
-	OldestDueAt          *time.Time `json:"oldest_due_at"`
+	Due                  int `json:"due"`
+	WaitingContinuations int `json:"waiting_continuations"`
+	// Deferred counts scheduled runs held back while the subscription is
+	// nearly spent (defer_low_priority).
+	Deferred    int        `json:"deferred"`
+	OldestDueAt *time.Time `json:"oldest_due_at"`
 }
 
 // RunningRun is a run an executor holds.
@@ -223,10 +226,11 @@ func (s *Store) Health(ctx context.Context) (*Health, error) {
 		if err := tx.QueryRow(ctx, `
 			SELECT now(),
 			       count(*) FILTER (WHERE run_after IS NULL OR run_after <= now()),
-			       count(*) FILTER (WHERE run_after > now()),
+			       count(*) FILTER (WHERE run_after > now() AND trigger = 'continue'),
+			       count(*) FILTER (WHERE run_after > now() AND trigger <> 'continue'),
 			       min(created_at) FILTER (WHERE run_after IS NULL OR run_after <= now())
 			FROM runs WHERE status = 'queued'`).
-			Scan(&h.CheckedAt, &h.Queue.Due, &h.Queue.WaitingContinuations, &h.Queue.OldestDueAt); err != nil {
+			Scan(&h.CheckedAt, &h.Queue.Due, &h.Queue.WaitingContinuations, &h.Queue.Deferred, &h.Queue.OldestDueAt); err != nil {
 			return err
 		}
 		rows, err := tx.Query(ctx, `

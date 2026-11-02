@@ -117,6 +117,9 @@ func harnessMCP(h *Harness, workdir, home string) string {
 	if h.Search != "" {
 		args = append(args, "--search", h.Search)
 	}
+	if h.Repos != "" {
+		args = append(args, "--repos", h.Repos)
+	}
 	b, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{
 		harness.MCPServer: map[string]any{"type": "stdio", "command": h.Bin, "args": args},
 	}})
@@ -137,6 +140,9 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 		allowed = append(allowed, harness.ToolQuery, harness.ToolCalc)
 		if req.Harness.Search != "" {
 			allowed = append(allowed, harness.ToolSearch)
+		}
+		if req.Harness.Repos != "" {
+			allowed = append(allowed, harness.RepoToolNames()...)
 		}
 		hooks = harnessHooks(req.Harness, req.Workdir, home)
 	}
@@ -304,7 +310,7 @@ func parseClaudeResult(line []byte) (*Result, error) {
 	usage, _ := json.Marshal(map[string]any{
 		"usage": r.Usage, "model_usage": r.ModelUsage, "num_turns": r.NumTurns,
 	})
-	res := &Result{Usage: usage, CostUSD: r.TotalCostUSD, SessionID: r.SessionID}
+	res := &Result{Usage: usage, Tokens: r.Tokens(), CostUSD: r.TotalCostUSD, SessionID: r.SessionID}
 	if r.IsError {
 		return res, fmt.Errorf("%w: claude-code %s/%s: %s", ErrBackend, r.Subtype, r.TerminalReason, firstLine(r.Failure()))
 	}
