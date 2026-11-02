@@ -39,6 +39,10 @@ Database and built-in agents are held to what orbit.yaml offers (`spec.validateT
 
 It is proposed as an `agent:define` with `rule: "approve"`, whatever the agent's rules, so a person approves the whole agent, seen as a dry-run diff (`preview`, docs/api.md, Actions). A name already in use is refused at once.
 
+### Approve and always allow
+
+A person approving any action can also make its type `auto` for that agent ("approve and always allow", docs/api.md, Actions): a new revertible version, like an API change.
+
 ## Secrets
 
 Never in YAML. Channels name variables with `*_env`; source urls, headers, query

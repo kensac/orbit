@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -576,14 +577,29 @@ func (s *Server) decide(approve bool) http.HandlerFunc {
 		var body struct {
 			By              string `json:"by"`
 			ClientRequestID string `json:"client_request_id"`
+			// Always also makes the action's type auto for its agent (approve only).
+			Always bool `json:"always"`
 		}
 		if !decode(w, r, 4<<10, &body, bodyOptional) {
+			return
+		}
+		if body.Always && !approve {
+			writeErr(w, http.StatusBadRequest, "always is for approving")
 			return
 		}
 		// A person decides as themselves; by is for the operator token.
 		by := body.By
 		if p := principalOf(r); p.Person != "" {
 			by = p.Person
+		}
+		if body.Always {
+			out, err := s.approveAlways(r.Context(), r.PathValue("id"), by, body.ClientRequestID)
+			if err != nil {
+				s.respondDefine(w, http.StatusOK, nil, err)
+				return
+			}
+			respond(w, out, nil)
+			return
 		}
 		err := s.decideAction(r.Context(), r.PathValue("id"), approve, by, body.ClientRequestID)
 		respond(w, map[string]any{"ok": err == nil}, err)
@@ -600,6 +616,35 @@ func (s *Server) decideAction(ctx context.Context, id string, approve bool, by, 
 		s.Wake()
 	}
 	return err
+}
+
+// approveAlways approves an action and makes its type auto for its agent: the new version is validated before the decision, so a change that cannot be made decides nothing, and stored after it. A replayed decision changes nothing again.
+func (s *Server) approveAlways(ctx context.Context, id, by, clientRequestID string) (map[string]any, error) {
+	act, err := s.Store.GetAction(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if act.Status == "pending" {
+		if _, err := s.Engine.AlwaysAllow(ctx, act, by, true); err != nil {
+			return nil, err
+		}
+	}
+	if by == "" {
+		by = "operator"
+	}
+	replayed, err := s.Store.DecideActionOnce(ctx, id, true, by, clientRequestID)
+	if err != nil {
+		return nil, err
+	}
+	if replayed {
+		return map[string]any{"ok": true}, nil
+	}
+	s.Wake()
+	d, err := s.Engine.AlwaysAllow(ctx, act, by, false)
+	if err != nil {
+		return nil, fmt.Errorf("approved, but the rule was not changed: %w", err)
+	}
+	return map[string]any{"ok": true, "always": map[string]any{"agent": d.Definition.Name, "type": act.Type, "rule": "auto", "version": d.Definition.Version}}, nil
 }
 
 // ---------------------------------------------------------------- helpers

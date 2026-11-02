@@ -252,3 +252,68 @@ func TestAPendingScheduleChangeShowsWhatItWillDo(t *testing.T) {
 		t.Fatalf("decided = %v", got)
 	}
 }
+
+// pendingAction records one pending action of agent's run.
+func pendingAction(t *testing.T, s *store.Store, e *engine.Engine, agent, typ, params string) string {
+	t.Helper()
+	if _, err := s.EnqueueRun(ctx, store.NewRun{Agent: agent, SpecSHA: e.Current().Config.Agents[agent].SHA, Trigger: "manual"}); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := s.ClaimRun(ctx, "w")
+	ids, err := s.RecordOutcome(ctx, c.ID, agent, store.RunResult{Attempt: 1, Status: "succeeded"}, store.Outcome{
+		Actions: []store.ProposedAction{{Type: typ, Params: json.RawMessage(params), Reason: "r", Rule: "approve"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ids[0]
+}
+
+func TestApproveAndAlwaysAllow(t *testing.T) {
+	v := newEnv(t, nil)
+	srv, s, e := v.srv, v.s, v.e
+	me := v.person("kanishk")
+	if _, err := e.DefineAgent(ctx, engine.DefineRequest{Spec: json.RawMessage(`{"name": "news", "charter": "x", "actions": {"notify": "approve"}}`)}); err != nil {
+		t.Fatal(err)
+	}
+	notify := `{"channel": "c", "title": "t", "body": "b"}`
+	id := pendingAction(t, s, e, "news", "notify", notify)
+	if code, got := call(t, "POST", srv.URL+"/api/v1/actions/"+id+"/reject", me, `{"always": true}`); code != 400 {
+		t.Fatalf("reject always = %d %v", code, got)
+	}
+	code, got := call(t, "POST", srv.URL+"/api/v1/actions/"+id+"/approve", me, `{"always": true, "client_request_id": "r1"}`)
+	al, _ := got["always"].(map[string]any)
+	if code != 200 || got["ok"] != true || al["agent"] != "news" || al["type"] != "notify" || al["version"] != float64(2) {
+		t.Fatalf("approve always = %d %v", code, got)
+	}
+	if a, _ := s.GetAction(ctx, id); a.Status != "approved" || *a.DecidedBy != "kanishk" {
+		t.Fatalf("action = %+v", a)
+	}
+	if r := e.Current().Config.Agents["news"].RuleFor("notify"); r != spec.RuleAuto {
+		t.Fatalf("rule = %s", r)
+	}
+	h, _ := s.DefinitionHistory(ctx, "news")
+	if h[0].Author == nil || *h[0].Author != "kanishk" || h[0].RunID != nil {
+		t.Fatalf("version = %+v", h[0])
+	}
+	// A retry changes nothing again.
+	if code, got = call(t, "POST", srv.URL+"/api/v1/actions/"+id+"/approve", me, `{"always": true, "client_request_id": "r1"}`); code != 200 || got["always"] != nil {
+		t.Fatalf("replay = %d %v", code, got)
+	}
+	if h2, _ := s.DefinitionHistory(ctx, "news"); len(h2) != len(h) {
+		t.Fatalf("a replay wrote a version: %d", len(h2))
+	}
+
+	// A file agent cannot be changed here, and the action stays undecided.
+	fileID := pendingAction(t, s, e, "a", "notify", notify)
+	if code, got = call(t, "POST", srv.URL+"/api/v1/actions/"+fileID+"/approve", me, `{"always": true}`); code != 409 || !strings.Contains(got["error"].(string), "configuration files") {
+		t.Fatalf("file agent = %d %v", code, got)
+	}
+	if a, _ := s.GetAction(ctx, fileID); a.Status != "pending" {
+		t.Fatalf("file agent's action = %s", a.Status)
+	}
+	// A type already auto waits for another reason; always cannot help.
+	autoID := pendingAction(t, s, e, "news", "notify", notify)
+	if code, got = call(t, "POST", srv.URL+"/api/v1/actions/"+autoID+"/approve", me, `{"always": true}`); code != 409 || !strings.Contains(got["error"].(string), "already auto") {
+		t.Fatalf("already auto = %d %v", code, got)
+	}
+}

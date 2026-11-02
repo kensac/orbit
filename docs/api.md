@@ -608,6 +608,7 @@ A row:
   409. The
   decider is the token's person. Only with the operator token, `{"by":
   "name"}` names it (default `operator`). The body is optional; one that is malformed or has another field is a `400` and decides nothing.
+- **Approve and always allow.** `POST /actions/{id}/approve` with `{"always": true}` (and optionally `client_request_id`) approves the action and also writes the next version of its agent with the action's type under `auto`, through the same path as `PUT /agents/{name}` (`change: "update"`, the decider as `author`, no `run_id`; reverted like any version). `200 {"ok": true, "always": {"agent": "news", "type": "webhook:home-assistant", "rule": "auto", "version": 5}}`. The new version is validated first: an agent in the configuration files is `409` and decides nothing, as is a type already `auto` for the agent (such an action waits for another reason: an `agent:define` that widens an agent always waits for a person) and an agent changed meanwhile. A retry with the same `client_request_id` returns `{"ok": true}` without `always` and changes nothing again. `always` on `/reject` is `400`. A client shows the button beside Approve for a pending action whose agent is not a file agent (`origin` on the agent row).
 
 ## Attention and push
 
@@ -965,7 +966,7 @@ After a conversation goes quiet, orbit runs a short learning pass over it (trigg
 | `wait_for_reply` | `run_id`, `wait_seconds` | `reply`, the run as a thread run item |
 | `read_thread` | `agent` or `conversation_id`, `limit` (default 20, at most 200), `before` | as a thread page: `items`, `has_more`, `next_before` |
 | `list_actions` | `agent`, `status` (default `pending`; `all` for every status), `run_id`, `limit`, `before` | as `GET /actions`: `actions`, `has_more`, `next_before` |
-| `approve_action`, `reject_action` | `action_id` | the decided `action`; a decided one is an error |
+| `approve_action`, `reject_action` | `action_id`; `approve_action` also `always` | the decided `action`; a decided one is an error. With `always: true`, as `POST /actions/{id}/approve` with `always` (Actions), plus `always` |
 | `search` | `q`, and as `GET /search`: `agent`, `conversation_id`, `run_id`, `kind`, `from`, `to`, `limit`, `offset` | as `GET /search` |
 
 - **Waiting.** `send_message` and `create_conversation` wait for the run they woke up to `wait_seconds` (default 45, at most 300; `-1` returns at once). A run still going when the wait ends is returned with its status and a `note` to call `wait_for_reply`. A message that woke no run (`wake_on_message` off) says so in `note`.
