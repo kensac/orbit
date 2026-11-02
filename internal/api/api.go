@@ -145,6 +145,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/actions/{id}/reject", s.decide(false))
 	api("GET /api/v1/attention", s.listAttention)
 	api("POST /api/v1/attention/{id}/dismiss", s.dismissAttention)
+	api("POST /api/v1/presence", s.setPresence)
 	api("GET /api/v1/push", s.pushInfo)
 	api("GET /api/v1/push/subscriptions", s.listPushSubscriptions)
 	api("POST /api/v1/push/subscriptions", s.savePushSubscription)
