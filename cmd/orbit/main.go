@@ -8,6 +8,7 @@
 //	orbit approve <action-id> / orbit reject <action-id>
 //	orbit healthcheck [--ready]  exit 0 if the local server answers /healthz (/readyz)
 //	orbit drain              tell the local server to drain (a deploy replacing it)
+//	orbit import claude-memory <dir> --scope <s> [--apply]   seed memory entries through the API
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
 //	orbit hook --root <dir> --state <dir> [--figures]   orbit's hook, run by Claude Code
 //	orbit sandboxd           the build sandbox service (holds the docker socket)
@@ -76,6 +77,8 @@ func main() {
 		err = healthcheck(len(os.Args) > 2 && os.Args[2] == "--ready")
 	case "drain":
 		err = drainCmd()
+	case "import":
+		err = importCmd(ctx, os.Args[2:])
 	case "mcp", "hook":
 		err = harnessCmd(os.Args[1], os.Args[2:])
 	case "sandboxd":
@@ -114,7 +117,7 @@ func harnessCmd(name string, args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | version | mcp | hook | sandboxd | egress")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | import claude-memory <dir> | version | mcp | hook | sandboxd | egress")
 	os.Exit(2)
 }
 

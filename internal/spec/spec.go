@@ -157,6 +157,10 @@ type Agent struct {
 	// money amount in the summary and report must be in the inputs or in a
 	// result of orbit's query or calc tool.
 	Verify []string `yaml:"verify,omitempty" json:"verify,omitempty"`
+	// Topics are the shared memory topics (finance, homelab) whose entries
+	// every run of this agent is shown, beside the profile's and its own.
+	// The API can attach more (docs/api.md, Memory entries).
+	Topics []string `yaml:"topics,omitempty" json:"topics,omitempty"`
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
@@ -579,6 +583,16 @@ func (c *Config) validateAgent(a *Agent) []error {
 		if !slices.Contains(verifyChecks, v) {
 			at("verify: unknown check %q (want one of %v)", v, verifyChecks)
 		}
+	}
+	seenTopic := map[string]bool{}
+	for _, t := range a.Topics {
+		if !nameRE.MatchString(t) {
+			at("topics: %q must match %s", t, nameRE)
+		}
+		if seenTopic[t] {
+			at("topics: %q is listed twice", t)
+		}
+		seenTopic[t] = true
 	}
 	if ss := a.Session; ss != nil {
 		rs := c.Deployment.Runners[a.Runner]

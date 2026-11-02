@@ -23,6 +23,7 @@ trigger (schedule | manual | message | continue)
   -> executor claims it (FOR UPDATE SKIP LOCKED; at most one running per agent;
      a continuation not before its run_after)
   -> StartRunContext: memory + unread messages (marked consumed) + open questions
+  -> memory entries the agent reads: an index in the prompt, the entries in full as an input
   -> session plan: continue the agent's Claude Code session, or start fresh
   -> a fresh session: the recent thread, packed into a byte budget, as conversation.md
   -> sources fetched by the harness, written to <workdir>/inputs/, stored as artifacts
@@ -162,6 +163,7 @@ to Codex or to a plain API call is one line in its spec.
 
 - **Memory** is one Markdown document per agent, replaced whole by a run that
   sets `memory.update`. Every version is kept (`memory_versions`).
+- **Memory entries** are the durable layer above it (below).
 - **Questions** a run asks become `from_agent` messages and are delivered with
   the report, in the asking run's conversation. A question stays open until
   a reply names it or any later message reaches that conversation; open
@@ -169,6 +171,18 @@ to Codex or to a plain API call is one line in its spec.
   again.
 - **Messages** to an agent are consumed by the first run of their
   conversation that starts after them. A run that fails or is interrupted hands them back.
+
+## Memory entries
+
+What a person teaches orbit, and what orbit learns about them, outlives any one agent's memory document. Memory entries hold it as one fact each (`memory_entries`, every version in `memory_entry_versions`; nothing is deleted, a retired or superseded entry is a version), with Claude Code's memory types (`user`, `feedback`, `project`, `reference`), a title, a one-line description, a body, why it holds and how to apply it, and where it came from (a person through the API, a learning run, an import). Three scopes decide who reads one:
+
+- **profile**: the person; every agent.
+- **topic**: a domain (`finance`, `homelab`) shared by the agents that read it: the spec's `topics`, plus topics the API attaches (`agent_attachments`).
+- **agent**: one agent's own.
+
+A run that starts fresh (not a recovery) reads every active entry in its scopes (`Store.EntriesFor`) and gets them twice (`internal/engine/known.go`): an index in the prompt (`# What you know`: one line per entry, the profile, then each topic, then the agent's own; within each, feedback first, then user, project, reference, newest first), packed into `knownIndexBudget` (8 KB, each line at most `knownLineMax`), and every entry in full as an input file, `inputs/_memory.md`, within `knownFileMax` (256 KB), stored as an artifact like any input. The system prompt says what the entries are and that they never authorize an action the rules do not. The packing is deterministic, so the same entries give the same prompt.
+
+`orbit import claude-memory` maps a Claude Code memory directory (one file per fact, frontmatter `name`/`description`/`type`, `**Why:**` and `**How to apply:**` paragraphs, the `MEMORY.md` index for titles) onto entries by key, through `POST /memory/import`, so a repeated import changes only what changed (docs/agents/deployment.md).
 
 ## Actions and rules
 

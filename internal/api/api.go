@@ -101,6 +101,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/abandon", s.ticketMove(store.TicketAbandoned))
 	api("POST /api/v1/tickets/{id}/retry", s.ticketMove(store.TicketApproved))
 	api("POST /api/v1/tickets/{id}/reopen", s.ticketMove(store.TicketOpen))
+	s.memoryRoutes(api)
 
 	if internal {
 		// Only the host's rollout reaches this listener; a person cannot

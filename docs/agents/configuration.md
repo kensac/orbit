@@ -67,6 +67,10 @@ a result of orbit's query or calc tool (docs/ARCHITECTURE.md). Use it for
 agents whose reports are numbers; prose with incidental amounts from the
 charter or memory gets those amounts sent back and then noted.
 
+## Memory topics
+
+`topics: [finance]` names the shared memory topics whose entries every run of the agent reads, beside the profile's and its own (docs/ARCHITECTURE.md, Memory entries). A topic exists as soon as an entry or an agent names it; the API can attach more (`PUT /agents/{name}/topics/{topic}`).
+
 ## Changing a running deployment
 
 orbit polls its config directory and reloads on any content change. A change
