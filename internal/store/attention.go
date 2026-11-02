@@ -77,9 +77,7 @@ const attentionCols = `a.id::text, a.key, a.kind, a.agent, a.run_id::text, a.con
 // ListAttention returns what is open, newest first, with each thing's
 // detail.
 func (s *Store) ListAttention(ctx context.Context, limit int) ([]Attention, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 500
-	}
+	limit = clampLimit(limit, 500, 500)
 	rows, err := s.Pool.Query(ctx, `
 		SELECT `+attentionCols+`,
 		       COALESCE(CASE a.kind

@@ -78,7 +78,7 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 		Note   string `json:"note"`
 		Author string `json:"author"`
 	}
-	if !decode(w, r, skillBodyLimit, &body) {
+	if !decode(w, r, skillBodyLimit, &body, bodyRequired) {
 		return
 	}
 	k, _, err := s.Store.PutSkill(r.Context(), store.SkillWrite{Name: body.Name, Content: body.Content, Files: body.Files, Create: true},
@@ -119,7 +119,7 @@ func (s *Server) putSkill(w http.ResponseWriter, r *http.Request) {
 		Note    string            `json:"note"`
 		Author  string            `json:"author"`
 	}
-	if !decode(w, r, skillBodyLimit, &body) {
+	if !decode(w, r, skillBodyLimit, &body, bodyRequired) {
 		return
 	}
 	k, changed, err := s.Store.PutSkill(r.Context(), store.SkillWrite{Name: r.PathValue("name"), Content: body.Content, Files: body.Files, Expect: body.Version},
@@ -134,7 +134,7 @@ func (s *Server) restoreSkill(w http.ResponseWriter, r *http.Request) {
 		Note    string `json:"note"`
 		Author  string `json:"author"`
 	}
-	if !decode(w, r, 16<<10, &body) {
+	if !decode(w, r, 16<<10, &body, bodyRequired) {
 		return
 	}
 	k, err := s.Store.RestoreSkill(r.Context(), r.PathValue("name"), body.Restore, body.Version,
@@ -148,7 +148,7 @@ func (s *Server) retireSkill(w http.ResponseWriter, r *http.Request) {
 		Note    string `json:"note"`
 		Author  string `json:"author"`
 	}
-	if r.ContentLength != 0 && !decode(w, r, 16<<10, &body) {
+	if !decode(w, r, 16<<10, &body, bodyOptional) {
 		return
 	}
 	k, err := s.Store.RetireSkill(r.Context(), r.PathValue("name"), body.Version,
@@ -166,7 +166,7 @@ func (s *Server) importSkills(w http.ResponseWriter, r *http.Request) {
 		Note   string    `json:"note"`
 		Author string    `json:"author"`
 	}
-	if !decode(w, r, importBodySkillsLimit, &body) {
+	if !decode(w, r, importBodySkillsLimit, &body, bodyRequired) {
 		return
 	}
 	writes := make([]store.SkillWrite, 0, len(body.Skills))

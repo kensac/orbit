@@ -551,7 +551,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	var hr *runner.Harness
 	if e.Harness != "" && r.Kind() == "claude-code" {
-		hr = &runner.Harness{Bin: e.Harness, Figures: figures && !chat, Search: e.searchSocket(a.Name)}
+		hr = &runner.Harness{Bin: e.Harness, Figures: figures && !chat, Search: e.searchSocket(a.Name), AgentHooks: agentHooks(a)}
+	} else if len(a.Hooks) > 0 {
+		emit("orbit.hooks_skipped", map[string]any{"reason": "the agent's hooks need claude-code with orbit's harness binary"})
 	}
 	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, hr != nil && !chat, inputs)
 	if err != nil {
