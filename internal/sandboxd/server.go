@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kensac/orbit/internal/credproxy"
 	"github.com/kensac/orbit/internal/sandbox"
 )
 
@@ -24,8 +25,10 @@ import (
 type Server struct {
 	cfg Config
 	d   *Docker
-	log *slog.Logger
-	now func() time.Time
+	// sealer turns a backend credential into a credproxy token; nil (a key Validate would refuse) refuses every attach that carries one.
+	sealer *credproxy.Sealer
+	log    *slog.Logger
+	now    func() time.Time
 	// mu serializes creates, so MaxSandboxes holds between the count and
 	// the create.
 	mu sync.Mutex
@@ -37,7 +40,8 @@ type Server struct {
 
 // New returns a server for cfg, which must have passed Validate.
 func New(cfg Config, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, d: NewDocker(cfg.Docker), log: log, now: time.Now}
+	sealer, _ := credproxy.NewSealer(cfg.CredProxyKey)
+	return &Server{cfg: cfg, d: NewDocker(cfg.Docker), log: log, now: time.Now, sealer: sealer}
 }
 
 // Check verifies the host before serving: the daemon has seccomp on, the
@@ -180,6 +184,9 @@ func (s *Server) profile(name string) (Config, error) {
 			return cfg, errors.New("the workstation profile is not configured here (ORBIT_SANDBOX_WORKSTATION_PROXY)")
 		}
 		cfg.Proxy, cfg.Network = cfg.WorkstationProxy, cfg.WorkstationNetwork
+		if cfg.WorkstationCredProxy != "" {
+			cfg.CredProxy = cfg.WorkstationCredProxy
+		}
 	default:
 		return cfg, fmt.Errorf("unknown profile %q", name)
 	}
@@ -349,6 +356,12 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	env, err := s.sealCredentials(c, ar.Env)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ar.Env = env
 	// The body is fully read before the connection is hijacked, so what
 	// follows on it is the process's stdin and nothing else.
 	if _, err := io.Copy(io.Discard, body); err != nil {
@@ -550,7 +563,7 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 		_ = srv.Shutdown(sctx)
 	}()
-	s.log.Info("sandboxd: serving", "listen", s.cfg.Listen, "image", s.cfg.Image, "network", s.cfg.Network, "box_image", s.cfg.BoxImage, "box_runtime", s.cfg.BoxRuntime)
+	s.log.Info("sandboxd: serving", "listen", s.cfg.Listen, "image", s.cfg.Image, "network", s.cfg.Network, "credproxy", s.cfg.CredProxy, "box_image", s.cfg.BoxImage, "box_runtime", s.cfg.BoxRuntime)
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
