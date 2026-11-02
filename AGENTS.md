@@ -74,6 +74,8 @@ is the design; the topic documents below are the rules for changing it.
 
 - `make testdb-up`, then `make check`: exactly CI's gates (format, vet,
   staticcheck, prose, the example config, the tests against Postgres).
+  Without `make testdb-up` (and no `ORBIT_TEST_DATABASE_URL`), database tests skip.
+- `make check-sandbox`: what a build sandbox can pass (no Postgres, no cgo): the same gates, tests without `-race`, database tests skipping.
 - `make vuln`: govulncheck.
 - `go run ./cmd/orbit validate <dir>`: check a configuration directory and
   list the environment it references.

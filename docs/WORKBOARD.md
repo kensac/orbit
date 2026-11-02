@@ -21,7 +21,7 @@ A self-hosted Go service on Kanishk's server (hetzner) that runs Claude Code on 
 | Operations | seamless upgrades (readiness, drain, resuming interrupted attempts), the worker fleet (capabilities, control vs worker, sessions across hosts), usage and health APIs | #11 #16 #25 |
 | Surfaces | thread and SSE API with authentik JWT auth, MCP server with OAuth proxy, mail (replies continue a conversation), uploads | #4 #21 #31 #45 |
 | Orchestration | `delegate` to other agents or fresh workers, each task in its own conversation; task DAGs; parent and child mailboxes (`task:message`, questions to the parent first); decision gates only a person resolves; `delegation` wakeups when tasks settle (never polling); the built-in `orbit` agent delegates to every agent; tasks in the thread, `/tasks` API and a live tasks stream (ARCHITECTURE.md, Delegation) | #46 |
-| Hygiene | API fixes, exact documented shapes, reserved agent names, migration uniqueness, the runners on claudeproto's protocol code (no copies in internal/runner) | #18 #19 #26 #29 #30 #40 #65 |
+| Hygiene | API fixes, exact documented shapes, reserved agent names, migration uniqueness, the runners on claudeproto's protocol code (no copies in internal/runner), `make check` skipping DB tests without a database, `make check-sandbox` for build sandboxes | #18 #19 #26 #29 #30 #40 #65 #73 |
 
 Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/compose.orbit.yml` (at the time of writing 21ab048; newer images were blocked by a duplicate migration, fixed in #50). MCP is live; mail is prepared but not enabled (docs in the homelab repo). The worker fleet is built but not deployed.
 
@@ -38,6 +38,12 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | Migration fix (duplicate version 14) | #50 | |
 
 The Claude side also plans: agent templates and more sources (Gmail, Calendar, Drive, GitHub, Prometheus/Loki, RSS, the DuckDB lake), a homelab-ops agent, presence-aware notifications across devices, the "safeguard later" pass (a credential proxy so the Claude token stays out of the sandbox, a review of self-edit rights, rate limits), and deploying the worker fleet. Ask before starting any of these.
+
+## Integration prerequisites
+
+| Area | Branch / PR | Notes |
+|---|---|---|
+| Run event ordering | `codex/event-sequence`, #72 | Serializes sequence allocation, message capture and complete event/journal persistence across concurrent callbacks; blocks integration checks until reviewed |
 
 ## Open for Codex
 
@@ -62,7 +68,7 @@ Pick one, put your name and branch in the Owner column in your first PR, keep ea
 - **The model never holds orbit's secrets or GitHub tokens.** Writes an agent wants are actions executed by orbit. Interactive messages from the owner count as his instructions; unattended runs follow the agent's rules.
 - **Never delete stored data.** New versions, never overwrites. DB access only through `internal/store`, with guarded state transitions.
 - **Migrations:** name new ones by UTC timestamp, `YYYYMMDDHHMMSS_name.sql` (`date -u +%Y%m%d%H%M%S`). Never the next small number: parallel agents reusing numbers broke main twice. Additive only; never edit a merged migration.
-- **Tests against real Postgres** (`ORBIT_TEST_DATABASE_URL`, `make testdb-up`); `make check` and golangci-lint must pass; CI must be green before merging.
+- **Tests against real Postgres** (`ORBIT_TEST_DATABASE_URL`, `make testdb-up`; without either, database tests skip); `make check` and golangci-lint must pass; CI must be green before merging. Inside a build sandbox (no Postgres, no cgo) run `make check-sandbox`; CI still runs the full gates.
 - **Workflow:** your own git worktree or clone (never switch the branch of a shared checkout); small PRs; merge your own PR (squash) once CI is green; if main moved, merge main into your branch; never force-push. Keep docs/api.md exact when the API changes, because the portfolio chat builds against it.
 - **Writing:** no AI attribution anywhere (no tool or model names, no "generated with", no Co-Authored-By) in commits, PR titles and bodies, code or docs. No em dashes. Do not hard-wrap prose at 80 columns: one line per paragraph or sentence in docs, comments, commit messages and PR bodies (code follows gofmt). Comments state the current rule and its reason, not history.
 - **Deploying is not your job here.** A merged PR builds an image; the owner's main session pins it on hetzner and rolls it out. Never edit anything on a host.
