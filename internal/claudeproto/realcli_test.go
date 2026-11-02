@@ -3,8 +3,10 @@ package claudeproto
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -133,7 +135,7 @@ func TestRealCLIProtocol(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("no permission request for slow.txt")
 	}
-	if err := p.Interrupt(ctx); err != nil {
+	if _, err := p.Interrupt(ctx, false); err != nil {
 		t.Fatal(err)
 	}
 	res, err = p.Await(ctx, emit)
@@ -153,3 +155,193 @@ func TestRealCLIProtocol(t *testing.T) {
 		t.Error("the withdrawn Write happened")
 	}
 }
+
+// TestRealCLISteer pins what the CLI does with a user message written while a turn is in progress (ORBIT_REAL_CLAUDE, as TestRealCLIProtocol): written during a tool call it is folded into the same turn (started before the result, one result answering both); written after the turn's last tool call it is not, and starts a turn of its own right after the result; cancel_async_message withdraws one still queued, and an interrupt with cancel_queued withdraws it with the turn and lists it in the receipt.
+func TestRealCLISteer(t *testing.T) {
+	bin := os.Getenv("ORBIT_REAL_CLAUDE")
+	if bin == "" {
+		t.Skip("ORBIT_REAL_CLAUDE is not set")
+	}
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := os.Getenv("ORBIT_REAL_CLAUDE_MODEL")
+	if model == "" {
+		model = "claude-haiku-4-5"
+	}
+	args, err := Args(Transport{Stream: true, Ephemeral: true}, []string{
+		"--model", model, "--tools", "Bash", "--allowedTools", "Bash", "--strict-mcp-config", "--setting-sources", "",
+		"--settings", `{"includeCoAuthoredBy":false}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Start(Command{Bin: bin, Args: args, Env: Env(os.Environ(), ""), Dir: dir}, Handler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close(CloseGrace)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// states is every lifecycle state of uuid u in lines, in order.
+	states := func(lines []Line, u string) string {
+		var s []string
+		for _, l := range lines {
+			if lc, ok := l.Lifecycle(); ok && lc.CommandUUID == u {
+				s = append(s, lc.State)
+			}
+		}
+		return strings.Join(s, ",")
+	}
+	// turn sends prompt and reads to the result, handing every line to on first.
+	turn := func(prompt string, on func(Line)) (*Result, []Line) {
+		t.Helper()
+		var lines []Line
+		if err := p.SendUUID(prompt, NewUUID()); err != nil {
+			t.Fatal(err)
+		}
+		res, err := p.Await(ctx, func(l Line) {
+			lines = append(lines, l)
+			if on != nil {
+				on(l)
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res, lines
+	}
+	const sleep = "Run the shell command `sleep %d; echo one` with the Bash tool, then reply with exactly what it printed."
+	const banana = "Also say the word banana in your reply."
+
+	// During a tool call: folded into the turn.
+	u := NewUUID()
+	sent := false
+	res, lines := turn(fmt.Sprintf(sleep, 5), func(l Line) {
+		if !sent && toolUse(l) {
+			sent = true
+			if err := p.SendUUID(banana, u); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	if !p.Capable(CapLifecycle) || !p.Capable(CapInterruptCancelQueued) {
+		t.Fatalf("capabilities: %+v", must(p.Init()))
+	}
+	t.Logf("folded: %q, lifecycle %s", res.Result, states(lines, u))
+	if got := states(lines, u); got != "queued,started,completed" {
+		t.Errorf("a message written during a tool call: %s before the result, want queued,started,completed", got)
+	}
+	if !strings.Contains(strings.ToLower(res.Result), "banana") {
+		t.Errorf("one result answers both: %q", res.Result)
+	}
+
+	// After the last tool call: queued past the result, then its own turn.
+	u = NewUUID()
+	sent = false
+	res, lines = turn(fmt.Sprintf(sleep, 2), func(l Line) {
+		if !sent && toolResult(l) {
+			sent = true
+			if err := p.SendUUID(banana, u); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	if got := states(lines, u); strings.Contains(got, LifecycleStarted) {
+		t.Errorf("a message written after the last tool call was folded: %s", got)
+	}
+	if strings.Contains(strings.ToLower(res.Result), "banana") {
+		t.Errorf("the first result answered the late message: %q", res.Result)
+	}
+	var after []Line
+	second, err := p.Await(ctx, func(l Line) { after = append(after, l) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("after the last tool call: first %q; then its own turn %q, lifecycle %s", res.Result, second.Result, states(after, u))
+	if got := states(after, u); !strings.Contains(got, LifecycleStarted) || !strings.Contains(strings.ToLower(second.Result), "banana") {
+		t.Errorf("the late message's own turn: %s, %q", got, second.Result)
+	}
+	if ok, err := p.CancelQueued(ctx, u); err != nil || ok {
+		t.Errorf("withdrawing a message no longer queued: %v %v, want false", ok, err)
+	}
+
+	// cancel_async_message while it waits: never runs.
+	u = NewUUID()
+	sent = false
+	var withdrawn bool
+	res, lines = turn(fmt.Sprintf(sleep, 5), func(l Line) {
+		if !sent && toolUse(l) {
+			sent = true
+			if err := p.SendUUID(banana, u); err != nil {
+				t.Error(err)
+			}
+		}
+		if lc, ok := l.Lifecycle(); ok && lc.CommandUUID == u && lc.State == LifecycleQueued {
+			if withdrawn, err = p.CancelQueued(ctx, u); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	t.Logf("cancel_async_message: %v, lifecycle %s, result %q", withdrawn, states(lines, u), res.Result)
+	if !withdrawn || states(lines, u) != "queued,cancelled" {
+		t.Errorf("withdrawn %v, lifecycle %s; want true, queued,cancelled", withdrawn, states(lines, u))
+	}
+
+	// An interrupt with cancel_queued: the turn ends, the queued message is withdrawn and listed.
+	u = NewUUID()
+	sent = false
+	var receipt *InterruptReceipt
+	res, lines = turn(fmt.Sprintf(sleep, 30), func(l Line) {
+		if !sent && toolUse(l) {
+			sent = true
+			if err := p.SendUUID(banana, u); err != nil {
+				t.Error(err)
+			}
+		}
+		if lc, ok := l.Lifecycle(); ok && lc.CommandUUID == u && lc.State == LifecycleQueued {
+			if receipt, err = p.Interrupt(ctx, true); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	t.Logf("interrupt with cancel_queued: receipt %+v, lifecycle %s, result %s %v", receipt, states(lines, u), res.Subtype, res.IsError)
+	if receipt == nil || len(receipt.StillQueued) != 0 || !slices.Contains(receipt.Cancelled, u) {
+		t.Errorf("receipt %+v, want cancelled [%s] and nothing still queued", receipt, u)
+	}
+	if got := states(lines, u); got != "queued,cancelled" {
+		t.Errorf("lifecycle %s, want queued,cancelled", got)
+	}
+}
+
+// toolUse is a top-level assistant line that calls a tool.
+func toolUse(l Line) bool { return l.Type == "assistant" && hasBlock(l.Raw, "tool_use") }
+
+// toolResult is a top-level user line carrying a tool's result.
+func toolResult(l Line) bool { return l.Type == "user" && hasBlock(l.Raw, "tool_result") }
+
+func hasBlock(raw []byte, typ string) bool {
+	var m struct {
+		Parent  *string `json:"parent_tool_use_id"`
+		Message struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(raw, &m) != nil || m.Parent != nil {
+		return false
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(m.Message.Content, &blocks)
+	for _, b := range blocks {
+		if b.Type == typ {
+			return true
+		}
+	}
+	return false
+}
+
+func must[T any](v T, _ bool) T { return v }

@@ -125,8 +125,10 @@ func (l *Loop) Tick(ctx context.Context) error {
 	}
 	k := &tick{l: l, cfg: cfg, app: app, tokens: map[string]*github.Token{}}
 	defer func() {
-		for _, t := range k.tokens {
-			_ = t.Revoke(context.WithoutCancel(ctx))
+		for key, t := range k.tokens {
+			if err := t.Revoke(context.WithoutCancel(ctx)); err != nil {
+				l.Log.Warn("revoke token", "token", key, "err", err)
+			}
 		}
 	}()
 	ts, err := l.Store.TicketsInFlight(ctx)
@@ -169,7 +171,9 @@ func (k *tick) prewarm(ctx context.Context) {
 		if _, err := p.Prewarm(ctx, repo, tok.GitAuthEnv()); err != nil {
 			k.l.Log.Warn("prewarm", "repo", repo, "err", err)
 		}
-		_ = tok.Revoke(context.WithoutCancel(ctx))
+		if err := tok.Revoke(context.WithoutCancel(ctx)); err != nil {
+			k.l.Log.Warn("revoke token", "repo", repo, "err", err)
+		}
 	}
 }
 

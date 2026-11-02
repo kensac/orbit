@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/kensac/orbit/internal/store"
@@ -239,5 +240,63 @@ func TestAttachments(t *testing.T) {
 	}
 	if names, _ := s.AttachedNames(ctx, "a", store.AttachTopic); len(names) != 0 {
 		t.Fatalf("attached after detach = %v", names)
+	}
+}
+
+// Pinning is a field like any other: versioned, kept by edits that do not name it, only on feedback, and dropped when an entry stops being feedback.
+func TestPinnedEntries(t *testing.T) {
+	s := testdb.New(t)
+	f := fields("feedback", "No em dashes", "Never write an em dash.")
+	f.Pinned = true
+	e, err := s.CreateEntry(ctx, store.NewEntry{EntryRef: store.EntryRef{Scope: store.ScopeProfile}, EntryFields: f}, person())
+	if err != nil || !e.Pinned {
+		t.Fatalf("create pinned = %+v %v", e, err)
+	}
+	u := fields("user", "Lives by the sea", "x")
+	u.Pinned = true
+	if _, err := s.CreateEntry(ctx, store.NewEntry{EntryRef: store.EntryRef{Scope: store.ScopeProfile}, EntryFields: u}, person()); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("a pinned user entry = %v, want ErrInvalid", err)
+	}
+	why := "He asked."
+	e2, err := s.UpdateEntry(ctx, e.ID, 1, store.EntryEdit{Why: &why}, person())
+	if err != nil || !e2.Pinned || e2.Version != 2 {
+		t.Fatalf("an edit not naming pinned = %+v %v", e2, err)
+	}
+	off := false
+	e3, err := s.UpdateEntry(ctx, e.ID, 2, store.EntryEdit{Pinned: &off}, person())
+	if err != nil || e3.Pinned || e3.Version != 3 {
+		t.Fatalf("unpin = %+v %v", e3, err)
+	}
+	if e4, err := s.RestoreEntry(ctx, e.ID, 2, 3, person()); err != nil || !e4.Pinned {
+		t.Fatalf("restore of a pinned version = %+v %v", e4, err)
+	}
+	typ := "project"
+	e5, err := s.UpdateEntry(ctx, e.ID, 4, store.EntryEdit{Type: &typ}, person())
+	if err != nil || e5.Pinned {
+		t.Fatalf("an entry that stops being feedback = %+v %v", e5, err)
+	}
+	on := true
+	if _, err := s.UpdateEntry(ctx, e.ID, 5, store.EntryEdit{Pinned: &on}, person()); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("pinning a project entry = %v", err)
+	}
+	_, versions, _ := s.GetEntry(ctx, e.ID)
+	var got []bool
+	for _, v := range versions {
+		got = append(got, v.Pinned)
+	}
+	if fmt.Sprint(got) != "[false true false true true]" {
+		t.Fatalf("pinned by version, newest first = %v", got)
+	}
+
+	// An import leaves an existing entry's pin alone: a Claude Code memory file has none.
+	g := fields("feedback", "Short replies", "Keep replies short.")
+	g.Pinned = true
+	pinned, _ := s.CreateEntry(ctx, store.NewEntry{EntryRef: store.EntryRef{Scope: store.ScopeProfile}, EntryFields: g}, person())
+	in := []store.NewEntry{{EntryRef: store.EntryRef{Scope: store.ScopeProfile}, Key: pinned.Key, EntryFields: fields("feedback", "Short replies", "Keep replies short, always.")}}
+	if _, err := s.ImportEntries(ctx, in, store.Provenance{Source: store.SourceImport}, false); err != nil {
+		t.Fatal(err)
+	}
+	if cur, _, _ := s.GetEntry(ctx, pinned.ID); !cur.Pinned || cur.Version != 2 {
+		t.Fatalf("after import = %+v", cur)
 	}
 }

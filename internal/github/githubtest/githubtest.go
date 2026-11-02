@@ -92,6 +92,10 @@ type Server struct {
 	// Others are pull requests besides PR (7), by number: read and
 	// patched, nothing else.
 	Others map[int]map[string]any
+	// Issues and Releases are what GET issues and releases answer, one
+	// page of per_page from page.
+	Issues   []map[string]any
+	Releases []map[string]any
 }
 
 // New starts a fake, stopped when the test ends.
@@ -299,6 +303,20 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		f.write(w, 200, map[string]any{"statuses": f.Statuses})
 	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/commits/") && strings.HasSuffix(r.URL.Path, "/status"):
 		f.write(w, 200, map[string]any{"statuses": []any{}})
+	case r.Method == "GET" && (r.URL.Path == "/repos/kensac/orbit/issues" || r.URL.Path == "/repos/kensac/orbit/releases"):
+		all := f.Issues
+		if strings.HasSuffix(r.URL.Path, "/releases") {
+			all = f.Releases
+		}
+		var per, page int
+		_, _ = fmt.Sscan(r.URL.Query().Get("per_page"), &per)
+		_, _ = fmt.Sscan(r.URL.Query().Get("page"), &page)
+		lo, hi := min((page-1)*per, len(all)), min(page*per, len(all))
+		out := all[lo:hi]
+		if out == nil {
+			out = []map[string]any{}
+		}
+		f.write(w, 200, out)
 	case r.Method == "PUT" && r.URL.Path == "/repos/kensac/orbit/pulls/7/merge":
 		_ = json.NewDecoder(r.Body).Decode(&f.Merged)
 		if f.Merged["sha"] != f.PR["head"].(map[string]any)["sha"] {
