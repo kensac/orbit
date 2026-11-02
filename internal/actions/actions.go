@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"maps"
 	"net/http"
 	"slices"
@@ -57,7 +56,7 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 	for _, name := range slices.Sorted(maps.Keys(d.Endpoints)) {
 		typ := "webhook:" + name
 		if a.RuleFor(typ) != spec.RuleDeny {
-			out = append(out, webhookType(name))
+			out = append(out, webhookType(name, d.Endpoints[name]))
 		}
 	}
 	if d.GitHub != nil && a.RuleFor(MergeType) != spec.RuleDeny {
@@ -215,33 +214,6 @@ type notifyParams struct {
 	Priority string `json:"priority"`
 }
 
-func webhookType(endpoint string) Type {
-	return Type{
-		Name:        "webhook:" + endpoint,
-		Description: fmt.Sprintf("Send a JSON body to the %q endpoint.", endpoint),
-		ParamsSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"body": map[string]any{"type": "object"},
-			},
-			"required":             []string{"body"},
-			"additionalProperties": false,
-		},
-		Validate: func(p json.RawMessage) error {
-			var v struct {
-				Body json.RawMessage `json:"body"`
-			}
-			if err := strictDecode(p, &v); err != nil {
-				return err
-			}
-			if len(v.Body) == 0 || v.Body[0] != '{' {
-				return fmt.Errorf("webhook: body must be a JSON object")
-			}
-			return nil
-		},
-	}
-}
-
 // ContinueMinDelay is the shortest wait a continuation may ask for. The
 // executors poll every few seconds, so anything shorter is a busy loop
 // rather than a checkpoint.
@@ -373,44 +345,7 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 		}
 		return json.RawMessage(`{"sent":true}`), nil
 	case strings.HasPrefix(typ, "webhook:"):
-		name := strings.TrimPrefix(typ, "webhook:")
-		ep, ok := e.Deployment.Endpoints[name]
-		if !ok {
-			return nil, fmt.Errorf("endpoint %q is not configured", name)
-		}
-		var p struct {
-			Body json.RawMessage `json:"body"`
-		}
-		if err := strictDecode(params, &p); err != nil {
-			return nil, err
-		}
-		method := ep.Method
-		if method == "" {
-			method = http.MethodPost
-		}
-		req, err := http.NewRequestWithContext(ctx, method, ep.URL, bytes.NewReader(p.Body))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		for k, v := range ep.Headers {
-			rv, err := spec.ExpandEnv(v, e.Env)
-			if err != nil {
-				return nil, fmt.Errorf("endpoint %q header %s: %w", name, k, err)
-			}
-			req.Header.Set(k, rv)
-		}
-		resp, err := e.Client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		result, _ := json.Marshal(map[string]any{"status": resp.StatusCode, "body": string(b)})
-		if resp.StatusCode/100 != 2 {
-			return result, fmt.Errorf("%s %s: %s", method, name, resp.Status)
-		}
-		return result, nil
+		return e.webhook(ctx, strings.TrimPrefix(typ, "webhook:"), params)
 	case typ == MergeType:
 		return e.merge(ctx, params)
 	case typ == CommentType:

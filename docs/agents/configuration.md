@@ -33,7 +33,7 @@ Never in YAML. Channels name variables with `*_env`; source urls, headers, query
 values, Prometheus expressions and endpoint headers use `${VAR}`. An unset variable is an error, never
 an empty string.
 
-`credentials:` in `orbit.yaml` names the variables sources may send, each bound to the URLs it may go to:
+`credentials:` in `orbit.yaml` names the variables sources and endpoint headers may send, each bound to the URLs it may go to:
 
 ```yaml
 credentials:
@@ -41,7 +41,43 @@ credentials:
     url_prefix: https://sure.example.com/api/
 ```
 
-`url_prefix` is an http(s) URL with a host and a path ending in `/`, without user, query or fragment. A source sends a credential only in a request whose URL starts with it (redirects included); where the URL has no template, a mismatch fails the load. A database or built-in agent may reference only credentials; a file agent may also name any other variable (docs/agents/security.md, What a model can define).
+`url_prefix` is an http(s) URL with a host and a path ending in `/`, without user, query or fragment. A source sends a credential only in a request whose URL starts with it (redirects included), and an endpoint only to a rendered URL that does; where the URL has no template or placeholder, a mismatch fails the load. A database or built-in agent may reference only credentials; a file agent may also name any other variable (docs/agents/security.md, What a model can define).
+
+## Endpoints
+
+`endpoints:` in `orbit.yaml` are the HTTP targets of `webhook:<name>` actions. The model writes the action's `body` and, when the endpoint has a `path`, the values of its `{name}` placeholders (`path` in the params); the URL, method and headers are the configuration's. Each placeholder is declared in `params` with a `type` (`string` or `integer`); a string also needs a `pattern` (RE2, matching the whole value) or an `enum`, since that is what keeps the path the configuration's, and is at most `max_length` (default and limit 200). Values are checked before the action is stored and again when it is sent, then escaped as one path segment (`/` becomes `%2F`; `.` and `..` are refused). `body_schema` (a JSON Schema) is what the body must satisfy, checked the same two times and shown to the model. A credential in a header is sent only to a rendered URL under its `url_prefix`, and no redirect is followed: a 3xx is the result and fails the action.
+
+Sure (the finance app) categorizes a transaction with `PUT /api/v1/transactions/{id}` and `{"transaction": {"category_id": "<uuid>"}}`, with an API key of read-write scope in `X-Api-Key` (Sure's `Api::V1::TransactionsController#update`); `user_modified: true` keeps the next bank sync from overwriting the category. On hetzner orbit reaches it as `http://plaid:3000` on the docker network:
+
+```yaml
+credentials:
+  ORBIT_SURE_API_KEY:
+    url_prefix: http://plaid:3000/api/
+endpoints:
+  sure-categorize:
+    url: http://plaid:3000/api/v1
+    method: PUT
+    path: /transactions/{id}
+    description: Set one Sure transaction's category. id is the transaction's id, category_id one of the categories in inputs/categories.json.
+    params:
+      id: {type: string, pattern: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", description: the transaction's id}
+    headers:
+      X-Api-Key: ${ORBIT_SURE_API_KEY}
+    body_schema:
+      type: object
+      additionalProperties: false
+      required: [transaction]
+      properties:
+        transaction:
+          type: object
+          additionalProperties: false
+          required: [category_id, user_modified]
+          properties:
+            category_id: {type: string, pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"}
+            user_modified: {const: true}
+```
+
+An agent gives it a rule (`actions: {webhook:sure-categorize: approve}`) and reads the categories as a source (`GET http://plaid:3000/api/v1/categories`, with the same header), and proposes `{"type": "webhook:sure-categorize", "params": {"path": {"id": "<transaction id>"}, "body": {"transaction": {"category_id": "<category id>", "user_modified": true}}}}`. The key must have Sure's read-write scope; a read-only key answers 403 and the action fails.
 
 ## GitHub
 
