@@ -86,6 +86,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/agents/{name}/thread", s.thread)
 	api("GET /api/v1/agents/{name}/conversations", s.listConversations)
 	api("POST /api/v1/agents/{name}/conversations", s.createConversation)
+	api("POST /api/v1/conversations", s.createConversation)
 	api("GET /api/v1/conversations/{id}", s.getConversation)
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
@@ -97,6 +98,8 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/conversations/{id}/uploads", s.createUpload)
 	api("POST /api/v1/conversations/{id}/uploads/url", s.uploadURL)
 	api("GET /api/v1/conversations/{id}/uploads/{upload}", s.getUpload)
+	api("GET /api/v1/conversations/{id}/files", s.workspaceFiles)
+	api("GET /api/v1/conversations/{id}/files/{path...}", s.workspaceFile)
 	// The signature in the URL is the credential (uploads.go).
 	mux.HandleFunc("PUT /api/v1/uploads/signed", s.signedUpload)
 	api("GET /api/v1/agents/{name}/memory", s.memoryHistory)
@@ -432,8 +435,12 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {
-	err := s.Store.CancelRun(r.Context(), r.PathValue("id"))
-	respond(w, map[string]any{"cancelled": err == nil}, err)
+	st, err := s.Store.CancelRun(r.Context(), r.PathValue("id"), actor(r, ""))
+	code := http.StatusOK
+	if st == "cancelling" {
+		code = http.StatusAccepted
+	}
+	respondStatus(w, code, map[string]any{"cancelled": st == store.StatusCancelled, "status": st}, err)
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
