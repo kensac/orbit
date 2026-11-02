@@ -7,16 +7,7 @@ alone, what waits for approval, what it may not do at all).
 
 ## Code first, model last
 
-The model is the expensive, slow, non-deterministic part, so it gets only the
-part of a job that needs judgment. Everything else is code that runs before
-it: the harness fetches and paginates sources, and runs an agent's
-transforms (`internal/transforms`: coded reducers over a source, such as
-per-category totals with transfers removed, each output an input of its
-own), and then its gates (`unchanged`, `items_above`: a scheduled run
-whose inputs are what the last review judged, or that has nothing to
-review, ends `skipped`, naming the gate, without a backend call, so a
-quiet day costs no tokens). A report's numbers should come from code,
-with the model explaining them.
+The model is the expensive, slow, non-deterministic part, so it gets only the part of a job that needs judgment. Everything else is code that runs before it: the harness fetches and paginates sources, and runs an agent's transforms (`internal/transforms`: coded reducers over a source, such as per-category totals with transfers removed, each output an input of its own), and then its gates (`unchanged`, `items_above`: a scheduled run whose inputs are what the last review judged, or that has nothing to review, ends `skipped`, naming the gate, without a backend call, so a quiet day costs no tokens). A report's numbers should come from code, with the model explaining them.
 
 ## One run
 
@@ -34,7 +25,7 @@ trigger (schedule | manual | message | continue)
   -> runner called with: system contract, prompt, workdir, tools, output schema
   -> output validated against the contract
   -> RecordOutcome, one transaction: run succeeded, memory version, questions, actions
-  -> notifications: the report, then one per action waiting for approval
+  -> notifications (unattended runs only): the report, then one per action waiting for approval
   -> action loop executes approved actions (auto ones arrive approved by rule)
 ```
 
@@ -162,6 +153,15 @@ to Codex or to a plain API call is one line in its spec.
 | `claude-code` | `claude -p --output-format stream-json --json-schema` | `CLAUDE_CODE_OAUTH_TOKEN` (subscription, `claude setup-token`) or `ANTHROPIC_API_KEY` | Read/Glob/Grep in the workdir, plus the agent's `tools` |
 | `codex` | `codex exec --json --output-schema -s read-only` | `CODEX_API_KEY` / `OPENAI_API_KEY` / `CODEX_HOME` | its read-only sandbox; agent `tools` refused |
 | `anthropic` | Messages API, schema as a forced tool | `api_key_env` | none; inputs inlined (bounded) |
+
+## Notifications
+
+Channels are for runs nobody is watching. A run a person's message woke
+(trigger `message`) notifies nothing: its reply, questions, pending
+approvals and failure are in the conversation they are reading
+(`engine.Attended`). Schedule, manual, continue and build runs deliver per
+the agent's `notify.when`, and always their failures and the approvals
+they wait on.
 
 ## Memory, questions, messages
 

@@ -373,3 +373,26 @@ func TestApprovalSignature(t *testing.T) {
 		t.Fatal("signature must name exactly one action")
 	}
 }
+
+func TestARunAnsweringAMessageNotifiesNothing(t *testing.T) {
+	for _, out := range []string{goodOutput, `{"summary": "x"}`} {
+		e, s, h := harness(t, &fakeRunner{output: out})
+		a := e.Current().Config.Agents["finance"]
+		if _, _, err := s.PostMessageOnce(ctx, store.PostMessage{Agent: "finance", SpecSHA: a.SHA, Body: "how is October?",
+			Author: "kanishk", Wake: true}); err != nil {
+			t.Fatal(err)
+		}
+		c, err := s.ClaimRun(ctx, "test")
+		if err != nil || c == nil || c.Trigger != "message" {
+			t.Fatalf("claim: %v %v", c, err)
+		}
+		if err := e.Execute(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		h.mu.Lock()
+		if len(h.messages) != 0 {
+			t.Errorf("the person is reading the chat; nothing goes to a channel: %v", h.messages)
+		}
+		h.mu.Unlock()
+	}
+}

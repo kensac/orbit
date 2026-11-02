@@ -591,6 +591,11 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if pr == "" {
 		pr = notify.Default
 	}
+	if Attended(c.Trigger) {
+		// The person is reading the conversation this run answered in:
+		// its reply, questions and approvals are there, not in a channel.
+		return nil
+	}
 	send := a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send)
 	if send || len(out.Questions) > 0 {
 		title := out.Notify.Title
@@ -638,7 +643,7 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 		return err
 	}
 	metrics.RunFinished(c.Agent, "failed", runnerKind(snap, a), time.Since(start), rr.CostUSD)
-	if a != nil {
+	if a != nil && !Attended(c.Trigger) {
 		e.deliver(ctx, snap, a, &c.ID, nil, "failure", notify.Message{
 			Title: a.Name + " run failed", Body: runErr.Error(), Priority: notify.High,
 			Tags: []string{"orbit", "warning"}, Link: e.runLink(snap, c.ID),
@@ -646,6 +651,12 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 	}
 	return nil
 }
+
+// Attended reports whether a run's trigger means its person is watching
+// the conversation: a message they sent. Such a run
+// notifies nothing (its reply, questions, approvals and failure are in the
+// thread); channels are for unattended runs (schedule, continue, build).
+func Attended(trigger string) bool { return trigger == "message" }
 
 func runnerKind(snap *Snapshot, a *spec.Agent) string {
 	if a == nil {

@@ -64,12 +64,7 @@ fails the run, naming it. A new kind is a function in
 
 ## Gates
 
-`gates:` in an agent are checks, in code, that end a run as `skipped`
-(naming the gate in `runs.gate`) before any backend call, so a quiet day
-costs no tokens and sends nothing. They apply only to scheduled runs with
-no person's message waiting: a message, a manual run, a continuation, a
-build and a recovered attempt always reach the model. Checked in order,
-after sources and transforms:
+`gates:` in an agent are checks, in code, that end a run as `skipped` (naming the gate in `runs.gate`) before any backend call, so a quiet day costs no tokens and sends nothing. They apply only to scheduled runs with no person's message waiting: a message, a manual run, a continuation, a build and a recovered attempt always reach the model. They are checked in order, after sources and transforms:
 
 | kind | fields | skips when |
 |---|---|---|
@@ -112,6 +107,13 @@ agent's summary, notification title and report traceable to its inputs or to
 a result of orbit's query or calc tool (docs/ARCHITECTURE.md). Use it for
 agents whose reports are numbers; prose with incidental amounts from the
 charter or memory gets those amounts sent back and then noted.
+
+## Notifications
+
+`notify.when` (`always`, `agent`: when the run asks, or `never`) applies to
+unattended runs: schedule, manual, continue, build. A run answering a
+person's message never notifies, whatever it says: the person is reading
+the chat. Failures and pending approvals of unattended runs always notify.
 
 ## Changing a running deployment
 
