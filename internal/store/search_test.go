@@ -10,7 +10,7 @@ import (
 )
 
 // searchMigration is the migration that creates search_docs.
-const searchMigration = 16
+const searchMigration = 20261102032149
 
 // searchedRun runs one claimed run of agent to success with a transcript of
 // events, a report and a memory document.
