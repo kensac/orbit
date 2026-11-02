@@ -65,6 +65,15 @@ notify: {channels: [ghost]}
 	}
 }
 
+func TestReservedAgentNamesFail(t *testing.T) {
+	for name := range ReservedAgentNames {
+		_, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/" + name + ".yaml": "name: " + name + "\ncharter: x\n"}))
+		if err == nil || !strings.Contains(err.Error(), "name is reserved") {
+			t.Errorf("agent %q: err = %v, want reserved", name, err)
+		}
+	}
+}
+
 func TestUnknownFieldsAndMismatchedNamesFail(t *testing.T) {
 	if _, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\ntriggerz: []\n"})); err == nil {
 		t.Error("an unknown field must fail the load, not be ignored")

@@ -417,8 +417,30 @@ func (s *Server) getArtifact(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------- actions
 
 func (s *Server) listActions(w http.ResponseWriter, r *http.Request) {
-	a, err := s.Store.ListActions(r.Context(), r.URL.Query().Get("agent"), r.URL.Query().Get("status"), intParam(r, "limit"))
-	respond(w, map[string]any{"actions": orEmpty(a)}, err)
+	q := r.URL.Query()
+	f := store.ActionFilter{Agent: q.Get("agent"), Status: q.Get("status"), RunID: q.Get("run_id"), Limit: intParam(r, "limit")}
+	if f.RunID != "" && !isUUID(f.RunID) {
+		writeErr(w, http.StatusBadRequest, "run_id: not a run id")
+		return
+	}
+	if b := q.Get("before"); b != "" {
+		c, err := store.ParseConversationCursor(b)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "before: "+err.Error())
+			return
+		}
+		f.Before = c
+	}
+	page, err := s.Store.ListActionsPage(r.Context(), f)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	resp := map[string]any{"actions": orEmpty(page.Actions), "has_more": page.HasMore, "next_before": nil}
+	if page.HasMore {
+		resp["next_before"] = page.NextBefore
+	}
+	respond(w, resp, nil)
 }
 
 func (s *Server) getAction(w http.ResponseWriter, r *http.Request) {
@@ -481,6 +503,26 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 func intParam(r *http.Request, name string) int {
 	n, _ := strconv.Atoi(r.URL.Query().Get(name))
 	return n
+}
+
+// isUUID reports whether s is a UUID in its canonical text form, so an id
+// that cannot name a row is a 400, not a Postgres cast error.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch {
+		case i == 8 || i == 13 || i == 18 || i == 23:
+			if c != '-' {
+				return false
+			}
+		case '0' <= c && c <= '9', 'a' <= c && c <= 'f', 'A' <= c && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // orEmpty makes a nil slice encode as [] rather than null.

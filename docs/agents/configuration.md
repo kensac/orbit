@@ -5,6 +5,13 @@ A deployment is a directory: `orbit.yaml` plus `agents/<name>.yaml`
 so does any invalid cross-reference. `orbit validate <dir>` checks a
 directory and lists the environment variables it references.
 
+## Agent names
+
+An agent's name is its file's (`^[a-z][a-z0-9-]{0,62}$`), and may not be
+one of `spec.ReservedAgentNames`: the UI's own top-level routes under
+`/orbit/` (`admin`, `api`, `c`, `new`, `components`, `lib`) and
+`orbit-admin`. Such an agent fails the load, naming the reason.
+
 ## Secrets
 
 Never in YAML. Channels name variables with `*_env`; source headers, query
