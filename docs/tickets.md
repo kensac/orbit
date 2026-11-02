@@ -327,7 +327,8 @@ The permission sets are named in code, one per use:
 
 | use | permissions |
 |---|---|
-| reading run (clone a repository for an agent to read) | `contents: read` |
+| reading (a build's clone, a fetch into the mirror of a repository an agent reads) | `contents: read` |
+| an agent's `pr_list` and `pr_view` (docs/api.md, Repositories) | `pull_requests: read`, `checks: read`, `statuses: read` |
 | build delivery (push `orbit/*`, open the PR, close it on abandon) | `contents: write`, `pull_requests: write` |
 | merge (read the PR and its checks, update the body, merge) | `contents: write`, `pull_requests: write`, `checks: read`, `statuses: read` |
 | failure report (read failing checks and their job logs) | `checks: read`, `actions: read` |
@@ -465,7 +466,7 @@ needs today.
 
 The container receives: the checkout (no `.git/config` credentials), the
 CLI command line, the prompt on stdin, and the backend credential
-(`CLAUDE_CODE_OAUTH_TOKEN`), which the CLI needs to reach its own backend
+(`CLAUDE_CODE_OAUTH_TOKEN`, else `ANTHROPIC_API_KEY`, chosen as for an ordinary run), which the CLI needs to reach its own backend
 (AGENTS.md rule 2). It never receives a GitHub token, the App key, orbit's
 database URL, the API token, or any source or channel secret.
 
@@ -752,8 +753,7 @@ proxy is verified, is `kensac/orbit`; the agent exists, uses a
 claude-code runner and has a timeout of at most `spec.MaxBuildTimeout`
 (50m, inside the sandbox's one-hour lifetime); commands are plain words;
 protected paths are relative globs. The build's model and turn limit are
-the agent's runner's `model` and `max_turns`; its credential is orbit's
-`CLAUDE_CODE_OAUTH_TOKEN`, the only secret the sandbox receives. The egress
+the agent's runner's `model` and `max_turns`; its credential is the one an ordinary run would get (`build.SandboxEnv`: orbit's `CLAUDE_CODE_OAUTH_TOKEN`, else its `ANTHROPIC_API_KEY`, never both), the only secret the sandbox receives. The egress
 allowlist and the image are sandboxd's and egress's own configuration
 (docs/agents/deployment.md).
 

@@ -63,6 +63,10 @@ more than its agent's rules allow.
 
 A run writes memory entries directly, and a learning run writes them from a conversation, so a poisoned input or message can plant an entry that later runs of every agent reading its scope are shown. What bounds it: entries are shown as data (the system prompt says they never authorize an action the rules do not, and an instruction in one is not to be followed); a run may write only to the profile, itself and the topics it reads, at most 10 writes, and only change entries it was shown at the version it was shown; every version is kept with the run and conversation it came from (`GET /memory/entries?run_id=`), so a bad one is found and retired or restored. A learning run reads the person's messages and the agent's reports (which can quote inputs), not the inputs themselves.
 
+## Agent hooks
+
+An agent's `run` hooks are commands from its configuration files, never chosen by a model (a database or built-in agent may not have one, What a model can define), but they read the event's JSON (tool inputs the model wrote) on stdin, so write them as parsers of untrusted input. They run as orbit's user with only `PATH`, `HOME` (the workdir) and `LANG` in their environment, so no orbit secret and no backend credential; the filesystem and network are not isolated beyond that, so a hook command is as trusted as anything else in the configuration. `say` and `deny` run no command.
+
 ## Skills
 
 A skill is instructions a run follows, and agents write their own, so a run steered by a poisoned input can write a skill that steers its later runs, and those of every agent the skill is attached to. What bounds it: a run writes at most 3 skills, only new ones or ones it was given (at the version given), and a written skill is attached to that agent only; every version is kept with its run (`source_run_id`), so a bad one is found, restored or retired. The skill tool reads only the run's own copy, inside each skill's directory after symlinks; it records nothing in the ledger, so a skill's text never backs a figure. Supporting files are stored as given and never executed by orbit; a script in a skill runs only if the agent's own `tools` let it.
@@ -71,9 +75,23 @@ A skill is instructions a run follows, and agents write their own, so a run stee
 
 Only actions its spec enables, through executors here, to destinations in
 configuration. `continue` can make an agent run again on its own, so it is
-bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body, never a URL or a header. `agent:define` lets a model rewrite an agent defined in the database, itself included: its charter, tools, sources and rules, so an agent with it enabled can widen any database agent's reach up to what orbit.yaml offers (endpoints, channels, repositories); never a file agent's, and never past the configuration. Every change is a version with its run, so it is seen and reverted through the API.
+bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body, never a URL or a header. `agent:define` lets a model rewrite an agent defined in the database or built in, itself included: its charter, tools, sources and rules. What such an agent may hold is limited below (What a model can define), and a change that widens one waits for a person. Never a file agent's. Every change is a version with its run, so it is seen and reverted through the API.
 `deny` is the default for every type an agent does not name, and denied
 types are not even offered.
+
+## What a model can define
+
+A database agent is written through the API or by `agent:define`, and the built-in `orbit` is changed the same way, so a model steered by a poisoned input (a fetched page, an upload) can write either. Without a sandbox (`sandbox:`, Sandboxed chats below) their runs are in orbit's container, which holds every `ORBIT_*` secret, and their sources are fetched by orbit either way. So `spec.validateTrust` holds them (`spec.Agent.Restricted`) to what orbit.yaml offers, at load and so on every write:
+
+- **No `file` source.** It would read orbit's filesystem (`/proc/self/environ`, `/config`, `/data`); the fetcher refuses one for a restricted agent too.
+- **No `${VAR}` but a credential.** orbit.yaml's `credentials:` binds each variable it lists to a URL prefix; a restricted agent may reference only those, so it can never render `${ORBIT_GITHUB_APP_PRIVATE_KEY}` into a header. The fetcher sends a credential only in a request whose URL starts with its prefix and has no dot segment, and refuses a redirect outside it (Go resends custom headers to any host). The binding holds for file agents too; a file agent may still name any other variable.
+- **Without a sandbox, only `spec.UnsandboxedTools`** (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite): no Bash, Edit, Write or NotebookEdit, which would run commands or write files beside the secrets. The list is the one place to change. In a sandbox the container is the boundary and its profile decides the tools.
+- **No precheck and no `run` hook** (Prechecks and Agent hooks, below): either would run a command on orbit's host as orbit's user. `say` and `deny` hooks are allowed.
+- **A change that widens an agent waits for a person.** `spec.Widening` compares the change, loaded as it would run, with the agent's current version (nothing, for a new agent): a tool, a source added or changed, a credential, a delegate target, a need, a move to a sandbox profile, or an action type allowed more readily (deny, approve, auto). An `agent:define` that widens is recorded as `approve` whatever its rule says. One executing by rule alone is compared again against the agent as it is then, and fails if it widens, so a person's narrowing between proposal and execution holds.
+
+What is left: an agent with `WebFetch` can send what its run read to any host, and a change within the agent's current reach (its charter, its triggers, narrowing) applies without a person.
+
+A worker rebuilds agents from the database without their origin and does not repeat these checks: control validated every spec it recorded, and the credential binding is checked on every fetch.
 
 ## Web Push
 
@@ -101,13 +119,14 @@ types are not even offered.
   request arrived on is a property of the socket; a header saying a request
   is internal could be sent by anyone, so none is trusted. Never give the
   internal port a traefik router or a public port mapping.
+- **Every key orbit signs or seals with is derived from the operator token** by `secret.Key.Derive(purpose)` (`internal/secret`): HMAC-SHA256 of a purpose label under the token, one label per use, so no two uses share a key and rotating the token voids all of them together. The purposes are `secret.Approval(id)` (`action:<id>`, whose output is the approval link's signature), `secret.Mail(id)` (`mail:<id>`, whose first 12 hex digits sign a mail token), `secret.UploadURL` (`orbit upload url`, the key of signed upload URLs) and `secret.MCPOAuth` (`orbit mcp oauth`, the OAuth proxy's sealing key). Each is byte-identical to what orbit signed before the package existed, and golden tests (`internal/secret`, `internal/mail`, `internal/engine`, `internal/api` `derive_test.go`) hold them there: changing a label voids every approval link, reply address, upload URL and in-flight OAuth sign-in already sent. A new use gets a new label; an existing label never changes.
 - `POST /api/v1/drain` takes an instance out of service; it exists only on
   the internal listener, so nobody on the public one can, whatever their
   token.
 - Only asymmetric signatures are accepted. An `HS*` token would be verified
   with the client secret, which every client holds, so any client could mint
   any person.
-- `/ui/actions/{id}` accepts `sig`, an HMAC of the action id under the
+- `/ui/actions/{id}` accepts `sig`, the action's approval purpose derived from the
   operator token, so a phone can approve from a notification without a
   login. The GET only shows; deciding is a POST from the page, so a link
   preview cannot approve anything. Rotating the token invalidates every
@@ -139,15 +158,25 @@ A worker (`orbit worker`) holds the database URL, its backend credential and the
 
 The App (`orbit-kensac`, docs/tickets.md) has its private key in orbit's
 environment only. Every token minted
-from it names one repository from `github.repositories` and one permission
+from it names one repository and one permission
 set from `internal/github` (never an empty set, which would mean all of the
 installation's), is revoked after its operation, and is refused if GitHub
-grants more than was asked. `github:merge` lets a compromised model ask to
+grants more than was asked. The repository is one of `github.repositories` for tickets, builds and merges, and one of `github.read_repositories` for agents that read (below); the two lists are separate, so reading a repository never lets anything write to it. `github:merge` lets a compromised model ask to
 merge an orbit PR whose checks are green; the executor re-checks the head
 commit, the branch and every check itself, and the rule decides whether a
 person approves first. In the fleet a merge is a deploy: keep it `approve`.
 
 `actions: write` (rerunning failed jobs) also covers dispatching and cancelling workflows; orbit mints it alone, only in the ticket loop, for `RerunJob` on the job ids of checks that failed, and no model sees it.
+
+## Repositories agents read
+
+An agent's `repos` (configuration.md, Repositories) are read by orbit, never by the model with a credential (`internal/repos`, `engine/repos.go`):
+
+- **Tokens.** Two permission sets, each minted for one repository of `github.read_repositories`, for one operation, and revoked after it: `ReadContents` (`contents: read`) for each fetch into the mirror, and `ReadPulls` (`pull_requests: read`, `checks: read`, `statuses: read`) for each `pr_list` or `pr_view` call. Neither can push, comment, merge, rerun or change anything; `ReadContents` reads every file and branch of that one repository, which is the point. A token lives in orbit's memory and in the environment of the one `git fetch` or `ls-remote` that uses it (`GIT_CONFIG_*`, as for builds), never in a file, a remote URL or the mirror's config (the remote is given on the command line), and never in a model's process or a sandbox.
+- **The mirror** (`<data>/mirrors/<owner>__<name>.git`) is bare and written only by orbit's git, run with no system or global config and no hooks. A run gets the tree at one commit through `git archive`, unpacked through `os.Root` into its inputs: regular files and directories only (symlinks and submodules left out, so nothing in a repository can point outside the run's directory), no `.git`, at most `repos.MaxTreeBytes` and `repos.MaxTreeEntries`.
+- **The tools** (`git_log`, `git_show`, `git_diff`, `git_blame`, `pr_list`, `pr_view`) run in orbit's process: for a report agent the tool server asks the engine over a per-agent unix socket (as search does), for a chat agent the engine answers the SDK tool call itself. The engine reads the agent's spec in force and refuses any repository it does not name. A model's revision or path is never read as an option (a leading `-` is refused, and every command has `--end-of-options` or `--`), only reads are ever run, and an answer is at most `repos.MaxOutput`. They need no Bash, no WebFetch and no token in the model's reach.
+- **What a compromised model gains:** the contents and history of the repositories its agent names, and their pull requests and checks, which its run already reads. A repository's text is data like any input: a file can carry instructions. A network tool (`WebFetch`, a workstation's egress) could carry what it read out; give `repos` naming a private repository only to agents whose tools you would let see it leave. `agent:define` can give a database agent `repos`, but only within `github.read_repositories`.
+- **Workers** hold no App key, so an agent with `repos` must need `github`, a capability only control advertises.
 
 ## The build sandbox
 
@@ -172,8 +201,7 @@ without docker):
   The proxy never dials a private, loopback, link-local or CGNAT address
   (every tailnet address), so an allowed name that resolves to one cannot
   reach the host's networks.
-- The environment is sandboxd's fixed list plus the backend credential
-  (`sandbox.AllowedEnv`); no orbit secret, no GitHub token.
+- The environment is sandboxd's fixed list plus one backend credential (`sandbox.AllowedEnv` permits `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, and an attach carrying both is refused); no orbit secret, no GitHub token. orbit chooses it as for an ordinary run, for builds and sandboxed chats alike (`build.SandboxEnv` through `claudeproto.Credential` and `claudeproto.Env`): the subscription token when set, else the API key.
 - Callers cannot pass docker options: the create request is the tar and a
   run id, the attach request is argv and env (unknown fields refused); the
   unit tests pin the full create document and reject any container the
