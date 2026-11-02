@@ -60,6 +60,9 @@ an agent's beliefs changed.
 
 - search (`search_docs`): derived, not written by any store method. Triggers on `messages`, `runs` (summary, report, error), `run_events` (the backends' prose and tool calls), `memory_versions` and `memory_entry_versions` insert one document per searchable piece, keyed by the row it came from (`ref`), so every writer indexes alike; a document that cannot be built raises a warning and never fails the write. A new searchable table gets its trigger and its backfill in one migration.
 
+- usage samples (`usage_samples`): one row per poll of the subscription usage endpoint, `ok` with the body as received or not with the error; parsed when read (`usage.ParsePoll`), never rewritten.
+- deferral (`run_deferrals`, one per run): `DeferRun` pushes a queued schedule run's `run_after` and upserts its row (`times`, the window and reading) in one transaction, refusing a run no longer queued; `ReleaseDeferrals` clears `run_after` and sets `released_at` together. A run is held only while queued, so a claim is never blocked by anything but `run_after`.
+
 A client request id (`receipts`) is written in the same transaction as the
 message or decision it records, so a retry returns the first result and a
 failure leaves no receipt.
