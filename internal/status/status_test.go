@@ -394,3 +394,38 @@ func TestSocketPath(t *testing.T) {
 		t.Fatalf("socket = %s", a)
 	}
 }
+
+func TestAggregate(t *testing.T) {
+	finished := at(9)
+	errMsg := "boom"
+	done := &Run{ID: "r2", Status: "succeeded", FinishedAt: &finished}
+	failed := &Run{ID: "r2", Status: "failed", FinishedAt: &finished, Error: &errMsg}
+	running := &Run{ID: "r3", Status: "running", Attempt: 1, StartedAt: &finished}
+	cases := []struct {
+		name          string
+		latest        *Run
+		open, pending bool
+		state         State
+		kind          Kind
+	}{
+		{"no run", nil, false, false, Idle, ""},
+		{"done", done, false, false, Done, ""},
+		{"an older question still open", done, true, false, Waiting, Question},
+		{"an older action pending", done, true, true, Waiting, Approval},
+		{"a failure gives way to a waiting question", failed, true, false, Waiting, Question},
+		{"failed", failed, false, false, Errored, ""},
+		{"a running run speaks for itself", running, true, true, Working, ""},
+	}
+	for _, c := range cases {
+		got := Aggregate(c.latest, c.open, c.pending)
+		if got.State != c.state || got.Kind != c.kind {
+			t.Errorf("%s: got %s/%s, want %s/%s", c.name, got.State, got.Kind, c.state, c.kind)
+		}
+		if c.latest != nil && got.RunID != c.latest.ID {
+			t.Errorf("%s: run id %q", c.name, got.RunID)
+		}
+		if c.state == Waiting && got.Detail != "" {
+			t.Errorf("%s: detail %q", c.name, got.Detail)
+		}
+	}
+}

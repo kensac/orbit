@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -378,8 +379,14 @@ func openSSE(t *testing.T, v *env, path, lastID string) (<-chan sse, context.Can
 	return ch, cancel
 }
 
-// next returns the next non-ping event.
+// next returns the next event that is neither a ping nor an agent_status
+// (TestStreamAgentStatus reads those).
 func next(t *testing.T, ch <-chan sse) sse {
+	t.Helper()
+	return nextEvent(t, ch, true)
+}
+
+func nextEvent(t *testing.T, ch <-chan sse, skipAgentStatus bool) sse {
 	t.Helper()
 	for {
 		select {
@@ -388,8 +395,9 @@ func next(t *testing.T, ch <-chan sse) sse {
 				t.Fatal("stream ended early")
 			}
 			// item events are the journal rows; tests of them read them
-			// with nextItem.
-			if e.Event != "ping" && e.Event != "item" {
+			// with nextItem. agent_status events are read by expect only
+			// when asked for.
+			if e.Event != "ping" && e.Event != "item" && (!skipAgentStatus || e.Event != "agent_status") {
 				return e
 			}
 		case <-time.After(5 * time.Second):
@@ -400,7 +408,7 @@ func next(t *testing.T, ch <-chan sse) sse {
 
 func expect(t *testing.T, ch <-chan sse, event, data string) sse {
 	t.Helper()
-	e := next(t, ch)
+	e := nextEvent(t, ch, event != "agent_status")
 	if e.Event != event || (data != "" && e.Data != data) {
 		t.Fatalf("got %s %s, want %s %s", e.Event, e.Data, event, data)
 	}
@@ -737,5 +745,51 @@ func TestRetriedSendsActOnce(t *testing.T) {
 	}
 	if code, _ := call(t, "POST", v.srv.URL+"/api/v1/actions/"+ids[0]+"/approve", kanishk, ""); code != 409 {
 		t.Fatalf("approve without an id after a decision = %d", code)
+	}
+}
+
+// A stream sends the agent's status with every status, and on its own when
+// the run's hooks change it; done carries it too.
+func TestStreamAgentStatus(t *testing.T) {
+	v := newEnv(t, fastStreams)
+	run := enqueue(t, v)
+	ch, _ := openStream(t, v, run)
+	agentStatus := func(want string) {
+		t.Helper()
+		e := expect(t, ch, "agent_status", "")
+		var st struct {
+			State, Kind, Detail, Source string
+			RunID                       string `json:"run_id"`
+		}
+		_ = json.Unmarshal([]byte(e.Data), &st)
+		if st.RunID != run {
+			t.Fatalf("agent_status run_id = %q", st.RunID)
+		}
+		if got := st.State + "/" + st.Kind + "/" + st.Detail + "/" + st.Source; got != want {
+			t.Fatalf("agent_status = %s, want %s (%s)", got, want, e.Data)
+		}
+	}
+	expect(t, ch, "status", `{"attempt":0,"status":"queued"}`)
+	agentStatus("queued///run")
+	_, a1 := claim(t, v, "claude-code")
+	expect(t, ch, "status", `{"attempt":1,"epoch":1,"status":"running"}`)
+	agentStatus("working///run")
+	snap := `{"state":"waiting","kind":"permission","detail":"Write","event":"PermissionRequest","at":"2026-11-01T12:00:00Z","attempt":1}`
+	if err := v.s.SetHookStatus(ctx, run, a1, json.RawMessage(snap)); err != nil {
+		t.Fatal(err)
+	}
+	agentStatus("waiting/permission/Write/hooks")
+	if _, err := v.s.RecordOutcome(ctx, run, "a", store.RunResult{Attempt: a1, Status: "succeeded", Report: "r"},
+		store.Outcome{Questions: []string{"q?"}}); err != nil {
+		t.Fatal(err)
+	}
+	expect(t, ch, "status", `{"attempt":1,"epoch":1,"status":"succeeded"}`)
+	agentStatus("waiting/question//run")
+	done := expect(t, ch, "done", "")
+	if !strings.Contains(done.Data, `"agent_status":{"state":"waiting","kind":"question"`) {
+		t.Fatalf("done = %s", done.Data)
+	}
+	if err := v.s.SetHookStatus(ctx, run, a1, json.RawMessage(snap)); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("a finished run's hook status: %v", err)
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/kensac/orbit/internal/status"
 )
 
 // The admin read side: usage totals and the deployment's health. Every
@@ -196,6 +198,10 @@ type RunningRun struct {
 	HeartbeatAt *time.Time `json:"heartbeat_at"`
 	// HeartbeatAgeSeconds is now minus HeartbeatAt, by the database clock.
 	HeartbeatAgeSeconds *float64 `json:"heartbeat_age_seconds"`
+	// AgentStatus is what the run's agent is doing (status.Derive): its
+	// hooks' report for this attempt, else working.
+	AgentStatus status.Status    `json:"agent_status" db:"-"`
+	HookStatus  *status.Snapshot `json:"-"`
 }
 
 // LastSuccess is an agent's newest run that finished well: succeeded, or
@@ -236,7 +242,7 @@ func (s *Store) Health(ctx context.Context) (*Health, error) {
 		}
 		rows, err := tx.Query(ctx, `
 			SELECT id::text, agent, worker, attempt, started_at, heartbeat_at,
-			       extract(epoch FROM now() - heartbeat_at)::float8
+			       extract(epoch FROM now() - heartbeat_at)::float8, hook_status
 			FROM runs WHERE status = 'running' ORDER BY started_at, id LIMIT $1`, maxRunning)
 		if err != nil {
 			return err
@@ -244,6 +250,11 @@ func (s *Store) Health(ctx context.Context) (*Health, error) {
 		running, err := pgx.CollectRows(rows, pgx.RowToStructByPos[RunningRun])
 		if err != nil {
 			return err
+		}
+		for i := range running {
+			r := &running[i]
+			r.AgentStatus = status.Derive(status.Run{ID: r.RunID, Status: "running", Attempt: r.Attempt,
+				StartedAt: r.StartedAt, Hook: r.HookStatus})
 		}
 		h.Running = append(h.Running, running...)
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM actions WHERE status = 'pending'`).Scan(&h.PendingActions); err != nil {
