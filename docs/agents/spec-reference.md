@@ -17,6 +17,8 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `credentials` | map of variable to credential | none | The variables sources may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
+| `usage_poll` | map: `every` (default 5m, at least 1m), `token_env` (default `CLAUDE_CODE_OAUTH_TOKEN`) | absent | Poll the subscription's usage windows (configuration.md, Subscription usage and low-priority agents). |
+| `defer_low_priority` | bool | `false` | Hold `priority: low` agents' scheduled runs while a usage window is above `usage.DeferLowAbove`. |
 
 ### `defaults`
 
@@ -26,6 +28,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `timeout` | duration | `15m` | An agent's run timeout when it names none. |
 | `channels` | list of channel names | none | An agent's `notify.channels` when it names none. Each must exist. |
 | `memory_max_bytes` | int | `16384` | The largest memory document a run or the API may write. |
+| `decision_stall` | duration | `24h` | How long a delegated task's decision may wait for a person before, with nothing else in its batch able to move, its parent is woken (docs/ARCHITECTURE.md, Delegation). |
 
 ### `channels.<name>`
 
@@ -157,10 +160,11 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `learn` | map | on | Learning runs over quiet conversations (below). |
 | `hooks` | list | none | Claude Code hooks for the agent's runs, beside orbit's own; claude-code only, at most 20 (below). |
 | `chat` | bool | `false` | A Claude Code session whose reply is its final message, with memory, questions and actions as orbit's tools; a workspace per conversation. claude-code only. |
-| `sandbox` | `workstation`, `build` | none | Needs `chat` and a sandboxd. Runs the CLI in a sandboxd container per conversation: `workstation` has every Claude Code tool and egress to any public host; `build` has its `tools` and the build allowlist (security.md, Sandboxed chats). |
+| `sandbox` | `workstation`, `build` | none | Needs `chat` and a sandboxd. Runs the CLI in a sandboxd container per conversation: `workstation` has every Claude Code tool and egress to any public host; `build` has its `tools` and the build allowlist (security.md, Sandboxed chats). A `workstation` agent also has a box for terminals (docs/workspace.md). |
 | `needs` | list of capabilities | none | What a host must have to run the agent (`docker-network:hetzner`); without any, every host. |
 | `delegates` | list of agent names, or `["*"]` | none | Agents this one may hand tasks to; the `delegate` action also needs a rule. |
 | `repos` | list (below) | none | Repositories every run reads: the tree at a commit under `inputs/repos/<name>/`, plus orbit's history and pull request tools. Each must be in `github.read_repositories`; needs `github` in `needs` and a claude-code or codex runner. |
+| `priority` | `normal`, `low` | `normal` | `low` is work that can wait: with `defer_low_priority`, its scheduled runs are held while the subscription is nearly spent. |
 
 ### `triggers[]`
 
@@ -229,7 +233,7 @@ Checked in order on scheduled runs with no message waiting (configuration.md, Ga
 
 ### `tools`
 
-Every claude-code run has `Read`, `Glob` and `Grep`, confined to the run's workdir; with orbit's harness, `mcp__orbit__query`, `mcp__orbit__calc` and `mcp__orbit__search` (the agent's own records); with skills, `Skill`. `tools` adds Claude Code tool names, passed as given to `--tools` and `--allowedTools` (not checked at load; codex and anthropic runners fail the run if it is set). A listed tool is allowed by name with no path rule, and orbit's path guard covers only Read, Glob and Grep. The table is for runs on orbit's host; in a `sandbox` container the container is the boundary instead (a workstation has every tool and ignores `tools`). A database or built-in agent without a `sandbox` may list only `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite).
+Every claude-code run has `Read`, `Glob` and `Grep`, confined to the run's workdir; with orbit's harness, `mcp__orbit__query`, `mcp__orbit__calc` and `mcp__orbit__search` (the agent's own records); with skills, `Skill`. `tools` adds Claude Code tool names, passed as given to `--tools` and `--allowedTools` (names are not checked at load; a spec with `tools` on a codex or anthropic runner fails validation, since neither has a per-tool grant). A listed tool is allowed by name with no path rule, and orbit's path guard covers only Read, Glob and Grep. The table is for runs on orbit's host; in a `sandbox` container the container is the boundary instead (a workstation has every tool and ignores `tools`). A database or built-in agent without a `sandbox` may list only `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite).
 
 | Tool | Grants | Risk |
 |---|---|---|
@@ -248,7 +252,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `notify` | Sends a message to the agent's channels. | |
 | `continue` | Wakes the agent again in 1m to 24h, at most 12 in a row. | |
 | `delegate` | Hands a task to an agent in `delegates`. | `delegates` |
-| `task:message`, `task:cancel` | Messages or cancels a delegated task; follow the `delegate` rule unless named. | `delegates` |
+| `task:message`, `task:cancel`, `task:retry` | Messages, cancels or retries a delegated task; follow the `delegate` rule unless named. A retry past a task's third failure waits for a person whatever the rule. | `delegates` |
 | `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint; never a URL or header of the model's. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
 | `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |
