@@ -270,6 +270,11 @@ func validate(args []string) error {
 	if m := cfg.Deployment.Mail; m != nil {
 		refs[m.IMAP.UsernameEnv], refs[m.IMAP.PasswordEnv] = true, true
 	}
+	for _, c := range cfg.Deployment.Connectors {
+		for _, v := range connectorEnv(c) {
+			refs[v] = true
+		}
+	}
 	if b := cfg.Deployment.Build; b != nil {
 		refs[b.TokenEnv] = true
 		refs["CLAUDE_CODE_OAUTH_TOKEN"] = true
@@ -293,6 +298,18 @@ func validate(args []string) error {
 		fmt.Printf("environment referenced: %s\n", strings.Join(env, ", "))
 	}
 	return nil
+}
+
+// connectorEnv is the environment a connector's calls need: its header's credentials, a configured client's secret, and for oauth the key its tokens are sealed with.
+func connectorEnv(c spec.Connector) []string {
+	out := spec.EnvRefs(c.Auth.Value)
+	if c.Auth.ClientSecretEnv != "" {
+		out = append(out, c.Auth.ClientSecretEnv)
+	}
+	if c.AuthKind() == spec.ConnectorAuthOAuth {
+		out = append(out, spec.ConnectorKeyEnv)
+	}
+	return out
 }
 
 func enqueue(ctx context.Context, args []string) error {

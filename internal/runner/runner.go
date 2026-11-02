@@ -54,6 +54,8 @@ type Request struct {
 	Chat *Chat
 	// SkillsPlugin is a plugin directory holding the run's skills (engine/skills.go), loaded with --plugin-dir; claude-code only.
 	SkillsPlugin string
+	// Connectors are the MCP servers the run reaches through orbit (connectors.go); claude-code only. A run with any talks to the CLI over stream-json, whose control channel carries their calls.
+	Connectors *Connectors
 }
 
 // Harness is orbit's own code inside the CLI's process tree.

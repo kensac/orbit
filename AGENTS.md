@@ -53,6 +53,7 @@ is the design; the topic documents below are the rules for changing it.
 - `internal/runner/`: model backends: `claude-code`, `codex`, `anthropic`.
 - `internal/claudeproto/`: Claude Code's stream-json protocol (turns, control requests both ways, permission answers recorded before they are sent, the transport's flags, the child's credential scrub), written against the Agent SDK's wire format, not the SDK.
 - `internal/sources/`: inputs the harness fetches (`http`, `prometheus`, `file`).
+- `internal/connectors/`: orbit's MCP client for connectors (streamable HTTP, header and OAuth credentials, sealed tokens); the engine's gateway is `internal/engine/connectors.go`.
 - `internal/transforms/`: coded reducers over a source before the model sees it.
 - `internal/actions/`: action types, their parameter schemas and executors.
 - `internal/notify/`: channels (`ntfy`, `smtp`, `webhook`, `log`).

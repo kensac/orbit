@@ -554,11 +554,20 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err != nil {
 		return nil, nil, err
 	}
+	gw, conns, connSection := e.prepareConnectors(ctx, snap, a, c, workdir, inputsDir, emit, func(kind string, v any) error {
+		b, _ := json.Marshal(v)
+		return events.write(kind, b)
+	})
+	defer gw.close()
 	if chat {
-		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
+		out, res, err := e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
 			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec,
-			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin})
+			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != "") + connSection, plugin: skillsPlugin, connectors: conns})
+		if out != nil {
+			out.connectorCalls = gw.pendingCalls()
+		}
+		return out, res, err
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
 	if tk != nil {
@@ -572,6 +581,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	system += entriesContract(topics)
 	system += skillsContract(skills, skillsPlugin != "")
+	system += connSection
 	delegated, err := e.Store.ConversationTasks(ctx, c.ConversationID, c.ID)
 	if err != nil {
 		return nil, nil, err
@@ -596,7 +606,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	defer cancel()
 	res, err := r.Run(runCtx, runner.Request{
 		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
-		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin,
+		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin, Connectors: conns,
 	}, func(ev runner.Event) { emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
@@ -616,6 +626,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	out.known, out.topics, out.skills = knownEntries, topics, skills
 	out.task = task
+	out.connectorCalls = gw.pendingCalls()
 	if figures {
 		// The hook already sent the output back for these, up to
 		// MaxFigureDenials times (claude-code); this is the same check on
@@ -825,6 +836,17 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			Buttons:  []notify.Button{{Label: "Review", URL: e.ApprovalLink(snap, id)}},
 		})
 	}
+	// Connector calls recorded for approval during the run (connectors.go).
+	for _, pc := range out.connectorCalls {
+		e.deliver(ctx, snap, a, &c.ID, &pc.id, "approval", notify.Message{
+			Title:    fmt.Sprintf("%s wants to %s", a.Name, pc.typ),
+			Body:     "```json\n" + string(pc.params) + "\n```",
+			Priority: notify.High,
+			Tags:     []string{"orbit", "approval"},
+			Link:     e.ApprovalLink(snap, pc.id),
+			Buttons:  []notify.Button{{Label: "Review", URL: e.ApprovalLink(snap, pc.id)}},
+		})
+	}
 	return nil
 }
 
@@ -1013,7 +1035,10 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 			return e.Store.EnqueueContinuation(ctx, store.Continuation{
 				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
 		},
-		Define: e.defineAction}
+		Define: e.defineAction,
+		Connector: func(ctx context.Context, c actions.Call) (json.RawMessage, error) {
+			return e.executeConnector(ctx, snap, c)
+		}}
 	for {
 		act, err := e.Store.ClaimApprovedAction(ctx)
 		if err != nil || act == nil {

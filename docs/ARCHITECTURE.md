@@ -138,6 +138,14 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
   and Stop (the stream already records every tool result, and the output to
   verify is the StructuredOutput call, not the stop).
 
+## Connectors
+
+An agent's `connectors` give its Claude Code runs the tools of MCP servers orbit.yaml names (`internal/connectors`, `engine/connectors.go`, `runner/connectors.go`). orbit is the gateway, so no credential enters the CLI or a sandbox:
+
+- **Before the CLI starts**, the engine lists each connector's tools (MCP streamable HTTP, with the connector's credential: a header bound like a source's credential, or an OAuth token a person signed in for, sealed in `connector_tokens`, a version per sign-in and per refresh) and decides each tool's rule: the agent's `mcp:<connector>:<tool>`, else `approve` for one in `write_tools`, else `auto`; `deny` is not offered. A connector that cannot be listed is left out, and the system prompt says so beside each offered connector's description.
+- **In the CLI**, each connector is an SDK MCP server (`{"type": "sdk", "name": <connector>}` in `--mcp-config`), its tools `mcp__<connector>__<tool>`; `auto` tools are in `--allowedTools`, `approve` tools are ask rules in `--settings` with `--permission-prompt-tool stdio` (and the default permission mode: dontAsk denies an ask rule unasked). A report run with connectors talks stream-json too, since their traffic rides the control channel. Verified on 2.1.316: several SDK servers in one config, a dash in a name, the tool use id in `tools/call`'s `_meta` matching the prompt's, and an ask rule reaching the prompt in the default and bypassPermissions modes (`TestRealCLIConnectors` holds all but the sandbox's bypassPermissions).
+- **A call** arrives as an `mcp_message`; orbit forwards an `auto` one to the server and returns its result, or, over 32 KiB, writes it into the attempt's inputs as JSON, copies it into a live sandbox, and returns its path. An `approve` call first reaches orbit as a permission prompt: in a run answering its person's message, orbit records a pending `connector:<connector>/<tool>` action (in the thread and the inbox at once) and holds the prompt until the person decides; on approval it claims the action, makes the call, and allows the tool, whose `tools/call` then gets that result by its tool use id. In any other run orbit records the pending action, denies the prompt saying so, and the action loop executes it at most once after approval; its approval is notified like any other. Every call is an `orbit.connector` event with its bounded result.
+
 ## Mail
 
 With `mail` configured (configuration.md), a person talks to orbit by mail as well as by the API (`internal/mail`):
@@ -256,7 +264,7 @@ to the agent, a validator, and an executor. An agent's spec maps types to
 Today: `notify` (an extra message to one of the agent's channels),
 `continue` (wake this agent again later, above), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; a change that widens it waits for a person; docs/api.md, Defining agents), `webhook:<endpoint>` (a
 JSON body to an endpoint whose URL and credentials are configuration, never
-chosen by the model), and `github:merge` (squash one of orbit's own
+chosen by the model), `connector:<connector>/<tool>` (a connector call that waits for approval, Connectors, above; recorded by orbit during the run, never proposed in an output), and `github:merge` (squash one of orbit's own
 `orbit/*` PRs, only if its head is still the approved commit and every
 required check passed; [tickets.md](tickets.md)).
 

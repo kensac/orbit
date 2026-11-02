@@ -317,6 +317,8 @@ type Executor struct {
 	Continue func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (id string, queued bool, err error)
 	// Define applies an agent:define for the call's run.
 	Define func(ctx context.Context, c Call, spec json.RawMessage) (json.RawMessage, error)
+	// Connector calls a connector's tool for an approved connector:<conn>/<tool> action, adding the connector's credential (engine/connectors.go).
+	Connector func(ctx context.Context, c Call) (json.RawMessage, error)
 }
 
 // Call is one action to execute: its type and parameters, and the agent
@@ -419,6 +421,11 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 			return nil, fmt.Errorf("%s: not available in this process", typ)
 		}
 		return e.executeTask(ctx, c)
+	case strings.HasPrefix(typ, spec.ConnectorActionPrefix):
+		if e.Connector == nil {
+			return nil, fmt.Errorf("%s: not available in this process", typ)
+		}
+		return e.Connector(ctx, c)
 	case typ == DefineType:
 		sp, err := DecodeDefine(params)
 		if err != nil {

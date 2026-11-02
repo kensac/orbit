@@ -70,6 +70,8 @@ type Deployment struct {
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
 	// Credentials are the variables a source may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
 	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
+	// Connectors are MCP servers agents may be given (connectors.go); orbit calls them on the agents' behalf.
+	Connectors map[string]Connector `yaml:"connectors,omitempty" json:"connectors,omitempty"`
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -206,6 +208,8 @@ type Agent struct {
 	// The delegate rule still decides whether it may (docs/ARCHITECTURE.md,
 	// Delegation).
 	Delegates []string `yaml:"delegates,omitempty" json:"delegates,omitempty"`
+	// Connectors names orbit.yaml's connectors whose tools this agent's runs may call (claude-code only); each tool's rule is in actions as mcp:<connector>:<tool> (connectors.go).
+	Connectors []string `yaml:"connectors,omitempty" json:"connectors,omitempty"`
 
 	// delegateTargets is Delegates resolved against the configuration,
 	// sorted; set by Validate.
@@ -792,6 +796,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, c.validateAgent(c.Agents[n])...)
 	}
 	errs = append(errs, c.validateCredentials()...)
+	errs = append(errs, c.validateConnectors()...)
 	errs = append(errs, c.validateBuild()...)
 	if sb := c.Deployment.Sandbox; sb != nil && !strings.HasPrefix(sb.Sandboxd, "unix:/") && !strings.Contains(sb.Sandboxd, ":") {
 		errs = append(errs, fmt.Errorf("sandbox: sandboxd %q is neither host:port nor unix:/path", sb.Sandboxd))
@@ -931,8 +936,12 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if c.Deployment.GitHub == nil {
 				at("action %q: needs a github block in orbit.yaml", typ)
 			}
+		case strings.HasPrefix(typ, ConnectorRulePrefix):
+			// validateAgentConnectors
+		case strings.HasPrefix(typ, ConnectorActionPrefix):
+			at("action %q: a connector tool's rule is named mcp:<connector>:<tool>", typ)
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, delegate, task:message, task:cancel, webhook:<endpoint> or github:merge)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, delegate, task:message, task:cancel, webhook:<endpoint>, github:merge or mcp:<connector>:<tool>)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
@@ -1053,6 +1062,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 	}
 	errs = append(errs, c.validateTrust(a)...)
+	errs = append(errs, c.validateAgentConnectors(a)...)
 	if ss := a.Session; ss != nil {
 		rs := c.Deployment.Runners[a.Runner]
 		if rs.Kind != "claude-code" {

@@ -17,6 +17,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `credentials` | map of variable to credential | none | The variables sources may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
+| `connectors` | map of name to connector | none | MCP servers agents may be given; orbit calls them on the agents' behalf and holds their credentials (below). |
 
 ### `defaults`
 
@@ -107,6 +108,29 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 |---|---|---|---|
 | `url_prefix` | http(s) URL, path ending in `/` | required | Every request the variable is rendered into, redirects included, must start with it; no user, query or fragment (configuration.md, Secrets). |
 
+### `connectors.<name>`
+
+Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connector's tools as `mcp__<name>__<tool>` (configuration.md, Connectors).
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `transport` | `http` | `http` | MCP streamable HTTP. `stdio` is refused: it is not built (it would run in sandboxd). |
+| `url` | http(s) URL | required | The server's MCP endpoint. orbit follows no redirect from it. |
+| `description` | string | none | What the server is for, shown to the model. |
+| `auth` | map | `kind: none` | How orbit signs the server's requests (below). |
+| `write_tools` | list of tool names | none | The server's tools that change the world: each waits for a person unless the agent's rules say otherwise. Every other tool runs at once. |
+
+### `connectors.<name>.auth`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `kind` | `none`, `header`, `oauth` | `none` | `header` sends one header; `oauth` sends a token a person signed in for (docs/api.md, Connectors). |
+| `header` | header name | required for `header` | The header, such as `Authorization`. |
+| `value` | string | required for `header` | Its value; each `${VAR}` must be in `credentials` with a `url_prefix` the connector's `url` starts with. |
+| `scopes` | list of strings | the server's `scopes_supported` | What an `oauth` sign-in asks for. |
+| `client_id` | string | none | An `oauth` client registered by hand; without it orbit registers itself (dynamic client registration). |
+| `client_secret_env` | env var | none | That client's secret, for a confidential client; needs `client_id`. |
+
 ### `mail`
 
 | Field | Type | Default | What it does |
@@ -158,6 +182,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `sandbox` | `workstation`, `build` | none | Needs `chat` and a sandboxd. Runs the CLI in a sandboxd container per conversation: `workstation` has every Claude Code tool and egress to any public host; `build` has its `tools` and the build allowlist (security.md, Sandboxed chats). |
 | `needs` | list of capabilities | none | What a host must have to run the agent (`docker-network:hetzner`); without any, every host. |
 | `delegates` | list of agent names, or `["*"]` | none | Agents this one may hand tasks to; the `delegate` action also needs a rule. |
+| `connectors` | list of connector names | none | `orbit.yaml` connectors whose tools the agent's runs may call; claude-code only. Each tool's rule is `mcp:<connector>:<tool>` in `actions`. Adding one widens the agent. |
 
 ### `triggers[]`
 
@@ -247,6 +272,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint; never a URL or header of the model's. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
 | `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |
+| `mcp:<connector>:<tool>` | The rule for one connector tool, overriding its default: `approve` for a tool in the connector's `write_tools`, `auto` for any other. A `deny` tool is not offered. An `approve` call is recorded as the action `connector:<connector>/<tool>` (configuration.md, Connectors). | the connector in `connectors` |
 
 ### `notify`
 

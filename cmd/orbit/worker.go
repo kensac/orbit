@@ -128,7 +128,7 @@ func storedConfig(ctx context.Context, s *store.Store) (*spec.Config, error) {
 	return spec.FromStored(dep, agents)
 }
 
-// missingEnv lists the variables the agents this host may run reference and its environment lacks: a source credential for a capability it advertises, or the backend's.
+// missingEnv lists the variables the agents this host may run reference and its environment lacks: a source or connector credential for a capability it advertises, or the backend's.
 func missingEnv(cfg *spec.Config, caps spec.Capabilities, lookup func(string) (string, bool)) []string {
 	want := map[string]bool{}
 	for _, a := range cfg.Agents {
@@ -137,6 +137,11 @@ func missingEnv(cfg *spec.Config, caps spec.Capabilities, lookup func(string) (s
 		}
 		for _, s := range a.Sources {
 			for _, r := range s.EnvRefs() {
+				want[r] = true
+			}
+		}
+		for _, n := range a.Connectors {
+			for _, r := range connectorEnv(cfg.Deployment.Connectors[n]) {
 				want[r] = true
 			}
 		}
