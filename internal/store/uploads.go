@@ -87,6 +87,12 @@ func numbered(name string, n int) string {
 	return fmt.Sprintf("%s (%d)%s", strings.TrimSuffix(name, ext), n, ext)
 }
 
+// SHA256 is b's digest in hex, as every stored digest is written.
+func SHA256(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 // CreateUpload stores a file in a conversation. A name already taken there
 // gets " (2)", " (3)", ... so uploads/<name> names one file; the stored name
 // is in the result.
