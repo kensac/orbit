@@ -198,3 +198,52 @@ func TestPackageRejectsEscapesAndResources(t *testing.T) {
 		t.Fatal("accepted linked root")
 	}
 }
+
+func TestPackageDirectoryBoundsAndOrdering(t *testing.T) {
+	t.Run("directory count", func(t *testing.T) {
+		dir := packageDir(t)
+		for i := range 513 {
+			if e := os.Mkdir(filepath.Join(dir, fmt.Sprintf("dir-%04d", i)), 0700); e != nil {
+				t.Fatal(e)
+			}
+		}
+		if _, e := ValidateDir(dir); e == nil {
+			t.Fatal("accepted excessive directory entries")
+		}
+	})
+	t.Run("path depth", func(t *testing.T) {
+		dir := packageDir(t)
+		p := dir
+		for range 18 {
+			p = filepath.Join(p, "deep")
+			if e := os.Mkdir(p, 0700); e != nil {
+				t.Fatal(e)
+			}
+		}
+		if _, e := ValidateDir(dir); e == nil {
+			t.Fatal("accepted excessive nesting")
+		}
+	})
+	t.Run("creation order", func(t *testing.T) {
+		var digests []string
+		for _, order := range [][]string{{"a/x", "a.z"}, {"a.z", "a/x"}} {
+			dir := packageDir(t)
+			if e := os.Mkdir(filepath.Join(dir, "a"), 0700); e != nil {
+				t.Fatal(e)
+			}
+			for _, p := range order {
+				if e := os.WriteFile(filepath.Join(dir, p), []byte(p), 0600); e != nil {
+					t.Fatal(e)
+				}
+			}
+			p, e := ValidateDir(dir)
+			if e != nil {
+				t.Fatal(e)
+			}
+			digests = append(digests, p.Digest)
+		}
+		if digests[0] != digests[1] {
+			t.Fatal("digest depends on filesystem creation order")
+		}
+	})
+}

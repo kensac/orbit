@@ -8,6 +8,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
+	"sort"
 	"strings"
 	"syscall"
 )
@@ -38,96 +40,43 @@ func ValidateDir(dir string) (*Package, error) {
 	defer func() { _ = root.Close() }()
 	result := &Package{}
 	hash := sha256.New()
-	entries := 0
-	entryOK := false
+
+	names, err := packageFiles(root)
+	if err != nil {
+		return nil, err
+	}
 	files := map[string]bool{}
 	var manifest []byte
-	err = fs.WalkDir(root.FS(), ".", func(name string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if name == "." {
-			return nil
-		}
-		entries++
-		if entries > 512 || len(name) > 256 || strings.Count(name, "/") > MaxDepth {
-			return fmt.Errorf("package exceeds path or entry limits")
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return fmt.Errorf("%s: only regular files allowed", name)
-		}
-		before, err := d.Info()
-		if err != nil {
-			return err
-		}
-		f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		stat, err := f.Stat()
-		if err != nil {
-			return err
-		}
-		sys, ok := stat.Sys().(*syscall.Stat_t)
-		if stat.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || !stat.Mode().IsRegular() || !os.SameFile(before, stat) || !ok || sys.Nlink != 1 {
-			return fmt.Errorf("%s: changed, special or file with multiple links", name)
-		}
-		result.Files++
-		if result.Files > MaxFiles {
-			return fmt.Errorf("package exceeds %d files", MaxFiles)
-		}
+	for _, name := range names {
 		capBytes := int64(MaxPackageBytes) - result.Bytes
 		if name == "manifest.json" && capBytes > MaxManifestBytes {
 			capBytes = MaxManifestBytes
 		}
-		if stat.Size() > capBytes {
-			return fmt.Errorf("%s: package or manifest size limit exceeded", name)
-		}
-		body, err := io.ReadAll(io.LimitReader(f, capBytes+1))
+		body, mode, err := readPackageFile(root, name, capBytes)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if int64(len(body)) > capBytes || int64(len(body)) != stat.Size() {
-			return fmt.Errorf("%s: size changed or limit exceeded", name)
-		}
-		after, err := f.Stat()
-		if err != nil {
-			return err
-		}
-		if after.Size() != stat.Size() || !after.ModTime().Equal(stat.ModTime()) {
-			return fmt.Errorf("%s: changed during validation", name)
-		}
-		files[name] = stat.Mode().Perm()&0111 != 0 && validELF(body)
+		result.Files++
 		result.Bytes += int64(len(body))
-		// WalkDir sorts paths; length-prefixing prevents ambiguous concatenation.
+		files[name] = mode&0111 != 0 && validELF(body)
+		// Paths are globally sorted; length prefixes disambiguate every field.
 		_ = binary.Write(hash, binary.BigEndian, uint64(len(name)))
 		_, _ = io.WriteString(hash, name)
-		_ = binary.Write(hash, binary.BigEndian, uint32(stat.Mode().Perm()))
+		_ = binary.Write(hash, binary.BigEndian, uint32(mode))
 		_ = binary.Write(hash, binary.BigEndian, uint64(len(body)))
 		_, _ = hash.Write(body)
 		if name == "manifest.json" {
 			manifest = body
-		}
-		if manifest != nil && result.Manifest == nil {
-			result.Manifest, err = Parse(manifest)
+			result.Manifest, err = Parse(body)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
-		// Entrypoint may sort before the manifest, so verify it after the walk.
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 	if result.Manifest == nil {
 		return nil, fmt.Errorf("manifest.json is required")
 	}
-	entryOK = files[result.Manifest.Entrypoint]
+	entryOK := files[result.Manifest.Entrypoint]
 	if !entryOK {
 		return nil, fmt.Errorf("entrypoint must name a 64-bit little-endian Linux ELF executable (x86-64 or arm64)")
 	}
@@ -145,4 +94,89 @@ func validELF(b []byte) bool {
 	typ := binary.LittleEndian.Uint16(b[16:18])
 	machine := binary.LittleEndian.Uint16(b[18:20])
 	return (typ == 2 || typ == 3) && (machine == 62 || machine == 183) && binary.LittleEndian.Uint32(b[20:24]) == 1 && binary.LittleEndian.Uint16(b[52:54]) == 64
+}
+
+// packageFiles bounds directory reads before sorting or visiting their children.
+func packageFiles(root *os.Root) ([]string, error) {
+	var names []string
+	entries := 0
+	var visit func(string) error
+	visit = func(dir string) error {
+		f, err := root.OpenFile(dir, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			return err
+		}
+		children, readErr := f.ReadDir(512 - entries + 1)
+		_ = f.Close()
+		if readErr != nil && readErr != io.EOF {
+			return readErr
+		}
+		entries += len(children)
+		if entries > 512 {
+			return fmt.Errorf("package exceeds 512 directory entries")
+		}
+		for _, d := range children {
+			name := path.Join(dir, d.Name())
+			if len(name) > 256 || strings.Count(name, "/") > MaxDepth {
+				return fmt.Errorf("package exceeds path limits")
+			}
+			if d.IsDir() {
+				if err := visit(name); err != nil {
+					return err
+				}
+				continue
+			}
+			if !d.Type().IsRegular() {
+				return fmt.Errorf("%s: only regular files allowed", name)
+			}
+			names = append(names, name)
+			if len(names) > MaxFiles {
+				return fmt.Errorf("package exceeds %d files", MaxFiles)
+			}
+		}
+		return nil
+	}
+	if err := visit("."); err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func readPackageFile(root *os.Root, name string, capBytes int64) ([]byte, fs.FileMode, error) {
+	before, err := root.Lstat(name)
+	if err != nil {
+		return nil, 0, err
+	}
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = f.Close() }()
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	sys, ok := stat.Sys().(*syscall.Stat_t)
+	if stat.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || !stat.Mode().IsRegular() || !os.SameFile(before, stat) || !ok || sys.Nlink != 1 {
+		return nil, 0, fmt.Errorf("%s: changed, special or file with multiple links", name)
+	}
+	if stat.Size() > capBytes {
+		return nil, 0, fmt.Errorf("%s: package or manifest size limit exceeded", name)
+	}
+	body, err := io.ReadAll(io.LimitReader(f, capBytes+1))
+	if err != nil {
+		return nil, 0, err
+	}
+	if int64(len(body)) > capBytes || int64(len(body)) != stat.Size() {
+		return nil, 0, fmt.Errorf("%s: size changed or limit exceeded", name)
+	}
+	after, err := f.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	if after.Size() != stat.Size() || !after.ModTime().Equal(stat.ModTime()) {
+		return nil, 0, fmt.Errorf("%s: changed during validation", name)
+	}
+	return body, stat.Mode().Perm(), nil
 }
