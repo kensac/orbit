@@ -1,10 +1,13 @@
 package api_test
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/kensac/orbit/internal/store"
 )
 
 func TestTheJournalIsReadByCursor(t *testing.T) {
@@ -69,5 +72,76 @@ func TestTheJournalIsReadByCursor(t *testing.T) {
 	}
 	if code, _ := get(t, v.internal.URL+"/api/v1/runs/not-a-run/journal", token); code != 400 {
 		t.Fatalf("bad id = %d", code)
+	}
+}
+
+func TestTheStreamSendsJournalRows(t *testing.T) {
+	v := newEnv(t, fastStreams)
+	run := enqueue(t, v)
+	_, attempt := claim(t, v, "claude-code")
+	appendEvents(t, v, run, attempt,
+		`{"type":"system","subtype":"init"}`,
+		`{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"plan it"},{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"ls"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b1","content":"a.json"}]}}`,
+		assistantText("Done."),
+		`{"type":"result","subtype":"success","duration_ms":7}`)
+	if err := v.s.FinishRun(ctx, run, store.RunResult{Attempt: attempt, Status: "succeeded", Report: "r"}); err != nil {
+		t.Fatal(err)
+	}
+	collect := func(lastID string) (items []map[string]any, events []string, done map[string]any) {
+		ch, _ := resumeStream(t, v, run, lastID)
+		for e := range ch {
+			switch e.Event {
+			case "item":
+				var it map[string]any
+				_ = json.Unmarshal([]byte(e.Data), &it)
+				if it["cursor"] != e.ID {
+					t.Fatalf("item id %s, cursor %v", e.ID, it["cursor"])
+				}
+				items = append(items, it)
+			case "done":
+				_ = json.Unmarshal([]byte(e.Data), &done)
+			}
+			if e.Event != "ping" {
+				events = append(events, e.Event)
+			}
+		}
+		return
+	}
+	items, events, done := collect("")
+	want := "status item item item tool item item text item item done"
+	if strings.Join(events, " ") != want {
+		t.Fatalf("events = %v", events)
+	}
+	if items[0]["kind"] != "turn" || items[2]["kind"] != "thinking" || items[4]["revision"] != float64(2) || len(items) != 7 {
+		t.Fatalf("items = %v", items)
+	}
+	turn, _ := done["turn"].(map[string]any)
+	if turn["state"] != "completed" || turn["outcome"] != "success" || done["steps"] != float64(1) {
+		t.Fatalf("done = %v", done)
+	}
+
+	// Resuming sends only the rows after the one named.
+	after, _, _ := collect(items[3]["cursor"].(string))
+	if len(after) != 3 || after[0]["seq"] != float64(5) {
+		t.Fatalf("resumed = %v", after)
+	}
+	// An id of the earlier (attempt.seq.index) form is no cursor: a full replay.
+	if old, _, _ := collect("1.2.0"); len(old) != 7 {
+		t.Fatalf("old id replay = %d rows", len(old))
+	}
+
+	// The run page shows the journal.
+	req, _ := http.NewRequest("GET", v.srv.URL+"/ui/runs/"+run, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, s := range []string{"Bash ls (completed)", "about 2 tokens", "completed, success", "Done."} {
+		if !strings.Contains(string(page), s) {
+			t.Fatalf("run page lacks %q:\n%s", s, page)
+		}
 	}
 }

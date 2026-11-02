@@ -553,8 +553,8 @@ type Run struct {
 	RunAfter      *time.Time `json:"run_after,omitempty"`
 	Continues     *string    `json:"continues,omitempty"`
 	Chain         int        `json:"chain,omitempty"`
-	// Steps is the number of tool calls in the latest attempt, as a
-	// thread's run item counts them (stepsCount).
+	// Steps is the number of tool calls in the latest attempt's
+	// timeline, as a thread's run item counts them (stepsCount).
 	Steps int `json:"steps"`
 	// Gate names what ended a skipped run.
 	Gate *string `json:"gate,omitempty"`
