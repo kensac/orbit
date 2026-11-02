@@ -19,7 +19,7 @@ A self-hosted Go service on Kanishk's server (hetzner) that runs Claude Code on 
 | Sandbox | `orbit sandboxd` (one locked-down container per build or workspace), `orbit egress` (allowlist proxy, never GitHub), the build image | #15 |
 | Operations | seamless upgrades (readiness, drain, resuming interrupted attempts), the worker fleet (capabilities, control vs worker, sessions across hosts), usage and health APIs | #11 #16 #25 |
 | Surfaces | thread and SSE API with authentik JWT auth, MCP server with OAuth proxy, mail (replies continue a conversation), uploads | #4 #21 #31 #45 |
-| Define limits | database and built-in agents held to orbit.yaml: no `file` source, `${VAR}` only from `credentials:` (each bound to a URL prefix, checked on every request and redirect), tools only from `spec.UnsandboxedTools`; an `agent:define` that widens an agent waits for a person | PRNUM |
+| Define limits | database and built-in agents held to orbit.yaml: no `file` source, `${VAR}` only from `credentials:` (each bound to a URL prefix, checked on every request and redirect), tools only from `spec.UnsandboxedTools`; an `agent:define` that widens an agent waits for a person | #71 |
 | Hygiene | API fixes, exact documented shapes, reserved agent names, migration uniqueness | #18 #19 #26 #29 #30 #40 |
 
 Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/compose.orbit.yml` (at the time of writing 21ab048; newer images were blocked by a duplicate migration, fixed in #50). MCP is live; mail is prepared but not enabled (docs in the homelab repo). The worker fleet is built but not deployed.
