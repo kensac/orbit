@@ -91,7 +91,7 @@ jobs:
             containerd --version
             locale -a | grep -qix en_US.utf8
             infocmp tmux-256color >/dev/null
-            tmux new-session -d -s smoke && test "$(tmux show -gv set-clipboard)" = on && test "$(tmux show -gv window-size)" = latest && test "$(tmux show -gv mouse)" = on && tmux kill-server
+            tmux new-session -d -s smoke && test "$(tmux show -gv set-clipboard)" = on && test "$(tmux show -gv window-size)" = latest && test "$(tmux show -gv mouse)" = on && tmux show -gv update-environment | grep -qx CLAUDE_CODE_OAUTH_TOKEN && tmux kill-server
             export GIT_TERMINAL_PROMPT=0
             if printf "protocol=https\nhost=github.com\n\n" | git credential fill 2>/dev/null | grep -q "^password="; then exit 1; fi
             sudo install -d -m 0755 /run/orbit && echo smoke-token | sudo tee /run/orbit/gh-token >/dev/null
