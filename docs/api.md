@@ -176,7 +176,8 @@ conversation is never deleted, only archived.
   "id": "uuid", "agent": "finance", "title": "How much on Uber Eats in October?",
   "is_default": false, "archived": false,
   "created_at": "...", "last_activity_at": "...", "needs_input": true,
-  "ticket_id": null, "model": null, "effort": null, "forked_from": null}],
+  "ticket_id": null, "model": null, "effort": null, "forked_from": null,
+  "title_source": "model"}],
  "has_more": false, "next_before": null}
 ```
 
@@ -198,8 +199,7 @@ returns `201 {"conversation_id": "uuid", "message_id": "uuid", "run_id": "uuid"}
 (`message_id` with a `body`, `run_id` when it woke a run; `wake` defaults to
 the agent's `wake_on_message`). Without a `title`, the first message names
 it: its first non-empty line, Markdown markers and extra whitespace
-removed, cut at a word to 60 characters (`store.DefaultTitle`, code, never
-a model). `client_request_id` makes a retry return the first result, as for
+removed, cut at a word to 60 characters (`store.DefaultTitle`, code). With `titles` in orbit.yaml, the titles runner (a cheap model) then names it once from that message, within about 30 seconds, cleaned the same way; a failed call keeps the first line, and a title a person gave or set since wins. `title_source` says which: `first_line`, `model`, `person` (given at creation or by `PATCH`), or `null` for one orbit titled otherwise (a task's, a mail's, a fork's, one from before the field). `client_request_id` makes a retry return the first result, as for
 messages below.
 
 `POST /conversations` takes the same body plus `agent`, and creates the conversation with that agent, or with the built-in general agent `orbit` when `agent` is absent: what "New chat" calls. 404 when the agent is not configured.

@@ -17,6 +17,13 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `credentials` | map of variable to credential | none | The variables sources may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
+| `titles` | map | absent | How a conversation is titled once its first message names it (below). Without it the title is that message's first line. |
+
+### `titles`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `runner` | runner name | required | The runner (a cheap model) that titles each new conversation once from its first message, unless a person named or renamed it; the first line stays when it fails. One call per conversation, ever. |
 
 ### `defaults`
 

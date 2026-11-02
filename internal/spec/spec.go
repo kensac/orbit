@@ -73,6 +73,16 @@ type Deployment struct {
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
 	// Credentials are the variables a source may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
 	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
+	// Titles names the runner that titles conversations from their first
+	// message (engine/titles.go). Without it a conversation keeps the first
+	// line code gave it.
+	Titles *Titles `yaml:"titles,omitempty" json:"titles,omitempty"`
+}
+
+// Titles is how orbit titles a conversation once its first message names it.
+type Titles struct {
+	// Runner is a runner of runners (a cheap model: haiku).
+	Runner string `yaml:"runner" json:"runner"`
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -868,6 +878,11 @@ func (c *Config) Validate() error {
 		}
 		if r.Kind == "anthropic" && r.APIKeyEnv == "" {
 			errs = append(errs, fmt.Errorf("runner %q: anthropic needs api_key_env", name))
+		}
+	}
+	if t := d.Titles; t != nil {
+		if _, ok := d.Runners[t.Runner]; !ok {
+			errs = append(errs, fmt.Errorf("titles: runner %q is not one of runners", t.Runner))
 		}
 	}
 	if g := d.GitHub; g != nil {
