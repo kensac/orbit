@@ -25,7 +25,12 @@ func (e *Engine) transform(ctx context.Context, a *spec.Agent, c *store.ClaimedR
 		if err != nil {
 			return nil, err
 		}
-		in := raw[t.Source]
+		in, ok := raw[t.Source]
+		if !ok {
+			// A webhook source on a run no delivery started: there is nothing to reduce, and no input of this name.
+			emit("orbit.transform_skipped", map[string]any{"transform": t.Name, "source": t.Source, "reason": "the source is absent"})
+			continue
+		}
 		out, err := transforms.Apply(t.Kind, params, in)
 		if err != nil {
 			emit("orbit.transform_failed", map[string]any{"transform": t.Name, "source": t.Source, "error": err.Error()})
