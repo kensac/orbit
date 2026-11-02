@@ -194,14 +194,14 @@ Design: docs/ARCHITECTURE.md, Worker fleet. One control instance (hetzner) and w
 | `ORBIT_CAPABILITIES` | what hetzner has (unset is `*`, every agent) | what this host has (unset is none: agents that need nothing) |
 | `ORBIT_WORKERS` | executors here (0 for control only) | executors here (default 2) |
 | `ORBIT_DATA_DIR` | `/data`, a named volume | `/data`, a named volume of its own |
-| `CLAUDE_CODE_OAUTH_TOKEN` | yes | yes: the backend credential, the only one the model sees |
+| `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) | yes (builds and sandboxed chats need the token itself) | yes: the backend credential, the only one the model sees; the token wins when both are set |
 | source credentials | every agent's | only those of agents its capabilities cover |
 | `ORBIT_API_TOKEN`, `ORBIT_OIDC_*` | yes | no (no API) |
 | channel credentials (`ORBIT_NTFY_TOPIC`, `SMTP_*`) | yes | no (control delivers) |
 | `ORBIT_GITHUB_APP_PRIVATE_KEY`, `ORBIT_SANDBOX_TOKEN` | yes | no (builds and actions are control's) |
 | `ORBIT_LISTEN` | public listener | `/healthz`, `/readyz`, `/metrics` only; publish it on the tailnet address |
 
-A worker logs `agents this worker may claim reference unset variables` with the names when a covered agent's source needs a variable it lacks; such a run fails on that worker with the source's error.
+A worker logs `agents this worker may claim reference unset variables` with the names when a covered agent's source needs a variable it lacks (such a run fails on that worker with the source's error), or when it has neither backend credential (`CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY`).
 
 ### Capabilities, per host
 

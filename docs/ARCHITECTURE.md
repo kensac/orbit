@@ -204,8 +204,8 @@ to Codex or to a plain API call is one line in its spec.
 | kind | how | auth | tools |
 |---|---|---|---|
 | `claude-code` | `claude -p --output-format stream-json --json-schema` | `CLAUDE_CODE_OAUTH_TOKEN` (subscription, `claude setup-token`) or `ANTHROPIC_API_KEY` | Read/Glob/Grep in the workdir, plus the agent's `tools` |
-| `codex` | `codex exec --json --output-schema -s read-only` | `CODEX_API_KEY` / `OPENAI_API_KEY` / `CODEX_HOME` | its read-only sandbox; agent `tools` refused |
-| `anthropic` | Messages API, schema as a forced tool | `api_key_env` | none; inputs inlined (bounded) |
+| `codex` | `codex exec --json --output-schema -s read-only` | `CODEX_API_KEY` / `OPENAI_API_KEY` / `CODEX_HOME` | its read-only sandbox; an agent with `tools` fails validation |
+| `anthropic` | Messages API, schema as a forced tool | `api_key_env` | none (an agent with `tools` fails validation); inputs inlined (bounded) |
 
 ## Notifications
 

@@ -916,8 +916,11 @@ func (c *Config) validateAgent(a *Agent) []error {
 	if err := a.SetTimezone(a.Timezone); err != nil {
 		at("timezone: %v", err)
 	}
-	if _, ok := c.Deployment.Runners[a.Runner]; !ok {
+	if r, ok := c.Deployment.Runners[a.Runner]; !ok {
 		at("unknown runner %q", a.Runner)
+	} else if len(a.Tools) > 0 && r.Kind != "claude-code" {
+		// codex and anthropic have no per-tool grant to map the list onto, so every run would fail; refuse the spec instead.
+		at("tools: runner %q is %s, which takes no tools (only a claude-code runner does)", a.Runner, r.Kind)
 	}
 	for i, t := range a.Triggers {
 		if _, err := TriggerSchedule(t, a.Location()); err != nil {
