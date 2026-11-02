@@ -68,6 +68,9 @@ type Loop struct {
 	// Restack moves a stacked ticket's branch onto a new base
 	// (build.Runner.Restack); nil leaves stacked tickets waiting.
 	Restack func(ctx context.Context, app *github.App, r build.Restack) (*build.Restacked, error)
+	// Checkouts is the builds' clone pool: kept warm here, and a ticket's
+	// clone released once it is done or abandoned. nil skips both.
+	Checkouts *build.Pool
 }
 
 // Run ticks until ctx ends.
@@ -142,7 +145,41 @@ func (l *Loop) Tick(ctx context.Context) error {
 			l.Log.Warn("ticket", "ticket", t.ID, "status", t.Status, "err", err)
 		}
 	}
+	k.prewarm(ctx)
 	return nil
+}
+
+// prewarm tops up the spare clones of every repository builds target, so
+// the next build starts from a checkout that needs only an incremental
+// fetch. A token is minted only for a repository that is short.
+func (k *tick) prewarm(ctx context.Context) {
+	p := k.l.Checkouts
+	if p == nil || p.Warm <= 0 {
+		return
+	}
+	for repo := range k.cfg.Deployment.Build.Repositories {
+		if n, err := p.Spares(repo); err != nil || n >= p.Warm {
+			continue
+		}
+		tok, err := k.app.Token(ctx, repo, github.ReadContents)
+		if err != nil {
+			k.l.Log.Warn("prewarm", "repo", repo, "err", err)
+			continue
+		}
+		if _, err := p.Prewarm(ctx, repo, tok.GitAuthEnv()); err != nil {
+			k.l.Log.Warn("prewarm", "repo", repo, "err", err)
+		}
+		_ = tok.Revoke(context.WithoutCancel(ctx))
+	}
+}
+
+// release drops a finished ticket's kept clone.
+func (k *tick) release(t *store.Ticket) {
+	if k.l.Checkouts != nil {
+		if err := k.l.Checkouts.Release(build.TicketKey(t.ID)); err != nil {
+			k.l.Log.Warn("release checkout", "ticket", t.ID, "err", err)
+		}
+	}
 }
 
 func (k *tick) reconcile(ctx context.Context, t *store.Ticket) error {
@@ -421,6 +458,9 @@ func (k *tick) merged(ctx context.Context, t *store.Ticket) error {
 		if errors.Is(err, store.ErrConflict) {
 			return nil
 		}
+		if err == nil {
+			k.release(t)
+		}
 		return err
 	}
 	if *t.Repo != spec.SelfRepo {
@@ -448,6 +488,7 @@ func (k *tick) merged(ctx context.Context, t *store.Ticket) error {
 
 // abandoned closes the PR of a ticket a person abandoned; the branch stays.
 func (k *tick) abandoned(ctx context.Context, t *store.Ticket) error {
+	k.release(t)
 	_, pr, err := k.pr(ctx, t)
 	if err != nil || pr.State != "open" {
 		return err

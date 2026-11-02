@@ -810,3 +810,20 @@ func TestAStackedTicketWaitsForItsParentsPR(t *testing.T) {
 		}
 	}
 }
+
+func TestAFinishedTicketsCloneIsReleased(t *testing.T) {
+	e := newEnv(t, "approve")
+	e.loop.Checkouts = &build.Pool{Root: t.TempDir()}
+	id := e.approvedTicket()
+	e.tick()
+	e.finishBuild(id, githubtest.Head)
+	dir, _ := e.loop.Checkouts.Dir(build.TicketKey(id))
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = e.s.TransitionTicket(ctx, id, store.TicketAbandoned, "kanishk", store.TicketUpdate{})
+	e.tick()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("the abandoned ticket's clone: %v", err)
+	}
+}
