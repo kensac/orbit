@@ -291,8 +291,8 @@ func (s *Store) Delegate(ctx context.Context, d Delegation) ([]Delegated, error)
 			}
 			var id string
 			if err := tx.QueryRow(ctx, `INSERT INTO tasks (action_id, key, parent_run_id, parent_agent, parent_conversation_id,
-				    agent, conversation_id, brief, fresh, depth)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id::text`,
+				    agent, conversation_id, brief, fresh, depth, created_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, clock_timestamp()) RETURNING id::text`,
 				d.ActionID, nt.Key, d.RunID, parent, convo, nt.Agent, conv, nt.Brief, nt.Fresh, depth+1).Scan(&id); err != nil {
 				return err
 			}
@@ -570,60 +570,27 @@ func (s *Store) ReconcileTasks(ctx context.Context) (*Reconciled, error) {
 		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, int64(reconcileLock)).Scan(&got); err != nil || !got {
 			return err
 		}
-		type open struct {
-			ID, Status, Agent, Conv, Action string
-			Decision                        *string
-		}
 		rows, err := tx.Query(ctx, `SELECT id::text, status, agent, conversation_id::text, action_id::text, decision_action_id::text
 			FROM tasks WHERE status NOT IN ('done', 'failed', 'cancelled') ORDER BY created_at, key FOR UPDATE`)
 		if err != nil {
 			return err
 		}
-		list, err := pgx.CollectRows(rows, pgx.RowToStructByPos[open])
+		list, err := pgx.CollectRows(rows, pgx.RowToAddrOfStructByPos[openTask])
 		if err != nil {
 			return err
 		}
 		settled := map[string]bool{}
-		for _, t := range list {
-			next, report, errText, prompt, err := reconcileOne(ctx, tx, t.ID, t.Status, t.Conv, t.Decision)
-			if err != nil {
-				return fmt.Errorf("task %s: %w", t.ID, err)
-			}
-			if next == t.Status && prompt == "" {
-				continue
-			}
-			if next == TaskWorking && (t.Status == TaskWaiting || t.Status == TaskBlocked) {
-				var active bool
-				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs WHERE conversation_id = $1 AND status IN ('queued', 'running'))`,
-					t.Conv).Scan(&active); err != nil {
-					return err
-				}
-				if !active {
-					id, err := enqueueTaskRun(ctx, tx, t.Agent, t.Conv, prompt)
-					if err != nil {
-						return err
-					}
-					res.Started = append(res.Started, id)
-				}
-			}
-			if next == t.Status {
-				continue
-			}
-			res.Moved++
-			var rep any
-			if report != nil {
-				b, _ := json.Marshal(report)
-				rep = b
-			}
-			if _, err := tx.Exec(ctx, `UPDATE tasks SET status = $2, report = COALESCE($3, report), error = NULLIF($4, ''),
-				    updated_at = now(),
-				    finished_at = CASE WHEN $2 IN ('done', 'failed', 'cancelled') THEN now() END,
-				    report_due_at = CASE WHEN $2 = 'needs_input' THEN now() ELSE report_due_at END
-				WHERE id = $1`, t.ID, next, rep, errText); err != nil {
+		// A pass can free a task an earlier one in it waited on (a
+		// dependency finished after its dependent was looked at), so passes
+		// repeat until one moves nothing; each move is one-way, so at most
+		// one pass per task is ever needed.
+		for pass := 0; pass <= len(list); pass++ {
+			moved := res.Moved
+			if err := reconcilePass(ctx, tx, list, res, settled); err != nil {
 				return err
 			}
-			if TaskTerminal(next) {
-				settled[t.Action] = true
+			if res.Moved == moved {
+				break
 			}
 		}
 		for action := range settled {
@@ -654,6 +621,64 @@ func (s *Store) ReconcileTasks(ctx context.Context) (*Reconciled, error) {
 		return err
 	})
 	return res, err
+}
+
+// openTask is a task ReconcileTasks holds locked.
+type openTask struct {
+	ID, Status, Agent, Conv, Action string
+	Decision                        *string
+}
+
+// reconcilePass moves each task in list once, recording its new status in
+// list, the runs it queued and the batches it finished in res and settled.
+func reconcilePass(ctx context.Context, tx pgx.Tx, list []*openTask, res *Reconciled, settled map[string]bool) error {
+	for _, t := range list {
+		if TaskTerminal(t.Status) {
+			continue
+		}
+		next, report, errText, prompt, err := reconcileOne(ctx, tx, t.ID, t.Status, t.Conv, t.Decision)
+		if err != nil {
+			return fmt.Errorf("task %s: %w", t.ID, err)
+		}
+		if next == t.Status && prompt == "" {
+			continue
+		}
+		if next == TaskWorking && (t.Status == TaskWaiting || t.Status == TaskBlocked) {
+			var active bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs WHERE conversation_id = $1 AND status IN ('queued', 'running'))`,
+				t.Conv).Scan(&active); err != nil {
+				return err
+			}
+			if !active {
+				id, err := enqueueTaskRun(ctx, tx, t.Agent, t.Conv, prompt)
+				if err != nil {
+					return err
+				}
+				res.Started = append(res.Started, id)
+			}
+		}
+		if next == t.Status {
+			continue
+		}
+		t.Status = next
+		res.Moved++
+		var rep any
+		if report != nil {
+			b, _ := json.Marshal(report)
+			rep = b
+		}
+		if _, err := tx.Exec(ctx, `UPDATE tasks SET status = $2, report = COALESCE($3, report), error = NULLIF($4, ''),
+			    updated_at = now(),
+			    finished_at = CASE WHEN $2 IN ('done', 'failed', 'cancelled') THEN now() END,
+			    report_due_at = CASE WHEN $2 = 'needs_input' THEN now() ELSE report_due_at END
+			WHERE id = $1`, t.ID, next, rep, errText); err != nil {
+			return err
+		}
+		if TaskTerminal(next) {
+			settled[t.Action] = true
+		}
+	}
+	return nil
 }
 
 // reconcileOne decides where one open task is. For a task that starts now

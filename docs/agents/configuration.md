@@ -104,6 +104,10 @@ one every run after a restart starts fresh (it does not fail).
 are constants in `internal/actions` (`ContinueMinDelay`, `ContinueMaxDelay`,
 `MaxContinueChain`).
 
+## Delegation
+
+`delegates: [<agent>, ...]` (or `["*"]`, every configured agent, itself included) names the agents an agent may hand tasks to; an unknown name fails the load. The `delegate` action needs it, and is denied unless named, like any action; `task:message` and `task:cancel` follow the `delegate` rule unless named themselves. In a run answering the person's message, `approve` on these applies directly (docs/ARCHITECTURE.md, Delegation). Bounds are constants in `internal/store` (`MaxTasksPerDelegation`, `MaxTaskDepth`, `MaxConversationTasks`).
+
 ## Checks
 
 `verify: [figures]` makes every money amount (`$` followed by a number) in an

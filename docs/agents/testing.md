@@ -32,6 +32,8 @@ After changing `internal/harness` or its wiring, run an agent with
 a Read of `../x` is denied with orbit's message, and a figure asked for "in
 your head" is sent back and recomputed with a tool.
 
+After changing delegation, run one agent with `delegates` naming two others and `actions: {delegate: approve}` against the real CLI: message it asking for two independent pieces of work. Check the delegate action was approved by the attended rule, both task runs ran at once (different agents), each task is `done` with the run's report, one `delegation` run woke the parent, and its report integrates both.
+
 After changing sessions or the live process, also run an agent with
 `session: {resume: true, live: 10m}` and `continue: approve`: a message (run
 fresh), a second message (`session_mode` live, one `claude` process), a

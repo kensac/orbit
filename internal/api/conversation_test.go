@@ -332,8 +332,14 @@ func openStream(t *testing.T, v *env, run string) (<-chan sse, context.CancelFun
 
 func resumeStream(t *testing.T, v *env, run, lastID string) (<-chan sse, context.CancelFunc) {
 	t.Helper()
+	return openSSE(t, v, "/api/v1/runs/"+run+"/stream", lastID)
+}
+
+// openSSE reads the Server-Sent Events at path as the person kanishk.
+func openSSE(t *testing.T, v *env, path, lastID string) (<-chan sse, context.CancelFunc) {
+	t.Helper()
 	c, cancel := context.WithCancel(ctx)
-	req, _ := http.NewRequestWithContext(c, "GET", v.srv.URL+"/api/v1/runs/"+run+"/stream", nil)
+	req, _ := http.NewRequestWithContext(c, "GET", v.srv.URL+path, nil)
 	if lastID != "" {
 		req.Header.Set("Last-Event-ID", lastID)
 	}

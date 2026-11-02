@@ -258,3 +258,31 @@ build:
 		t.Fatalf("build without github = %v", err)
 	}
 }
+
+func TestDelegatesAreResolvedAndChecked(t *testing.T) {
+	cfg, err := Load(write(t, map[string]string{
+		"orbit.yaml":       base,
+		"agents/boss.yaml": "name: boss\ncharter: x\ndelegates: [\"*\"]\nactions: {delegate: approve, task:cancel: auto}\n",
+		"agents/one.yaml":  "name: one\ncharter: x\n",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := cfg.Agents["boss"]
+	if got := b.DelegateTargets(); len(got) != 2 || got[0] != "boss" || got[1] != "one" {
+		t.Fatalf("targets = %v", got)
+	}
+	if b.RuleFor("task:message") != RuleApprove || b.RuleFor("task:cancel") != RuleAuto {
+		t.Fatal("task types follow the delegate rule unless named")
+	}
+	_, err = Load(write(t, map[string]string{
+		"orbit.yaml":       base,
+		"agents/boss.yaml": "name: boss\ncharter: x\ndelegates: [nobody]\n",
+		"agents/two.yaml":  "name: two\ncharter: x\nactions: {delegate: auto}\n",
+	}))
+	for _, want := range []string{`delegates: "nobody" is not a configured agent`, `agent "two": action "delegate": needs delegates`} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error %v lacks %q", err, want)
+		}
+	}
+}

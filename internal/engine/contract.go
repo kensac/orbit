@@ -226,13 +226,19 @@ func userPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 		b.WriteString(renderConversation(convo, now.Location()))
 	}
 	if len(rc.Messages) > 0 {
-		b.WriteString("\n# Messages since your last run\n\n")
+		head := "# Messages from your person since your last run"
 		for _, m := range rc.Messages {
-			from := messageFrom(m)
-			if from == "" {
-				from = "from your person"
+			if messageFrom(m) != "" {
+				head = "# Messages since your last run"
 			}
-			fmt.Fprintf(&b, "- %s, %s: %s\n", m.CreatedAt.In(now.Location()).Format("2006-01-02 15:04"), from, m.Body)
+		}
+		b.WriteString("\n" + head + "\n\n")
+		for _, m := range rc.Messages {
+			at := m.CreatedAt.In(now.Location()).Format("2006-01-02 15:04")
+			if from := messageFrom(m); from != "" {
+				at += " " + from
+			}
+			fmt.Fprintf(&b, "- %s: %s\n", at, m.Body)
 		}
 	}
 	if len(rc.Questions) > 0 {
