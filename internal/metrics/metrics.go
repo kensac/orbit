@@ -23,8 +23,11 @@ var (
 		Name: "orbit_run_cost_usd_total", Help: "Cost the backend reported, by agent and runner kind. Subscription runs report an equivalent API cost.",
 	}, []string{"agent", "runner"})
 	lastSuccess = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "orbit_agent_last_success_timestamp_seconds", Help: "Unix time of the agent's last successful run.",
+		Name: "orbit_agent_last_success_timestamp_seconds", Help: "Unix time of the agent's last run that succeeded or was skipped by a gate.",
 	}, []string{"agent"})
+	skipped = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "orbit_runs_skipped_total", Help: "Runs a gate ended without a backend call, by agent and gate.",
+	}, []string{"agent", "gate"})
 	deliveries = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "orbit_deliveries_total", Help: "Notification attempts by channel and result.",
 	}, []string{"channel", "result"})
@@ -58,9 +61,17 @@ func RunFinished(agent, status, runner string, d time.Duration, cost *float64) {
 	if cost != nil && runner != "" {
 		runCost.WithLabelValues(agent, runner).Add(*cost)
 	}
-	if status == "succeeded" {
+	// A skipped run finished well: a gate found nothing to judge, so the
+	// agent is not stale.
+	if status == "succeeded" || status == "skipped" {
 		lastSuccess.WithLabelValues(agent).SetToCurrentTime()
 	}
+}
+
+// RunSkipped records which gate ended a run; RunFinished is still called
+// with status skipped.
+func RunSkipped(agent, gate string) {
+	skipped.WithLabelValues(agent, gate).Inc()
 }
 
 // SeedLastSuccess sets an agent's gauge from the database at startup, so a
