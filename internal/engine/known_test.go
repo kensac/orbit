@@ -1,11 +1,13 @@
 package engine_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kensac/orbit/internal/engine"
+	orbitharness "github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -84,14 +86,91 @@ func TestKnownIndexStaysInItsBudget(t *testing.T) {
 			EntryFields: store.EntryFields{Type: "project", Title: strings.Repeat("t", 150), Description: strings.Repeat("d", 300)},
 			UpdatedAt:   now})
 	}
-	idx := engine.KnownIndex(entries)
+	idx := engine.KnownIndex(entries, true)
 	if len(idx) > 8<<10 {
 		t.Fatalf("index is %d bytes", len(idx))
 	}
-	if !strings.Contains(idx, "more entries are only in inputs/_memory.md") {
-		t.Fatal("the index does not say entries were left out")
+	if !strings.Contains(idx, "more entries are not listed here (0 of them feedback)") || !strings.Contains(idx, "They are in inputs/_memory.md; find one by its words with mcp__orbit__search, kind memory_entry.") {
+		t.Fatalf("the index does not say entries were left out, and how to reach them:\n%s", idx[len(idx)-400:])
 	}
-	if engine.KnownIndex(entries) != idx {
+	if engine.KnownIndex(entries, true) != idx {
 		t.Fatal("the index is not deterministic")
+	}
+	if strings.Contains(engine.KnownIndex(entries, false), "mcp__orbit__search") {
+		t.Fatal("a run without the search tool is told to use it")
+	}
+}
+
+// With many topics, the index keeps every feedback entry, then the most recently changed, whatever their scope or topic's name; what it lists stays grouped as before.
+func TestKnownIndexKeepsFeedbackThenNewest(t *testing.T) {
+	now := time.Now()
+	var entries []store.Entry
+	long := strings.Repeat("d", 380)
+	for i := range 60 {
+		// Topics a.. sort before the agent's own and the newest: under the old packing they filled the budget.
+		entries = append(entries, store.Entry{Scope: store.ScopeTopic, Topic: "a" + string(rune('a'+i%20)), Key: "old-" + string(rune('a'+i%26)) + string(rune('a'+i/26)),
+			EntryFields: store.EntryFields{Type: "project", Title: "Old fact", Description: long}, UpdatedAt: now.Add(-time.Duration(100+i) * time.Hour)})
+	}
+	entries = append(entries,
+		store.Entry{Scope: store.ScopeTopic, Topic: "zz", Key: "old-rule", EntryFields: store.EntryFields{Type: "feedback", Title: "An old rule", Description: long}, UpdatedAt: now.Add(-1000 * time.Hour)},
+		store.Entry{Scope: store.ScopeAgent, Agent: "orbit", Key: "newest", EntryFields: store.EntryFields{Type: "project", Title: "The newest fact"}, UpdatedAt: now},
+		store.Entry{Scope: store.ScopeProfile, Key: "second", EntryFields: store.EntryFields{Type: "user", Title: "The second newest"}, UpdatedAt: now.Add(-time.Hour)},
+	)
+	idx := engine.KnownIndex(entries, true)
+	if len(idx) > 8<<10 {
+		t.Fatalf("index is %d bytes", len(idx))
+	}
+	for _, want := range []string{"(topic/zz/old-rule)", "(agent/newest)", "(profile/second)", "## Topic: zz", "## This agent"} {
+		if !strings.Contains(idx, want) {
+			t.Fatalf("index is missing %q:\n%s", want, idx)
+		}
+	}
+	// Grouped in the usual order: the profile, topics by name, the agent's own.
+	if p, z, a := strings.Index(idx, "## Your person"), strings.Index(idx, "## Topic: zz"), strings.Index(idx, "## This agent"); p > z || z > a {
+		t.Fatalf("groups out of order:\n%s", idx)
+	}
+	shown := strings.Count(idx, "- [project] Old fact")
+	if shown == 0 || shown == 60 {
+		t.Fatalf("%d old facts shown, want some but not all", shown)
+	}
+	if !strings.Contains(idx, fmt.Sprintf("(%d more entries are not listed here (0 of them feedback)", 60-shown)) {
+		t.Fatalf("index note:\n%s", idx[len(idx)-300:])
+	}
+	// Every shown old fact is newer than every one left out.
+	for i := range 60 {
+		e := entries[i]
+		ref := "(topic/" + e.Topic + "/" + e.Key + ")"
+		if strings.Contains(idx, ref) != (i < shown) {
+			t.Fatalf("old fact %d (%s) shown = %v, want the %d newest shown", i, ref, i >= shown, shown)
+		}
+	}
+}
+
+// An agent reading every topic ("*", as the built-in orbit agent does) is shown each topic's entries, may write to any of them, and finds them with its search; an agent naming one topic searches only that topic's and the profile's.
+func TestAgentReadingEveryTopic(t *testing.T) {
+	fr := &fakeRunner{output: goodOutput}
+	e, s, _ := harnessWith(t, fr, "topics: [\"*\"]\n")
+	e.Harness = "/usr/local/bin/orbit"
+	p := store.Provenance{Source: store.SourcePerson, Author: "kanishk"}
+	for _, topic := range []string{"homelab", "money"} {
+		if _, err := s.CreateEntry(ctx, store.NewEntry{EntryRef: store.EntryRef{Scope: store.ScopeTopic, Owner: topic},
+			EntryFields: store.EntryFields{Type: "feedback", Title: "Rule for " + topic, Body: "Zebra rule for " + topic + "."}}, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.Execute(ctx, claim(t, e, s)); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"## Topic: homelab", "## Topic: money"} {
+		if !strings.Contains(fr.got.Prompt, want) {
+			t.Fatalf("prompt is missing %q", want)
+		}
+	}
+	if !strings.Contains(fr.got.System, "topic/<name> for a topic you read (homelab, money)") {
+		t.Fatalf("system prompt does not offer both topics to write to:\n%s", fr.got.System)
+	}
+	res, err := orbitharness.Search(fr.got.Harness.Search, orbitharness.SearchRequest{Q: "zebra", Kind: "memory_entry"})
+	if err != nil || res["total"] != 2.0 {
+		t.Fatalf("search = %v %v, want both topics' entries", res, err)
 	}
 }

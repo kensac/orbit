@@ -23,9 +23,25 @@ database agent of their name. Each instance reloads when the directory's
 content or the newest definition changes, so a definition written on one
 instance is in force on all within the 30 s poll.
 
-An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential, delegate target or need it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily) waits for a person's approval whatever the rule.
+An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential, delegate target, need or webhook trigger it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily) waits for a person's approval whatever the rule.
 
 Database and built-in agents are held to what orbit.yaml offers (`spec.validateTrust`): no `file` source, no `${VAR}` that is not in `credentials:`, without a `sandbox`, only the tools in `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite), no precheck and no `run` hook. A spec breaking one fails validation, naming it.
+
+### Saving a conversation as an agent
+
+`agent:save {name, description, charter, starters}` (the built-in `orbit` has it, `approve`) turns the conversation it is proposed in into a new agent (`internal/engine/save.go`). The model writes only those words; everything that decides the agent's reach comes from the conversation's record (`store.ConversationFacts`) and is no broader than what happened there:
+
+- `tools`: the tools its runs called (orbit's own `mcp__` tools are given to every run and are not listed). Without a sandbox, a tool outside `spec.UnsandboxedTools` is dropped; with one, the new agent gets the same `sandbox` and `needs`.
+- `sources`: the pages fetched with WebFetch, as `http` sources named by host (at most 5; a URL with `${` or `{{` is skipped).
+- `actions`: each type a person approved in the conversation (not one a rule approved), as `approve`, never `auto`. Delegation's types are left out: the record does not say which targets were meant.
+- `triggers`: every `schedule:add` proposed in the conversation that no person rejected, compiled as `schedule:add` compiles it; a `schedule:add` in the same reply with `agent` set to the new name becomes its schedule instead of an action of its own.
+- `runner`, `chat`, `session` and `timezone` from the agent it was saved from, `wake_on_message: true`, and the model's `starters`.
+
+It is proposed as an `agent:define` with `rule: "approve"`, whatever the agent's rules, so a person approves the whole agent, seen as a dry-run diff (`preview`, docs/api.md, Actions). A name already in use is refused at once.
+
+### Approve and always allow
+
+A person approving any action can also make its type `auto` for that agent ("approve and always allow", docs/api.md, Actions): a new revertible version, like an API change.
 
 ## Secrets
 
@@ -79,6 +95,15 @@ endpoints:
 
 An agent gives it a rule (`actions: {webhook:sure-categorize: approve}`) and reads the categories as a source (`GET http://plaid:3000/api/v1/categories`, with the same header), and proposes `{"type": "webhook:sure-categorize", "params": {"path": {"id": "<transaction id>"}, "body": {"transaction": {"category_id": "<category id>", "user_modified": true}}}}`. The key must have Sure's read-write scope; a read-only key answers 403 and the action fails.
 
+`expires:` records when a credential orbit cannot inspect stops working, so an alert fires before it does. The Claude Code subscription token (`claude setup-token`) lasts a year and gives no warning; record the day it lapses when you set it:
+
+```yaml
+expires:
+  CLAUDE_CODE_OAUTH_TOKEN: 2027-10-31
+```
+
+Each entry is `orbit_credential_expiry_timestamp_seconds{credential="CLAUDE_CODE_OAUTH_TOKEN"}` (midnight UTC of the date) on every instance that loads the configuration, refreshed on reload; nothing else reads it. Update it with the token.
+
 ## GitHub
 
 `github:` in `orbit.yaml` names the App (`app_id`), the variable holding its
@@ -116,6 +141,19 @@ mail:
 
 `port` defaults to 993 (implicit TLS); any other port must offer STARTTLS. `mailbox` defaults to `INBOX` and must be orbit's own: every unseen mail in it is read and marked seen. The server must deliver `local+anything@domain` to the mailbox (Postfix's `recipient_delimiter`). Without `agent`, a mail that is not a reply is recorded and ignored. `poll` is at least 10s. With the section, every mail orbit sends carries a reply address and Message-ID naming its run's conversation.
 
+## Subscription usage and low-priority agents
+
+```yaml
+usage_poll:                          # off without this block
+  every: 5m                          # default 5m, at least 1m
+  token_env: CLAUDE_CODE_OAUTH_TOKEN # default; the token claude-code runners use
+defer_low_priority: true             # hold priority: low agents' scheduled runs while the subscription is nearly spent
+```
+
+`usage_poll` makes control ask the endpoint Claude Code's own `/usage` screen reads (`spec.DefaultUsageURL`) with the subscription's OAuth token, and store each answer (`internal/usage`). **Best effort**: the endpoint is undocumented, so a change to it shows as failed polls in `/usage` (`subscription.poll.last_error`) and the windows fall back to what runs' streams reported. Two instances during a rollout share one poll per interval. The token stays on control and is sent only to that URL.
+
+`priority: low` on an agent (default normal) marks work that can wait. With `defer_low_priority`, while any subscription window not yet reset is above `usage.DeferLowAbove` (80%), that agent's scheduled runs are held in the queue, rechecked every `usage.DeferRecheck` (10m) and let go within `scheduler.DeferCheckEvery` (1m) of every window dropping below; each hold is recorded (`run_deferrals`, `/usage` `deferral.held`). Manual runs and a person's messages are never held. The reading is the freshest of polled and stream-reported values, so deferring works without `usage_poll`, on readings only as fresh as the last run.
+
 ## Capabilities
 
 `needs: [<capability>, ...]` on an agent says what a host must have to run it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated; `*` alone is every agent, control's default when unset; a worker's default is none). A capability is `name` or `name:qualifier`, lower case (`spec.CapabilityRE`). An agent with no needs runs on any host. Give an agent a need for anything only some hosts have: a network its sources are on (`docker-network:hetzner`), a source credential that lives only on some hosts (`sure`), the GitHub App's key (`github`, required with `repos`), a tool (`browser`). The table of capabilities and the hosts that have them is docs/agents/deployment.md, Worker fleet. A run whose agent needs what no host has waits queued; nothing fails it.
@@ -138,14 +176,14 @@ at load (unknown params fail):
 | `sure-monthly` | `items` | Sure transactions per month and category: income, spending, net, transfers left out |
 
 `items` is the dot path to the records (empty: the document is the array,
-as a paginated `http` source is); `where` is the query tool's conditions
+as a paginated `http` source is; `.`: the document itself is the one record, as a webhook delivery's event is); `where` is the query tool's conditions
 (`field`, `op`, `value`). Sums are exact decimals. A transform that fails
 fails the run, naming it. A new kind is a function in
 `internal/transforms`, its parameters in `parse`, and a test.
 
 ## Gates
 
-`gates:` in an agent are checks, in code, that end a run as `skipped` (naming the gate in `runs.gate`) before any backend call, so a quiet day costs no tokens and sends nothing. They apply only to scheduled runs with no person's message waiting: a message, a manual run, a continuation, a build and a recovered attempt always reach the model. They are checked in order, after sources and transforms:
+`gates:` in an agent are checks, in code, that end a run as `skipped` (naming the gate in `runs.gate`) before any backend call, so a quiet day costs no tokens and sends nothing. They apply only to scheduled and webhook runs with no person's message waiting: a message, a manual run, a continuation, a build and a recovered attempt always reach the model. They are checked in order, after sources and transforms:
 
 | kind | fields | skips when |
 |---|---|---|
@@ -163,8 +201,54 @@ A skipped run counts as a success for staleness (docs/agents/store.md).
 
 - `schedule`: a five-field cron expression or a descriptor (`@daily`), read in the agent's `timezone`.
 - `rrule` and `start`: an RFC 5545 recurrence rule (`internal/rrule`), anchored at `start`, a local time in the agent's timezone (`2026-11-03T09:00`). For what cron cannot say: `FREQ=WEEKLY;INTERVAL=2;BYDAY=TU` (every other Tuesday), `FREQ=MONTHLY;BYDAY=-1FR` (the last Friday), `FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=2` (the second weekday), and series that end (`COUNT`, `UNTIL`). `start` sets the first period and the time of day the rule does not name. Supported: `FREQ` from `MINUTELY` to `YEARLY`, `INTERVAL`, `COUNT` (at most 10000), `UNTIL`, `BYMONTH`, `BYMONTHDAY`, `BYDAY` (ordinals in `MONTHLY` and `YEARLY`), `BYHOUR`, `BYMINUTE`, `BYSECOND`, `BYSETPOS`, `WKST`; anything else fails the load. Days and longer are wall-clock (09:00 stays 09:00 across daylight saving); hours and minutes are elapsed time.
+- `webhook`: a signed delivery to `POST /hooks/<agent>/<webhook>` (Webhooks, below).
 
-Either kind takes `prompt`, the reason for the wake. Both go through the same scheduler (one fire per trigger and time, `runs_one_per_fire`; after downtime only the newest missed fire), and an ended series never fires again.
+Every kind takes `prompt`, the reason for the wake. `schedule` and `rrule` go through the same scheduler (one fire per trigger and time, `runs_one_per_fire`; after downtime only the newest missed fire), and an ended series never fires again.
+
+**Missed fires.** A fire that starts too late is not run hours late: a schedule run claimed more than its trigger's `missed_grace` after its fire time (after downtime, or behind a long queue) ends `skipped` with gate `missed`, before anything is read or fetched, and notifies nothing. The default grace is the time from that fire to the trigger's next one, at most an hour (`spec.DefaultMissedGraceMax`): a five-minute trigger's fire may start up to five minutes late, a daily one's up to an hour. Set `missed_grace` (1m to 168h) for a job that must still run late, such as a monthly close. Only a run's first attempt is judged; a missed fire is no success for staleness.
+
+## Webhooks
+
+A webhook trigger starts a run when a sender (GitHub, anything speaking Standard Webhooks) POSTs a signed delivery to `/hooks/<agent>/<webhook>` (docs/api.md, Webhooks). Its secret is an environment variable `orbit.yaml` binds, like a credential, to the agents that may name it, with the sender's signature scheme:
+
+```yaml
+# orbit.yaml
+webhook_secrets:
+  ORBIT_HOOK_GITHUB:
+    scheme: github        # X-Hub-Signature-256; or standard (webhook-id, webhook-timestamp, webhook-signature)
+    agents: [triage]
+```
+
+```yaml
+# agents/triage.yaml
+triggers:
+  - webhook: issues               # POST /hooks/triage/issues
+    secret: ORBIT_HOOK_GITHUB
+    max_bytes: 262144             # default 1 MiB, at most 8 MiB
+sources:
+  - name: event                   # the delivery's body, as received
+    kind: webhook
+```
+
+- **Verified before anything is stored.** The body's HMAC-SHA256 under the secret must match the sender's signature (constant-time). `github` reads `X-Hub-Signature-256` and the delivery id from `X-GitHub-Delivery`; `standard` signs `<webhook-id>.<webhook-timestamp>.<body>` (a `whsec_` secret is base64 after the prefix) and refuses a timestamp more than `spec.WebhookTolerance` (5 minutes) from orbit's clock, which is its replay protection. GitHub signs no timestamp, so there the delivery id is.
+- **Once per delivery.** The run and the delivery are one transaction, unique per agent, trigger and delivery id (`webhook_deliveries_once`): a sender's retry, or a second instance receiving it, answers the first run and starts nothing.
+- **The body is a source.** A `webhook` source is the body of the delivery that started the run, stored as received (`webhook_deliveries`), so transforms, gates (`items_above` with `items: .` counts one event), the `unchanged` gate and withholding apply as to a fetched source. On a run no delivery started (manual, schedule, message) it is absent: its transforms are skipped and an `items_above` gate on it skips the run. The run's prompt names the delivery id and the event.
+- GitHub's `ping` (sent when a hook is created) is answered `200` without a run. A disabled agent refuses deliveries (`409`), and a secret unset in the environment is `503`, never an unauthenticated route.
+
+A database agent may have a webhook trigger only under a secret bound to its name, and adding one widens it (waits for a person). Binding a name no agent has yet lets whoever defines that agent receive the deliveries.
+
+`paused: true` stops a trigger firing; with `paused_until` (a local time, as `start`) it fires again from then, and the fires in between are skipped, not caught up (`spec.TriggerSchedule` applies it, so the scheduler, `next_fires` and validation agree).
+
+### Changing schedules by talking
+
+The actions `schedule:add`, `schedule:pause`, `schedule:resume` and `schedule:remove` change a database or built-in agent's triggers without rewriting its spec (`internal/actions/schedule.go`, `internal/engine/schedule.go`): each applies as the next version through `agent:define`'s path (`DefineAgent`, with the run and the person it answered, refused if the agent changed since the action read it), so it is listed in the agent's definitions and reverted like any version. The target is the agent itself, or one it may delegate to (`agent`).
+
+- `schedule:add {when, prompt}`: `when` is the person's words, compiled by `internal/scheduletext` in the agent's timezone: `daily`, `every day`, `every weekday`, `every monday` (any full weekday), `every other monday`, `the 1st` or `the 1st of every month` (any ordinal), each `at` a time (`8` and `8:00` are the 24-hour clock, `9am` and `9:30pm` explicit). A cron expression is accepted as written. Anything else is refused with what is supported.
+- `schedule:pause {trigger, until}`: `trigger` is the index `next_fires` reports (absent: every trigger); `until` is `tomorrow`, a weekday (`monday`, `next monday`: the next one after today), a date (`2026-11-09`, `nov 9`), any of those `at` a time, a local `2026-11-09T08:00`, or `in N hours|days|weeks`. A date alone is its midnight. Absent, the pause lasts until resumed.
+- `schedule:resume {trigger}`, `schedule:remove {trigger}` (later indexes move down one).
+- `run:now {agent, prompt}` starts a manual run; it changes no spec. A run that no person's message woke cannot start its own agent (that is `continue`, which is bounded).
+
+The model never computes a time. Each proposal is compiled when it is made: a phrase code cannot read, or a trigger that is not there, is denied at once with the reason, and a chat agent's `act` call answers with the compiled rule and the next three fires for it to tell the person (the action's result, when it executes during the turn). The executed action's `result` echoes the same (`rule`, `timezone`, `triggers`, `paused_until`, `next_fires` as local times, `version`), and a pending one shows it as `preview` (docs/api.md, Actions). In a run answering the person's message an `approve` rule on these applies directly, as delegation's does; unattended runs follow the rules as written. The built-in `orbit` has all five under `approve`.
 
 ## Templates in sources
 
@@ -199,7 +283,7 @@ are constants in `internal/actions` (`ContinueMinDelay`, `ContinueMaxDelay`,
 
 ## Delegation
 
-`delegates: [<agent>, ...]` (or `["*"]`, every configured agent, itself included) names the agents an agent may hand tasks to; an unknown name fails the load. The `delegate` action needs it, and is denied unless named, like any action; `task:message` and `task:cancel` follow the `delegate` rule unless named themselves. In a run answering the person's message, `approve` on these applies directly (docs/ARCHITECTURE.md, Delegation). Bounds are constants in `internal/store` (`MaxTasksPerDelegation`, `MaxTaskDepth`, `MaxConversationTasks`).
+`delegates: [<agent>, ...]` (or `["*"]`, every configured agent, itself included) names the agents an agent may hand tasks to; an unknown name fails the load. The `delegate` action needs it, and is denied unless named, like any action; `task:message`, `task:cancel` and `task:retry` follow the `delegate` rule unless named themselves. In a run answering the person's message, `approve` on these applies directly (docs/ARCHITECTURE.md, Delegation). Bounds are constants in `internal/store` (`MaxTasksPerDelegation`, `MaxTaskDepth`, `MaxConversationTasks`, `MaxTaskFailures`).
 
 ## Checks
 
@@ -214,11 +298,12 @@ charter or memory gets those amounts sent back and then noted.
 `notify.when` (`always`, `agent`: when the run asks, or `never`) applies to
 unattended runs: schedule, manual, continue, build. A run answering a
 person's message never notifies, whatever it says: the person is reading
-the chat. Failures and pending approvals of unattended runs always notify.
+the chat. Failures and pending approvals of unattended runs always notify, except a failure that holds its runner (the backend refused orbit's login, or the subscription window is spent): that sends one notification for the runner (or, for a run a person started, the run's own failure report), and the runner's unattended runs wait until it answers again (docs/ARCHITECTURE.md, Reliability).
+Another exception is a run that read a mail (`mail:`): its report, or a short note when it fails, is mailed to the sender as a reply, through the agent's first `smtp` channel (else the deployment's first by name) and no other channel, whatever `notify.when` is.
 
 ## Memory topics
 
-`topics: [finance]` names the shared memory topics whose entries every run of the agent reads, beside the profile's and its own (docs/ARCHITECTURE.md, Memory entries). A topic exists as soon as an entry or an agent names it; the API can attach more (`PUT /agents/{name}/topics/{topic}`).
+`topics: [finance]` names the shared memory topics whose entries every run of the agent reads, beside the profile's and its own (docs/ARCHITECTURE.md, Memory entries). `topics: ["*"]` (alone) is every topic, as the built-in `orbit` agent has it. A topic exists as soon as an entry or an agent names it; the API can attach more (`PUT /agents/{name}/topics/{topic}`).
 
 ## Hooks
 

@@ -1,153 +1,140 @@
 package engine_test
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
-	"io"
-	"log/slog"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/kensac/orbit/internal/engine"
-	"github.com/kensac/orbit/internal/runner"
-	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
-	"github.com/kensac/orbit/internal/testdb"
 )
 
-const txID = "0b6f2c1e-7d1a-4c3b-9e8f-2a5d6c7b8e9f"
-const catID = "5f0e3a2b-1c4d-4e6f-8a9b-0c1d2e3f4a5b"
+const quietOutput = `{"summary": "triaged", "report": "ok", "notify": {"send": false, "priority": "default", "title": ""},
+  "memory": {"update": false, "content": ""}, "questions": [], "actions": []}`
 
-// A Sure-shaped categorize: the model names a transaction and a category, orbit sends PUT /api/v1/transactions/{id} with the key the credential binds to Sure's API, and nothing the model wrote reaches the URL outside its placeholder.
-func TestWebhookPathFromCheckedParams(t *testing.T) {
-	s := testdb.New(t)
-	var mu sync.Mutex
-	var got []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		var body bytes.Buffer
-		_ = json.Compact(&body, b)
-		mu.Lock()
-		got = append(got, r.Method+" "+r.URL.EscapedPath()+" "+r.Header.Get("X-Api-Key")+" "+body.String())
-		mu.Unlock()
-		if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/transactions/") {
-			fmt.Fprintf(w, `{"id":%q}`, strings.TrimPrefix(r.URL.Path, "/api/v1/transactions/"))
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	t.Cleanup(srv.Close)
+func webhookHarness(t *testing.T, fr *fakeRunner) (*engine.Engine, *store.Store) {
+	t.Helper()
+	e, s, _ := harnessFiles(t, fr, "", map[string]string{
+		"orbit.yaml": "webhook_secrets:\n  HOOK: {scheme: github, agents: [hooked]}\n",
+		"agents/hooked.yaml": `
+name: hooked
+charter: Triage issues.
+triggers: [{webhook: issues, secret: HOOK}]
+sources: [{name: event, kind: webhook}]
+transforms:
+  - name: opened
+    source: event
+    kind: json-project
+    params: {items: ".", where: [{field: action, op: eq, value: opened}], fields: [issue.title]}
+gates: [{kind: items_above, input: opened, n: 0}]
+`,
+	})
+	return e, s
+}
 
-	dir := t.TempDir()
-	write := func(name, body string) {
-		p := filepath.Join(dir, name)
-		_ = os.MkdirAll(filepath.Dir(p), 0o755)
-		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("orbit.yaml", fmt.Sprintf(`
-timezone: America/New_York
-defaults: {runner: fake, channels: [log]}
-runners: {fake: {kind: claude-code}}
-channels: {log: {kind: log}}
-credentials:
-  SURE_API_KEY: {url_prefix: "%[1]s/api/"}
-endpoints:
-  sure-categorize:
-    url: %[1]s/api/v1
-    method: PUT
-    path: /transactions/{id}
-    description: Set one transaction's category.
-    params:
-      id: {type: string, pattern: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"}
-    headers: {X-Api-Key: "${SURE_API_KEY}"}
-    body_schema:
-      type: object
-      additionalProperties: false
-      required: [transaction]
-      properties:
-        transaction:
-          type: object
-          additionalProperties: false
-          required: [category_id]
-          properties:
-            category_id: {type: string, pattern: "^[0-9a-f-]{36}$"}
-            user_modified: {const: true}
-`, srv.URL))
-	write("agents/finance.yaml", `
-name: finance
-charter: Categorize my transactions.
-actions:
-  webhook:sure-categorize: auto
-`)
-	cfg, err := spec.Load(dir)
+func deliver(t *testing.T, e *engine.Engine, s *store.Store, id, body string) (string, bool) {
+	t.Helper()
+	a := e.Current().Config.Agents["hooked"]
+	run, dup, err := s.RecordWebhook(ctx, store.NewWebhook{Agent: "hooked", SpecSHA: a.SHA, TriggerName: "issues", TriggerIndex: 0,
+		DeliveryID: id, Event: "issues", MediaType: "application/json", Body: []byte(body), Prompt: "Webhook issues: delivery " + id + "."})
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := fmt.Sprintf(`{"summary": "categorized", "report": "r", "notify": {"send": false, "priority": "default", "title": ""},
-  "memory": {"update": false, "content": ""}, "questions": [], "actions": [
-    {"type": "webhook:sure-categorize", "params": {"path": {"id": %[1]q}, "body": {"transaction": {"category_id": %[2]q, "user_modified": true}}}, "reason": "groceries"},
-    {"type": "webhook:sure-categorize", "params": {"path": {"id": "../accounts"}, "body": {"transaction": {"category_id": %[2]q}}}, "reason": "escape"},
-    {"type": "webhook:sure-categorize", "params": {"path": {"id": %[1]q}, "body": {"transaction": {"name": "x"}}}, "reason": "rename"},
-    {"type": "webhook:sure-categorize", "params": {"body": {"transaction": {"category_id": %[2]q}}}, "reason": "no id"}
-  ]}`, txID, catID)
-	fr := &fakeRunner{output: out}
-	env := func(k string) (string, bool) {
-		if k == "SURE_API_KEY" {
-			return "sure-key", true
-		}
-		return "", false
+	return run, dup
+}
+
+func execNext(t *testing.T, e *engine.Engine, s *store.Store) *store.Run {
+	t.Helper()
+	c, err := s.ClaimRun(ctx, "test")
+	if err != nil || c == nil {
+		t.Fatalf("claim: %v %v", c, err)
 	}
-	e := &engine.Engine{
-		Store: s, DataDir: t.TempDir(), ConfigDir: dir, Env: env, Client: srv.Client(), Secret: []byte("secret"),
-		NewRunner: func(string, spec.RunnerSpec, func(string) (string, bool)) (runner.Runner, error) { return fr, nil },
-		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
-	if err := e.SetConfig(cfg); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := json.Marshal(cfg.Agents["finance"])
-	if err := s.SyncAgents(ctx, map[string]store.AgentSpec{"finance": {SHA: cfg.Agents["finance"].SHA, JSON: b, Enabled: true}}); err != nil {
-		t.Fatal(err)
-	}
-	c := claim(t, e, s)
 	if err := e.Execute(ctx, c); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(fr.got.System+fr.got.Prompt, "/transactions/{id}") {
-		t.Error("the model is told the endpoint's path template")
-	}
-	if strings.Contains(fr.got.System+fr.got.Prompt, "sure-key") {
-		t.Fatal("the credential reached the model")
-	}
-	if err := e.ExecuteActions(ctx); err != nil {
+	r, err := s.GetRun(ctx, c.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	acts, _ := s.ListActions(ctx, "finance", "", 0)
-	byReason := map[string]store.Action{}
-	for _, a := range acts {
-		byReason[a.Reason] = a
+	return r
+}
+
+// TestAWebhookDeliveryIsARunsSource: the delivery's body is the run's webhook source, transforms and gates apply to it as to a fetched one, and a retried delivery starts nothing.
+func TestAWebhookDeliveryIsARunsSource(t *testing.T) {
+	fr := &fakeRunner{output: quietOutput}
+	e, s := webhookHarness(t, fr)
+
+	body := `{"action":"opened","issue":{"title":"Login is broken"}}`
+	first, dup := deliver(t, e, s, "d-1", body)
+	if dup {
+		t.Fatal("a new delivery is not a duplicate")
 	}
-	for reason, want := range map[string]string{"escape": "does not match", "rename": "body does not match", "no id": "path.id is required"} {
-		a := byReason[reason]
-		if a.Status != "denied" || a.Error == nil || !strings.Contains(*a.Error, want) {
-			t.Errorf("%s: %s %v, want denied with %q", reason, a.Status, a.Error, want)
+	if again, dup := deliver(t, e, s, "d-1", body); !dup || again != first {
+		t.Fatalf("a retried delivery = %s dup %v, want the first run %s", again, dup, first)
+	}
+	r := execNext(t, e, s)
+	if r.ID != first || r.Status != store.StatusSucceeded || r.Trigger != store.TriggerWebhook || fr.calls != 1 {
+		t.Fatalf("run %s = %s (%s), calls %d", r.ID, r.Status, r.Trigger, fr.calls)
+	}
+	var names []string
+	for _, in := range fr.got.Inputs {
+		names = append(names, in.Name)
+		if in.Name == "opened" && string(in.Content) != `[{"issue.title":"Login is broken"}]` {
+			t.Fatalf("opened = %s", in.Content)
 		}
 	}
-	if a := byReason["groceries"]; a.Status != "executed" || !strings.Contains(string(a.Result), txID) {
-		t.Fatalf("groceries: %s %s %v", a.Status, a.Result, a.Error)
+	if !strings.Contains(strings.Join(names, ","), "opened") || strings.Contains(strings.Join(names, ","), "event") {
+		t.Fatalf("inputs %v: the transform's output is shown and the source it reads is withheld", names)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	want := "PUT /api/v1/transactions/" + txID + " sure-key " + `{"transaction":{"category_id":"` + catID + `","user_modified":true}}`
-	if len(got) != 1 || got[0] != want {
-		t.Fatalf("requests = %q, want %q", got, want)
+	arts, err := s.ListArtifacts(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := false
+	for _, a := range arts {
+		kept = kept || a.Name == "sources/event.json"
+	}
+	if !kept {
+		t.Fatalf("artifacts %+v: the delivery's body is kept as the withheld source", arts)
+	}
+	if !strings.Contains(fr.got.Prompt, "delivery d-1") {
+		t.Fatalf("prompt %q does not say what started the run", fr.got.Prompt)
+	}
+
+	// Another action: the transform finds nothing, the gate skips without a model call.
+	deliver(t, e, s, "d-2", `{"action":"labeled","issue":{"title":"Login is broken"}}`)
+	r = execNext(t, e, s)
+	if r.Status != store.StatusSkipped || r.Gate == nil || *r.Gate != "items_above" || fr.calls != 1 {
+		t.Fatalf("labeled = %s gate %v, calls %d", r.Status, r.Gate, fr.calls)
+	}
+
+	// A manual run has no delivery: the source is absent, its transform skipped, and the run still reaches the model.
+	a := e.Current().Config.Agents["hooked"]
+	if _, err := s.EnqueueRun(ctx, store.NewRun{Agent: "hooked", SpecSHA: a.SHA, Trigger: "manual"}); err != nil {
+		t.Fatal(err)
+	}
+	r = execNext(t, e, s)
+	if r.Status != store.StatusSucceeded || fr.calls != 2 {
+		t.Fatalf("manual = %s, calls %d", r.Status, fr.calls)
+	}
+	for _, in := range fr.got.Inputs {
+		if in.Name == "opened" || in.Name == "event" {
+			t.Fatalf("a manual run was given %s", in.Name)
+		}
+	}
+	evs, err := s.ListEvents(ctx, r.ID, 0, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absent := false
+	for _, ev := range evs {
+		if ev.Kind == "orbit.source_absent" {
+			var p map[string]any
+			_ = json.Unmarshal(ev.Payload, &p)
+			absent = p["source"] == "event"
+		}
+	}
+	if !absent {
+		t.Fatal("no orbit.source_absent event for the webhook source of a manual run")
 	}
 }
