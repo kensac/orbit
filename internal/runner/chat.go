@@ -362,9 +362,9 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	defer p.tools.set(nil)
 
 	var (
-		imu         sync.Mutex
-		interrupted bool
-		receipt     *claudeproto.InterruptReceipt
+		imu     sync.Mutex
+		stopped bool
+		receipt *claudeproto.InterruptReceipt
 	)
 	turnCtx, endTurn := context.WithCancel(ctx)
 	defer endTurn()
@@ -373,7 +373,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			select {
 			case <-req.Chat.Interrupt:
 				imu.Lock()
-				interrupted = true
+				stopped = true
 				imu.Unlock()
 				ictx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
 				defer cancel()
@@ -402,9 +402,8 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	})
 	endTurn()
 	imu.Lock()
-	stopped, rec := interrupted, receipt
+	interrupted, rec := stopped, receipt
 	imu.Unlock()
-	interrupted = stopped
 	// Every steer the turn did not take is withdrawn; one that may still
 	// run means this process cannot be kept.
 	clean := true
