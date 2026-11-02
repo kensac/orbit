@@ -379,6 +379,8 @@ type chatTurn struct {
 	repos *repoRun
 	// stall watches the turn (runner.Stall).
 	stall *runner.Stall
+	// model and effort are the conversation's (conversationModel).
+	model, effort string
 }
 
 // errCancelled is a run a person stopped; Execute records it cancelled.
@@ -438,6 +440,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	res, err := r.Run(runCtx, runner.Request{
 		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
 		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin, Stall: t.stall,
+		Model: t.model, Effort: t.effort,
 	}, func(ev runner.Event) { t.emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))

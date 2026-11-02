@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -214,7 +215,7 @@ func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*R
 	args := c.baseArgs(req, home, keepDays)
 	env := c.env(home)
 	if sess == nil {
-		full, err := claudeproto.Args(claudeproto.Transport{Ephemeral: true}, args)
+		full, err := claudeproto.Args(claudeproto.Transport{Ephemeral: true}, withModel(args, req))
 		if err != nil {
 			return nil, err
 		}
@@ -274,7 +275,7 @@ func (c *claudeCode) resumed(ctx context.Context, sess *Session, args, env []str
 	if err := sess.Started(mode, sess.Resume); err != nil {
 		return nil, err
 	}
-	full, err := claudeproto.Args(claudeproto.Transport{Resume: sess.Resume}, args)
+	full, err := claudeproto.Args(claudeproto.Transport{Resume: sess.Resume}, withModel(args, req))
 	if err != nil {
 		return nil, err
 	}
@@ -368,4 +369,23 @@ func TranscriptCost(home, workdir, id string) (total float64, ok bool) {
 			return total, ok
 		}
 	}
+}
+
+// withModel adds the run's model and effort to a process's arguments. They
+// come after the runner's own --model, and the CLI takes an option's last
+// value (2.1.316: --model opus --model sonnet runs sonnet). A live process is
+// keyed by its arguments without them (hashArgs), so a conversation that
+// changes its model keeps its process (liveProc.switchModel).
+func withModel(args []string, req Request) []string {
+	if req.Model == "" && req.Effort == "" {
+		return args
+	}
+	out := slices.Clone(args)
+	if req.Model != "" {
+		out = append(out, "--model", req.Model)
+	}
+	if req.Effort != "" {
+		out = append(out, "--effort", req.Effort)
+	}
+	return out
 }

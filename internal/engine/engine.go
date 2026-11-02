@@ -6,6 +6,7 @@ package engine
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"encoding/hex"
@@ -288,7 +289,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := e.Store.SetRunner(ctx, c.ID, c.Attempt, r.Kind(), r.Model(), a.SHA); err != nil {
+	model, effort, dropped, err := e.conversationModel(ctx, c.ConversationID, r.Kind())
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := e.Store.SetRunnerAt(ctx, c.ID, c.Attempt, r.Kind(), cmp.Or(model, r.Model()), effort, a.SHA); err != nil {
 		return nil, nil, err
 	}
 
@@ -398,6 +403,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		events.emit(kind, b)
 	}
 
+	if dropped != "" {
+		emit("orbit.model_skipped", map[string]any{"reason": dropped})
+	}
 	if c.Attempt > 1 && claudeCode {
 		emit("orbit.recovery", map[string]any{"recovers_attempt": recFrom(rec), "skipped_because": skipped})
 	}
@@ -575,7 +583,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}}
 	}
 	if chat {
-		out, res, err := e.chatTurn(ctx, snap, a, c, r, chatTurn{stall: stall, workdir: workdir, home: home, inputsDir: inputsDir, now: now,
+		out, res, err := e.chatTurn(ctx, snap, a, c, r, chatTurn{stall: stall, model: model, effort: effort, workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
 			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec,
 			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun})
@@ -621,6 +629,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	res, err := r.Run(runCtx, runner.Request{
 		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
 		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin, Stall: stall,
+		Model: model, Effort: effort,
 	}, func(ev runner.Event) { emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
@@ -1058,4 +1067,29 @@ func recFrom(r *recovery) int {
 		return 0
 	}
 	return r.from
+}
+
+// conversationModel is the model and effort a conversation's runs use
+// instead of the runner's own ("" for the runner's). A conversation's pair
+// that its runner no longer takes (the agent moved to another runner since it
+// was set) is not used, and dropped says why, for an orbit.model_skipped
+// event.
+func (e *Engine) conversationModel(ctx context.Context, conversationID, kind string) (model, effort, dropped string, err error) {
+	if conversationID == "" {
+		return "", "", "", nil
+	}
+	conv, err := e.Store.GetConversation(ctx, conversationID)
+	if err != nil {
+		return "", "", "", err
+	}
+	if conv.Model != nil {
+		model = *conv.Model
+	}
+	if conv.Effort != nil {
+		effort = *conv.Effort
+	}
+	if err := spec.CheckModel(kind, model, effort); err != nil {
+		return "", "", "the conversation's " + err.Error(), nil
+	}
+	return model, effort, "", nil
 }

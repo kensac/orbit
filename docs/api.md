@@ -176,7 +176,7 @@ conversation is never deleted, only archived.
   "id": "uuid", "agent": "finance", "title": "How much on Uber Eats in October?",
   "is_default": false, "archived": false,
   "created_at": "...", "last_activity_at": "...", "needs_input": true,
-  "ticket_id": null}],
+  "ticket_id": null, "model": null, "effort": null}],
  "has_more": false, "next_before": null}
 ```
 
@@ -216,9 +216,10 @@ messages below.
 
 Regular files only, by path; orbit's own state (`.orbit/`, the run's `inputs/`) is left out. `snapshot` is `null` (and `files` empty) for a conversation without one. `GET /conversations/{id}/files/{path}` is one file, always as a download (`application/octet-stream`, `Content-Disposition: attachment`, `nosniff`, a CSP that runs nothing), 404 for a path the snapshot does not have.
 
-`PATCH /conversations/{id}` `{"title": "...", "archived": true}` (either
-field) returns the updated `{"conversation": {...}}`. A title is at most 240
-characters (400 otherwise). The default conversation cannot be archived
+`PATCH /conversations/{id}` `{"title": "...", "archived": true, "model": "sonnet", "effort": "high"}` (any of the fields) returns the updated `{"conversation": {...}}`. A title is at most 240
+characters (400 otherwise).
+
+`model` and `effort` are what the conversation's runs use instead of the agent's runner's own; `null` or `""` returns one to the runner's, and an absent field is left as it is. Both are checked against the agent's runner (`spec.CheckModel`, 400 naming the problem): a model is an alias or id (`opus`, `claude-opus-4-5`, `sonnet[1m]`, `gpt-5-codex`: lowercase letters, digits and `. _ : -`), an `anthropic` runner's an id starting `claude-`; `effort` is only for `claude-code`, one of `low`, `medium`, `high`, `xhigh`, `max`. A run reads them when it starts and records what it ran with (a run's `model` and `effort`). A conversation's live process takes a change at its next turn without ending (`set_model`, and `apply_flag_settings` with `effortLevel`), so the session and its cache carry on; a process that refuses either is closed and the turn starts one with `--model` and `--effort`. A stored pair the runner no longer takes (the agent moved to another runner) is not used, and the run's `orbit.model_skipped` event `{"reason"}` says why. The default conversation cannot be archived
 (409). A message to an archived conversation brings it back.
 
 `POST /conversations/{id}/messages` takes and returns exactly what
@@ -394,7 +395,7 @@ The final answer is `done.report`, not the concatenated `text`: `text` is what t
 {"id": "uuid", "attempt": 1, "agent": "finance", "spec_sha": "hex",
  "trigger": "schedule", "trigger_index": 0, "scheduled_for": "...",
  "prompt": "", "status": "succeeded",
- "runner_kind": "claude-code", "model": "...", "worker": "orbit/0",
+ "runner_kind": "claude-code", "model": "...", "effort": "high", "worker": "orbit/0",
  "created_at": "...", "started_at": "...", "finished_at": "...",
  "error": "...", "summary": "...", "report": "<markdown>",
  "output": {}, "usage": {}, "cost_usd": 0.03, "session_id": "...",
@@ -405,7 +406,7 @@ The final answer is `done.report`, not the concatenated `text`: `text` is what t
 
 - Always present: `id`, `attempt`, `agent`, `spec_sha`, `trigger`, `prompt` (`""` when none), `status`, `created_at` and `steps`. Every other field is omitted when it has no value (not `null`).
 - `trigger` and `status` are as in a thread run item. `trigger_index` and `scheduled_for` are set on a `schedule` run: which of the agent's triggers fired, and the fire time.
-- `runner_kind`, `model` and `worker` are the latest attempt's backend, its model (absent when the runner names none) and the instance that claimed it. `spec_sha` is the spec the latest attempt ran under.
+- `runner_kind`, `model` and `worker` are the latest attempt's backend, its model (the conversation's when it sets one, else the runner's; absent when neither names one) and the instance that claimed it. `effort` is the conversation's effort the attempt ran at, absent for the runner's default. `spec_sha` is the spec the latest attempt ran under.
 - `output` is the backend's raw structured output and `usage` its token usage, as it reported them. `cost_usd` is every attempt's cost together.
 - `session_id` is the backend session the run ended in. `session_mode` (`fresh`, `resumed`, `live`), `session_parent` (the run whose session it continued) and `session_depth` are set for an agent with a session.
 - `run_after`, `continues` (the run that asked) and `chain` (its place in the chain, from 1) are set on a `continue` run.
@@ -433,7 +434,7 @@ An attempt (`store.Attempt`), oldest first:
 {"attempt": 1, "seq": 12, "at": "...", "kind": "assistant", "payload": {}}
 ```
 
-`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.stalled`, `orbit.figures_unverified`, and a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`.
+`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.stalled`, `orbit.model_skipped`, `orbit.figures_unverified`, and a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`.
 
 ### The journal
 

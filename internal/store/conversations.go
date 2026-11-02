@@ -66,6 +66,10 @@ type Conversation struct {
 	// questions are to the delegating agent, so they do not count as
 	// waiting on the person.
 	TaskID *string `json:"task_id"`
+	// Model and Effort are what the conversation's runs use instead of the
+	// agent's runner's own; null is the runner's.
+	Model  *string `json:"model"`
+	Effort *string `json:"effort"`
 }
 
 const conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived, c.created_at, c.last_activity_at,
@@ -74,7 +78,7 @@ const conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived
 	OR EXISTS (SELECT 1 FROM actions x JOIN runs xr ON xr.id = x.run_id
 	           WHERE xr.conversation_id = c.id AND x.status = 'pending'),
 	(SELECT t.id::text FROM tickets t WHERE t.conversation_id = c.id), c.purpose,
-	(SELECT k.id::text FROM tasks k WHERE k.conversation_id = c.id)`
+	(SELECT k.id::text FROM tasks k WHERE k.conversation_id = c.id), c.model, c.effort`
 
 // GetConversation returns one conversation.
 func (s *Store) GetConversation(ctx context.Context, id string) (*Conversation, error) {
@@ -215,11 +219,15 @@ func (s *Store) CreateConversation(ctx context.Context, n NewConversation) (res 
 	return res, replayed, json.Unmarshal(raw, &res)
 }
 
-// ConversationUpdate changes a conversation's title or archived flag; nil
-// leaves a field as it is.
+// ConversationUpdate changes a conversation's title, archived flag, model or
+// effort; nil leaves a field as it is, and an empty Model or Effort returns
+// it to the runner's own. The caller checks a model and effort against the
+// agent's runner (spec.CheckModel).
 type ConversationUpdate struct {
 	Title    *string
 	Archived *bool
+	Model    *string
+	Effort   *string
 }
 
 // UpdateConversation applies u. The default conversation cannot be
@@ -233,8 +241,10 @@ func (s *Store) UpdateConversation(ctx context.Context, id string, u Conversatio
 		u.Title = &t
 	}
 	tag, err := s.Pool.Exec(ctx, `UPDATE conversations SET
-		    title = COALESCE($2, title), archived = COALESCE($3, archived)
-		WHERE id = $1 AND NOT (is_default AND COALESCE($3, false))`, id, u.Title, u.Archived)
+		    title = COALESCE($2, title), archived = COALESCE($3, archived),
+		    model = CASE WHEN $4::text IS NULL THEN model ELSE NULLIF($4, '') END,
+		    effort = CASE WHEN $5::text IS NULL THEN effort ELSE NULLIF($5, '') END
+		WHERE id = $1 AND NOT (is_default AND COALESCE($3, false))`, id, u.Title, u.Archived, u.Model, u.Effort)
 	if err != nil {
 		return err
 	}

@@ -92,3 +92,41 @@ func TestConversationsOverTheAPI(t *testing.T) {
 }
 
 var longTitle = strings.Repeat("x", 300)
+
+func TestAConversationsModelAndEffort(t *testing.T) {
+	v := newEnv(t, nil)
+	kanishk := v.person("kanishk")
+	base := v.srv.URL + "/api/v1"
+	_, r := call(t, "POST", base+"/agents/a/conversations", kanishk, `{"title":"x"}`)
+	id := r["conversation_id"].(string)
+	conv := func(body string, want int) map[string]any {
+		t.Helper()
+		code, r := call(t, "PATCH", base+"/conversations/"+id, kanishk, body)
+		if code != want {
+			t.Fatalf("PATCH %s = %d %v, want %d", body, code, r, want)
+		}
+		if want != 200 {
+			return nil
+		}
+		return r["conversation"].(map[string]any)
+	}
+	if c := conv(`{"model":"sonnet","effort":"high"}`, 200); c["model"] != "sonnet" || c["effort"] != "high" {
+		t.Fatalf("set = %v", c)
+	}
+	// One field at a time leaves the other; null clears.
+	if c := conv(`{"effort":"max"}`, 200); c["model"] != "sonnet" || c["effort"] != "max" {
+		t.Fatalf("effort only = %v", c)
+	}
+	if c := conv(`{"model":null}`, 200); c["model"] != nil || c["effort"] != "max" {
+		t.Fatalf("model cleared = %v", c)
+	}
+	if c := conv(`{"effort":""}`, 200); c["effort"] != nil {
+		t.Fatalf("effort cleared = %v", c)
+	}
+	conv(`{"effort":"extreme"}`, 400)
+	conv(`{"model":"Opus Max"}`, 400)
+	conv(`{"model":3}`, 400)
+	if code, _ := call(t, "PATCH", base+"/conversations/00000000-0000-0000-0000-000000000000", kanishk, `{"model":"opus"}`); code != 404 {
+		t.Fatalf("unknown conversation = %d", code)
+	}
+}

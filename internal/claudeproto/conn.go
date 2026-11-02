@@ -362,6 +362,16 @@ func (c *Conn) SetModel(ctx context.Context, model string) error {
 	return err
 }
 
+// SetEffort changes the effort level for later turns (apply_flag_settings with effortLevel; empty sends null, the model's default). The CLI accepts an unknown level and ignores it (2.1.316), so a caller checks the level first.
+func (c *Conn) SetEffort(ctx context.Context, level string) error {
+	var l any
+	if level != "" {
+		l = level
+	}
+	_, err := c.Request(ctx, "apply_flag_settings", map[string]any{"settings": map[string]any{"effortLevel": l}})
+	return err
+}
+
 func newRequestID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
