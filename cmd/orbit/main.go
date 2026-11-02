@@ -12,11 +12,12 @@
 //	orbit import claude-memory <dir> --scope <s> [--apply]   seed memory entries through the API
 //	orbit import skills <dir> [--attach <agent>] [--apply]   seed the skills library through the API
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
-//	orbit hook --root <dir> --state <dir> [--figures]   orbit's hook, run by Claude Code
+//	orbit hook --root <dir> --state <dir> [--figures] [--status <socket>]   orbit's hook, run by Claude Code
 //	orbit agent-hook --root <dir> --def <hook>   one of an agent's own hooks, run by Claude Code
 //	orbit tls-cert --dir <d> [--owner uid:gid]   orbit-db's self-signed TLS certificate
 //	orbit sandboxd           the build sandbox service (holds the docker socket)
 //	orbit egress             the allowlisting proxy, a sandbox's only route out
+//	orbit credproxy          a sandbox's route to its backend, adding the credential it never holds
 package main
 
 import (
@@ -52,10 +53,12 @@ import (
 	"github.com/kensac/orbit/internal/push"
 	"github.com/kensac/orbit/internal/repos"
 	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/tickets"
+	subusage "github.com/kensac/orbit/internal/usage"
 )
 
 // revision is set at build time (-ldflags -X main.revision=<sha>).
@@ -99,6 +102,8 @@ func main() {
 		err = sandboxdCmd(ctx, log)
 	case "egress":
 		err = egressCmd(ctx, log)
+	case "credproxy":
+		err = credproxyCmd(ctx, log)
 	case "vapid":
 		err = vapid()
 	case "version":
@@ -120,6 +125,7 @@ func harnessCmd(name string, args []string) error {
 	root := fs.String("root", "", "the run's working directory")
 	figures := fs.Bool("figures", false, "check the output's money amounts")
 	state := fs.String("state", "", "the directory the tool server and the hook share")
+	statusSock := fs.String("status", "", "the run's status socket the hook posts every event to")
 	search := fs.String("search", "", "the engine's search socket for this agent (mcp)")
 	repoSock := fs.String("repos", "", "the engine's repository tools socket for this agent (mcp)")
 	if err := fs.Parse(args); err != nil {
@@ -131,7 +137,7 @@ func harnessCmd(name string, args []string) error {
 	if name == "mcp" {
 		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, *repoSock, revision)
 	}
-	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state})
+	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state, Status: *statusSock})
 }
 
 // agentHookCmd runs one of an agent's own hooks for Claude Code (spec hooks): the definition is a flag orbit wrote, the event is stdin, and the exit code is the CLI's to read.
@@ -151,7 +157,7 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
 	os.Exit(2)
 }
 
@@ -249,6 +255,21 @@ func validate(args []string) error {
 	if err != nil {
 		return err
 	}
+	names := make([]string, 0, len(cfg.Agents))
+	for n := range cfg.Agents {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	fmt.Printf("ok: %d agent(s): %s\n", len(names), strings.Join(names, ", "))
+	env := referencedEnv(cfg)
+	if len(env) > 0 {
+		fmt.Printf("environment referenced: %s\n", strings.Join(env, ", "))
+	}
+	return nil
+}
+
+// referencedEnv is the environment a configuration needs, sorted. The claude-code backend's is listed as its two alternatives in one entry.
+func referencedEnv(cfg *spec.Config) []string {
 	b, _ := json.Marshal(cfg)
 	refs := map[string]bool{}
 	for _, r := range spec.EnvRefs(string(b)) {
@@ -265,6 +286,9 @@ func validate(args []string) error {
 		if r.APIKeyEnv != "" {
 			refs[r.APIKeyEnv] = true
 		}
+		if r.Kind == "claude-code" {
+			refs[claudeBackend] = true
+		}
 	}
 	if g := cfg.Deployment.GitHub; g != nil {
 		refs[g.PrivateKeyEnv] = true
@@ -275,6 +299,7 @@ func validate(args []string) error {
 	if m := cfg.Deployment.Mail; m != nil {
 		refs[m.IMAP.UsernameEnv], refs[m.IMAP.PasswordEnv] = true, true
 	}
+	// A build or a sandboxed chat hands the sandbox the subscription token itself (engine.buildCredential), so these name it alone.
 	if b := cfg.Deployment.Build; b != nil {
 		refs[b.TokenEnv] = true
 		refs["CLAUDE_CODE_OAUTH_TOKEN"] = true
@@ -283,21 +308,12 @@ func validate(args []string) error {
 		refs[tokenEnv] = true
 		refs["CLAUDE_CODE_OAUTH_TOKEN"] = true
 	}
-	names := make([]string, 0, len(cfg.Agents))
-	for n := range cfg.Agents {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	fmt.Printf("ok: %d agent(s): %s\n", len(names), strings.Join(names, ", "))
-	var env []string
+	env := make([]string, 0, len(refs))
 	for r := range refs {
 		env = append(env, r)
 	}
 	sort.Strings(env)
-	if len(env) > 0 {
-		fmt.Printf("environment referenced: %s\n", strings.Join(env, ", "))
-	}
-	return nil
+	return env
 }
 
 func enqueue(ctx context.Context, args []string) error {
@@ -466,7 +482,8 @@ func serve(ctx context.Context, log *slog.Logger) error {
 
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
-			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher}
+			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher,
+			Boxes: boxClient(func() spec.Deployment { return eng.Current().Config.Deployment }), WorkspaceOrigins: auth.SplitList(os.Getenv("ORBIT_WORKSPACE_ORIGINS"))}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		// Bind before any executor starts: an instance that cannot serve
@@ -507,6 +524,19 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			}).Run(claimCtx)
 		}()
 
+		// The usage poller is best effort and off without usage_poll; it
+		// stops with claims, and two instances share one poll per interval
+		// (subusage.Poller.maybePoll).
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			(&subusage.Poller{
+				Store: s, Client: &http.Client{}, Env: os.LookupEnv, Worker: eng.Worker, Version: revision,
+				Config: func() *spec.Deployment { return &eng.Current().Config.Deployment },
+				Log:    log.With("component", "usage"),
+			}).Run(claimCtx)
+		}()
+
 		// The scheduler only enqueues, so it keeps leading through a drain
 		// (fires stay on time, the ready instance claims them) and lets go
 		// of the lock when this process ends.
@@ -534,7 +564,11 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			defer loops.Done()
 			all := true
 			for life.Err() == nil {
-				if n, err := s.BackfillJournal(life, all); err != nil {
+				n, failed, err := s.BackfillJournal(life, all)
+				for _, f := range failed {
+					log.Error("journal backfill skipped a run", "err", f)
+				}
+				if err != nil {
 					if life.Err() == nil {
 						log.Error("journal backfill", "err", err)
 					}
@@ -713,6 +747,33 @@ const writeTimeout = 5 * time.Minute
 // steps of a run nobody streams can be while an older instance writes it.
 const journalSyncEvery = 30 * time.Second
 
+// boxClient is sandboxd's client for agents' boxes: the sandboxd chats use
+// (spec.Deployment.SandboxService) with its token, made again only when
+// either changes.
+func boxClient(deployment func() spec.Deployment) func() (*sandbox.Client, error) {
+	var mu sync.Mutex
+	var key string
+	var c *sandbox.Client
+	return func() (*sandbox.Client, error) {
+		addr, tokenEnv := deployment().SandboxService()
+		if addr == "" {
+			return nil, errors.New("orbit.yaml names no sandboxd (a sandbox: or build: section)")
+		}
+		token := os.Getenv(tokenEnv)
+		mu.Lock()
+		defer mu.Unlock()
+		if c != nil && key == addr+"\x00"+token {
+			return c, nil
+		}
+		nc, err := sandbox.NewClient(addr, token)
+		if err != nil {
+			return nil, fmt.Errorf("%w (%s)", err, tokenEnv)
+		}
+		c, key = nc, addr+"\x00"+token
+		return c, nil
+	}
+}
+
 func httpServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: writeTimeout}
 }
@@ -805,27 +866,18 @@ func configHash(dir string) string {
 }
 
 func seedMetrics(ctx context.Context, s *store.Store) error {
-	rows, err := s.Pool.Query(ctx, `SELECT agent, max(finished_at) FROM runs WHERE status IN ('succeeded', 'skipped') AND gate IS DISTINCT FROM 'missed' GROUP BY agent`)
+	last, err := s.LastSuccessTimes(ctx)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var agent string
-		var t time.Time
-		if err := rows.Scan(&agent, &t); err != nil {
-			return err
-		}
+	for agent, t := range last {
 		metrics.SeedLastSuccess(agent, t)
 	}
-	return rows.Err()
+	return nil
 }
 
 func refreshGauges(ctx context.Context, s *store.Store, log *slog.Logger) {
-	var pending, queued int
-	err := s.Pool.QueryRow(ctx, `SELECT
-		(SELECT count(*) FROM actions WHERE status = 'pending'),
-		(SELECT count(*) FROM runs WHERE status = 'queued' AND (run_after IS NULL OR run_after <= now()))`).Scan(&pending, &queued)
+	pending, queued, err := s.GaugeCounts(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Warn("gauges", "err", err)

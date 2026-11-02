@@ -81,6 +81,34 @@ func TestUsage(t *testing.T) {
 	if o := sub["overage"].(map[string]any); o["status"] != "rejected" || o["disabled_reason"] != "org_level_disabled" {
 		t.Fatalf("overage = %v", o)
 	}
+	if w["source"] != "stream" || w["status"] != "allowed" {
+		t.Fatalf("window = %v, want the stream's reading", w)
+	}
+	if p := sub["poll"].(map[string]any); p["enabled"] != false || p["last_at"] != nil {
+		t.Fatalf("poll = %v, want off and never polled", p)
+	}
+	if d := u["deferral"].(map[string]any); d["enabled"] != false || d["threshold"] != 0.8 || len(d["held"].([]any)) != 0 {
+		t.Fatalf("deferral = %v", d)
+	}
+
+	// A poll newer than the stream's report wins its window, and names
+	// itself; a failed poll after it keeps the reading and says why.
+	if err := v.s.RecordUsageSample(ctx, "control", 200, json.RawMessage(
+		`{"seven_day":{"utilization":31,"resets_at":"2100-01-01T00:00:00+00:00"},"five_hour":null}`), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.s.RecordUsageSample(ctx, "control", 500, nil, errors.New("HTTP 500: overloaded")); err != nil {
+		t.Fatal(err)
+	}
+	_, u = call(t, "GET", v.internal.URL+"/api/v1/usage", token, "")
+	sub = u["subscription"].(map[string]any)
+	w = sub["windows"].([]any)[0].(map[string]any)
+	if w["source"] != "poll" || w["utilization"] != 0.31 || w["status"] != nil || w["run_id"] != nil {
+		t.Fatalf("window = %v, want the poll's reading", w)
+	}
+	if p := sub["poll"].(map[string]any); p["last_ok_at"] == nil || p["last_error"] != "HTTP 500: overloaded" {
+		t.Fatalf("poll = %v", p)
+	}
 	c := u["cost"].(map[string]any)
 	total := c["total"].(map[string]any)
 	if total["api_equivalent_usd"] != 0.017097 || total["runs"] != 1.0 || total["by_status"].(map[string]any)["succeeded"] != 1.0 {
