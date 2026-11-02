@@ -6,7 +6,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
-| `timezone` | IANA zone | `UTC` | The zone schedules and source templates are read in, unless an agent names its own. |
+| `timezone` | IANA zone | `UTC` | The zone schedules and source templates are read in, unless an agent names its own. A zone the tz database does not have fails the load. |
 | `public_url` | URL | none | Where a person reaches the API; links in notifications and search results. |
 | `defaults` | map | | Values every agent gets unless it sets its own (below). |
 | `channels` | map of name to channel | none | Notification destinations an agent's `notify.channels` names. |
@@ -130,7 +130,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `description` | string | none | One line shown in agent lists and to MCP clients. |
 | `charter` | string | required | The standing instruction every run starts from. |
 | `enabled` | bool | `true` | `false` stops its triggers firing; manual runs still work. A database agent's comes from its definition, not its spec. |
-| `timezone` | IANA zone | `orbit.yaml` timezone | Zone for triggers and source templates. |
+| `timezone` | IANA zone | `orbit.yaml` timezone | Zone for triggers and source templates; parsed once at load (`Agent.Location`), and one the tz database does not have fails it. |
 | `runner` | runner name | `defaults.runner` | The backend. |
 | `timeout` | duration | `defaults.timeout` | How long one run may take. |
 | `triggers` | list | none | When the agent wakes on its own (below). |

@@ -361,3 +361,44 @@ func TestAPrecheckIsForFileAgentsOnly(t *testing.T) {
 		t.Fatalf("a database agent's precheck = %v", err)
 	}
 }
+
+func TestTimezonesAreParsedOnceAndCheckedAtLoad(t *testing.T) {
+	cfg, err := Load(write(t, map[string]string{"orbit.yaml": "timezone: Europe/Berlin\n" + base,
+		"agents/a.yaml": "name: a\ncharter: x\ntimezone: America/New_York\ntriggers: []\n",
+		"agents/b.yaml": "name: b\ncharter: x\ntriggers: []\n"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Agents["a"].Location().String(); got != "America/New_York" {
+		t.Errorf("agent a location = %s", got)
+	}
+	if got := cfg.Agents["b"].Location().String(); got != "Europe/Berlin" {
+		t.Errorf("agent b location = %s, want the deployment's zone", got)
+	}
+	if got := cfg.Deployment.Location().String(); got != "Europe/Berlin" {
+		t.Errorf("deployment location = %s", got)
+	}
+	if got := (&Agent{}).Location(); got != time.UTC {
+		t.Errorf("an unvalidated agent reads as %s, want UTC", got)
+	}
+
+	_, err = Load(write(t, map[string]string{"orbit.yaml": "timezone: Mars/Olympus\n" + base,
+		"agents/a.yaml": "name: a\ncharter: x\ntimezone: Moon/Tranquility\ntriggers: []\n"}))
+	for _, want := range []string{"orbit.yaml timezone", "Mars/Olympus", `agent "a": timezone`, "Moon/Tranquility"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to name %q", err, want)
+		}
+	}
+}
+
+func TestRunURL(t *testing.T) {
+	for public, want := range map[string]string{
+		"":                           "",
+		"https://orbit.example.com":  "https://orbit.example.com/ui/runs/r-1",
+		"https://example.com/orbit/": "https://example.com/orbit/ui/runs/r-1",
+	} {
+		if got := (Deployment{PublicURL: public}).RunURL("r-1"); got != want {
+			t.Errorf("RunURL under %q = %q, want %q", public, got, want)
+		}
+	}
+}
