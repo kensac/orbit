@@ -608,12 +608,14 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
  "decision": {"action_id": "uuid", "question": "Spend $20?", "status": "executed", "decided_by": "kanishk"},
  "report": {"run_id": "uuid", "summary": "...", "report": "<markdown>"},
  "error": null, "run_id": "uuid", "run_status": "succeeded",
+ "outcome": "succeeded", "outcome_reason": null,
  "questions": [{"id": "uuid", "body": "Which year?", "open": true}],
  "created_at": "...", "updated_at": "...", "finished_at": "..."}
 ```
 
-- `status`: `waiting` (a dependency is not done), `blocked` (its decision is pending), `working` (a run in its conversation is queued or running), `needs_input` (its agent asked the delegating agent something; `questions`), `done` (`report` is the reply of the run that finished it), `failed` or `cancelled` (`error` says why). A message from the delegating agent moves a `done` task back to `working`; `report` keeps the previous reply until the next.
+- `status`: `waiting` (a dependency is not done), `blocked` (its decision is pending), `working` (a run in its conversation is queued or running), `needs_input` (its agent asked the delegating agent something, `questions`, or said it is blocked, `outcome`), `done` (`report` is the reply of the run that finished it), `failed` or `cancelled` (`error` says why; a task whose run said it could not do the work keeps that run's reply in `report`). A message from the delegating agent moves a `done` task back to `working`; `report` keeps the previous reply until the next.
 - `depends_on` is the keys of tasks in the same batch (`action_id`) it waits for. `decision` is `null` without one; otherwise approve or reject its `action_id` like any action (`POST /actions/{id}/approve`), and the task starts or is cancelled within seconds.
+- `outcome` and `outcome_reason` are what the newest run in its conversation said of its work: `outcome` is `succeeded`, `failed` (it could not do the work; the task fails) or `blocked` (it cannot go on until something outside its reach changes; the task needs input), `outcome_reason` why, or `null` when it gave none. Both are `null` while that run has not finished, and for a run that gave no outcome (a chat turn, which counts as succeeded).
 - `run_id` and `run_status` are the newest run in its conversation; stream it with `/runs/{id}/stream` to show the task's work as it happens. `fresh` is a worker started from its agent's spec without its memory. `depth` is 1 for a task a top-level conversation delegated.
 
 `POST /tasks/{id}/cancel` `{"reason": "optional"}`: `200 {"cancelled": true}`, `409` when the task is already over. Its queued runs are cancelled (a running one finishes, unheeded) and its dependents with it. The canceller is the token's person (with the operator token, `"by"` names it).

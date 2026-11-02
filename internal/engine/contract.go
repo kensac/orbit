@@ -38,6 +38,11 @@ type Output struct {
 	// planTicket is the ticket a non-empty Plan is for, set by the engine,
 	// never read from the output.
 	planTicket string
+	// Outcome and OutcomeReason are a task's run saying whether it did the
+	// work (delegation.go); only a run in a task's conversation is offered
+	// the fields.
+	Outcome       string `json:"outcome"`
+	OutcomeReason string `json:"outcome_reason"`
 	// Entries are memory entry writes (entries.go).
 	Entries []OutputEntry `json:"entries"`
 	// known and topics are the entries the run was shown and the topics it reads, set by the engine to resolve Entries.
