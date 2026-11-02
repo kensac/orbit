@@ -318,12 +318,21 @@ func servePage(w http.ResponseWriter, r *http.Request, fetch func(before *store.
 	if !queryInt(w, r, "limit", &limit) {
 		return
 	}
-	resp, err := threadPage(r.URL.Query().Get("before"), limit, fetch)
+	fold := true
+	switch r.URL.Query().Get("fold") {
+	case "", "true":
+	case "false":
+		fold = false
+	default:
+		writeErr(w, http.StatusBadRequest, "fold: want true or false")
+		return
+	}
+	resp, err := threadPage(r.URL.Query().Get("before"), limit, fold, fetch)
 	respond(w, resp, err)
 }
 
 // threadPage reads a thread page for HTTP and MCP alike: the before cursor and limit in, items, has_more and next_before out (listPage).
-func threadPage(before string, limit int, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) (map[string]any, error) {
+func threadPage(before string, limit int, fold bool, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) (map[string]any, error) {
 	var c *store.ThreadCursor
 	if before != "" {
 		var err error
@@ -335,7 +344,12 @@ func threadPage(before string, limit int, fetch func(before *store.ThreadCursor,
 	if err != nil {
 		return nil, err
 	}
-	return listPage("items", page.Items, page.HasMore, page.NextBefore), nil
+	items := page.Items
+	if fold {
+		// limit and the cursor count every run, so paging is unchanged; a fold never crosses a page.
+		items = store.FoldSkips(items)
+	}
+	return listPage("items", items, page.HasMore, page.NextBefore), nil
 }
 
 // listPage is a page as every paged list is served, over HTTP and MCP alike: the items under key (always an array), has_more, and next_before, null exactly when has_more is false.

@@ -109,6 +109,55 @@ type ThreadRun struct {
 	NeedsInput bool `json:"needs_input"`
 	// AgentStatus is the agent's status in this run (status.Derive).
 	AgentStatus status.Status `json:"agent_status"`
+	// Folded is set on a run that stands for a streak of identical skips (FoldSkips).
+	Folded *FoldedSkips `json:"folded,omitempty"`
+	// TriggerIndex is which of the agent's triggers fired, for FoldSkips.
+	TriggerIndex *int `json:"-"`
+}
+
+// FoldedSkips is a streak of consecutive skipped runs of one trigger with one gate, shown as its newest run.
+type FoldedSkips struct {
+	// Count is how many runs the streak holds, the shown one included.
+	Count   int       `json:"count"`
+	FirstAt time.Time `json:"first_at"`
+	LastAt  time.Time `json:"last_at"`
+	// RunIDs are every run of the streak, oldest first; each is still a run of its own (GET /runs/{id}).
+	RunIDs []string `json:"run_ids"`
+}
+
+// FoldSkips folds each streak of consecutive items (oldest first, as a page holds them) that are skipped runs of the same trigger, trigger index and gate into the streak's newest run, carrying the streak in Folded. A quiet agent's thread is then one line per streak rather than one per fire; nothing stored changes. A streak broken by any other item, or by a page boundary, is two streaks.
+func FoldSkips(items []ThreadItem) []ThreadItem {
+	same := func(a, b *ThreadRun) bool {
+		return a.Status == StatusSkipped && b.Status == StatusSkipped && a.Trigger == b.Trigger &&
+			eqPtr(a.TriggerIndex, b.TriggerIndex) && eqPtr(a.Gate, b.Gate)
+	}
+	out := make([]ThreadItem, 0, len(items))
+	for i := 0; i < len(items); {
+		j := i + 1
+		if r := items[i].Run; r != nil {
+			for j < len(items) && items[j].Run != nil && same(r, items[j].Run) {
+				j++
+			}
+		}
+		if j-i < 2 {
+			out = append(out, items[i])
+			i++
+			continue
+		}
+		last := *items[j-1].Run
+		f := &FoldedSkips{Count: j - i, FirstAt: items[i].Run.At, LastAt: last.At}
+		for _, it := range items[i:j] {
+			f.RunIDs = append(f.RunIDs, it.Run.ID)
+		}
+		last.Folded = f
+		out = append(out, ThreadItem{Run: &last})
+		i = j
+	}
+	return out
+}
+
+func eqPtr[T comparable](a, b *T) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
 }
 
 // ThreadQuestion is a question a run asked; ID is its from_agent message,
@@ -174,7 +223,7 @@ const latestTurn = `(
 // actions_run and journal_items' key, so a page costs the same queries
 // however many runs it holds.
 var threadRunSelect = `
-	SELECT r.id::text, r.created_at, r.trigger, r.status, r.attempt, r.started_at, r.finished_at,
+	SELECT r.id::text, r.created_at, r.trigger, r.trigger_index, r.status, r.attempt, r.started_at, r.finished_at,
 	       ` + stepsCount + `, ` + latestTurn + `, r.summary, r.report, r.error, r.cost_usd::float8, r.gate,
 	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', (` + openQuestion + `)) ORDER BY m.created_at, m.id)
 	                 FROM messages m WHERE m.run_id = r.id AND m.direction = 'from_agent'), '[]'),
@@ -197,7 +246,7 @@ var threadRunSelect = `
 func scanThreadRun(row pgx.Row) (*ThreadRun, error) {
 	r := ThreadRun{Kind: "run"}
 	var questions, actions, tasks, hook []byte
-	if err := row.Scan(&r.ID, &r.At, &r.Trigger, &r.Status, &r.Attempt, &r.StartedAt, &r.FinishedAt, &r.Steps,
+	if err := row.Scan(&r.ID, &r.At, &r.Trigger, &r.TriggerIndex, &r.Status, &r.Attempt, &r.StartedAt, &r.FinishedAt, &r.Steps,
 		&r.Turn, &r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions, &tasks, &hook, &r.Tokens); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
