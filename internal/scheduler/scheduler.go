@@ -10,14 +10,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 )
-
-// lockKey is orbit's advisory lock id: "orbit" in ASCII.
-const lockKey = 0x6f72626974
 
 // Scheduler enqueues schedule fires.
 type Scheduler struct {
@@ -42,11 +37,11 @@ type fire struct {
 // Run blocks until ctx ends. It waits for the leader lock, catches up, then
 // sleeps until each next fire.
 func (s *Scheduler) Run(ctx context.Context) error {
-	conn, err := s.acquire(ctx)
+	lock, err := s.acquire(ctx)
 	if err != nil {
 		return err
 	}
-	defer conn.Release()
+	defer lock.Release(ctx)
 	s.Log.Info("scheduler is leader")
 
 	// Fires missed while no process was leader come from the database;
@@ -74,7 +69,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		case <-time.After(d):
 		}
 		// Keep the lock's connection alive and detect losing it.
-		if err := conn.Ping(ctx); err != nil {
+		if err := lock.Ping(ctx); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -83,24 +78,17 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	}
 }
 
-// acquire blocks until this process holds the scheduler lock. The lock lives
-// on one pooled connection held for the scheduler's lifetime; if that
-// connection drops, Postgres releases the lock and Run returns an error.
-func (s *Scheduler) acquire(ctx context.Context) (*pgxpool.Conn, error) {
+// acquire blocks until this process holds the scheduler lock
+// (store.SchedulerLock).
+func (s *Scheduler) acquire(ctx context.Context) (*store.SchedulerLock, error) {
 	for {
-		conn, err := s.Store.Pool.Acquire(ctx)
+		lock, err := s.Store.TrySchedulerLock(ctx)
 		if err != nil {
 			return nil, err
 		}
-		var ok bool
-		if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, int64(lockKey)).Scan(&ok); err != nil {
-			conn.Release()
-			return nil, err
+		if lock != nil {
+			return lock, nil
 		}
-		if ok {
-			return conn, nil
-		}
-		conn.Release()
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

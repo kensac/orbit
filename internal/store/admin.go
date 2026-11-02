@@ -156,12 +156,15 @@ const RateLimitLookback = 8 * 24 * time.Hour
 const maxRateLimitEvents = 1000
 
 // RateLimitEvents returns the newest rate_limit_event lines from runs
-// created within RateLimitLookback, newest first.
+// created within RateLimitLookback, newest first. An event is never older
+// than its run, so the bound on e.at changes no answer; it is what lets
+// run_events_rate_limit range-scan instead of reading every event.
 func (s *Store) RateLimitEvents(ctx context.Context) ([]RateLimitEvent, error) {
 	rows, err := s.Pool.Query(ctx, `
 		SELECT e.run_id::text, e.at, e.payload
 		FROM runs r JOIN run_events e ON e.run_id = r.id
-		WHERE r.created_at > now() - $1::interval AND e.kind = 'rate_limit_event'
+		WHERE r.created_at > now() - $1::interval AND e.at > now() - $1::interval
+		  AND e.kind = 'rate_limit_event'
 		ORDER BY e.at DESC, e.run_id, e.attempt DESC, e.seq DESC
 		LIMIT $2`, RateLimitLookback.String(), maxRateLimitEvents)
 	if err != nil {
@@ -249,7 +252,7 @@ func (s *Store) Health(ctx context.Context) (*Health, error) {
 			    WHERE r.agent = a.name AND r.status IN ('succeeded', 'skipped')
 			    ORDER BY r.finished_at DESC LIMIT 1
 			) ls ON true
-			WHERE a.present`)
+			WHERE a.present`) // runs_agent_last_success serves the lateral read
 		if err != nil {
 			return err
 		}
@@ -268,4 +271,41 @@ func (s *Store) Health(ctx context.Context) (*Health, error) {
 		return nil, err
 	}
 	return h, nil
+}
+
+// LastSuccessTimes returns each agent's newest succeeded or skipped run's
+// finish time, for orbit_agent_last_success_timestamp_seconds at startup.
+// One indexed probe per agent (runs_agent_last_success), not an aggregate
+// over every run.
+func (s *Store) LastSuccessTimes(ctx context.Context) (map[string]time.Time, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT a.name, ls.finished_at FROM agents a
+		JOIN LATERAL (
+		    SELECT r.finished_at FROM runs r
+		    WHERE r.agent = a.name AND r.status IN ('succeeded', 'skipped')
+		    ORDER BY r.finished_at DESC LIMIT 1
+		) ls ON true`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var agent string
+		var t time.Time
+		if err := rows.Scan(&agent, &t); err != nil {
+			return nil, err
+		}
+		out[agent] = t
+	}
+	return out, rows.Err()
+}
+
+// GaugeCounts returns the pending actions and the queued runs an executor
+// may claim now, for orbit's gauges.
+func (s *Store) GaugeCounts(ctx context.Context) (pending, queued int, err error) {
+	err = s.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM actions WHERE status = 'pending'),
+		(SELECT count(*) FROM runs WHERE status = 'queued' AND (run_after IS NULL OR run_after <= now()))`).Scan(&pending, &queued)
+	return pending, queued, err
 }
