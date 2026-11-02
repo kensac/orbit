@@ -243,7 +243,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `notify` | Sends a message to the agent's channels. | |
 | `continue` | Wakes the agent again in 1m to 24h, at most 12 in a row. | |
 | `delegate` | Hands a task to an agent in `delegates`. | `delegates` |
-| `task:message`, `task:cancel` | Messages or cancels a delegated task; follow the `delegate` rule unless named. | `delegates` |
+| `task:message`, `task:cancel`, `task:retry` | Messages, cancels or retries a delegated task; follow the `delegate` rule unless named. A retry past a task's third failure waits for a person whatever the rule. | `delegates` |
 | `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint; never a URL or header of the model's. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
 | `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |

@@ -89,6 +89,12 @@ type Task struct {
 	// conversation said of its work; nil until a run finishes with them.
 	Outcome       *string `json:"outcome"`
 	OutcomeReason *string `json:"outcome_reason"`
+	// Attempt is its current attempt (1, and one more per task:retry);
+	// Failures how many of its attempts failed by its agent's work.
+	Attempt  int `json:"attempt"`
+	Failures int `json:"failures"`
+	// Attempts are the attempts a retry ended, oldest first.
+	Attempts []TaskAttempt `json:"attempts"`
 	// Questions are its agent's open questions, to the parent.
 	Questions  []ThreadQuestion `json:"questions"`
 	CreatedAt  time.Time        `json:"created_at"`
@@ -105,6 +111,18 @@ func (t *Task) OutcomeReasonText() string {
 		return ""
 	}
 	return *t.OutcomeReason
+}
+
+// TaskAttempt is an earlier attempt of a task, as it was when a retry ended
+// it.
+type TaskAttempt struct {
+	Attempt        int        `json:"attempt"`
+	Agent          string     `json:"agent"`
+	ConversationID string     `json:"conversation_id"`
+	Brief          string     `json:"brief"`
+	Error          *string    `json:"error"`
+	FinishedAt     *time.Time `json:"finished_at"`
+	RetryActionID  string     `json:"retry_action_id"`
 }
 
 // TaskDecision is a person's decision a task waits on.
@@ -133,6 +151,10 @@ const taskSelect = `
 	                 WHERE x.task_id = t.id), '{}'),
 	       da.id::text, da.reason, da.status, da.decided_by,
 	       t.report, t.error, lr.id, lr.status, lr.outcome, NULLIF(lr.outcome_reason, ''),
+	       t.attempt, t.failures,
+	       COALESCE((SELECT json_agg(json_build_object('attempt', a.attempt, 'agent', a.agent, 'conversation_id', a.conversation_id,
+	                     'brief', a.brief, 'error', a.error, 'finished_at', a.finished_at, 'retry_action_id', a.retry_action_id) ORDER BY a.attempt)
+	                 FROM task_attempts a WHERE a.task_id = t.id), '[]'),
 	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', true) ORDER BY m.created_at, m.id)
 	                 FROM messages m WHERE m.conversation_id = t.conversation_id AND ` + openQuestion + `), '[]'),
 	       t.created_at, t.updated_at, t.finished_at
@@ -145,10 +167,10 @@ const taskSelect = `
 func scanTask(row pgx.Row) (*Task, error) {
 	var t Task
 	var decID, decQ, decStatus, decBy *string
-	var report, questions []byte
+	var report, attempts, questions []byte
 	if err := row.Scan(&t.ID, &t.Key, &t.Agent, &t.ConversationID, &t.ParentAgent, &t.ParentConversationID,
 		&t.ParentRunID, &t.ActionID, &t.Brief, &t.Fresh, &t.Depth, &t.Status, &t.DependsOn,
-		&decID, &decQ, &decStatus, &decBy, &report, &t.Error, &t.RunID, &t.RunStatus, &t.Outcome, &t.OutcomeReason, &questions,
+		&decID, &decQ, &decStatus, &decBy, &report, &t.Error, &t.RunID, &t.RunStatus, &t.Outcome, &t.OutcomeReason, &t.Attempt, &t.Failures, &attempts, &questions,
 		&t.CreatedAt, &t.UpdatedAt, &t.FinishedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -163,6 +185,9 @@ func scanTask(row pgx.Row) (*Task, error) {
 		if err := json.Unmarshal(report, t.Report); err != nil {
 			return nil, err
 		}
+	}
+	if err := json.Unmarshal(attempts, &t.Attempts); err != nil {
+		return nil, err
 	}
 	if err := json.Unmarshal(questions, &t.Questions); err != nil {
 		return nil, err
@@ -237,6 +262,10 @@ const (
 	MaxTasksPerDelegation = 8
 	MaxTaskDepth          = 3
 	MaxConversationTasks  = 64
+	// MaxTaskFailures is the circuit breaker: a task whose attempts have
+	// failed this many times reopens only when a person approves its
+	// retry, so two agents cannot hand a hopeless task back and forth.
+	MaxTaskFailures = 3
 )
 
 // NewTask is one task of a delegate action.
@@ -489,6 +518,112 @@ func (s *Store) MessageTask(ctx context.Context, m TaskMessage) (msgID, runID st
 	return msgID, runID, err
 }
 
+// TaskRetry is a parent's retry of one of its failed tasks.
+type TaskRetry struct {
+	// FromRun is the parent run whose action retries it; the task must be
+	// one its conversation delegated.
+	FromRun  string
+	ActionID string
+	TaskID   string
+	Reason   string
+	// Brief, when set, replaces the task's brief; Agent, when set and not
+	// the task's, hands it to that agent in a new conversation.
+	Brief string
+	Agent string
+	// ByPerson is set when a person approved the retry: the only way past
+	// MaxTaskFailures.
+	ByPerson bool
+}
+
+// Retried is what RetryTask did.
+type Retried struct {
+	Attempt        int    `json:"attempt"`
+	Agent          string `json:"agent"`
+	ConversationID string `json:"conversation_id"`
+}
+
+// RetryTask reopens a failed task on the same row: the attempt it ends is
+// kept in task_attempts, the task waits again (ReconcileTasks starts it,
+// with its dependencies' reports), and its dependents, which waited for
+// it, stay as they are. Its conversation is told why it runs again; with a
+// new agent, the task moves to a new conversation of that agent, whose
+// first message is the brief. A task that failed MaxTaskFailures times
+// reopens only ByPerson.
+func (s *Store) RetryTask(ctx context.Context, r TaskRetry) (*Retried, error) {
+	out := &Retried{}
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var key, agent, parent, conv, status, brief string
+		var errText *string
+		var report []byte
+		var finished *time.Time
+		var attempt, failures int
+		err := tx.QueryRow(ctx, `SELECT t.key, t.agent, t.parent_agent, t.conversation_id::text, t.status, t.brief, t.error, t.report,
+			       t.finished_at, t.attempt, t.failures FROM tasks t
+			JOIN runs r ON r.id = $2 AND r.conversation_id = t.parent_conversation_id
+			WHERE t.id = $1 FOR UPDATE OF t`, r.TaskID, r.FromRun).
+			Scan(&key, &agent, &parent, &conv, &status, &brief, &errText, &report, &finished, &attempt, &failures)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("task %s is not one this conversation delegated: %w", r.TaskID, ErrNotFound)
+		}
+		if err != nil {
+			return err
+		}
+		if status != TaskFailed {
+			return fmt.Errorf("task %s is %s; only a failed task is retried: %w", r.TaskID, status, ErrConflict)
+		}
+		if failures >= MaxTaskFailures && !r.ByPerson {
+			return fmt.Errorf("task %s failed %d times; only a person's approval reopens it: %w", r.TaskID, failures, ErrConflict)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO task_attempts (task_id, attempt, agent, conversation_id, brief, error, report, finished_at, retry_action_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, r.TaskID, attempt, agent, conv, brief, errText, report, finished, r.ActionID); err != nil {
+			return err
+		}
+		newBrief := brief
+		if b := strings.TrimSpace(r.Brief); b != "" {
+			newBrief = b
+		}
+		note := fmt.Sprintf("Try this task again (attempt %d). The last attempt failed: %s\n\nWhy again: %s", attempt+1, deref(errText), r.Reason)
+		if r.Agent != "" && r.Agent != agent {
+			note = fmt.Sprintf("Another agent (%s) tried this task and failed: %s\n\nWhy you: %s", agent, deref(errText), r.Reason)
+			agent = r.Agent
+			if err := tx.QueryRow(ctx, `INSERT INTO conversations (agent, title) VALUES ($1, $2) RETURNING id::text`,
+				agent, DefaultTitle(key+": "+newBrief)).Scan(&conv); err != nil {
+				if isForeignKeyViolation(err) {
+					return fmt.Errorf("%w: agent %q is not known", ErrInvalid, agent)
+				}
+				return err
+			}
+			if err := insertAgentMessage(ctx, tx, agent, parent, conv, newBrief); err != nil {
+				return err
+			}
+		} else if newBrief != brief {
+			note += "\n\nThe brief is now:\n\n" + newBrief
+		}
+		if err := insertAgentMessage(ctx, tx, agent, parent, conv, note); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE tasks SET status = 'waiting', agent = $2, conversation_id = $3, brief = $4,
+			    report = NULL, error = NULL, finished_at = NULL, report_due_at = NULL, attempt = attempt + 1, updated_at = now()
+			WHERE id = $1`, r.TaskID, agent, conv, newBrief); err != nil {
+			return err
+		}
+		*out = Retried{Attempt: attempt + 1, Agent: agent, ConversationID: conv}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// insertAgentMessage writes a message from agent parent into a task's
+// conversation.
+func insertAgentMessage(ctx context.Context, tx pgx.Tx, agent, parent, conv, body string) error {
+	_, err := tx.Exec(ctx, `INSERT INTO messages (agent, direction, body, author, conversation_id, created_at)
+		VALUES ($1, 'to_agent', $2, $3, $4, clock_timestamp())`, agent, body, AgentAuthorPrefix+parent, conv)
+	return err
+}
+
 func enqueueTaskRun(ctx context.Context, tx pgx.Tx, agent, conv, prompt string) (string, error) {
 	var id string
 	err := tx.QueryRow(ctx, `INSERT INTO runs (agent, spec_sha, trigger, prompt, conversation_id)
@@ -577,9 +712,10 @@ const briefDepMax = 8 << 10
 // number of instances (one at a time holds the lock; the others return at
 // once). Per task:
 //
-//   - waiting or blocked: a rejected decision or a failed or cancelled
-//     dependency cancels it; a pending decision blocks it; otherwise, once
-//     every dependency is done, a run starts it, given their reports.
+//   - waiting or blocked: a rejected decision or a cancelled dependency
+//     cancels it; a pending decision blocks it; a failed dependency keeps
+//     it waiting (its parent may retry that one); otherwise, once every
+//     dependency is done, a run starts it, given their reports.
 //   - working or needs_input: from its conversation. A queued or running
 //     run, or an approved action not yet executed (a continuation about to
 //     queue), is working; else the newest run decides: failed or cancelled
@@ -665,10 +801,11 @@ func reconcilePass(ctx context.Context, tx pgx.Tx, list []*openTask, res *Reconc
 		if TaskTerminal(t.Status) {
 			continue
 		}
-		next, report, errText, prompt, err := reconcileOne(ctx, tx, t.ID, t.Status, t.Conv, t.Decision)
+		m, err := reconcileOne(ctx, tx, t.ID, t.Status, t.Conv, t.Decision)
 		if err != nil {
 			return fmt.Errorf("task %s: %w", t.ID, err)
 		}
+		next, report, errText, prompt := m.next, m.report, m.errText, m.prompt
 		if next == t.Status && prompt == "" {
 			continue
 		}
@@ -697,10 +834,10 @@ func reconcilePass(ctx context.Context, tx pgx.Tx, list []*openTask, res *Reconc
 			rep = b
 		}
 		if _, err := tx.Exec(ctx, `UPDATE tasks SET status = $2, report = COALESCE($3, report), error = NULLIF($4, ''),
-			    updated_at = now(),
+			    failures = failures + $5::int, updated_at = now(),
 			    finished_at = CASE WHEN $2 IN ('done', 'failed', 'cancelled') THEN now() END,
 			    report_due_at = CASE WHEN $2 IN ('needs_input', 'failed') THEN now() ELSE report_due_at END
-			WHERE id = $1`, t.ID, next, rep, errText); err != nil {
+			WHERE id = $1`, t.ID, next, rep, errText, m.failure); err != nil {
 			return err
 		}
 		if TaskTerminal(next) {
@@ -710,10 +847,22 @@ func reconcilePass(ctx context.Context, tx pgx.Tx, list []*openTask, res *Reconc
 	return nil
 }
 
+// move is where reconcileOne puts a task: its next status, the report and
+// error it settles with, the first run's prompt for one that starts, and
+// failure 1 when it fails by its agent's work (the circuit breaker's
+// count; a run lost with its worker is not that).
+type move struct {
+	next    string
+	report  *TaskReport
+	errText string
+	prompt  string
+	failure int
+}
+
 // reconcileOne decides where one open task is. For a task that starts now
 // it returns working and the first run's prompt: its dependencies' reports
 // and the decision that let it go.
-func reconcileOne(ctx context.Context, tx pgx.Tx, id, status, conv string, decision *string) (next string, report *TaskReport, errText, prompt string, err error) {
+func reconcileOne(ctx context.Context, tx pgx.Tx, id, status, conv string, decision *string) (move, error) {
 	if status == TaskWaiting || status == TaskBlocked {
 		var b strings.Builder
 		if decision != nil {
@@ -721,15 +870,15 @@ func reconcileOne(ctx context.Context, tx pgx.Tx, id, status, conv string, decis
 			var by *string
 			var q string
 			if err := tx.QueryRow(ctx, `SELECT status, decided_by, reason FROM actions WHERE id = $1`, *decision).Scan(&st, &by, &q); err != nil {
-				return "", nil, "", "", err
+				return move{}, err
 			}
 			switch st {
 			case "pending":
-				return TaskBlocked, nil, "", "", nil
+				return move{next: TaskBlocked}, nil
 			case "approved", "executing", "executed":
 				fmt.Fprintf(&b, "A person (%s) approved this task to go ahead: %q\n\n", deref(by), q)
 			default:
-				return TaskCancelled, nil, fmt.Sprintf("a person (%s) declined: %s", deref(by), q), "", nil
+				return move{next: TaskCancelled, errText: fmt.Sprintf("a person (%s) declined: %s", deref(by), q)}, nil
 			}
 		}
 		type dep struct {
@@ -739,18 +888,21 @@ func reconcileOne(ctx context.Context, tx pgx.Tx, id, status, conv string, decis
 		rows, err := tx.Query(ctx, `SELECT d.key, d.agent, d.status, d.report FROM task_deps x JOIN tasks d ON d.id = x.depends_on
 			WHERE x.task_id = $1 ORDER BY d.key`, id)
 		if err != nil {
-			return "", nil, "", "", err
+			return move{}, err
 		}
 		deps, err := pgx.CollectRows(rows, pgx.RowToStructByPos[dep])
 		if err != nil {
-			return "", nil, "", "", err
+			return move{}, err
 		}
 		for _, d := range deps {
-			if d.Status == TaskFailed || d.Status == TaskCancelled {
-				return TaskCancelled, nil, fmt.Sprintf("dependency %q %s", d.Key, d.Status), "", nil
+			if d.Status == TaskCancelled {
+				return move{next: TaskCancelled, errText: fmt.Sprintf("dependency %q cancelled", d.Key)}, nil
 			}
+		}
+		for _, d := range deps {
+			// A failed dependency holds it: its parent may retry that one.
 			if d.Status != TaskDone {
-				return TaskWaiting, nil, "", "", nil
+				return move{next: TaskWaiting}, nil
 			}
 		}
 		if len(deps) > 0 {
@@ -765,7 +917,7 @@ func reconcileOne(ctx context.Context, tx pgx.Tx, id, status, conv string, decis
 		if p == "" {
 			p = "Start the task."
 		}
-		return TaskWorking, nil, "", p, nil
+		return move{next: TaskWorking, prompt: p}, nil
 	}
 	var active, pendingExec, asked bool
 	if err := tx.QueryRow(ctx, `SELECT
@@ -774,31 +926,39 @@ func reconcileOne(ctx context.Context, tx pgx.Tx, id, status, conv string, decis
 		            WHERE r.conversation_id = $1 AND a.status IN ('approved', 'executing')),
 		    EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = $1 AND `+openQuestion+`)`, conv).
 		Scan(&active, &pendingExec, &asked); err != nil {
-		return "", nil, "", "", err
+		return move{}, err
 	}
 	if active || pendingExec {
-		return TaskWorking, nil, "", "", nil
+		return move{next: TaskWorking}, nil
 	}
 	var runID, st string
 	var summary, rep, rerr, outcome, why *string
-	err = tx.QueryRow(ctx, `SELECT id::text, status, summary, report, error, output->>'outcome', output->>'outcome_reason'
-		FROM runs WHERE conversation_id = $1
-		ORDER BY created_at DESC LIMIT 1`, conv).Scan(&runID, &st, &summary, &rep, &rerr, &outcome, &why)
+	var lost bool
+	err := tx.QueryRow(ctx, `SELECT r.id::text, r.status, r.summary, r.report, r.error, r.output->>'outcome', r.output->>'outcome_reason',
+		       COALESCE((SELECT a.outcome = 'lost' FROM run_attempts a WHERE a.run_id = r.id ORDER BY a.attempt DESC LIMIT 1), false)
+		FROM runs r WHERE r.conversation_id = $1
+		ORDER BY r.created_at DESC LIMIT 1`, conv).Scan(&runID, &st, &summary, &rep, &rerr, &outcome, &why, &lost)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Started with no run (its first one was cancelled by a person):
 		// nothing will move it, so it is over.
-		return TaskCancelled, nil, "no run is working on it", "", nil
+		return move{next: TaskCancelled, errText: "no run is working on it"}, nil
 	}
 	if err != nil {
-		return "", nil, "", "", err
+		return move{}, err
 	}
 	switch st {
 	case StatusFailed:
-		return TaskFailed, nil, "run failed: " + deref(rerr), "", nil
+		// A run the reaper failed because its worker was lost says nothing
+		// about the task's work: it does not count toward the breaker.
+		m := move{next: TaskFailed, errText: "run failed: " + deref(rerr), failure: 1}
+		if lost {
+			m.failure = 0
+		}
+		return m, nil
 	case StatusCancelled:
-		return TaskCancelled, nil, "its run was cancelled", "", nil
+		return move{next: TaskCancelled, errText: "its run was cancelled"}, nil
 	}
-	report = &TaskReport{RunID: runID, Summary: deref(summary), Report: deref(rep)}
+	report := &TaskReport{RunID: runID, Summary: deref(summary), Report: deref(rep)}
 	reason := strings.TrimSpace(deref(why))
 	if reason == "" {
 		reason = report.Summary
@@ -807,11 +967,11 @@ func reconcileOne(ctx context.Context, tx pgx.Tx, id, status, conv string, decis
 	case deref(outcome) == OutcomeFailed:
 		// The run finished, but says it could not do the work: the task
 		// failed, with what the run reported kept for its parent.
-		return TaskFailed, report, "the agent could not do the work: " + reason, "", nil
+		return move{next: TaskFailed, report: report, errText: "the agent could not do the work: " + reason, failure: 1}, nil
 	case asked, deref(outcome) == OutcomeBlocked:
-		return TaskNeedsInput, nil, "", "", nil
+		return move{next: TaskNeedsInput}, nil
 	}
-	return TaskDone, report, "", "", nil
+	return move{next: TaskDone, report: report}, nil
 }
 
 // clipText cuts s to at most n bytes on a rune boundary and says so.

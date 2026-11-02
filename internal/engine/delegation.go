@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/actions"
+	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -98,6 +99,39 @@ func (o *taskOps) CancelTask(ctx context.Context, c actions.Call, p actions.Task
 	return json.RawMessage(`{"cancelled":true}`), nil
 }
 
+func (o *taskOps) RetryTask(ctx context.Context, c actions.Call, p actions.TaskRetryParams) (json.RawMessage, error) {
+	a, ok := o.snap.Config.Agents[c.Agent]
+	if !ok {
+		return nil, fmt.Errorf("task:retry: agent %q is no longer configured", c.Agent)
+	}
+	// Checked again against the configuration in force, as delegate is.
+	p, err := actions.DecodeTaskRetry(c.Params, a.DelegateTargets())
+	if err != nil {
+		return nil, err
+	}
+	got, err := o.e.Store.RetryTask(ctx, store.TaskRetry{FromRun: c.RunID, ActionID: c.ID, TaskID: p.TaskID, Reason: p.Reason,
+		Brief: p.Brief, Agent: p.Agent, ByPerson: c.Rule == spec.RuleApprove})
+	if err != nil {
+		return nil, err
+	}
+	if err := o.e.ReconcileTasks(ctx); err != nil {
+		o.e.Log.Warn("delegation: reconcile after retry", "err", err)
+	}
+	return json.Marshal(got)
+}
+
+// retryNeedsPerson reports whether a task:retry proposal is past the
+// circuit breaker: its task failed MaxTaskFailures times, so only a
+// person's approval may reopen it, whatever the rule.
+func (e *Engine) retryNeedsPerson(ctx context.Context, params json.RawMessage) bool {
+	var p actions.TaskRetryParams
+	if json.Unmarshal(params, &p) != nil {
+		return false
+	}
+	t, err := e.Store.GetTask(ctx, p.TaskID)
+	return err == nil && t.Failures >= store.MaxTaskFailures
+}
+
 // taskContract is the system prompt's part for a run in a task's own
 // conversation.
 func taskContract(t *store.Task) string {
@@ -174,6 +208,12 @@ func tasksSection(tasks []store.Task, loc *time.Location) string {
 		if t.Error != nil {
 			fmt.Fprintf(&b, "error: %s\n", *t.Error)
 		}
+		if t.Attempt > 1 || t.Failures > 0 {
+			fmt.Fprintf(&b, "attempt: %d, failed %d of at most %d times\n", t.Attempt, t.Failures, store.MaxTaskFailures)
+		}
+		if t.Status == store.TaskFailed && t.Failures >= store.MaxTaskFailures {
+			b.WriteString("retry: only a person's approval reopens it now\n")
+		}
 		for _, q := range t.Questions {
 			fmt.Fprintf(&b, "question (reply_to %s): %s\n", q.ID, q.Body)
 		}
@@ -196,7 +236,7 @@ func tasksSection(tasks []store.Task, loc *time.Location) string {
 	}
 	var out strings.Builder
 	out.WriteString("\n# Tasks you delegated from this conversation (oldest first)\n\n")
-	out.WriteString("Their agents worked on them in their own conversations. Integrate the reports into your answer; reply to a task's question with task:message (reply_to its id), or ask your person if only they can answer. You are woken again when tasks still open settle, fail or ask; do not poll.\n\n")
+	out.WriteString("Their agents worked on them in their own conversations. Integrate the reports into your answer; reply to a task's question with task:message (reply_to its id), or ask your person if only they can answer. A failed task's dependents wait for it: retry it with task:retry (a new brief or another agent when that would help), or cancel them. You are woken again when tasks still open settle, fail or ask; do not poll.\n\n")
 	for i := len(blocks) - 1; i >= 0; i-- {
 		out.WriteString(blocks[i])
 	}

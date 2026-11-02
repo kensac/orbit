@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/runner"
@@ -625,5 +627,194 @@ func TestAFailedTaskWakesItsParentAtOnceWhileItsSiblingRuns(t *testing.T) {
 	}
 	if ran := d.step(t); len(ran) != 0 {
 		t.Fatalf("woken again: %+v", ran)
+	}
+}
+
+const retryingPlanner = `
+name: planner
+charter: I am planner.
+triggers: []
+wake_on_message: true
+delegates: [researcher, writer]
+actions: {delegate: approve, task:retry: auto}
+`
+
+// taskIDIn reads the task_id of the task with key from a parent's prompt.
+func taskIDIn(prompt, key string) string {
+	i := strings.Index(prompt, "## "+key+": ")
+	if i < 0 {
+		return ""
+	}
+	j := strings.Index(prompt[i:], "task_id: ")
+	return prompt[i+j+9 : i+j+9+36]
+}
+
+func retryAction(taskID, extra string) string {
+	return fmt.Sprintf(`{"type": "task:retry", "params": {"task_id": %q, "reason": "the archive has it"%s}, "reason": "try again"}`, taskID, extra)
+}
+
+func TestARetryWithANewBriefReopensTheSameTaskAndItsDependentGoesOn(t *testing.T) {
+	fr := &scriptRunner{scripts: map[string]func(runner.Request) string{
+		"planner": func(req runner.Request) string {
+			switch {
+			case strings.Contains(req.Prompt, "## facts: failed"):
+				return output("Retrying", "again", nil, retryAction(taskIDIn(req.Prompt, "facts"), `, "brief": "Find the facts in the archive."`))
+			case strings.Contains(req.Prompt, "Trigger: delegation"):
+				return output("Integrated", "ok", nil)
+			}
+			return output("Delegated", "on it", nil, delegateAction(`[
+				{"key": "facts", "agent": "researcher", "brief": "Find the facts."},
+				{"key": "draft", "agent": "writer", "brief": "Write it up.", "after": ["facts"]}]`))
+		},
+		"researcher": func(req runner.Request) string {
+			if strings.Contains(req.Prompt, "in the archive") {
+				return output("Facts found", "FACTS-FROM-ARCHIVE", nil)
+			}
+			return outcome("No facts", "R", "failed", "the source is gone")
+		},
+		"writer": func(req runner.Request) string { return output("Drafted", "DRAFT", nil) },
+	}}
+	d := newDelegationWith(t, fr, retryingPlanner)
+	first := d.message(t, "go")
+	ran := d.step(t)
+	if len(ran["researcher"]) != 2 || len(ran["writer"]) != 1 {
+		t.Fatalf("ran = %+v", ran)
+	}
+	ts := d.tasks(t, first)
+	facts, draft := ts[0], ts[1]
+	if facts.Status != store.TaskDone || facts.Attempt != 2 || facts.Failures != 1 || facts.Brief != "Find the facts in the archive." ||
+		len(facts.Attempts) != 1 || facts.Attempts[0].Error == nil || !strings.Contains(*facts.Attempts[0].Error, "the source is gone") ||
+		facts.Attempts[0].Brief != "Find the facts." {
+		t.Fatalf("retried task = %+v", facts)
+	}
+	// The dependent waited through the failure instead of being cancelled,
+	// and started with the retried report.
+	if draft.Status != store.TaskDone || !strings.Contains(fr.last("writer").Prompt, "FACTS-FROM-ARCHIVE") {
+		t.Fatalf("dependent = %+v\n%s", draft, fr.last("writer").Prompt)
+	}
+	p := fr.last("researcher").Prompt
+	for _, want := range []string{"Try this task again (attempt 2)", "the source is gone", "Why again: the archive has it", "The brief is now:"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("the retried run's prompt lacks %q:\n%s", want, p)
+		}
+	}
+}
+
+func TestARetryToAnotherAgentMovesTheTaskToANewConversation(t *testing.T) {
+	fr := &scriptRunner{scripts: map[string]func(runner.Request) string{
+		"planner": func(req runner.Request) string {
+			switch {
+			case strings.Contains(req.Prompt, "## facts: failed"):
+				return output("Rerouting", "again", nil, retryAction(taskIDIn(req.Prompt, "facts"), `, "agent": "writer"`))
+			case strings.Contains(req.Prompt, "Trigger: delegation"):
+				return output("Integrated", "ok", nil)
+			}
+			return output("Delegated", "on it", nil, delegateAction(`[{"key": "facts", "agent": "researcher", "brief": "Find the facts."}]`))
+		},
+		"researcher": func(runner.Request) string { return outcome("No facts", "R", "failed", "out of my depth") },
+		"writer":     func(runner.Request) string { return output("Facts found", "WRITER-FACTS", nil) },
+	}}
+	d := newDelegationWith(t, fr, retryingPlanner)
+	first := d.message(t, "go")
+	d.step(t)
+	ts := d.tasks(t, first)
+	f := ts[0]
+	if f.Status != store.TaskDone || f.Agent != "writer" || f.Report.Report != "WRITER-FACTS" || len(f.Attempts) != 1 ||
+		f.Attempts[0].Agent != "researcher" || f.Attempts[0].ConversationID == f.ConversationID {
+		t.Fatalf("rerouted task = %+v", f)
+	}
+	p := fr.last("writer").Prompt
+	if !strings.Contains(p, "from planner: Find the facts.") || !strings.Contains(p, "Another agent (researcher) tried this task") {
+		t.Fatalf("the new agent's prompt:\n%s", p)
+	}
+	// The earlier attempt's conversation keeps its rows.
+	var n int
+	if err := d.s.Pool.QueryRow(ctx, `SELECT count(*) FROM runs WHERE conversation_id = $1`, f.Attempts[0].ConversationID).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("runs in the first attempt's conversation = %d %v", n, err)
+	}
+}
+
+func TestTheCircuitBreakerHoldsARetryForAPersonAfterThreeFailures(t *testing.T) {
+	fr := &scriptRunner{scripts: map[string]func(runner.Request) string{}}
+	fr.scripts["planner"] = func(req runner.Request) string {
+		if strings.Contains(req.Prompt, "## facts: failed") {
+			return output("Retrying", "again", nil, retryAction(taskIDIn(req.Prompt, "facts"), ""))
+		}
+		return output("Delegated", "on it", nil, delegateAction(`[{"key": "facts", "agent": "researcher", "brief": "Find the facts."}]`))
+	}
+	fr.scripts["researcher"] = func(runner.Request) string { return outcome("No facts", "R", "failed", "still gone") }
+	d := newDelegationWith(t, fr, retryingPlanner)
+	first := d.message(t, "go")
+	d.step(t)
+	ts := d.tasks(t, first)
+	if ts[0].Status != store.TaskFailed || ts[0].Failures != store.MaxTaskFailures || ts[0].Attempt != store.MaxTaskFailures {
+		t.Fatalf("after the breaker: %+v", ts[0])
+	}
+	if !strings.Contains(fr.last("planner").Prompt, "only a person's approval reopens it") {
+		t.Errorf("the parent was not told of the breaker:\n%s", fr.last("planner").Prompt)
+	}
+	// Its rule is auto, yet the retry past the breaker waits for a person.
+	pending, _ := d.s.ListActions(ctx, "planner", "pending", 0)
+	if len(pending) != 1 || pending[0].Type != "task:retry" || pending[0].Rule != "approve" {
+		t.Fatalf("pending = %+v", pending)
+	}
+	// Executed without a person, the store refuses it too.
+	if _, err := d.s.RetryTask(ctx, store.TaskRetry{FromRun: pending[0].RunID, ActionID: pending[0].ID, TaskID: ts[0].ID, Reason: "x"}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("retry past the breaker without a person = %v", err)
+	}
+	// A person's approval reopens it.
+	fr.scripts["researcher"] = func(runner.Request) string { return output("Facts found", "FINALLY", nil) }
+	if err := d.s.DecideAction(ctx, pending[0].ID, true, "kanishk"); err != nil {
+		t.Fatal(err)
+	}
+	d.step(t)
+	ts = d.tasks(t, first)
+	if ts[0].Status != store.TaskDone || ts[0].Attempt != store.MaxTaskFailures+1 || len(ts[0].Attempts) != store.MaxTaskFailures {
+		t.Fatalf("after a person's approval: %+v", ts[0])
+	}
+}
+
+func TestARunLostWithItsWorkerDoesNotCountTowardTheBreaker(t *testing.T) {
+	fr := &scriptRunner{scripts: map[string]func(runner.Request) string{
+		"planner": func(req runner.Request) string {
+			if strings.Contains(req.Prompt, "Trigger: delegation") {
+				return output("Integrated", "ok", nil)
+			}
+			return output("Delegated", "on it", nil, delegateAction(`[{"key": "facts", "agent": "researcher", "brief": "Find the facts."}]`))
+		},
+		"researcher": func(runner.Request) string { return output("Facts found", "F", nil) },
+	}}
+	d := newDelegation(t, fr)
+	first := d.message(t, "go")
+	c, _ := d.s.ClaimRun(ctx, "test")
+	if err := d.e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.e.ExecuteActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Its worker dies on every attempt; reclaims keep the task working.
+	for i := 1; i <= store.MaxAttempts; i++ {
+		c, err := d.s.ClaimRun(ctx, "doomed")
+		if err != nil || c == nil || c.Agent != "researcher" {
+			t.Fatalf("claim %d = %+v %v", i, c, err)
+		}
+		if _, err := d.s.Pool.Exec(ctx, `UPDATE runs SET heartbeat_at = now() - interval '1 hour' WHERE id = $1`, c.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.s.ReapStale(ctx, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.e.ReconcileTasks(ctx); err != nil {
+			t.Fatal(err)
+		}
+		ts := d.tasks(t, first)
+		if i < store.MaxAttempts && ts[0].Status != store.TaskWorking {
+			t.Fatalf("after reclaim %d: %+v", i, ts[0])
+		}
+	}
+	ts := d.tasks(t, first)
+	if ts[0].Status != store.TaskFailed || ts[0].Failures != 0 {
+		t.Fatalf("a task whose worker was lost = %+v", ts[0])
 	}
 }

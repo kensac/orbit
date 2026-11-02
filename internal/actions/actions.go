@@ -53,6 +53,9 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 		if a.RuleFor(TaskCancelType) != spec.RuleDeny {
 			out = append(out, taskCancelType())
 		}
+		if a.RuleFor(TaskRetryType) != spec.RuleDeny {
+			out = append(out, taskRetryType(targets))
+		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(d.Endpoints)) {
 		typ := "webhook:" + name
@@ -308,7 +311,7 @@ type Executor struct {
 	Env        func(string) (string, bool)
 	// MergeOptions tunes github:merge's wait for mergeability (tests).
 	MergeOptions github.MergeOptions
-	// Tasks carries out delegation (delegate, task:message, task:cancel);
+	// Tasks carries out delegation (delegate, task:message, task:cancel, task:retry);
 	// nil fails them.
 	Tasks TaskOps
 	// Continue enqueues a continuation for agent, asked for by run fromRun.
@@ -414,7 +417,7 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 		// A person approved it; the task it holds starts at the next
 		// reconcile. Nothing else happens here.
 		return json.RawMessage(`{"decided":true}`), nil
-	case typ == DelegateType, typ == TaskMessageType, typ == TaskCancelType:
+	case IsTaskType(typ):
 		if e.Tasks == nil {
 			return nil, fmt.Errorf("%s: not available in this process", typ)
 		}
