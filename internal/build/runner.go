@@ -9,9 +9,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/spec"
@@ -55,10 +57,43 @@ type Job struct {
 	Model    string
 	MaxTurns int
 	Timeout  time.Duration
-	// Credential is the backend credential the CLI needs
-	// (CLAUDE_CODE_OAUTH_TOKEN), the only secret the sandbox receives.
-	Credential string
-	Author     Identity
+	// Env is the CLI's one backend credential (SandboxEnv), the only secret the sandbox receives.
+	Env    map[string]string
+	Author Identity
+}
+
+// SandboxEnv is the environment orbit sends a build's CLI, chosen as an ordinary run's is: the variables sandbox.AllowedEnv permits, then claudeproto.Env keeping only claudeproto.Credential's pick (the subscription token when set, else the API key), so a stray key never turns a subscription build into API spend and the sandbox never holds both. It is empty when getenv has neither.
+func SandboxEnv(getenv func(string) (string, bool)) map[string]string {
+	cred := claudeproto.Credential(getenv)
+	if cred == "" {
+		return nil
+	}
+	names := make([]string, 0, len(sandbox.AllowedEnv))
+	for n := range sandbox.AllowedEnv {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var env []string
+	for _, n := range names {
+		if v, ok := getenv(n); ok && v != "" {
+			env = append(env, n+"="+v)
+		}
+	}
+	out := map[string]string{}
+	for _, kv := range claudeproto.Env(env, cred) {
+		k, v, _ := strings.Cut(kv, "=")
+		out[k] = v
+	}
+	return out
+}
+
+// secrets are env's values, which a diff must never contain.
+func secrets(env map[string]string) []string {
+	out := make([]string, 0, len(env))
+	for _, v := range env {
+		out = append(out, v)
+	}
+	return out
 }
 
 // Deps is what a build reaches: GitHub as the App, sandboxd, and orbit's
@@ -172,8 +207,8 @@ func (d Deps) emit(kind string, v any) {
 // permission handler, readback, the diff policy, commit, push and the PR.
 // It returns the delivered result or why nothing was delivered.
 func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
-	if j.Credential == "" {
-		return nil, errors.New("the build needs CLAUDE_CODE_OAUTH_TOKEN for the CLI in the sandbox")
+	if len(j.Env) == 0 {
+		return nil, fmt.Errorf("the build needs %s or %s for the CLI in the sandbox", claudeproto.OAuthToken, claudeproto.APIKey)
 	}
 	if d.App == nil || d.Sandbox == nil {
 		return nil, errors.New("the build needs the GitHub App and sandboxd")
@@ -259,7 +294,7 @@ func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
 	}
 	res.Output = *out
 
-	policy := DiffPolicy{Protected: j.Policy.Protected, MaxDiffLines: j.Policy.MaxDiffLines, Secrets: []string{j.Credential}}
+	policy := DiffPolicy{Protected: j.Policy.Protected, MaxDiffLines: j.Policy.MaxDiffLines, Secrets: secrets(j.Env)}
 	diff, err := policy.check(ctx, g)
 	if err != nil {
 		return res, err
@@ -354,7 +389,7 @@ func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git) (*Output, 
 	}
 	ar := sandbox.AttachRequest{
 		Argv: cliArgs(binary, j.Model, j.MaxTurns, systemPrompt(policy, j.Purpose)),
-		Env:  map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": j.Credential},
+		Env:  j.Env,
 	}
 	proc := func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 		return sb.Attach(ctx, cr.ID, ar, stdin, stdout, stderr)

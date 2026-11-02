@@ -20,7 +20,7 @@ A self-hosted Go service on Kanishk's server (hetzner) that runs Claude Code on 
 | Operations | seamless upgrades (readiness, drain, resuming interrupted attempts), the worker fleet (capabilities, control vs worker, sessions across hosts), usage and health APIs | #11 #16 #25 |
 | Surfaces | thread and SSE API with authentik JWT auth, MCP server with OAuth proxy, mail (replies continue a conversation), uploads | #4 #21 #31 #45 |
 | Orchestration | `delegate` to other agents or fresh workers, each task in its own conversation; task DAGs; parent and child mailboxes (`task:message`, questions to the parent first); decision gates only a person resolves; `delegation` wakeups when tasks settle (never polling); the built-in `orbit` agent delegates to every agent; tasks in the thread, `/tasks` API and a live tasks stream (ARCHITECTURE.md, Delegation) | #46 |
-| Hygiene | API fixes, exact documented shapes, reserved agent names, migration uniqueness | #18 #19 #26 #29 #30 #40 |
+| Hygiene | API fixes, exact documented shapes, reserved agent names, migration uniqueness, builds choose their Claude credential as ordinary runs do (`build.SandboxEnv`) | #18 #19 #26 #29 #30 #40 |
 
 Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/compose.orbit.yml` (at the time of writing 21ab048; newer images were blocked by a duplicate migration, fixed in #50). MCP is live; mail is prepared but not enabled (docs in the homelab repo). The worker fleet is built but not deployed.
 

@@ -160,8 +160,7 @@ without docker):
   The proxy never dials a private, loopback, link-local or CGNAT address
   (every tailnet address), so an allowed name that resolves to one cannot
   reach the host's networks.
-- The environment is sandboxd's fixed list plus the backend credential
-  (`sandbox.AllowedEnv`); no orbit secret, no GitHub token.
+- The environment is sandboxd's fixed list plus one backend credential (`sandbox.AllowedEnv` permits `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, and an attach carrying both is refused); no orbit secret, no GitHub token. orbit chooses it as for an ordinary run (`build.SandboxEnv` through `claudeproto.Credential` and `claudeproto.Env`): the subscription token when set, else the API key.
 - Callers cannot pass docker options: the create request is the tar and a
   run id, the attach request is argv and env (unknown fields refused); the
   unit tests pin the full create document and reject any container the
