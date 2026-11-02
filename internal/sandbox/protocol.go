@@ -2,7 +2,8 @@
 // service that alone holds a docker socket and runs build containers. It
 // holds the wire protocol both sides share and the client orbit uses.
 //
-// sandboxd exposes exactly four operations, and none takes a docker option:
+// sandboxd exposes four operations on build sandboxes, and none takes a
+// docker option (agents' boxes are box.go's):
 //
 //	POST   /v1/sandboxes?run_id=<id>   body: the workdir as a tar; creates and starts a container
 //	POST   /v1/sandboxes/{id}/attach   body: AttachRequest; upgrades to a framed stdio stream

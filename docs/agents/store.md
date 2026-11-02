@@ -47,6 +47,7 @@ an agent's beliefs changed.
 
 - outbox (`outbox`, written by a worker's engine): unsent, claimed by one control instance (`ClaimOutbox`, reclaimed after `OutboxReclaimAfter`), then `sent_at` set once its deliveries are recorded. Rows are kept.
 - workspaces (`workspaces`): a chat conversation's snapshot after each run that changed it, never updated; the newest is the workspace.
+- boxes and terminals (`boxes`, `terminals`, `terminal_tickets`, `terminals.go`): a box row per agent, created on first use, never updated. A terminal is running until `EndTerminal` sets `ended_at` and `end_reason` once (`WHERE ended_at IS NULL`; `terminals_ended` holds them together); `CreateTerminal` counts the running ones under the box row's lock. A ticket is stored as its sha256 and used once by a guarded UPDATE (`used_at IS NULL AND expires_at > now()`, the terminal and origin matching); used and expired rows are kept.
 - session transcripts (`session_transcripts`): written once per session id (`ON CONFLICT DO NOTHING`; a resume forks to a new id), never updated.
 - deployment (`deployment_specs`, `deployment_current`): every version kept, as `agent_specs`; `SyncDeployment` moves the pointer before `SyncAgents` records the agents loaded with it.
 

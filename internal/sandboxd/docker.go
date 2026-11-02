@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -115,6 +116,7 @@ func (d *Docker) call(ctx context.Context, method, path string, q url.Values, in
 }
 
 type dockerInfo struct {
+	Name            string              `json:"Name"`
 	SecurityOptions []string            `json:"SecurityOptions"`
 	Runtimes        map[string]struct{} `json:"Runtimes"`
 	Architecture    string              `json:"Architecture"`
@@ -170,10 +172,19 @@ func (d *Docker) pull(ctx context.Context, ref string) error {
 }
 
 func (d *Docker) createContainer(ctx context.Context, spec containerCreate) (string, error) {
+	return d.createNamed(ctx, "", spec)
+}
+
+// createNamed creates a container with a name ("" lets docker pick one).
+func (d *Docker) createNamed(ctx context.Context, name string, spec containerCreate) (string, error) {
 	var out struct {
 		ID string `json:"Id"`
 	}
-	if err := d.call(ctx, http.MethodPost, "/containers/create", nil, spec, &out); err != nil {
+	var q url.Values
+	if name != "" {
+		q = url.Values{"name": {name}}
+	}
+	if err := d.call(ctx, http.MethodPost, "/containers/create", q, spec, &out); err != nil {
 		return "", err
 	}
 	return out.ID, nil
@@ -186,6 +197,16 @@ func (d *Docker) inspect(ctx context.Context, id string) (containerState, error)
 
 func (d *Docker) start(ctx context.Context, id string) error {
 	return d.call(ctx, http.MethodPost, "/containers/"+id+"/start", nil, nil, nil)
+}
+
+// stop stops a container, giving its processes 10 s after SIGTERM.
+func (d *Docker) stop(ctx context.Context, id string) error {
+	return d.call(ctx, http.MethodPost, "/containers/"+id+"/stop", url.Values{"t": {"10"}}, nil, nil)
+}
+
+// resizeExec sets an exec's TTY size.
+func (d *Docker) resizeExec(ctx context.Context, id string, cols, rows int) error {
+	return d.call(ctx, http.MethodPost, "/exec/"+id+"/resize", url.Values{"h": {strconv.Itoa(rows)}, "w": {strconv.Itoa(cols)}}, nil, nil)
 }
 
 // remove kills and removes a container with its anonymous volumes.
@@ -283,12 +304,22 @@ func (d *Docker) inspectExec(ctx context.Context, id string) (execState, error) 
 // writes go to the process's stdin, reads are docker's multiplexed
 // stdout/stderr frames.
 func (d *Docker) startExec(ctx context.Context, id string) (net.Conn, *bufio.Reader, error) {
+	return d.startExecWith(ctx, id, []byte(`{"Detach":false,"Tty":false}`))
+}
+
+// startExecTTY starts a TTY exec attached: the stream is the terminal's raw
+// bytes both ways, not multiplexed.
+func (d *Docker) startExecTTY(ctx context.Context, id string, cols, rows int) (net.Conn, *bufio.Reader, error) {
+	body, _ := json.Marshal(map[string]any{"Detach": false, "Tty": true, "ConsoleSize": []int{rows, cols}})
+	return d.startExecWith(ctx, id, body)
+}
+
+func (d *Docker) startExecWith(ctx context.Context, id string, body []byte) (net.Conn, *bufio.Reader, error) {
 	var dl net.Dialer
 	conn, err := dl.DialContext(ctx, "unix", d.sock)
 	if err != nil {
 		return nil, nil, fmt.Errorf("docker: %w", err)
 	}
-	body := []byte(`{"Detach":false,"Tty":false}`)
 	req, err := http.NewRequest(http.MethodPost, "http://docker/"+apiVersion+"/exec/"+id+"/start", bytes.NewReader(body))
 	if err != nil {
 		_ = conn.Close()
