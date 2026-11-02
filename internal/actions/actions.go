@@ -20,6 +20,7 @@ import (
 	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/notify"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/store"
 )
 
 // Type describes one action type to the agent and validates its params.
@@ -41,6 +42,17 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 	}
 	if r := a.RuleFor("continue"); r != spec.RuleDeny {
 		out = append(out, continueType())
+	}
+	if targets := a.DelegateTargets(); len(targets) > 0 {
+		if a.RuleFor(DelegateType) != spec.RuleDeny {
+			out = append(out, delegateType(targets))
+		}
+		if a.RuleFor(TaskMessageType) != spec.RuleDeny {
+			out = append(out, taskMessageType())
+		}
+		if a.RuleFor(TaskCancelType) != spec.RuleDeny {
+			out = append(out, taskCancelType())
+		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(d.Endpoints)) {
 		typ := "webhook:" + name
@@ -241,6 +253,9 @@ type Executor struct {
 	Env        func(string) (string, bool)
 	// MergeOptions tunes github:merge's wait for mergeability (tests).
 	MergeOptions github.MergeOptions
+	// Tasks carries out delegation (delegate, task:message, task:cancel);
+	// nil fails them.
+	Tasks TaskOps
 	// Continue enqueues a continuation for agent, asked for by run fromRun.
 	// It returns the queued run's id, and queued false when one was
 	// already waiting (whose id it returns instead).
@@ -250,6 +265,8 @@ type Executor struct {
 // Call is one action to execute: its type and parameters, and the agent
 // and run that proposed it.
 type Call struct {
+	// ID is the action's own id.
+	ID     string
 	Agent  string
 	RunID  string
 	Type   string
@@ -334,6 +351,15 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 		return result, nil
 	case typ == MergeType:
 		return e.merge(ctx, params)
+	case typ == store.DecisionType:
+		// A person approved it; the task it holds starts at the next
+		// reconcile. Nothing else happens here.
+		return json.RawMessage(`{"decided":true}`), nil
+	case typ == DelegateType, typ == TaskMessageType, typ == TaskCancelType:
+		if e.Tasks == nil {
+			return nil, fmt.Errorf("%s: not available in this process", typ)
+		}
+		return e.executeTask(ctx, c)
 	}
 	return nil, fmt.Errorf("unknown action type %q", typ)
 }

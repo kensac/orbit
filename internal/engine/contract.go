@@ -38,6 +38,9 @@ type Output struct {
 	// planTicket is the ticket a non-empty Plan is for, set by the engine,
 	// never read from the output.
 	planTicket string
+	// task is the task whose conversation the run is in, set by the
+	// engine.
+	task *store.Task
 }
 
 // summaryMax keeps a summary to one notification title line.
@@ -189,6 +192,8 @@ type promptRun struct {
 	// Continuing is true when the backend continues the agent's session,
 	// which already holds the charter and the conversation.
 	Continuing bool
+	// Tasks are the tasks the run's conversation delegated.
+	Tasks []store.Task
 }
 
 // userPrompt is the run's content: charter, why it woke, memory and inbox.
@@ -200,6 +205,9 @@ func userPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 	fmt.Fprintf(&b, "# This run\n\nNow: %s (%s)\nTrigger: %s\n", now.Format("Monday 2006-01-02 15:04 MST"), a.Timezone, run.Trigger)
 	if run.Continuing {
 		b.WriteString("Session: continued. Your earlier runs in this session are above; this message starts a new run. Inputs listed below are this run's, freshly fetched: read them rather than relying on earlier reads.\n")
+	}
+	if run.Trigger == store.TriggerDelegation {
+		b.WriteString("\nYou were woken because tasks you delegated settled: every one is over, or one asks you something. They are below.\n")
 	}
 	if run.Trigger == "continue" {
 		fmt.Fprintf(&b, "\nYou asked to be woken again (continuation %d of at most %d). Your note to yourself:\n\n%s\n",
@@ -218,9 +226,13 @@ func userPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 		b.WriteString(renderConversation(convo, now.Location()))
 	}
 	if len(rc.Messages) > 0 {
-		b.WriteString("\n# Messages from your person since your last run\n\n")
+		b.WriteString("\n# Messages since your last run\n\n")
 		for _, m := range rc.Messages {
-			fmt.Fprintf(&b, "- %s: %s\n", m.CreatedAt.In(now.Location()).Format("2006-01-02 15:04"), m.Body)
+			from := messageFrom(m)
+			if from == "" {
+				from = "from your person"
+			}
+			fmt.Fprintf(&b, "- %s, %s: %s\n", m.CreatedAt.In(now.Location()).Format("2006-01-02 15:04"), from, m.Body)
 		}
 	}
 	if len(rc.Questions) > 0 {
@@ -229,6 +241,7 @@ func userPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 			fmt.Fprintf(&b, "- %s\n", q.Body)
 		}
 	}
+	b.WriteString(tasksSection(run.Tasks, now.Location()))
 	if len(inputs) > 0 {
 		b.WriteString("\n# Inputs\n\n")
 		for _, in := range inputs {
