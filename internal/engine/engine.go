@@ -442,6 +442,12 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			return nil, nil, err
 		}
 	}
+	var known string
+	if rec == nil {
+		if known, inputs, err = e.knownInput(ctx, c, a, workdir, inputsDir, inputs); err != nil {
+			return nil, nil, err
+		}
+	}
 	var hr *runner.Harness
 	if e.Harness != "" && r.Kind() == "claude-code" {
 		hr = &runner.Harness{Bin: e.Harness, Figures: figures}
@@ -450,8 +456,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if tk != nil {
 		system += ticketContract(tk, planning)
 	}
+	if known != "" {
+		system += knownContract
+	}
 	trigger := c.Trigger
-	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing},
+	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known},
 		rc, convo, inputs)
 	if rec != nil {
 		prompt = recoveryPrompt(rec, rc, now.Location())

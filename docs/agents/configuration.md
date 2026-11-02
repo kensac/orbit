@@ -119,6 +119,10 @@ unattended runs: schedule, manual, continue, build. A run answering a
 person's message never notifies, whatever it says: the person is reading
 the chat. Failures and pending approvals of unattended runs always notify.
 
+## Memory topics
+
+`topics: [finance]` names the shared memory topics whose entries every run of the agent reads, beside the profile's and its own (docs/ARCHITECTURE.md, Memory entries). A topic exists as soon as an entry or an agent names it; the API can attach more (`PUT /agents/{name}/topics/{topic}`).
+
 ## Changing a running deployment
 
 orbit polls its config directory and reloads on any content change. A change
