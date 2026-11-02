@@ -317,6 +317,9 @@ func (s *Store) Delegate(ctx context.Context, d Delegation) ([]Delegated, error)
 				if _, err := tx.Exec(ctx, `UPDATE tasks SET decision_action_id = $2, status = 'blocked' WHERE id = $1`, id, aid); err != nil {
 					return err
 				}
+				if err := newAttention(ctx, tx, AttentionDecision, "action:"+aid, d.RunID, " needs a decision", &aid, nil, nil, nil); err != nil {
+					return err
+				}
 				dl.DecisionID = &aid
 			}
 			out = append(out, dl)
