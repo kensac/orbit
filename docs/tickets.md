@@ -334,6 +334,7 @@ The permission sets are named in code, one per use:
 | merge (read the PR and its checks, update the body, merge) | `contents: write`, `pull_requests: write`, `checks: read`, `statuses: read` |
 | failure report (read failing checks and their job logs) | `checks: read`, `actions: read` |
 | rerun (run failed Actions jobs again) | `actions: write` |
+| `github:comment` (a comment on an issue or pull request of `github.comment_repositories`) | `issues: write` |
 
 `metadata: read` is implicit in every token. No set includes `workflows`, so
 a pushed change to `.github/workflows/` is refused by GitHub itself: a build

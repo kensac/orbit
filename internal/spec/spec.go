@@ -103,6 +103,8 @@ type GitHub struct {
 	// for them. Reading a repository never permits a ticket or a merge
 	// there; that is Repositories alone.
 	ReadRepositories []string `yaml:"read_repositories,omitempty" json:"read_repositories,omitempty"`
+	// CommentRepositories ("owner/name") are where github:comment may post: a token of issues:write alone, minted per comment. Commenting never permits a push, a ticket or a merge.
+	CommentRepositories []string `yaml:"comment_repositories,omitempty" json:"comment_repositories,omitempty"`
 }
 
 // AllowsRepo reports whether repo is one orbit may act on.
@@ -124,6 +126,11 @@ func (d Deployment) RunURL(runID string) string {
 		return ""
 	}
 	return strings.TrimRight(d.PublicURL, "/") + "/ui/runs/" + url.PathEscape(runID)
+}
+
+// AllowsComment reports whether github:comment may post on repo.
+func (d Deployment) AllowsComment(repo string) bool {
+	return d.GitHub != nil && slices.Contains(d.GitHub.CommentRepositories, repo)
 }
 
 // AllowsRead reports whether repo is one an agent may read.
@@ -961,6 +968,11 @@ func (c *Config) Validate() error {
 				errs = append(errs, fmt.Errorf("github: read_repositories: %q is not owner/name", r))
 			}
 		}
+		for _, r := range g.CommentRepositories {
+			if !RepoRE.MatchString(r) || strings.Contains(r, "..") {
+				errs = append(errs, fmt.Errorf("github: comment_repositories: %q is not owner/name", r))
+			}
+		}
 	}
 	for _, ch := range d.Defaults.Channels {
 		if _, ok := d.Channels[ch]; !ok {
@@ -1156,8 +1168,12 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if c.Deployment.GitHub == nil {
 				at("action %q: needs a github block in orbit.yaml", typ)
 			}
+		case typ == "github:comment":
+			if c.Deployment.GitHub == nil || len(c.Deployment.GitHub.CommentRepositories) == 0 {
+				at("action %q: needs github.comment_repositories in orbit.yaml", typ)
+			}
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone or github:pr)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr or github:comment)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {

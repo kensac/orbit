@@ -94,6 +94,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `api_url` | URL | `https://api.github.com` | GitHub's API (tests, Enterprise). |
 | `repositories` | list of `owner/name` | required | The repositories tickets and `github:merge` may target; every token is limited to one. |
 | `read_repositories` | list of `owner/name` | none | The repositories an agent's `repos` may name: orbit mirrors them and mints read tokens for them. Reading one never permits a ticket or a merge there (configuration.md, Repositories). |
+| `comment_repositories` | list of `owner/name` | none | Where `github:comment` may post, with an `issues: write` token per comment. Commenting never permits a push, a ticket or a merge. |
 
 ### `build`
 
@@ -291,6 +292,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `task:message`, `task:cancel`, `task:retry` | Messages, cancels or retries a delegated task; follow the `delegate` rule unless named. A retry past a task's third failure waits for a person whatever the rule. | `delegates` |
 | `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint, with `path` params filling its path's placeholders; never a URL, method or header of the model's. No redirect is followed. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
+| `github:comment` | Posts a comment on an issue or a pull request as the App: `{repo, number, body}`, body at most 20000 bytes, attribution lines scrubbed. | `github.comment_repositories` |
 | `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |
 | `schedule:add`, `schedule:pause`, `schedule:resume`, `schedule:remove` | Changes one trigger (or, pausing and resuming, every trigger) of this agent or one in `delegates`, as a new revertible version; times are the person's words, parsed by code (configuration.md, Changing schedules by talking). `approve` applies directly in a run answering the person's message. | a database or built-in target |
 | `agent:save` | Saves the conversation as a new agent: the model writes its name, description, charter and starters; orbit adds what the conversation did and proposes it as an `agent:define` that always waits for a person (configuration.md, Saving a conversation as an agent). | |
