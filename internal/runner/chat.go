@@ -228,6 +228,8 @@ type chatTools struct {
 	ws   Workspace
 	// emit records the turn's events: a permission decision is one.
 	emit func(Event)
+	// lv is the process's level; it reads the mode the CLI reports as the stream is read (Handler.Observe), so a request is decided knowing the mode the CLI was in when it asked.
+	lv *procLevel
 }
 
 func (t *chatTools) set(c *Chat, ws Workspace, emit func(Event)) {
@@ -274,6 +276,14 @@ func (l LocalWorkspace) Get(_ context.Context, dir string) ([]byte, error) {
 
 func (t *chatTools) handler() claudeproto.Handler {
 	return claudeproto.Handler{Name: "orbit",
+		Observe: func(l claudeproto.Line) {
+			t.mu.Lock()
+			lv := t.lv
+			t.mu.Unlock()
+			if lv != nil {
+				lv.observe(l)
+			}
+		},
 		MCP: func(ctx context.Context, req claudeproto.MCPMessage) (json.RawMessage, error) {
 			t.mu.Lock()
 			c, ws := t.chat, t.ws
@@ -419,6 +429,9 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			return nil, err
 		}
 		p = &liveProc{proc: proc, tools: tools, busy: true}
+		tools.mu.Lock()
+		tools.lv = &p.lv
+		tools.mu.Unlock()
 		if sess != nil {
 			p.key = sess.Key
 		}
@@ -474,7 +487,6 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	}
 	changed := watchLevel(ctx, turnCtx, p, req.Chat, emit)
 	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) {
-		p.lv.observe(l)
 		emit(Event{Kind: l.Kind, Payload: l.Raw})
 	})
 	endTurn()
