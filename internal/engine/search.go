@@ -94,7 +94,8 @@ func (e *Engine) serveSearch(ln net.Listener, agent string) {
 }
 
 // searchFor runs req within agent's records and shapes the page for a
-// model: each match's snippet with the matched words in **bold**.
+// model: each match's snippet with the matched words in «guillemets», which
+// Markdown reports (often already bold) do not use.
 func (e *Engine) searchFor(ctx context.Context, agent string, req harness.SearchRequest) (map[string]any, error) {
 	loc := time.UTC
 	if a, ok := e.Current().Config.Agents[agent]; ok {
@@ -131,7 +132,7 @@ func (e *Engine) searchFor(ctx context.Context, agent string, req harness.Search
 		var snip strings.Builder
 		for _, p := range r.Parts {
 			if p.Match {
-				snip.WriteString("**" + p.Text + "**")
+				snip.WriteString("«" + p.Text + "»")
 			} else {
 				snip.WriteString(p.Text)
 			}
