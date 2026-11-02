@@ -200,7 +200,7 @@ func contains(list []string, s string) bool {
 // chatProc is a CLI a chat run talks to: on this host, or in a sandbox.
 type chatProc interface {
 	Turn(ctx context.Context, prompt string, emit func(claudeproto.Line)) (*claudeproto.Result, error)
-	Interrupt(ctx context.Context) error
+	Interrupt(ctx context.Context, cancelQueued bool) (*claudeproto.InterruptReceipt, error)
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
@@ -362,7 +362,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 				interrupted = true
 				ictx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
 				defer cancel()
-				if err := p.proc.Interrupt(ictx); err != nil {
+				if _, err := p.proc.Interrupt(ictx, false); err != nil {
 					endTurn()
 				}
 			case <-turnCtx.Done():

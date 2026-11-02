@@ -51,7 +51,7 @@ is the design; the topic documents below are the rules for changing it.
 - `internal/engine/`: one run end to end, and the output contract
   (`contract.go`: the schema and the prompts).
 - `internal/runner/`: model backends: `claude-code`, `codex`, `anthropic`.
-- `internal/claudeproto/`: Claude Code's stream-json protocol (turns, control requests both ways, permission answers recorded before they are sent, the transport's flags, the child's credential scrub), written against the Agent SDK's wire format, not the SDK.
+- `internal/claudeproto/`: Claude Code's stream-json protocol (turns, control requests both ways, messages written mid-turn with their uuid and lifecycle, withdrawing a queued one, interrupt receipts, init capabilities, permission answers recorded before they are sent, the transport's flags, the child's credential scrub), written against the Agent SDK's wire format, not the SDK.
 - `internal/sources/`: inputs the harness fetches (`http`, `prometheus`, `file`).
 - `internal/transforms/`: coded reducers over a source before the model sees it.
 - `internal/actions/`: action types, their parameter schemas and executors.
