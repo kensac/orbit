@@ -27,6 +27,7 @@ Never recreate the container in place: traefik routes nothing until the new
 one is healthy, and runs in progress are cut. Instead, two instances run
 side by side for the switch (docs/ARCHITECTURE.md, Upgrades):
 
+0. **Preflight the new image** against the live database, before anything starts: `orbit preflight --config /config` in a one-off container of the new image with the service's environment and networks (compose: `docker compose run --rm --no-deps -l traefik.enable=false --entrypoint orbit orbit preflight --config /config`). It exits non-zero, and the rollout stops with the old instance untouched, when a pending migration is not expand-only, fails on the live schema or rows (a dry run, rolled back), or the configuration does not load (docs/agents/store.md, Migrations). An image without the command (before it existed) is rolled out without it.
 1. **Start the new container** beside the old one, same image config,
    environment, networks, `/config` mount and **the same `/data` volume**
    (sessions live there; a new instance on its own volume starts every
@@ -86,6 +87,7 @@ It also holds `mirrors/`, a bare mirror of each repository agents read (`repos`)
 Rendered from Infisical (`HETZNER_ORBIT_*`). The Claude Code subscription
 token comes from `claude setup-token` and lasts a year; when it expires every
 run fails with `Not logged in`, which pages through the failure notification.
+Record the day it lapses in orbit.yaml's `expires:` (configuration.md, Secrets) whenever it is set, so `orbit_credential_expiry_timestamp_seconds` warns two weeks ahead (Alerts, below).
 
 Web Push needs `ORBIT_VAPID_PUBLIC_KEY`, `ORBIT_VAPID_PRIVATE_KEY` (from
 `orbit vapid`) and `ORBIT_VAPID_SUBJECT` on control (docs/api.md, Attention
@@ -121,6 +123,7 @@ The build sandbox runs on hetzner today, beside orbit, in `hetzner-vps-config` a
 - **The credential proxy key:** `ORBIT_CREDPROXY_KEY`, at least 32 characters, `HETZNER_ORBIT_CREDPROXY_KEY` in Infisical, read by orbit-credproxy and orbit-sandboxd and nothing else. sandboxd also takes `ORBIT_SANDBOX_CREDPROXY` (default `orbit-credproxy:3129`) and `ORBIT_SANDBOX_WORKSTATION_CREDPROXY` (the proxy's address on the workstation profile's network when it is addressed by IP; default the same), and refuses to start without the key: there is no configuration in which a sandbox holds the backend credential. Rotating the key invalidates every live sandbox's token (their runs fail with `Failed to authenticate. API Error: 401`).
 - **Token:** `ORBIT_SANDBOX_TOKEN`, at least 32 characters, `HETZNER_ORBIT_SANDBOX_TOKEN` in Infisical, read by both sandboxd and orbit (`build.token_env`).
 - **Images:** `ghcr.io/kensac/orbit-build` is pushed by `build-push-ghcr.yml` beside the orbit image. sandboxd pulls it through the Engine API without credentials, so the package must be public (it is built from this public repository and holds nothing private) or pulled on the host before sandboxd starts.
+- **Health:** sandboxd answers `GET /healthz` (up) and `GET /readyz` without the token: 200 or 503 with `{"ready", "checks"}`, where `checks` names `docker` (the daemon answers), `network` and, when set, `workstation_network` (still internal), `proxy:<host>` for `ORBIT_SANDBOX_PROXY` and `ORBIT_SANDBOX_WORKSTATION_PROXY`, and `credproxy:<host>` for `ORBIT_SANDBOX_CREDPROXY` and `ORBIT_SANDBOX_WORKSTATION_CREDPROXY` (the container named as the host is running, and healthy when it has a healthcheck; a host given as an IP is reported `unchecked`), each `ok` or the failure; answers are cached for 10 s. egress answers an origin-form `GET /healthz` on its listener (a proxied request is never answered by it). Neither image healthcheck fits them (it probes `ORBIT_LISTEN`), so compose gives each `test: ["CMD", "orbit", "healthcheck", "--url", "<its /healthz>"]`. orbit control asks the configured sandboxd's `/readyz` every 30 s (Alerts, below).
 - **Claiming it is deployed:** `docker logs orbit-sandboxd` shows `sandboxd: serving` (it exits on a failed host check: no seccomp, a network that is not internal, an image it cannot get), `docker logs orbit-egress` shows `egress: serving` with the allowlist, and `docker logs orbit-credproxy` shows `credproxy: serving` and, once a run has used it, `credproxy: forwarded` lines with the run's id and `status=200`.
 
 **Workstation profile** (sandboxed chats, `sandbox: workstation`, and agents' boxes): its own internal network, `orbit-workstation`, and a second `orbit egress` with `ORBIT_EGRESS_PROFILE=workstation` (the open web: any public host on any port but SMTP's, plain HTTP too; docs/agents/security.md, Workstation egress) on the `orbit-workstation` and `orbit-egress` networks, never on `orbit-sandbox`, named for example `orbit-egress-open`; sandboxd's environment gains `ORBIT_SANDBOX_WORKSTATION_PROXY=orbit-egress-open:3128` and `ORBIT_SANDBOX_WORKSTATION_NETWORK=orbit-workstation`. sandboxd refuses to start with the proxy and no network of its own, or with the build network, so a build can never reach the open proxy. Without the proxy sandboxd refuses that profile (400), and the built-in agent's runs fail naming the variable. Its deny lists, the same on every host that runs boxes:
@@ -168,6 +171,19 @@ sandboxd (on the fleet daemon, as today, with the docker-ws socket mounted) take
 - The fleet daemon's iptables `FORWARD` policy is `DROP`, and a packet must pass every table, so `DOCKER-USER` gets four rules (inserted only if absent): accept within `orbws-sbx` and within `orbws-box` (bridged traffic seen through `br_netfilter`), from `orbws-out` to any other interface, and established or related traffic back to it. These only let through what the nftables tables also pass. Hosts with firewalld add the three bridges to its `docker` zone.
 
 **Claiming it is deployed**, by the verification playbook on each host: `runsc --version` names the pinned release; `docker -H unix:///run/docker-ws/sock/docker.sock info` lists `runsc` as the default runtime, the data-root and `name=seccomp`; a container run there reports gVisor's kernel (`dmesg` starts with gVisor's banner); `nft list table inet orbit_ws` and `nft list table bridge orbit_ws_l2` match the file; the fleet daemon's `docker ps` does not list docker-ws's containers. From a probe container on `orbit-ws-box`: the workstation egress tunnels to `example.com:443` and `example.com:22`; it refuses `orbit.kanishksachdev.com`, `169.254.169.254`, the host's public address, a tailnet address and port 25; a direct TCP connection to `1.1.1.1:443`, to the bridge's gateway on 22 and to a second probe container on the same bridge all fail; `orbit-ws-sandbox`'s build egress refuses `example.com`. sandboxd starts against it (`sandboxd: serving`), and a build and a workstation chat each run end to end.
+
+## Alerts
+
+Prometheus rules for these live in the homelab repository (`hetzner-vps-config/prometheus/rules/orbit.yml`); orbit exports what they need:
+
+| metric | means | alert on |
+|---|---|---|
+| `orbit_runs_queued_oldest_age_seconds` | seconds the oldest due queued run has waited since it became due (0 when none) | a queue no executor drains (no worker with the capability, every executor wedged) |
+| `orbit_runs_total{agent,status}` | finished runs, per instance | an agent failing with no success or skip in hours |
+| `orbit_config_valid` | 0 while the files on disk do not load | a change that is not in force |
+| `orbit_sandboxd_ready` | control's probe of the configured sandboxd's `/readyz`; absent without one | builds and sandboxed chats cannot start |
+| `orbit_egress_ready{proxy}` | each egress proxy's container, as sandboxd reported it; absent when sandboxd did not answer | sandboxes cannot reach the model or package registries |
+| `orbit_credential_expiry_timestamp_seconds{credential}` | `expires:` in orbit.yaml, midnight UTC | the Claude Code token lapsing within 14 days |
 
 ## Building tickets: what hetzner needs
 

@@ -4,13 +4,14 @@
   checkout's own container; `internal/testdb` creates a fresh database per
   test. Without `ORBIT_TEST_DATABASE_URL` they skip locally and fail under CI.
   `make test` uses `ORBIT_TEST_DATABASE_URL` from the environment when set (CI sets it, so an unreachable server fails the run), else this checkout's container when it is running, else none, and says so. `make check-sandbox` always skips them and drops `-race` (it needs cgo), for the build sandbox; a green sandbox run is not a green `make check`.
+- **A migration test writes its old-schema rows in SQL, never with today's store code.** It runs `testdb.Empty`, `MigrateTo` the version before the migration, inserts rows as that schema had them (`oldAgent`, `oldRun` in `internal/store`), then `Migrate` and asserts the result. Today's queries read columns later migrations add, so a test that calls them at an old version breaks on the next unrelated migration.
 - **Runners are tested with fake CLIs** (`runner_test.go`): a script that
   records its argv, environment and stdin. That is where "the model never
   sees orbit's secrets" is enforced. A fake live CLI answers one result per
   stdin line, and can crash, hang, or send a control request mid-turn.
 - **The engine is tested end to end** with a fake runner and an httptest
   server standing in for sources, channels and endpoints.
-- **The CLI protocol has its own real-CLI check**: `ORBIT_REAL_CLAUDE=claude go test -run RealCLI ./internal/claudeproto/` (initialize with a host hook, set_permission_mode, can_use_tool allowed and denied, a hook_callback per call, an interrupt that withdraws a pending permission request). Run it after a CLI bump; it uses the person's own login, so it never runs in CI.
+- **The CLI protocol has its own real-CLI check**: `ORBIT_REAL_CLAUDE=claude go test -run RealCLI ./internal/claudeproto/` (initialize with a host hook, set_permission_mode, can_use_tool allowed and denied, a hook_callback per call, an interrupt that withdraws a pending permission request; and `TestRealCLISteer`: a message written during a tool call folded into that turn, one written after the last tool call starting its own turn after the result, `cancel_async_message` withdrawing a queued one, an interrupt with `cancel_queued` listing it in its receipt). Run it after a CLI bump; it uses the person's own login, so it never runs in CI.
 
 ## The real-CLI smoke
 
