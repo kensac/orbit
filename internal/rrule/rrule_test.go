@@ -155,3 +155,47 @@ func TestParseRefuses(t *testing.T) {
 		t.Error("a rule with no start parsed")
 	}
 }
+
+func TestNonexistentWallClockOccurrencesAreSkipped(t *testing.T) {
+	for _, tc := range []struct{ zone, start, rule, after, want string }{
+		{"America/New_York", "2026-03-07T00:00:00-05:00", "FREQ=DAILY;BYHOUR=2;BYMINUTE=30", "2026-03-07T02:30:00-05:00", "2026-03-09T02:30:00-04:00"},
+		{"Australia/Lord_Howe", "2026-10-03T00:00:00+10:30", "FREQ=DAILY;BYHOUR=2;BYMINUTE=15", "2026-10-03T02:15:00+10:30", "2026-10-05T02:15:00+11:00"},
+		{"America/New_York", "2026-03-01T00:00:00-05:00", "FREQ=MONTHLY;BYMONTHDAY=8;BYHOUR=2;BYMINUTE=30", "2026-03-01T00:00:00-05:00", "2026-04-08T02:30:00-04:00"},
+	} {
+		t.Run(tc.zone+tc.rule, func(t *testing.T) {
+			loc, err := time.LoadLocation(tc.zone)
+			if err != nil {
+				t.Fatal(err)
+			}
+			start, err := time.Parse(time.RFC3339, tc.start)
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, err := time.Parse(time.RFC3339, tc.after)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := Parse(tc.rule, start.In(loc))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := r.Next(after).Format(time.RFC3339); got != tc.want {
+				t.Fatalf("got %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFoldKeepsOneWallClockOccurrence(t *testing.T) {
+	r, err := Parse("FREQ=DAILY;BYHOUR=1;BYMINUTE=30", at("2026-10-31 00:00"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := r.Next(at("2026-11-01 00:00"))
+	if got := first.Format(time.RFC3339); got != "2026-11-01T01:30:00-04:00" {
+		t.Fatalf("fold occurrence %s", got)
+	}
+	if got := r.Next(first).Format(time.RFC3339); got != "2026-11-02T01:30:00-05:00" {
+		t.Fatalf("second occurrence %s", got)
+	}
+}

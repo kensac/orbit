@@ -28,5 +28,15 @@
       "matchUpdateTypes": ["major"],
       "automerge": false
     }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Release binaries in Dockerfiles pinned by version and sha256 (yq in deploy/workstation.Dockerfile): the comment names the release, the ARG holds the version and that asset's checksum, which Renovate recomputes from the new release.",
+      "managerFilePatterns": ["/(^|/)[^/]*\\.Dockerfile$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nARG \\S+?=(?<currentValue>\\S+) \\S+?=(?<currentDigest>[a-f0-9]{64})"
+      ]
+    }
   ]
 }

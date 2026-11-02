@@ -427,12 +427,31 @@ func endAttempt(ctx context.Context, tx pgx.Tx, runID string, attempt int, outco
 }
 
 // releaseMessages hands a run's consumed messages back to the inbox, so the
-// next run reads what this one did not finish with. messages.json in the
-// run's artifacts keeps the record that this attempt saw them.
+// next run reads what this one did not finish with. The attempt's read rows
+// and messages.run_id are kept: they are the record that it read them.
 func releaseMessages(ctx context.Context, db execer, runID string) error {
-	_, err := db.Exec(ctx, `UPDATE messages SET run_id = NULL WHERE run_id = $1 AND direction = 'to_agent'`, runID)
+	if _, err := db.Exec(ctx, `UPDATE message_reads SET released_at = now() WHERE run_id = $1 AND released_at IS NULL`, runID); err != nil {
+		return err
+	}
+	// A read without a row (giveComments, an older image) is recorded as
+	// handed back here, or the message would stay held (waitingMessage).
+	_, err := db.Exec(ctx, `INSERT INTO message_reads (message_id, run_id, attempt, read_at, released_at)
+		SELECT m.id, r.id, r.attempt, COALESCE(r.started_at, m.created_at), now()
+		FROM messages m JOIN runs r ON r.id = m.run_id
+		WHERE m.run_id = $1 AND m.direction = 'to_agent'
+		  AND NOT EXISTS (SELECT 1 FROM message_reads x WHERE x.message_id = m.id)`, runID)
 	return err
 }
+
+// waitingMessage is true of a person's message (alias m) that no attempt
+// holds, so the next run of its conversation reads it: never read, or
+// handed back by every attempt that read it (message_reads). A message
+// with run_id set and no read row was marked read without an attempt (a
+// build given review comments when enqueued, giveComments) or by an image
+// older than message_reads, which may still run during a deploy; it is held.
+const waitingMessage = `m.direction = 'to_agent' AND (m.run_id IS NULL OR (
+	NOT EXISTS (SELECT 1 FROM message_reads x WHERE x.message_id = m.id AND x.released_at IS NULL)
+	AND EXISTS (SELECT 1 FROM message_reads x WHERE x.message_id = m.id)))`
 
 // SetRunner records the backend and the spec an attempt executes under,
 // on the run and on the attempt. The spec can differ from the one it was
@@ -890,15 +909,31 @@ func (s *Store) StartRunContext(ctx context.Context, runID, agent string) (*RunC
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
+		// One running run per agent (runs_one_running) is the only reader
+		// of its conversations' messages; message_reads_one_holder holds it.
 		rows, err := tx.Query(ctx, `
-			UPDATE messages SET run_id = $2
-			WHERE agent = $1 AND direction = 'to_agent' AND run_id IS NULL
-			  AND conversation_id = (SELECT conversation_id FROM runs WHERE id = $2)
+			UPDATE messages m SET run_id = $2
+			WHERE m.agent = $1 AND `+waitingMessage+`
+			  AND m.conversation_id = (SELECT conversation_id FROM runs WHERE id = $2)
 			RETURNING id::text, agent, direction, body, reply_to::text, run_id::text, author, created_at`, agent, runID)
 		if err != nil {
 			return err
 		}
 		if rc.Messages, err = pgx.CollectRows(rows, pgx.RowToStructByPos[Message]); err != nil {
+			return err
+		}
+		ids := make([]string, len(rc.Messages))
+		for i, m := range rc.Messages {
+			ids[i] = m.ID
+		}
+		// A read an older image handed back (run_id = NULL) left its row
+		// open; it ends where this one starts.
+		if _, err := tx.Exec(ctx, `UPDATE message_reads SET released_at = now()
+			WHERE message_id = ANY($1::uuid[]) AND released_at IS NULL`, ids); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO message_reads (message_id, run_id, attempt)
+			SELECT unnest($1::uuid[]), id, attempt FROM runs WHERE id = $2`, ids, runID); err != nil {
 			return err
 		}
 		rows, err = tx.Query(ctx, `
