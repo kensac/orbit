@@ -813,6 +813,11 @@ func (c *Config) validateAgent(a *Agent) []error {
 				at("gate %d: unchanged takes no input, items, n, command or timeout", i)
 			}
 		case "precheck":
+			if a.Origin != OriginFile {
+				// The API and agent:define write database agents; a
+				// command on orbit's host is for reviewed files only.
+				at("gate %d: a precheck runs a command on orbit's host, so only an agent in the configuration files may have one", i)
+			}
 			if strings.TrimSpace(g.Command) == "" {
 				at("gate %d: precheck needs a command", i)
 			}

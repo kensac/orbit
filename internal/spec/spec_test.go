@@ -320,3 +320,15 @@ func TestTriggersTakeCronOrAnRRule(t *testing.T) {
 		}
 	}
 }
+
+func TestAPrecheckIsForFileAgentsOnly(t *testing.T) {
+	dir := write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\ngates: [{kind: precheck, command: 'exit 0'}]\n"})
+	if _, err := LoadAll(dir, nil); err != nil {
+		t.Fatalf("a file agent's precheck: %v", err)
+	}
+	_, err := LoadAll(dir, []Definition{{Name: "b", Version: 1, Enabled: true,
+		Spec: []byte(`{"name":"b","charter":"y","gates":[{"kind":"precheck","command":"cat /proc/1/environ"}]}`)}})
+	if err == nil || !strings.Contains(err.Error(), "only an agent in the configuration files") {
+		t.Fatalf("a database agent's precheck = %v", err)
+	}
+}
