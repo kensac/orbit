@@ -618,6 +618,182 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
 
 `GET /conversations/{id}/tasks/stream` is Server-Sent Events: a `tasks` event (`{"tasks": [<task>]}`, as the list) on connect and again whenever any task of the conversation changes, and `: ping` every 15 s. It never ends on its own; reconnect after a deploy (there is no `Last-Event-ID`: the first event is the whole state). A chat UI shows the delegating run's tasks from its thread item, then keeps them live from this stream, and opens a task's `conversation_id` to show its work.
 
+## Workspace (planned)
+
+**Planned: not implemented.** The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). Until a route is built it answers `404`. Each part loses this mark in the PR that implements it.
+
+A workspace is a file tree a person and an agent share. Routes take the authentik token as above; writes, trash, uploads, terminals and git writes also require membership of `ORBIT_WORKSPACE_GROUP` (default `ORBIT_OIDC_GROUP`; `403`, `check: "group"`). Errors carry a `check` beside `error`, as authentication errors do:
+
+| `check` | status | meaning |
+|---|---|---|
+| `path` | 400 | not clean, absolute, outside the tree, or through a symlink out of it |
+| `not_found` | 404 | no such path, ref, terminal or comment |
+| `exists` | 409 | the target of a create, rename or restore exists |
+| `version` | 412 | `If-Match` is not the current version; the body carries `current` (the entry, or `null` when it is gone) |
+| `version_required` | 428 | a write to an existing file without `If-Match` |
+| `read_only`, `no_shell`, `no_git` | 409 | the backend does not have that capability (`capabilities`, below) |
+| `busy` | 409 | a snapshot write while a run of the conversation is running |
+| `too_large` | 413 | over a size limit (workspace.md, Auth, scope and limits) |
+| `limit` | 409 | a count limit (terminals, clients) |
+| `rate` | 429 | over a rate, with `Retry-After` |
+| `box_starting` | 503 | the box is starting, with `Retry-After` |
+
+### Finding a workspace
+
+`GET /conversations/{id}/workspace` and `GET /agents/{name}/workspace` return `{"workspace": <workspace>}`:
+
+```json
+{"id": "uuid", "scope": "conversation", "conversation_id": "uuid", "agent": "orbit",
+ "backend": "snapshot", "cwd": "",
+ "capabilities": {"read": true, "write": true, "terminals": false, "git": false,
+                  "watch": true, "presets": []},
+ "as_of": {"snapshot_id": 4, "run_id": "uuid", "at": "..."},
+ "box": null, "created_at": "..."}
+```
+
+- `scope` is `conversation` (the snapshot backend: one per conversation) or `agent` (a box: one per agent, shared by its conversations). From a conversation, `cwd` is that conversation's directory in the tree (`""` on the snapshot backend, `conversations/<id>` in a box); a client opens there and lets the person go up. From an agent, `cwd` is `""`.
+- `backend` is informative; a client decides from `capabilities`. `presets` lists the terminal presets (`shell`, `claude`).
+- `as_of` is the snapshot read (snapshot backend), `null` in a box.
+- `box` is `{"host": "oci", "arch": "arm64", "state": "running", "image": "sha256:..."}` in a box, `state` one of `starting`, `running`, `stopped`. A request to a stopped box starts it, waits up to 30 s, then answers `box_starting`.
+- A conversation of an agent without chat workspaces returns `{"workspace": null}`.
+- Conversations gain `workspace_id` (the same id; `null` without one) in every conversation shape above.
+
+### Files
+
+Every path is a query parameter, `path`, relative to the root. An entry:
+
+```json
+{"path": "src/main.go", "name": "main.go", "kind": "file", "bytes": 1342,
+ "mode": "0644", "modified_at": "...", "version": "sha256:<hex>",
+ "target": null, "ignored": false, "git": "M", "has_children": null}
+```
+
+`kind` is `file`, `dir` or `symlink` (`target` its link text; a symlink is never followed out of the tree). `version` is for files only. `ignored` is from `.gitignore`. `git` is the porcelain status letters in a box (`null` outside a repository and on the snapshot backend). `has_children` is for directories.
+
+- `GET /workspaces/{id}/tree?path=&cursor=&limit=` lists one directory: `{"path", "entries": [<entry>], "next_cursor": null}`, directories first, then by name; `limit` defaults to 500, at most 2000; `next_cursor` is opaque, `null` on the last page. `version` is omitted from tree entries (it costs a read of every file).
+- `GET /workspaces/{id}/stat?path=` is `{"entry": <entry>}`, with `version`.
+- `GET /workspaces/{id}/files?path=&ref=` is a file for the editor: `{"entry": <entry>, "text": "...", "reason": null}`. `text` is the whole file as UTF-8, byte for byte (line endings and a BOM kept). When it cannot be edited, `text` is absent and `reason` is `binary` (a NUL in the first 8000 bytes, or not UTF-8) or `too_large` (over 2 MiB). `ref` reads a past version from `history` (below). The response's `ETag` is the version.
+- `PUT /workspaces/{id}/files?path=` writes the body (raw bytes, at most 8 MiB) as the file. `If-Match: "<version>"` is required for an existing file; `If-None-Match: *` creates and fails `exists` if it is there. Parent directories are created. `200` (or `201` created) `{"entry": <entry>}`.
+- `POST /workspaces/{id}/mkdir` `{"path"}`: `201 {"entry"}`.
+- `POST /workspaces/{id}/rename` `{"from", "to", "version"?}`: `200 {"entry"}` at `to`. Never overwrites (`exists`); `version` guards a file's content as `If-Match` does.
+- `POST /workspaces/{id}/trash` `{"path", "version"?}` moves a file or directory to the trash: `200 {"trash": <item>}`. `GET /workspaces/{id}/trash?cursor=&limit=` lists items, newest first: `{"items": [...], "next_cursor"}`. `POST /workspaces/{id}/trash/{item}/restore` `{"to"?}` puts it back at its path or `to`: `200 {"entry"}`. There is no route that empties the trash.
+
+```json
+{"id": "uuid", "path": "notes/old.md", "kind": "file", "bytes": 210,
+ "trashed_at": "...", "by": "kanishk", "restored_at": null}
+```
+
+- `POST /workspaces/{id}/upload?dir=` takes `multipart/form-data`, any number of file parts, each at most 64 MiB, named by the part's file name (cleaned as conversation uploads are). An existing name is `exists` unless `overwrite=1`, which trashes the old file first. `201 {"entries": [<entry>]}`. `POST /workspaces/{id}/upload/url` `{"path", "bytes", "media_type"}` returns a signed `PUT` URL exactly as `POST /conversations/{id}/uploads/url` does, up to 1 GiB, writing to `path` (`exists` applies).
+- `GET /workspaces/{id}/download?path=&ref=` is a file as a download (`Content-Disposition: attachment`, `nosniff`, a CSP that runs nothing), or a directory as `application/gzip` (a tar.gz, `.orbit/` left out), at most 1 GiB. `inline=1` serves a raster image (not SVG) inline, for a preview.
+
+On the snapshot backend a write, mkdir, rename, trash, restore or upload stores a new snapshot, refused with `busy` while a run of the conversation is running; `as_of` moves to it.
+
+### History
+
+`GET /workspaces/{id}/history?path=&before=&limit=` is a file's versions, newest first: `{"versions": [{"ref": "opaque", "version": "sha256:<hex>", "at": "...", "by": {"kind": "run", "run_id": "uuid", "person": null, "terminal_id": null}, "source": "snapshot"}], "next_before": null}`. `source` is `snapshot`, `checkpoint` (a box's per-turn record) or `git` (a commit; `rev` is set). `by.kind` is `run`, `person`, `terminal` or `unknown` (a change seen between turns that nothing attributed). Read one with `GET /workspaces/{id}/files?path=&ref=`.
+
+### The change stream
+
+`GET /workspaces/{id}/changes?path=` is Server-Sent Events for a subtree (default the root):
+
+| event | id | data |
+|---|---|---|
+| `ready` | cursor | `{"backend": "box", "cursor": "..."}`, first on every connection |
+| `change` | cursor | `{"path", "op": "create", "kind": "file", "from": null, "version": "sha256:<hex>", "by": {"kind", "run_id", "person", "terminal_id"}}`; `op` is `create`, `modify`, `trash`, `restore` or `rename` (`from` set) |
+| `resync` | none | `{"reason": "cursor_lost"}` or `"overflow"`: re-read what is shown, then carry on |
+
+`Last-Event-ID` resumes from a cursor; a cursor the serving instance no longer holds sends `resync`. `: ping` every 15 s. Changes made through this API and by runs are attributed; a change a terminal process made is `terminal` when one terminal was in the directory's session, else `unknown`.
+
+### A reply's changes
+
+Thread run items and runs gain `changes`: `{"files": 3, "additions": 40, "deletions": 2}`, `null` for a run with no workspace.
+
+`GET /runs/{id}/changes` is what the run changed in its workspace:
+
+```json
+{"run_id": "uuid", "workspace_id": "uuid",
+ "before": {"ref": "opaque", "at": "..."}, "after": {"ref": "opaque", "at": "..."},
+ "files": [<diff file>], "truncated": false}
+```
+
+`before` and `after` are the snapshots (snapshot backend) or checkpoints (box) at the run's start and end. A run of an agent without a workspace is `404` (`check: "no_workspace"`); its journal's `diff` items are what it changed.
+
+A diff file, here and in git diffs:
+
+```json
+{"path": "src/a.go", "old_path": null, "status": "modified", "binary": false,
+ "additions": 3, "deletions": 1, "truncated": false,
+ "hunks": [{"old_start": 10, "old_lines": 4, "new_start": 10, "new_lines": 6,
+            "header": "func main() {",
+            "lines": [{"kind": "context", "old": 10, "new": 10, "text": "..."},
+                      {"kind": "add", "old": null, "new": 11, "text": "..."},
+                      {"kind": "delete", "old": 11, "new": null, "text": "..."}]}]}
+```
+
+`status` is `added`, `modified`, `deleted`, `renamed` or `mode`. `text` is the line without its newline. Caps: 300 files and 10 MiB per response, 5000 lines per file (`truncated` on the file or the response); a truncated file is read whole with `path`.
+
+### Git (box only)
+
+`capabilities.git` false answers `no_git`. `repo` is a repository's path in the tree (a directory with `.git`, found up to three levels deep).
+
+- `GET /workspaces/{id}/git/repos`: `{"repos": [{"path": "orbit", "branch": "main", "head": "sha", "upstream": "origin/main", "ahead": 1, "behind": 0, "remote": "https://github.com/kensac/orbit"}]}`, at most 50.
+- `GET /workspaces/{id}/git/status?repo=`: `{"repo", "branch", "head", "files": [{"path", "orig_path": null, "index": "M", "worktree": ".", "conflict": false}]}` (porcelain v2 letters, `.` for unchanged).
+- `GET /workspaces/{id}/git/diff?repo=&base=HEAD&head=worktree&path=&context=3&staged=false`: `{"base": {"rev": "HEAD", "sha"}, "head": {"rev": "worktree", "sha": null}, "files": [<diff file>], "truncated"}`. `base` is a revision or `merge-base:<rev>` (what the branch changed since it left `<rev>`); `head` is `worktree` (default), `index` or a revision; `path` narrows to one file or directory.
+- `GET /workspaces/{id}/git/log?repo=&rev=HEAD&path=&before=&limit=`: `{"commits": [{"sha", "parents": [], "author": {"name", "email", "at"}, "subject", "body"}], "next_before"}`, `limit` default 50, at most 500.
+- `GET /workspaces/{id}/git/show?repo=&rev=&path=`: the file at a revision, shaped as `GET /files`.
+- `GET /workspaces/{id}/git/branches?repo=`: `{"branches": [{"name", "sha", "upstream", "current"}]}`.
+- `POST /workspaces/{id}/git/commit` `{"repo", "message", "paths": [], "all": false}`: commits in the box as the person (author from the person's git identity), `paths` staged first, `all` as `git commit -a`. `201 {"sha"}`.
+- `POST /workspaces/{id}/git/push` `{"repo", "remote": "origin", "branch"}`: pushes in the box with the person's terminal GitHub credential (direct mode). `200 {"pushed": true, "output": "..."}`; git's refusal is `409` with its output.
+
+Unattended agents push through the action `workspace:push`, `{"repo", "branch", "base_sha", "head_sha", "reason"}`, denied unless the agent's spec names it: orbit reads the commits from the box as a bundle, applies the build diff policy, and pushes with an App token for the repository (`github.repositories`) to `branch`, which may not be the default or a protected branch. `result` is `{"pushed": "sha", "branch"}`.
+
+### Terminals (box only)
+
+`capabilities.terminals` false answers `no_shell`. A terminal:
+
+```json
+{"id": "uuid", "workspace_id": "uuid", "preset": "claude", "title": "Claude Code (direct)",
+ "cwd": "conversations/uuid", "state": "running", "exit_code": null, "end_reason": null,
+ "cols": 120, "rows": 32, "clients": 2, "created_by": "kanishk",
+ "created_at": "...", "last_output_at": "...", "ended_at": null}
+```
+
+`state` is `running` or `exited`; `end_reason` is `exit`, `killed` or `box_restarted`. An exited terminal's record and final scrollback are kept.
+
+- `POST /workspaces/{id}/terminals` `{"preset": "shell", "cwd"?, "cols", "rows", "title"?, "claude"?: {"resume"?: "session id", "continue"?: false, "model"?}}`: `201 {"terminal"}`. `cwd` defaults to the workspace's `cwd`. `claude` options are only for the `claude` preset. At most 8 running per workspace (`limit`).
+- `GET /workspaces/{id}/terminals?state=running|exited|all`: `{"terminals": [...]}`, newest first. `GET /terminals/{tid}`: `{"terminal"}`. `PATCH /terminals/{tid}` `{"title"}`.
+- `POST /terminals/{tid}/resize` `{"cols", "rows"}` (an attached client resizes in band instead). `POST /terminals/{tid}/kill` `{"signal": "HUP"}` (`HUP`, `INT`, `TERM`, `KILL`): `200 {"terminal"}`.
+- `GET /terminals/{tid}/scrollback?lines=` is the scrollback as text with escapes (`text/plain; charset=utf-8`), at most 10,000 lines.
+- `GET /workspaces/{id}/claude-sessions?cwd=`: the box's Claude Code sessions for a directory, for the `resume` picker: `{"sessions": [{"id", "started_at", "last_at", "first_prompt"}]}`.
+
+**Attaching.** `POST /terminals/{tid}/attach` returns `{"url": "wss://orbit.kanishksachdev.com/api/v1/terminals/{tid}/socket?ticket=...", "protocol": "orbit.terminal.v1", "expires_at": "..."}`. The ticket names the terminal and the person, is single-use and expires in 30 s; it is the socket's only credential besides a bearer token. `GET /terminals/{tid}/socket` is the WebSocket (subprotocol `orbit.terminal.v1`), authenticated by `ticket` or `Authorization: Bearer`; an `Origin` outside `ORBIT_WORKSPACE_ORIGINS` (default `https://kanishksachdev.com`) is refused. At most 8 clients per terminal.
+
+| frame | direction | content |
+|---|---|---|
+| binary | both | terminal bytes: input to the terminal, output from it |
+| `{"type": "ready", "terminal": {...}, "replay_bytes": n}` | server | first; the next `n` bytes of binary frames are the scrollback replay, then live output |
+| `{"type": "resize", "cols", "rows"}` | client | this client's size |
+| `{"type": "ping"}` / `{"type": "pong"}` | both | every 30 s (Cloudflare closes a socket idle for 100 s) |
+| `{"type": "exit", "code": 0, "reason": "exit"}` | server | the terminal ended; the socket closes |
+| `{"type": "error", "check": "...", "error": "..."}` | server | then the socket closes |
+
+A client with 4 MiB of output queued is closed (code 4008) and reattaches with a replay.
+
+**Without a WebSocket** (a proxy that cannot carry one): `GET /terminals/{tid}/output` is SSE, `ready` then `data` events (`{"b64": "..."}`, id an output offset), resumable with `Last-Event-ID` (a lost offset replays the scrollback after a `ready`); `POST /terminals/{tid}/input` `{"b64": "...", "cols"?, "rows"?}` writes input, `204`.
+
+### Review comments
+
+Comments on lines, sent to the conversation's agent as one message, as a ticket's review comments are (tickets.md).
+
+- `POST /conversations/{id}/comments` `{"path", "start_line", "end_line", "side": "new", "anchor": {"kind": "run", "run_id": "uuid"}, "body"}`: `201 {"comment"}`, a draft. `anchor.kind` is `run` (a reply's changes), `git` (`repo`, `base`, `head` as for a git diff) or `worktree` (the file as it is). `side` is `new` or `old`. Lines `0` and `0` mean the whole file; a body is at most 8 KB.
+- `GET /conversations/{id}/comments?status=`: `{"comments": [...]}`. `status` is `draft`, `sent`, `superseded` or `withdrawn`.
+- `POST /conversations/{id}/comments/{c}/edit` `{"body", "start_line"?, "end_line"?}` writes a new version that supersedes it; `POST .../withdraw` withdraws a draft.
+- `POST /conversations/{id}/review` `{"note"?, "comments"?: ["ids"], "wake"?: true, "client_request_id"?}`: sends the drafts (all of the conversation's, or the ones named) as one message, formatted by code: each comment's file, lines and anchor, the code it is on quoted, then its body quoted line by line. `201 {"message_id", "run_id"}` as `POST /conversations/{id}/messages`.
+
+### Audit
+
+`GET /workspaces/{id}/events?before=&limit=`: `{"events": [{"id", "at", "person", "op", "path", "from", "version_before", "version_after", "bytes", "terminal_id", "run_id", "request_id"}], "next_before"}`, newest first. `op` is each write route's name (`write`, `mkdir`, `rename`, `trash`, `restore`, `upload`, `commit`, `push`, `terminal.create`, `terminal.attach`, `terminal.detach`, `terminal.kill`, `review`). Terminal input is never recorded.
+
 ## Memory
 
 `GET /agents/{name}/memory?limit=`: the agent's memory versions, newest
