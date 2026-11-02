@@ -35,7 +35,7 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | Hook-driven live agent status | #37 agent-status | |
 | Worktrees, review comments on PR diffs, stacked PRs, check reruns, RRULE schedules with a precheck | #32 #43 | |
 | Migration fix (duplicate version 14) | #50 | |
-| Workspace: an IDE in the portfolio chat (explorer, editor, terminals with Claude Code (direct), diffs with line comments), one shell with the chat | docs/workspace-contract (design, this PR); items below | design [docs/workspace.md](workspace.md), contract docs/api.md, Workspace (planned) |
+| Workspace: an IDE in the portfolio chat (explorer, editor, terminals with Claude Code (direct), diffs with line comments), one shell with the chat | #78 docs/workspace-contract (design); items below | design [docs/workspace.md](workspace.md), contract docs/api.md, Workspace (planned) |
 
 ### Workspace: implementation items, in order
 
