@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 // Input is one fetched source, already written to Workdir/Path.
@@ -113,8 +114,10 @@ type Event struct {
 type Result struct {
 	// Output is the JSON the schema describes, unvalidated: the engine
 	// validates it, so every runner is held to the same check.
-	Output    json.RawMessage
-	Usage     json.RawMessage
+	Output json.RawMessage
+	Usage  json.RawMessage
+	// Tokens is Usage in orbit's shape, nil when the backend reported none.
+	Tokens    *tokens.Usage
 	CostUSD   *float64
 	SessionID string
 	Model     string

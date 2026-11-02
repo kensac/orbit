@@ -95,6 +95,7 @@ so `ORBIT_DATA_DIR` must be a persistent volume for resume to survive a restart.
   `session_parent`, `session_depth`, `session_id`, and `session_cost_usd`. The
   CLI reports a cumulative cost per session (across turns, resumes and forks),
   so `cost_usd` is the difference from the parent run's total.
+- **Tokens and the prompt cache.** Every turn sends the whole conversation again, so what a session costs is decided by whether the prompt cache hits. Each attempt records its tokens (`internal/tokens`: uncached input, cache reads, cache writes, output, the model, the backend's turn count, the split by model) from the backend's own report: Claude Code's result line (its `usage` and `model_usage_since_last_result` are the turn's; `modelUsage` is the process's running total), Codex's `turn.completed`, the API's `usage`. Before the call, the engine records the attempt's stable prefix (`runner.PrefixOf`: digests of the model, tools, orbit's tool names, the output schema, the skills digest, the system contract, the CLI's working directory and the charter), and a run's `prefix` names the parts that differ from its conversation's previous run, so a cache bust is visible as the part that caused it. `/usage` totals tokens by agent, model and day with the cache hit ratio (docs/api.md).
 
 ## Chat agents (claude-code, `chat: true`)
 

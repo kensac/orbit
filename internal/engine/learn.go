@@ -240,7 +240,11 @@ func (e *Engine) learn(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 	emit := func(ev runner.Event) { events.emit(ev.Kind, ev.Payload) }
 	runCtx, cancel := context.WithTimeout(ctx, learnTimeout(a))
 	defer cancel()
-	res, err = r.Run(runCtx, runner.Request{RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs, OutputSchema: schema}, emit)
+	req := runner.Request{RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs, OutputSchema: schema}
+	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), "", req)); err != nil {
+		return nil, nil, nil, nil, nil, "", err
+	}
+	res, err = r.Run(runCtx, req, emit)
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, nil, nil, nil, res, "", fmt.Errorf("timed out after %s", learnTimeout(a))
 	}

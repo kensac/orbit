@@ -589,12 +589,16 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
-	defer cancel()
-	res, err := r.Run(runCtx, runner.Request{
+	req := runner.Request{
 		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
 		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin,
-	}, func(ev runner.Event) { emit(ev.Kind, ev.Payload) })
+	}
+	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
+		return nil, nil, err
+	}
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
+	defer cancel()
+	res, err := r.Run(runCtx, req, func(ev runner.Event) { emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
 	}
@@ -870,7 +874,7 @@ func fillResult(rr *store.RunResult, r *runner.Result) {
 		return
 	}
 	rr.Output, rr.Usage, rr.CostUSD, rr.SessionID = r.Output, r.Usage, r.CostUSD, r.SessionID
-	rr.SessionCostUSD = r.SessionCostUSD
+	rr.SessionCostUSD, rr.Tokens = r.SessionCostUSD, r.Tokens
 }
 
 // deliver sends to every channel of the agent and records each attempt. A

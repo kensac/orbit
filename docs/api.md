@@ -272,7 +272,8 @@ conversation:
    "turn": {"state": "completed", "outcome": "success", "started_at": "...", "completed_at": "..."},
    "summary": "...", "report": "<markdown>",
    "questions": [{"id": "uuid-of-the-question-message", "body": "...", "open": true}],
-   "error": null, "cost_usd": 0.03, "gate": null,
+   "error": null, "cost_usd": 0.03, "tokens": {"input": 12, "output": 840, "cache_read": 41200, "cache_creation": 3100, "cache_hit_ratio": 0.929773, "num_turns": 3, "model": "claude-opus-5-5"},
+   "gate": null,
    "actions": [{"id": "uuid", "type": "notify", "status": "pending", "reason": "...", "params": {}}],
    "tasks": [{"id": "uuid", "key": "facts", "agent": "researcher", "status": "working",
               "conversation_id": "uuid", "depends_on": [], "summary": null, "error": null,
@@ -309,7 +310,7 @@ conversation:
   turn (`state`, `outcome`, ...; as in The journal), `null` before the
   backend was called. `summary`,
   `report`, `error` and `cost_usd` are `null` when absent. `questions` and
-  `actions` are always arrays.
+  `actions` are always arrays. `tokens` is the run's tokens, as on a run (Runs, below), `null` when no attempt reported any.
 - **Questions** appear twice by design: in their run's `questions`, and as
   `from: "agent"` message items with the same `id`. A client dedupes by
   `id`, and replies by sending a message with `reply_to` set to it, in the
@@ -393,7 +394,12 @@ The final answer is `done.report`, not the concatenated `text`: `text` is what t
  "output": {}, "usage": {}, "cost_usd": 0.03, "session_id": "...",
  "session_mode": "fresh", "session_parent": "uuid", "session_depth": 1,
  "run_after": "...", "continues": "uuid", "chain": 1,
- "gate": "unchanged", "steps": 4}
+ "gate": "unchanged", "steps": 4,
+ "tokens": {"input": 12, "output": 840, "cache_read": 41200, "cache_creation": 3100,
+            "cache_hit_ratio": 0.929773, "num_turns": 3, "model": "claude-opus-5-5"},
+ "prefix": {"sha": "hex", "parts": {"model": "hex16", "tools": "hex16", "mcp": "hex16", "schema": "hex16",
+                                    "skills": "hex16", "system": "hex16", "workdir": "hex16", "charter": "hex16"},
+            "previous_run": "uuid", "previous_sha": "hex", "changed": ["system"]}}
 ```
 
 - Always present: `id`, `attempt`, `agent`, `spec_sha`, `trigger`, `prompt` (`""` when none), `status`, `created_at` and `steps`. Every other field is omitted when it has no value (not `null`).
@@ -404,6 +410,8 @@ The final answer is `done.report`, not the concatenated `text`: `text` is what t
 - `run_after`, `continues` (the run that asked) and `chain` (its place in the chain, from 1) are set on a `continue` run.
 - `gate` names what ended a `skipped` run.
 - `steps` is the number of tool calls in the latest attempt's timeline, counted as a thread's run item counts it.
+- `tokens` is every attempt's tokens together (absent when none reported any): `input` is the prompt sent uncached, `cache_read` what was read from the prompt cache, `cache_creation` what was written to it, `output` what the model generated. `cache_hit_ratio` is `cache_read / (cache_read + input + cache_creation)`, six places, `null` with no prompt tokens: every turn sends the whole conversation again, so this is what decides a turn's cost. `num_turns` is the backend's own count (Claude Code's `num_turns`; 1 per call for Codex and the API). `model` is the latest reporting attempt's model, the one that did most of the work (by cost when Claude Code ran subagents on others). Claude Code's counts are its result line's per-turn `usage`, split by model from `model_usage_since_last_result` when present (subagents included); Codex counts cached tokens inside `input_tokens`, so its `input` is the difference and `cache_creation` 0. A build records tokens; a run finished before orbit recorded them got its latest attempt's counts from `usage`.
+- `prefix` is the stable prefix the latest attempt sent, absent before one was recorded (a skipped run, a build): what comes before the conversation in every request, which the prompt cache reuses only when it is byte for byte the same. `parts` are 16-hex-digit digests of each piece: `model` (the backend and model), `tools` (the built-in tools named), `mcp` (orbit's tool names; a chat run's tools with their descriptions and schemas), `schema` (the output schema), `skills` (the skills plugin's digest), `system` (orbit's system contract), `workdir` (the CLI's working directory, which Claude Code writes into its own system prompt) and `charter` (which leads a fresh session's first message). `sha` covers every part but `charter`, which a resumed session sends after its transcript. `previous_run` is the newest earlier run of the same conversation that recorded a prefix, `previous_sha` its digest, and `changed` the parts that differ from it (`[]` when none did; `null`, with the other two absent, when there is no such run). A `sha` unlike `previous_sha` is a cache miss for everything after the changed part, the whole transcript on a resume.
 
 An attempt (`store.Attempt`), oldest first:
 
@@ -411,10 +419,15 @@ An attempt (`store.Attempt`), oldest first:
 {"attempt": 2, "worker": "orbit/0", "runner_kind": "claude-code", "spec_sha": "hex",
  "started_at": "...", "ended_at": "...", "outcome": "succeeded",
  "session_id": "...", "recovered_from": 1, "recover_skipped": "...",
- "cost_usd": 0.01, "session_cost_usd": 0.04}
+ "cost_usd": 0.01, "session_cost_usd": 0.04,
+ "tokens": {"input": 12, "output": 840, "cache_read": 41200, "cache_creation": 3100, "cache_hit_ratio": 0.929773,
+            "num_turns": 3, "model": "claude-opus-5-5",
+            "by_model": {"claude-opus-5-5": {"input": 10, "output": 800, "cache_read": 41000, "cache_creation": 3000},
+                         "claude-haiku-5-5": {"input": 2, "output": 40, "cache_read": 200, "cache_creation": 100}}},
+ "prefix": {"sha": "hex", "parts": {"model": "hex16", "...": "hex16"}}}
 ```
 
-`attempt`, `worker` and `started_at` are always present; the rest is omitted when unset. `outcome` is `succeeded`, `failed`, `skipped`, `handed_back` (stopped by its instance) or `lost` (reaped without a heartbeat), absent while the attempt runs. `recovered_from` is the attempt whose session it continued, `recover_skipped` why it started over instead. `cost_usd` is the attempt's share, absent when unknown (a killed process saved none); `session_cost_usd` is the backend's running total for the session after it.
+`attempt`, `worker` and `started_at` are always present; the rest is omitted when unset. `outcome` is `succeeded`, `failed`, `skipped`, `handed_back` (stopped by its instance) or `lost` (reaped without a heartbeat), absent while the attempt runs. `recovered_from` is the attempt whose session it continued, `recover_skipped` why it started over instead. `cost_usd` is the attempt's share, absent when unknown (a killed process saved none); `session_cost_usd` is the backend's running total for the session after it. `tokens` is the attempt's, shaped as a run's with `by_model`, its counts per model when the backend named one (absent when it reported none: a killed process, a skip); `prefix` is its `sha` and `parts` (absent before it sent one).
 
 `POST /runs/{id}/cancel` stops a run. A queued run is cancelled at once: `200 {"cancelled": true, "status": "cancelled"}`. A running run is asked to stop: `202 {"cancelled": false, "status": "cancelling"}`; its attempt sees the request within 2 s (`engine.cancelPoll`), interrupts the backend (a chat agent's turn through Claude Code's control channel, which ends the turn with what it has; any other run's backend is stopped), and ends the run `cancelled`, with the reply so far as its `report` and `error` `"stopped by its person"`. A stopped run notifies nothing. Any other state is 409.
 
@@ -806,7 +819,15 @@ Full-text search across everything orbit stores, ranked best first.
              "by_status": {"queued": 0, "running": 1, "succeeded": 38, "failed": 3, "cancelled": 0, "skipped": 0}},
    "by_agent": [{"agent": "finance", "api_equivalent_usd": 0.811000, "runs": 30,
                  "runs_with_cost": 29, "by_status": {"...": 0}}],
-   "by_day": [{"date": "2026-10-03", "api_equivalent_usd": 0.000000, "runs": 0}]}}
+   "by_day": [{"date": "2026-10-03", "api_equivalent_usd": 0.000000, "runs": 0}]},
+ "tokens": {
+   "total": {"input": 1200, "output": 52000, "cache_read": 4100000, "cache_creation": 310000,
+             "cache_hit_ratio": 0.929515, "attempts": 40, "runs": 39},
+   "by_agent": [{"agent": "finance", "input": 800, "...": 0, "attempts": 29, "runs": 29}],
+   "by_model": [{"model": "claude-opus-5-5", "input": 1000, "...": 0, "attempts": 38, "runs": 37}],
+   "by_day": [{"date": "2026-10-03", "input": 0, "output": 0, "cache_read": 0, "cache_creation": 0,
+               "cache_hit_ratio": null, "attempts": 0, "runs": 0}]},
+ "skills": [{"skill": "tidy-ledger", "runs": 4, "last_used_at": "...", "versions": [2, 3]}]}
 ```
 
 - **Subscription windows are what Claude Code last reported, not a live
@@ -844,6 +865,8 @@ Full-text search across everything orbit stores, ranked best first.
   that is not `YYYY-MM-DD` is `400`. `by_day` lists every day of the range,
   oldest first, zero or not. `by_agent` lists agents with a run in the range,
   by name. `by_status` always has all six statuses.
+- **Tokens** are run attempts' token counts (Runs, above) over the same range, by their run's `created_at`. Each entry has `input`, `output`, `cache_read`, `cache_creation`, `cache_hit_ratio` (`cache_read / (cache_read + input + cache_creation)` over the entry, six places, `null` with no prompt tokens), `attempts` (attempts that reported tokens) and `runs` (their runs). `by_agent` lists agents with a reporting attempt in the range, by name; `by_model` models, by name, from each attempt's per-model split (all of an attempt under its `model` when the backend did not split; `""` when it named none); `by_day` every day of the range, oldest first, zero or not.
+- **Skills** are the skills runs created in the range read through orbit's skill tool (`mcp__orbit__skill`, from the journal's tool calls, each call counted whether or not it succeeded), by name: `runs` that called it for the skill, `last_used_at` the newest call, and `versions` the versions those runs were given (their `skills.json`), ascending. A run that only loaded a skill's stub, or read it without orbit's tools (the whole `SKILL.md` in the plugin), is not counted. Always an array.
 
 ## Readiness and drain
 

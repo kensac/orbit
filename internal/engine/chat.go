@@ -420,12 +420,16 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 			chat.Push = append(chat.Push, in.Path)
 		}
 	}
-	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
-	defer cancel()
-	res, err := r.Run(runCtx, runner.Request{
+	req := runner.Request{
 		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
 		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin,
-	}, func(ev runner.Event) { t.emit(ev.Kind, ev.Payload) })
+	}
+	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
+		return nil, nil, err
+	}
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
+	defer cancel()
+	res, err := r.Run(runCtx, req, func(ev runner.Event) { t.emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
 	}

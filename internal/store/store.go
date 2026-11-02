@@ -20,6 +20,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 //go:embed migrations/*.sql
@@ -470,6 +472,8 @@ type RunResult struct {
 	SessionID string
 	// SessionCostUSD is the backend's cumulative total for the session.
 	SessionCostUSD *float64
+	// Tokens is this attempt's token counts, nil when the backend reported none.
+	Tokens *tokens.Usage
 	// Gate names what ended a skipped run without a backend call; set
 	// exactly when Status is skipped (runs_skipped_names_gate).
 	Gate string
@@ -530,6 +534,9 @@ func finishRun(ctx context.Context, tx pgx.Tx, runID string, r RunResult) error 
 		runID, r.Attempt, r.Status, r.CostUSD, r.SessionCostUSD, r.SessionID); err != nil {
 		return err
 	}
+	if err := recordTokens(ctx, tx, runID, r.Attempt, r.Tokens); err != nil {
+		return err
+	}
 	if r.Status == "failed" {
 		// Every way a run fails ends here (the engine, a build, the reaper).
 		if err := newAttention(ctx, tx, AttentionFailure, "failure:"+runID, runID, " run failed", nil, nil, nil, nil); err != nil {
@@ -578,24 +585,34 @@ type Run struct {
 	Steps int `json:"steps"`
 	// Gate names what ended a skipped run.
 	Gate *string `json:"gate,omitempty"`
+	// Tokens is every attempt's token counts together; Prefix the stable prefix the latest attempt sent, against the conversation's previous run.
+	Tokens *Tokens `json:"tokens,omitempty"`
+	Prefix *Prefix `json:"prefix,omitempty"`
 }
 
 // runCols reads a run aliased r: stepsCount names it.
-const runCols = `r.id::text, r.attempt, r.agent, r.spec_sha, r.trigger, r.trigger_index, r.scheduled_for, r.prompt, r.status,
+var runCols = `r.id::text, r.attempt, r.agent, r.spec_sha, r.trigger, r.trigger_index, r.scheduled_for, r.prompt, r.status,
 	r.runner_kind, r.model, r.worker, r.created_at, r.started_at, r.finished_at, r.error, r.summary, r.report,
 	r.output, r.usage, r.cost_usd::float8, r.session_id, r.session_mode, r.session_parent, r.session_depth,
-	r.run_after, r.continues::text, r.chain, r.gate, ` + stepsCount
+	r.run_after, r.continues::text, r.chain, r.gate, ` + stepsCount + `, ` + runTokens + `, ` + runPrefix
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
+	var prefix []byte
 	err := row.Scan(&r.ID, &r.Attempt, &r.Agent, &r.SpecSHA, &r.Trigger, &r.TriggerIndex, &r.ScheduledFor, &r.Prompt,
 		&r.Status, &r.RunnerKind, &r.Model, &r.Worker, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.Error,
 		&r.Summary, &r.Report, &r.Output, &r.Usage, &r.CostUSD, &r.SessionID, &r.SessionMode, &r.SessionParent,
-		&r.SessionDepth, &r.RunAfter, &r.Continues, &r.Chain, &r.Gate, &r.Steps)
+		&r.SessionDepth, &r.RunAfter, &r.Continues, &r.Chain, &r.Gate, &r.Steps, &r.Tokens, &prefix)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	return &r, err
+	if err != nil {
+		return nil, err
+	}
+	if r.Prefix, err = decodePrefix(prefix); err != nil {
+		return nil, err
+	}
+	return &r, nil
 }
 
 // GetRun returns one run.

@@ -29,10 +29,13 @@ type Attempt struct {
 	RecoverSkipped *string  `json:"recover_skipped,omitempty"`
 	CostUSD        *float64 `json:"cost_usd,omitempty"`
 	SessionCostUSD *float64 `json:"session_cost_usd,omitempty"`
+	// Tokens is what the attempt's backend calls spent in tokens; Prefix the stable prefix it sent.
+	Tokens *Tokens        `json:"tokens,omitempty"`
+	Prefix *AttemptPrefix `json:"prefix,omitempty"`
 }
 
-const attemptCols = `attempt, worker, runner_kind, spec_sha, started_at, ended_at, outcome, session_id,
-	recovered_from, recover_skipped, cost_usd::float8, session_cost_usd::float8`
+var attemptCols = `attempt, worker, runner_kind, spec_sha, started_at, ended_at, outcome, session_id,
+	recovered_from, recover_skipped, cost_usd::float8, session_cost_usd::float8, ` + attemptTokens + `, ` + attemptPrefix
 
 // ListAttempts returns a run's attempts, oldest first. A run claimed before
 // attempts were recorded has none for those claims.

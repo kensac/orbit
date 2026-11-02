@@ -15,6 +15,7 @@ import (
 	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 // Sandbox is sandboxd's four operations (*sandbox.Client).
@@ -117,6 +118,7 @@ type Result struct {
 	TrustBoundary []string
 	CostUSD       *float64
 	Usage         json.RawMessage
+	Tokens        *tokens.Usage
 	// Gate, when set, says why the model was not called; GateName is its
 	// short name, recorded on the skipped run.
 	Gate     string
@@ -291,7 +293,7 @@ func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
 	if out == nil {
 		return nil, err
 	}
-	res.CostUSD, res.Usage = cost.cost, cost.usage
+	res.CostUSD, res.Usage, res.Tokens = cost.cost, cost.usage, cost.tokens
 	if err != nil {
 		return res, err
 	}
@@ -325,8 +327,9 @@ func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
 
 // costs is what the CLI reported spending.
 type costs struct {
-	cost  *float64
-	usage json.RawMessage
+	cost   *float64
+	usage  json.RawMessage
+	tokens *tokens.Usage
 }
 
 // sandboxed runs the CLI in a fresh sandbox over the clone's tree and
@@ -420,7 +423,7 @@ func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git, scripts Sc
 	if err != nil {
 		return nil, costs{}, err
 	}
-	c := costs{cost: cli.TotalCostUSD, usage: cli.Usage}
+	c := costs{cost: cli.TotalCostUSD, usage: cli.Usage, tokens: cli.Tokens()}
 	if n := len(cli.PermissionDenials); n > 0 && string(cli.PermissionDenials) != "null" && string(cli.PermissionDenials) != "[]" {
 		emit("orbit.permission_denials", cli.PermissionDenials)
 	}

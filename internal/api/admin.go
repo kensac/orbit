@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/store"
@@ -46,6 +47,16 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
+	toks, err := s.Store.TokenUsage(r.Context(), from, to, tz)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	skills, err := s.Store.SkillUses(r.Context(), from, to, tz, harness.ToolSkill)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
 	respond(w, map[string]any{
 		"timezone": tz,
 		"from":     from,
@@ -54,7 +65,9 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 			"windows": windows,
 			"overage": overage,
 		},
-		"cost": costs,
+		"cost":   costs,
+		"tokens": toks,
+		"skills": skills,
 	}, nil)
 }
 
