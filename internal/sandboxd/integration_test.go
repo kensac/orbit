@@ -377,7 +377,7 @@ func TestIntegrationIsolation(t *testing.T) {
 		"HOME": true, "TMPDIR": true, "LANG": true, "PATH": true, "HOSTNAME": true,
 		"HTTPS_PROXY": true, "HTTP_PROXY": true, "https_proxy": true, "http_proxy": true, "NO_PROXY": true, "no_proxy": true,
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": true, "DISABLE_AUTOUPDATER": true, "GIT_TERMINAL_PROMPT": true,
-		"CLAUDE_CODE_OAUTH_TOKEN": true, "ANTHROPIC_API_KEY": true,
+		"CLAUDE_CODE_OAUTH_TOKEN": true, "ANTHROPIC_API_KEY": true, "ANTHROPIC_BASE_URL": true,
 	}
 	for _, n := range p.Env {
 		if !allowedEnv[n] {
