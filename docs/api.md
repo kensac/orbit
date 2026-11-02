@@ -3,6 +3,10 @@
 Base path `/api/v1`. JSON in and out; errors are `{"error": "..."}` with a
 4xx/5xx status. Times are RFC 3339.
 
+Every JSON request body is decoded strictly: a field the endpoint does not read is a `400` naming it (`json: unknown field "x"`), as is a body that is not one JSON value, is malformed, or exceeds the endpoint's size limit. An endpoint whose body is optional treats an empty body as `{}`: `POST /agents/{name}/runs`, `POST /agents/{name}/conversations`, `POST /actions/{id}/approve` and `/reject`, `POST /tickets` and every `POST /tickets/{id}/...` (transitions, comments, review), `POST /tasks/{id}/cancel`, `POST /memory/entries/{id}/retire` and `POST /skills/{name}/retire`. Any other empty body is a `400`. `POST /oauth/register` is the exception: RFC 7591 clients send metadata orbit does not use, so it ignores unknown fields.
+
+An integer query parameter (`limit`, `after`, `attempt`, `offset`) that is not an integer is a `400` (`limit: want an integer`); an absent one takes its default.
+
 ## Authentication: authentik
 
 Every request carries `Authorization: Bearer <token>`, where the token is one
@@ -541,7 +545,7 @@ A row:
   of a decision that succeeded returns `200 {"ok": true}` again instead of
   409. The
   decider is the token's person. Only with the operator token, `{"by":
-  "name"}` names it (default `operator`).
+  "name"}` names it (default `operator`). The body is optional; one that is malformed or has another field is a `400` and decides nothing.
 
 ## Attention and push
 
@@ -563,7 +567,7 @@ Something waiting on a person is an **attention** row, written in the same trans
 **Web Push.** Control sends each attention row with `push` set to every registered device, straight to the browser's push service (RFC 8291 encryption, RFC 8292 VAPID; `internal/webpush`). The payload is only `{"title", "url", "tag", "kind", "count"}`: the title above and the link. Rows that arrive within 20 s of the previous push (`push.Gap`) wait and go out together as one summary (`"3 things need you: finance, ops"`, url `<base>/inbox`, tag `orbit-inbox`); a row that closed before its turn, or waited more than a day (`push.MaxAge`), is not sent. `tag` and the `Topic` header are the row's key, so a device and the push service each keep one notification per thing. A send that fails is not retried; the inbox still lists it.
 
 - `GET /push` is `{"enabled": true, "public_key": "<VAPID public key, base64url>"}` (`enabled: false`, `public_key: null` without keys).
-- `POST /push/subscriptions` takes a browser's `PushSubscription.toJSON()` (`{"endpoint", "keys": {"p256dh", "auth"}}`) and an optional `label`, and returns `201 {"id": "uuid"}`. The endpoint must be https on a known push service (FCM, Apple, Windows, Mozilla; `push.AllowedEndpoint`), else 400. The same endpoint again refreshes its row. 503 when push is not configured.
+- `POST /push/subscriptions` takes a browser's `PushSubscription.toJSON()` (`{"endpoint", "expirationTime", "keys": {"p256dh", "auth"}}`; `expirationTime` is ignored) and an optional `label`, and returns `201 {"id": "uuid"}`. The endpoint must be https on a known push service (FCM, Apple, Windows, Mozilla; `push.AllowedEndpoint`), else 400. The same endpoint again refreshes its row. 503 when push is not configured.
 - `GET /push/subscriptions` is the caller's active devices (`id`, `endpoint`, `author`, `label`, `created_at`, `last_sent_at`, `last_error`, `failures`; never the keys); every device for the operator token.
 - `DELETE /push/subscriptions` with `{"endpoint": "..."}` stops pushing to it (404 when none is active). A push service answering 404 or 410 revokes it too.
 - `POST /push/test` sends `orbit notifications are on` to the caller's devices now, ignoring the gap: `{"sent": <devices that accepted it>}`.
@@ -657,7 +661,7 @@ An entry:
 Nothing is deleted. Every change is a new version, kept:
 
 - `GET /memory/entries?scope=&topic=&agent=&type=&status=&q=&run_id=&limit=`: `{"entries": [...]}`, current versions, by scope (profile, topics, agents), then name, then most recently changed. `topic` or `agent` (not both) selects one place. `status` is `active` (default), `retired` or `all`; `q` matches key, title, description, body, why and how_to_apply, case-insensitively. `run_id` selects entries that run wrote a version of. `limit` defaults to 200, at most 1000.
-- `POST /memory/entries` `{"scope", "topic"|"agent", "key"?, "type", "title", "description"?, "body", "why"?, "how_to_apply"?, "note"?}`: `201 {"entry": ...}`. An explicit `key` already used in the scope is 409; an `agent` that is not configured is 400. Unknown fields are 400.
+- `POST /memory/entries` `{"scope", "topic"|"agent", "key"?, "type", "title", "description"?, "body", "why"?, "how_to_apply"?, "note"?}`: `201 {"entry": ...}`. An explicit `key` already used in the scope is 409; an `agent` that is not configured is 400.
 - `GET /memory/entries/{id}`: `{"entry": <current>, "versions": [...]}`, every version newest first.
 - `PATCH /memory/entries/{id}` `{"version"?, "type"?, "title"?, "description"?, "body"?, "why"?, "how_to_apply"?, "status"?, "note"?}`: the next version, with absent fields kept. `version` is the version the client read; another current one is 409, so two edits never silently overwrite each other (omit it to write regardless). `status: "active"` restores a retired entry (clearing `superseded_by`). An edit that changes nothing writes no version and returns the current one.
 - `POST /memory/entries/{id}/restore` `{"restore": <version>, "version"?, "note"?}`: the next version, a copy of an earlier one's content and status (and its `superseded_by` while that entry is still active). `restore` must be an earlier version (400); `version` is as for `PATCH`. `note` defaults to `restored version <n>`.
