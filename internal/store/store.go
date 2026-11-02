@@ -652,18 +652,38 @@ func (s *Store) ListRuns(ctx context.Context, f RunFilter) ([]Run, error) {
 	return out, rows.Err()
 }
 
-// CancelRun cancels a queued run. A running run cannot be cancelled here; the
-// executor owns it until its timeout.
-func (s *Store) CancelRun(ctx context.Context, id string) error {
-	tag, err := s.Pool.Exec(ctx, `UPDATE runs SET status = 'cancelled', finished_at = now()
-		WHERE id = $1 AND status = 'queued'`, id)
+// CancelRun cancels a queued run at once (status cancelled), or asks a
+// running one to stop (status "cancelling"): its executor owns it, and ends
+// it. Any other state is ErrConflict.
+func (s *Store) CancelRun(ctx context.Context, id, by string) (status string, err error) {
+	tag, err := s.Pool.Exec(ctx, `UPDATE runs SET status = 'cancelled', finished_at = now(),
+		cancel_requested_at = now(), cancel_requested_by = NULLIF($2, '')
+		WHERE id = $1 AND status = 'queued'`, id, by)
 	if err != nil {
-		return err
+		return "", err
+	}
+	if tag.RowsAffected() == 1 {
+		return StatusCancelled, nil
+	}
+	// A running run is asked to stop: its attempt sees the request
+	// (CancelRequested), interrupts its backend and ends the run cancelled.
+	tag, err = s.Pool.Exec(ctx, `UPDATE runs SET cancel_requested_at = COALESCE(cancel_requested_at, now()),
+		cancel_requested_by = COALESCE(cancel_requested_by, NULLIF($2, ''))
+		WHERE id = $1 AND status = 'running'`, id, by)
+	if err != nil {
+		return "", err
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrConflict
+		return "", ErrConflict
 	}
-	return nil
+	return "cancelling", nil
+}
+
+// CancelRequested reports whether a person asked the run to stop.
+func (s *Store) CancelRequested(ctx context.Context, id string) (bool, error) {
+	var asked bool
+	err := s.Pool.QueryRow(ctx, `SELECT cancel_requested_at IS NOT NULL FROM runs WHERE id = $1`, id).Scan(&asked)
+	return asked, err
 }
 
 // ---------------------------------------------------------------- events

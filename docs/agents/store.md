@@ -22,7 +22,7 @@ an agent's beliefs changed.
 
 ## State machines
 
-- run: `queued -> running -> succeeded | failed | skipped`, `queued -> cancelled`,
+- run: `queued -> running -> succeeded | failed | skipped | cancelled` (cancelled: a person stopped it, `cancel_requested_at`), `queued -> cancelled`,
   `running -> queued` (a hand-back, a lost worker under `MaxAttempts`).
   Every write by a running attempt also guards `attempt = <its own>`, so an
   attempt superseded by a newer claim writes nothing. `skipped` is a run that ended without a backend call, and names what ended it in `gate` (`runs_skipped_names_gate`): an agent's gate (`unchanged`, `items_above`; configuration.md) or a build that delivered an earlier attempt's pushed commit (`pushed`). It counts as a success for staleness (`orbit_agent_last_success_timestamp_seconds`, `/health`'s `last_success`); `orbit_runs_skipped_total` counts them by gate.
@@ -47,6 +47,7 @@ an agent's beliefs changed.
 - task (`tasks`, `tasks.go`): `waiting | blocked -> working -> needs_input | done | failed | cancelled`, `needs_input -> working`, `done -> working` (a parent's message reopens it), and `cancelled` from any open state. `Delegate` creates a batch; `ReconcileTasks` (one instance at a time, by advisory lock) makes every other move but `MessageTask` and `CancelTask`, each in one transaction. `report` is kept when a task reopens.
 
 - outbox (`outbox`, written by a worker's engine): unsent, claimed by one control instance (`ClaimOutbox`, reclaimed after `OutboxReclaimAfter`), then `sent_at` set once its deliveries are recorded. Rows are kept.
+- workspaces (`workspaces`): a chat conversation's snapshot after each run that changed it, never updated; the newest is the workspace.
 - session transcripts (`session_transcripts`): written once per session id (`ON CONFLICT DO NOTHING`; a resume forks to a new id), never updated.
 - deployment (`deployment_specs`, `deployment_current`): every version kept, as `agent_specs`; `SyncDeployment` moves the pointer before `SyncAgents` records the agents loaded with it.
 

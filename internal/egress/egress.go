@@ -47,9 +47,19 @@ func Forbidden(host string) bool {
 	return false
 }
 
-// ParseAllowlist reads a comma- or space-separated list of exact hostnames.
-// Wildcards, IP literals, ports and GitHub are refused, as is an empty list.
+// AnyPublic is the allowlist "*": every hostname that resolves only to
+// public addresses, GitHub included. It is a workstation sandbox's egress
+// (sandboxd's ORBIT_SANDBOX_WORKSTATION_PROXY), whose box holds no GitHub
+// token; a build's proxy keeps its exact list.
+const AnyPublic = "*"
+
+// ParseAllowlist reads a comma- or space-separated list of exact hostnames,
+// or "*" alone (AnyPublic). Wildcards in names, IP literals, ports and GitHub
+// are refused, as is an empty list.
 func ParseAllowlist(s string) (map[string]bool, error) {
+	if strings.TrimSpace(s) == AnyPublic {
+		return map[string]bool{AnyPublic: true}, nil
+	}
 	allow := map[string]bool{}
 	for _, h := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' }) {
 		h = strings.TrimSuffix(strings.ToLower(h), ".")
@@ -150,6 +160,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case port != Port:
 		p.deny(w, client, r.Host, "port is not "+Port)
 		return
+	case !hostRE.MatchString(host):
+		p.deny(w, client, r.Host, "not a hostname")
+		return
+	case p.allow[AnyPublic]:
+		// Any public host: the address check below still refuses every
+		// private, loopback, link-local and tailnet address.
 	case Forbidden(host):
 		p.deny(w, client, r.Host, "GitHub is never allowed")
 		return
