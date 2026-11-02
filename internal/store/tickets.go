@@ -90,10 +90,18 @@ type Ticket struct {
 	MergeActionID *string `json:"merge_action_id,omitempty"`
 	// StackOn is the request this one is stacked on.
 	StackOn *string `json:"stack_on,omitempty"`
+	// Race is how many builds race for a request (2 or 3, docs/tickets.md,
+	// Races); PickedLane is the one a person picked, after which the
+	// ticket's branch, PR and head are that lane's.
+	Race       *int    `json:"race,omitempty"`
+	PickedLane *string `json:"picked_lane,omitempty"`
 }
 
+// Racing reports whether t is a race no person has picked from yet.
+func (t *Ticket) Racing() bool { return t.Race != nil && t.PickedLane == nil }
+
 const ticketCols = `id::text, kind, title, agent, conversation_id::text, repo, status, author, approved_plan, base_sha, branch,
-	pr_number, head_sha, merge_sha, error, created_at, updated_at, merge_action_id::text, stack_on::text`
+	pr_number, head_sha, merge_sha, error, created_at, updated_at, merge_action_id::text, stack_on::text, race, picked_lane`
 
 // NewTicket is what filing a ticket needs. Body is its first message; Wake
 // enqueues a run in the ticket's conversation in the same transaction.
@@ -111,6 +119,11 @@ type NewTicket struct {
 	// StackOn is the request this one builds on: of the same repository,
 	// and not merged, done or abandoned.
 	StackOn string
+	// Race, 2 or 3, builds the approved plan that many times on lanes a,
+	// b, c; Variants[i] is lane i's model or effort (fewer variants than
+	// lanes leave the rest on the build agent's runner). 0 is one build.
+	Race     int
+	Variants []Variant
 }
 
 // TicketCreated is what filing a ticket did.
@@ -135,8 +148,14 @@ func (s *Store) CreateTicket(ctx context.Context, t NewTicket) (res TicketCreate
 	if t.StackOn != "" && t.Kind != "request" {
 		return res, false, fmt.Errorf("%w: only a request stacks on another", ErrInvalid)
 	}
+	if err := checkRace(t); err != nil {
+		return res, false, err
+	}
 	req := map[string]any{"op": "ticket", "kind": t.Kind, "title": t.Title, "body": t.Body, "repo": t.Repo,
 		"author": t.Author, "wake": t.Wake, "stack_on": t.StackOn}
+	if t.Race > 0 {
+		req["race"], req["variants"] = t.Race, t.Variants
+	}
 	raw, replayed, err := s.withReceipt(ctx, t.Agent, t.ClientID, req, func(tx pgx.Tx) (json.RawMessage, error) {
 		var r TicketCreated
 		err := tx.QueryRow(ctx, `INSERT INTO conversations (agent, title) VALUES ($1, $2) RETURNING id::text`,
@@ -149,7 +168,8 @@ func (s *Store) CreateTicket(ctx context.Context, t NewTicket) (res TicketCreate
 		}
 		if t.StackOn != "" {
 			var kind, repo, status string
-			err := tx.QueryRow(ctx, `SELECT kind, COALESCE(repo, ''), status FROM tickets WHERE id = $1 FOR SHARE`, t.StackOn).Scan(&kind, &repo, &status)
+			var race *int
+			err := tx.QueryRow(ctx, `SELECT kind, COALESCE(repo, ''), status, race FROM tickets WHERE id = $1 FOR SHARE`, t.StackOn).Scan(&kind, &repo, &status, &race)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, fmt.Errorf("%w: stack_on names no ticket", ErrInvalid)
 			}
@@ -161,12 +181,18 @@ func (s *Store) CreateTicket(ctx context.Context, t NewTicket) (res TicketCreate
 				return nil, fmt.Errorf("%w: stack_on must be a request of %s", ErrInvalid, t.Repo)
 			case status == TicketMerged || status == TicketDone || status == TicketAbandoned:
 				return nil, fmt.Errorf("%w: the ticket to stack on is %s; file against the default branch", ErrInvalid, status)
+			case race != nil:
+				// Until its pick, a race has no one branch to build on.
+				return nil, fmt.Errorf("%w: the ticket to stack on is a race", ErrInvalid)
 			}
 		}
 		if err := tx.QueryRow(ctx, `
-			INSERT INTO tickets (kind, title, agent, conversation_id, repo, author, stack_on)
-			VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, '')::uuid) RETURNING id::text`,
-			t.Kind, t.Title, t.Agent, r.ConversationID, t.Repo, t.Author, t.StackOn).Scan(&r.TicketID); err != nil {
+			INSERT INTO tickets (kind, title, agent, conversation_id, repo, author, stack_on, race)
+			VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, '')::uuid, NULLIF($8, 0)) RETURNING id::text`,
+			t.Kind, t.Title, t.Agent, r.ConversationID, t.Repo, t.Author, t.StackOn, t.Race).Scan(&r.TicketID); err != nil {
+			return nil, err
+		}
+		if err := insertLanes(ctx, tx, r.TicketID, t.Race, t.Variants); err != nil {
 			return nil, err
 		}
 		if err := ticketEvent(ctx, tx, r.TicketID, "", TicketOpen, t.Author, nil); err != nil {
@@ -304,6 +330,9 @@ type TicketUpdate struct {
 	MergeSHA string
 	// Reason is recorded on the event (an abandon's why).
 	Reason string
+	// Diff is a delivered build's diff, kept on its ticket_builds row
+	// (FinishBuild).
+	Diff *BuildDiff
 }
 
 // TransitionTicket moves a ticket to status to, if its kind allows that from

@@ -136,6 +136,9 @@ func ValidSkillPath(p string) error {
 }
 
 // skillDigest is over SKILL.md and each file by path, so it names exactly a version's content.
+// SkillDigest is a skill version's sha256: over SKILL.md and every file by path, so a copy of a skill on disk can be matched to a version.
+func SkillDigest(content string, files []SkillFile) string { return skillDigest(content, files) }
+
 func skillDigest(content string, files []SkillFile) string {
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "SKILL.md\x00%d\x00%s", len(content), content)
