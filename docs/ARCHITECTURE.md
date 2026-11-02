@@ -149,7 +149,7 @@ Every backend returns the same JSON (`internal/engine/contract.go`):
 `summary`, `report` (Markdown), `notify` (send, priority, title), `memory`
 (update, the complete new document), `questions`, `actions`, and, only for a
 run in a request ticket's conversation that is still being discussed,
-`plan` ([tickets.md](tickets.md)). The backend is
+`plan` ([tickets.md](tickets.md)), and `entries`, the memory entry writes the run makes (below). The backend is
 given a strict schema in which each action type's parameters are spelled out;
 the engine validates against a looser envelope and then judges each action on
 its own, so one malformed proposal is denied without losing the report.
@@ -204,6 +204,10 @@ What a person teaches orbit, and what orbit learns about them, outlives any one 
 
 A run that starts fresh (not a recovery) reads every active entry in its scopes (`Store.EntriesFor`) and gets them twice (`internal/engine/known.go`): an index in the prompt (`# What you know`: one line per entry, the profile, then each topic, then the agent's own; within each, feedback first, then user, project, reference, newest first), packed into `knownIndexBudget` (8 KB, each line at most `knownLineMax`), and every entry in full as an input file, `inputs/_memory.md`, within `knownFileMax` (256 KB), stored as an artifact like any input. The system prompt says what the entries are and that they never authorize an action the rules do not. The packing is deterministic, so the same entries give the same prompt.
 
+**Agents write their own entries.** Every run's output has `entries` (at most `maxEntryWrites`, 10): `add` (to the profile, the agent's own, or a topic it reads), `update` (only the fields given) and `retire` (with the entry that supersedes it, possibly one the same run adds), each naming an entry by the ref the index showed (`internal/engine/entries.go`). They are applied in `RecordOutcome`'s transaction, each in a savepoint: a write the store refuses (a version written since the run read it, such as a person's edit; an add whose key exists, which is how a near-duplicate is turned into a refusal rather than a second entry) is skipped and reported, and the rest apply. Nothing waits for approval: every version is kept, and a person reverts or retires through the API. What became of each write is the run's `entries.json` artifact.
+
+**Learning runs** (`internal/engine/learn.go`) turn a quiet conversation into entries. Every serving instance, every `LearnEvery` (a minute), asks the store which conversations of agents that learn (`learn`, on unless disabled) have a message from the person after the last succeeded learning run's point and have been quiet for `learn.idle` (default 30 minutes): no message or run start, no run finished, nothing queued or running (`Store.LearningDue`). Each gets one learning run (trigger `learn`), unique per conversation and point (`runs_one_learning`), so instances never double it and a failed one is not retried until the person says something new: the cost is bounded by what the person writes, and a run whose window holds no message from them is `skipped` (`learn:nothing-new`) without a backend call. The run reads the window (the person's messages up to the point, the agent's questions and reports after the previous point; `learnBudget`, 32 KB, newest kept), the agent's charter and its entries (index and file, as a run gets them), and returns only `summary` and `entries`, applied as above with the conversation it read as their source. It is a one-shot backend call (no session, no tools, no sources) on the agent's runner or `learn.runner`, within `learnTimeoutMax` (5 minutes). It lives in the agent's learning conversation (`conversations.purpose`, archived), so the conversation it read keeps its thread, prompt and session exactly as they were. A learning run never notifies; its failure is on the run.
+
 `orbit import claude-memory` maps a Claude Code memory directory (one file per fact, frontmatter `name`/`description`/`type`, `**Why:**` and `**How to apply:**` paragraphs, the `MEMORY.md` index for titles) onto entries by key, through `POST /memory/import`, so a repeated import changes only what changed (docs/agents/deployment.md).
 
 ## Actions and rules
@@ -224,7 +228,7 @@ execution is failed for a person to check, never retried.
 
 ## The journal
 
-A run's journal (`internal/journal`, `journal_items`) is its transcript in one typed shape for every backend: messages, thinking (with a token estimate), tool calls with their full input and bounded results, diffs, plans, approvals, questions, status, and turns whose state (running, completed, interrupted, unverifiable) is kept apart from the backend's verdict. Code derives it from `run_events` as each event is stored, and backfills older runs with the same code, so the two agree; `run_events` stays the record it is derived from. Items are append-only revisions addressed by (run, epoch, seq): an epoch is a timeline of attempts that continue each other's sessions, so a cursor never mixes a resumed attempt with an abandoned one. Large values are a bounded head with their size and digest, the whole value fetched by digest. Shapes: docs/api.md.
+A run's journal (`internal/journal`, `journal_items`) is its transcript in one typed shape for every backend: messages, thinking (with a token estimate), tool calls with their full input and bounded results, diffs, plans, approvals, questions, status, and turns whose state (running, completed, interrupted, unverifiable) is kept apart from the backend's verdict. Code derives it from `run_events` as each event is stored, and backfills older runs with the same code, so the two agree; `run_events` stays the record it is derived from. Items are append-only revisions addressed by (run, epoch, seq): an epoch is a timeline of attempts that continue each other's sessions, so a cursor never mixes a resumed attempt with an abandoned one. Large values are a bounded head with their size and digest, the whole value fetched by digest. The stream, a thread run's `steps` and `turn`, MCP progress and the run page (`/ui/runs/{id}`, each item's latest revision, a subagent's nested under its call) all read it. Shapes: docs/api.md.
 
 ## The API
 
@@ -233,8 +237,8 @@ A run's journal (`internal/journal`, `journal_items`) is its transcript in one t
 `/ui` sits behind forward-auth, and an internal one that also takes the
 operator token. A conversation is read as one thread (messages and runs
 interleaved, `Store.Thread`), and a run is watched as Server-Sent Events
-(`/runs/{id}/stream`), which poll the stored transcript and turn it into
-prose and tool calls in code (`runner.Narrate`). The stream reads only rows,
+(`/runs/{id}/stream`), which poll the run's journal and send its rows,
+with a prose-only view of them beside. The stream reads only rows,
 so it follows a run across a requeue, a deploy or another replica with no
 signalling between writers and readers. `GET /usage` and `GET /health` are
 the admin read side, computed from stored rows and the configuration in
@@ -329,8 +333,8 @@ for twice. The rollout contract is in docs/agents/deployment.md.
   share (`run_attempts.cost_usd`) and the session's total; a run's
   `cost_usd` is every attempt's.
 - **The stream follows it.** An attempt that resumed the previous one's
-  session continues its narration (`status.continues`); a client keeps what
-  it showed (docs/api.md).
+  session continues its journal timeline (the same `epoch`); a client keeps
+  what it showed (docs/api.md).
 - **Configuration** reloads when the directory's content changes. An invalid
   change is refused and the previous configuration kept
   (`orbit_config_valid` = 0).
@@ -398,8 +402,8 @@ ticket loop, every 30 s: checks green -> github:merge proposed (approve for orbi
 
 - **`internal/build`** is deterministic code around one model call: the
   tool policy (`policy.go`, `shell.go`: a Bash command is parsed with a
-  shell parser, never matched with a regex), the stdio permission protocol
-  (`protocol.go`), the diff policy (`diff.go`), and the run itself
+  shell parser, never matched with a regex), the stdio permission prompt
+  (`protocol.go`, spoken through `internal/claudeproto`), the diff policy (`diff.go`), and the run itself
   (`runner.go`). It holds the GitHub tokens; the sandbox holds only the
   backend credential.
 - **`internal/engine/build.go`** turns a claimed build run into a job from
