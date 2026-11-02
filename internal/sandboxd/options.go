@@ -2,6 +2,7 @@ package sandboxd
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"time"
@@ -155,6 +156,7 @@ func containerSpec(cfg Config, runID string, now time.Time) containerCreate {
 		LabelExpires: strconv.FormatInt(now.Add(Lifetime).Unix(), 10),
 	}
 	proxy := "http://" + cfg.Proxy
+	credHost, _, _ := net.SplitHostPort(cfg.CredProxy)
 	return containerCreate{
 		Image: cfg.Image,
 		User:  user,
@@ -172,8 +174,10 @@ func containerSpec(cfg Config, runID string, now time.Time) containerCreate {
 			"HTTP_PROXY=" + proxy,
 			"https_proxy=" + proxy,
 			"http_proxy=" + proxy,
-			"NO_PROXY=",
-			"no_proxy=",
+			// The backend is reached through the credential proxy, directly on this network, never through egress.
+			"ANTHROPIC_BASE_URL=http://" + cfg.CredProxy,
+			"NO_PROXY=" + credHost,
+			"no_proxy=" + credHost,
 			"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
 			"DISABLE_AUTOUPDATER=1",
 			"GIT_TERMINAL_PROMPT=0",
@@ -278,6 +282,11 @@ type containerState struct {
 	State struct {
 		Running bool `json:"Running"`
 	} `json:"State"`
+	NetworkSettings struct {
+		Networks map[string]struct {
+			IPAddress string `json:"IPAddress"`
+		} `json:"Networks"`
+	} `json:"NetworkSettings"`
 }
 
 // verifyCreated checks that the container the daemon made is the one

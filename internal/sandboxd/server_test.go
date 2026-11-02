@@ -12,6 +12,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kensac/orbit/internal/credproxy"
 	"github.com/kensac/orbit/internal/sandbox"
 )
 
@@ -127,6 +129,11 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 			}{m.Type, m.Target})
 		}
 		st.State.Running = c.running
+		if c.running {
+			st.NetworkSettings.Networks = map[string]struct {
+				IPAddress string `json:"IPAddress"`
+			}{h.NetworkMode: {IPAddress: "10.250.251.7"}}
+		}
 		if f.tamper != nil {
 			f.tamper(&st)
 		}
@@ -335,6 +342,8 @@ func TestServerFlow(t *testing.T) {
 	running := h.fd.containers[cr.ID].running
 	h.fd.mu.Unlock()
 	want := containerSpec(testConfig(), "run-1", time.Now())
+	// A copy: the fake container shares the created spec's label map.
+	created.Labels = maps.Clone(created.Labels)
 	created.Labels[LabelExpires], want.Labels[LabelExpires] = "", ""
 	if gb, wb := mustJSON(t, created), mustJSON(t, want); gb != wb {
 		t.Fatalf("docker received a different spec:\n%s\nwant\n%s", gb, wb)
@@ -354,10 +363,17 @@ func TestServerFlow(t *testing.T) {
 	if code != 7 || stdout.String() != "ping" || stderr.String() != "bye" {
 		t.Fatalf("attach: code %d stdout %q stderr %q", code, stdout.String(), stderr.String())
 	}
+	// The process gets a token in the credential's place, sealed for this sandbox's address and expiry.
 	h.fd.mu.Lock()
 	for _, e := range h.fd.execs {
-		if e.User != "10001:10001" || e.Privileged || e.WorkingDir != "/work" || len(e.Env) != 1 || e.Env[0] != "CLAUDE_CODE_OAUTH_TOKEN=tok" {
+		if e.User != "10001:10001" || e.Privileged || e.WorkingDir != "/work" || len(e.Env) != 1 || !strings.HasPrefix(e.Env[0], "CLAUDE_CODE_OAUTH_TOKEN=orbit-cp1.") {
 			t.Fatalf("exec spec %+v", e)
+		}
+		sealer, _ := credproxy.NewSealer(testConfig().CredProxyKey)
+		g, err := sealer.Open(strings.TrimPrefix(e.Env[0], "CLAUDE_CODE_OAUTH_TOKEN="))
+		if err != nil || g.Credential != "tok" || g.Kind != credproxy.KindOAuth || g.Addr.String() != "10.250.251.7" ||
+			!g.Expires.Equal(cr.ExpiresAt) || g.Sandbox != cr.ID || g.RunID != "run-1" {
+			t.Fatalf("grant %+v, %v", g, err)
 		}
 	}
 	h.fd.mu.Unlock()

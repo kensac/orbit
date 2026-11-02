@@ -121,6 +121,12 @@ func buildTestImage(t *testing.T, d *Docker, bins map[string][]byte) string {
 		_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: "usr/local/bin/" + name, Mode: 0o755, Size: int64(len(data)), ModTime: now})
 		_, _ = tw.Write(data)
 	}
+	// The host's CA bundle, where it has one (a Linux runner), so `orbit credproxy` in the image can verify the backend.
+	if ca, err := os.ReadFile("/etc/ssl/certs/ca-certificates.crt"); err == nil {
+		_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "etc/ssl/certs/", Mode: 0o755, ModTime: now})
+		_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: "etc/ssl/certs/ca-certificates.crt", Mode: 0o644, Size: int64(len(ca)), ModTime: now})
+		_, _ = tw.Write(ca)
+	}
 	_ = tw.Close()
 	if err := d.putArchive(ctx, created.ID, "/", &b); err != nil {
 		t.Fatal(err)
@@ -176,6 +182,37 @@ func startEgress(t *testing.T, d *Docker, image, name, internal, outside string)
 	return created.ID
 }
 
+// credproxyKey seals the integration test's tokens.
+var credproxyKey = strings.Repeat("c", 40)
+
+// startCredproxy runs `orbit credproxy` as a container on both networks, as the deployment does.
+func startCredproxy(t *testing.T, d *Docker, image, name, internal, outside string) {
+	t.Helper()
+	ctx := context.Background()
+	spec := map[string]any{
+		"Image":      image,
+		"User":       "10001:10001",
+		"Entrypoint": []string{"orbit", "credproxy"},
+		"Env":        []string{"ORBIT_CREDPROXY_KEY=" + credproxyKey, "ORBIT_CREDPROXY_LISTEN=:3129"},
+		"Labels":     map[string]string{"orbit.sandbox.test": "1"},
+		"HostConfig": map[string]any{"NetworkMode": outside, "ReadonlyRootfs": true, "CapDrop": []string{"ALL"}, "SecurityOpt": []string{"no-new-privileges:true"}},
+		"NetworkingConfig": map[string]any{"EndpointsConfig": map[string]any{
+			outside:  map[string]any{},
+			internal: map[string]any{"Aliases": []string{name}},
+		}},
+	}
+	var created struct {
+		ID string `json:"Id"`
+	}
+	if err := d.call(ctx, http.MethodPost, "/containers/create?name="+name, nil, spec, &created); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.remove(context.Background(), created.ID) })
+	if err := d.start(ctx, created.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type probeReport struct {
 	UID        int               `json:"uid"`
 	GID        int               `json:"gid"`
@@ -185,6 +222,7 @@ type probeReport struct {
 	DNS        string            `json:"dns"`
 	Proxy      map[string]any    `json:"proxy"`
 	DockerSock string            `json:"docker_sock"`
+	Credproxy  map[string]any    `json:"credproxy"`
 	Env        []string          `json:"env"`
 }
 
@@ -199,9 +237,11 @@ func TestIntegrationIsolation(t *testing.T) {
 	image := buildTestImage(t, d, bins)
 	suffix := newID()[:8]
 	internalNet, outsideNet, proxyName := "orbit-sbx-test-"+suffix, "orbit-sbx-out-"+suffix, "orbit-egress-"+suffix
+	credName := "orbit-credproxy-" + suffix
 	createNetwork(t, d, internalNet, true)
 	createNetwork(t, d, outsideNet, false)
 	egressID := startEgress(t, d, image, proxyName, internalNet, outsideNet)
+	startCredproxy(t, d, image, credName, internalNet, outsideNet)
 
 	dir := socketDir(t)
 	cfg := Config{
@@ -211,6 +251,9 @@ func TestIntegrationIsolation(t *testing.T) {
 		Network: internalNet,
 		Proxy:   proxyName + ":3128",
 		Docker:  d.sock,
+
+		CredProxy:    credName + ":3129",
+		CredProxyKey: credproxyKey,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
@@ -306,6 +349,25 @@ func TestIntegrationIsolation(t *testing.T) {
 	} {
 		if got, _ := p.Proxy[target].(float64); got != want {
 			t.Errorf("CONNECT %s: %v, want %v", target, p.Proxy[target], want)
+		}
+	}
+	// The process holds a token, never the credential, and reaches the backend only through the credential proxy: its token is forwarded to the Messages API (upstream answers the placeholder credential), another path or a forged token is refused by the proxy.
+	if code, out, _ := run([]string{"sh", "-c", `echo "$CLAUDE_CODE_OAUTH_TOKEN"`}, ""); code != 0 || strings.Contains(out, "placeholder") || !strings.HasPrefix(out, "orbit-cp1.") {
+		t.Errorf("the credential in the sandbox: %q", out)
+	}
+	// The Messages API request passed every check: the backend answered it (refusing the placeholder credential), or, without a CA bundle in the image, the proxy could not verify the backend (502).
+	if got, _ := p.Credproxy["messages"].(map[string]any); got["by_proxy"] != false && got["status"] != float64(502) {
+		t.Errorf("credproxy messages: %v, want it forwarded", p.Credproxy["messages"])
+	}
+	for name, want := range map[string]map[string]any{
+		"models": {"status": float64(403), "by_proxy": true},
+		"forged": {"status": float64(401), "by_proxy": true},
+	} {
+		got, _ := p.Credproxy[name].(map[string]any)
+		for k, v := range want {
+			if got[k] != v {
+				t.Errorf("credproxy %s: %v, want %s %v", name, p.Credproxy[name], k, v)
+			}
 		}
 	}
 	if p.DockerSock == "" {

@@ -52,7 +52,7 @@ const (
 	frameChunk = 32 << 10
 )
 
-// AllowedEnv is every variable a caller may set for an attached process: the backend credentials the CLI can reach its own backend with (AGENTS.md rule 2), and nothing else. A caller sends at most one of them (build.SandboxEnv); sandboxd sets the rest of the environment itself.
+// AllowedEnv is every variable a caller may send for an attached process: the backend credentials the CLI can reach its own backend with (AGENTS.md rule 2), and nothing else. A caller sends at most one of them (build.SandboxEnv); sandboxd sets the rest of the environment itself. A sandbox's process never receives the value: sandboxd puts a credential proxy token in its place (internal/credproxy).
 var AllowedEnv = map[string]bool{claudeproto.OAuthToken: true, claudeproto.APIKey: true}
 
 // CreateResponse is the answer to a create.
