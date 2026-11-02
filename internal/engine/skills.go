@@ -41,7 +41,7 @@ func (e *Engine) agentSkills(ctx context.Context, a *spec.Agent) ([]string, erro
 func skillsDigest(skills []store.Skill) string {
 	h := sha256.New()
 	for _, k := range skills {
-		fmt.Fprintf(h, "%s\x00%s\x00", k.Name, k.SHA256)
+		_, _ = fmt.Fprintf(h, "%s\x00%s\x00", k.Name, k.SHA256)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }

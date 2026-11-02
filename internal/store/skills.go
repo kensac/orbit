@@ -77,7 +77,7 @@ type SkillProvenance struct {
 func SkillDescription(name, content string) (string, error) {
 	fm, _, err := frontmatter.Split([]byte(content))
 	if err != nil {
-		return "", fmt.Errorf("%w: SKILL.md must open with frontmatter naming its description: %v", ErrInvalid, err)
+		return "", fmt.Errorf("%w: SKILL.md must open with frontmatter naming its description (%s)", ErrInvalid, err.Error())
 	}
 	f := frontmatter.Fields(fm)
 	if n := f["name"]; n != "" && n != name {
@@ -138,11 +138,11 @@ func ValidSkillPath(p string) error {
 // skillDigest is over SKILL.md and each file by path, so it names exactly a version's content.
 func skillDigest(content string, files []SkillFile) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "SKILL.md\x00%d\x00%s", len(content), content)
+	_, _ = fmt.Fprintf(h, "SKILL.md\x00%d\x00%s", len(content), content)
 	sorted := slices.Clone(files)
 	slices.SortFunc(sorted, func(a, b SkillFile) int { return strings.Compare(a.Path, b.Path) })
 	for _, f := range sorted {
-		fmt.Fprintf(h, "\x00%s\x00%d\x00", f.Path, len(f.Content))
+		_, _ = fmt.Fprintf(h, "\x00%s\x00%d\x00", f.Path, len(f.Content))
 		h.Write(f.Content)
 	}
 	return hex.EncodeToString(h.Sum(nil))

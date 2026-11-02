@@ -10,7 +10,9 @@ import (
 
 const skillMD = "---\nname: close\ndescription: Use to close a month.\n---\n\nSteps.\n"
 
-func byPerson() store.SkillProvenance { return store.SkillProvenance{Source: store.SkillByPerson, Author: "kanishk"} }
+func byPerson() store.SkillProvenance {
+	return store.SkillProvenance{Source: store.SkillByPerson, Author: "kanishk"}
+}
 
 func TestSkillVersions(t *testing.T) {
 	s := testdb.New(t)
