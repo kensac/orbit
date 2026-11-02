@@ -40,6 +40,7 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | Hook-driven live agent status | #37 agent-status | |
 | Worktrees, review comments on PR diffs, stacked PRs, check reruns, RRULE schedules with a precheck | #32 #43 | |
 | Migration fix (duplicate version 14) | #50 | |
+| `GET /workspaces/{id}/search` over the snapshot backend, for the portfolio editor's search across files (portfolio #914) | branch `workspace-search` (claude-workspace-stream), stacked on the ticket diff | literal or RE2, bounded matches with UTF-16 columns and previews; a read |
 | `GET /tickets/{id}/diff`: a ticket's PR as diff files with line numbers (the run changes' shape), for the portfolio's ticket notes and review comments | branch `ticket-diff` (claude-workspace-stream), stacked on W7 | GitHub patches parsed by `diff.ParsePatch`; a read token per request |
 | Workspace: an IDE in the portfolio chat (explorer, editor, terminals with Claude Code (direct), diffs with line comments), one shell with the chat | #78 (design, merged); items below | design [docs/workspace.md](workspace.md), contract docs/api.md, Workspace (each unbuilt part marked planned) |
 
