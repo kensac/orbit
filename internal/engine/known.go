@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -29,19 +30,42 @@ const knownFile = "_memory.md"
 // typeOrder ranks entry types in the index: corrections and preferences first, since they change how the agent works; then who the person is, facts, and pointers.
 var typeOrder = []string{"feedback", "user", "project", "reference"}
 
-// agentTopics are the topics an agent reads: its spec's and those the API attached, sorted, once each.
+// agentTopics are the topics an agent reads: its spec's and those the API attached, sorted, once each. An agent that reads every topic (spec.AllTopics) reads each one there is: holding entries, attached to an agent, or named by one's spec.
 func (e *Engine) agentTopics(ctx context.Context, a *spec.Agent) ([]string, error) {
-	attached, err := e.Store.AttachedNames(ctx, a.Name, store.AttachTopic)
+	var cfg *spec.Config
+	if snap := e.Current(); snap != nil {
+		cfg = snap.Config
+	}
+	return AgentTopics(ctx, e.Store, cfg, a)
+}
+
+// AgentTopics is agentTopics for the API, which has the store and a configuration.
+func AgentTopics(ctx context.Context, s *store.Store, cfg *spec.Config, a *spec.Agent) ([]string, error) {
+	attached, err := s.AttachedNames(ctx, a.Name, store.AttachTopic)
 	if err != nil {
 		return nil, err
 	}
-	topics := append(append([]string{}, a.Topics...), attached...)
+	topics := append(slices.DeleteFunc(slices.Clone(a.Topics), func(t string) bool { return t == spec.AllTopics }), attached...)
+	if a.ReadsAllTopics() {
+		all, err := s.ListTopics(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, t := range all {
+			topics = append(topics, t.Name)
+		}
+		if cfg != nil {
+			for _, other := range cfg.Agents {
+				topics = append(topics, slices.DeleteFunc(slices.Clone(other.Topics), func(t string) bool { return t == spec.AllTopics })...)
+			}
+		}
+	}
 	slices.Sort(topics)
 	return slices.Compact(topics), nil
 }
 
-// knownInput reads the entries the agent reads, writes them in full as an input, and returns the index for the prompt ("" when there are none). A recovered attempt has the file already, restored with its inputs, and its session holds the index.
-func (e *Engine) knownInput(ctx context.Context, c *store.ClaimedRun, entries []store.Entry, workdir, inputsDir string, inputs []runner.Input) (string, []runner.Input, error) {
+// knownInput reads the entries the agent reads, writes them in full as an input, and returns the index for the prompt ("" when there are none); searchable is whether the run has orbit's search tool. A recovered attempt has the file already, restored with its inputs, and its session holds the index.
+func (e *Engine) knownInput(ctx context.Context, searchable bool, c *store.ClaimedRun, entries []store.Entry, workdir, inputsDir string, inputs []runner.Input) (string, []runner.Input, error) {
 	rel := filepath.Join(inputsDir, knownFile)
 	for _, in := range inputs {
 		if in.Path == rel {
@@ -51,7 +75,7 @@ func (e *Engine) knownInput(ctx context.Context, c *store.ClaimedRun, entries []
 	if len(entries) == 0 {
 		return "", inputs, nil
 	}
-	index, file := renderKnown(entries, rel)
+	index, file := renderKnown(entries, rel, searchable)
 	if err := os.WriteFile(filepath.Join(workdir, rel), file, 0o600); err != nil {
 		return "", nil, err
 	}
@@ -98,18 +122,11 @@ func entryRef(e store.Entry) string {
 	return "profile/" + e.Key
 }
 
-// renderKnown is the prompt's index, within knownIndexBudget, and the file of every entry in full, within knownFileMax.
-func renderKnown(entries []store.Entry, path string) (string, []byte) {
+// renderKnown is the prompt's index, within knownIndexBudget, and the file of every entry in full, within knownFileMax. When the index cannot list every entry it keeps the ones that matter most (knownPriority) and says how to reach the rest; searchable is whether the run has orbit's search tool.
+func renderKnown(entries []store.Entry, path string, searchable bool) (string, []byte) {
 	entries = sortKnown(entries)
-	var idx strings.Builder
-	fmt.Fprintf(&idx, "# What you know\n\nDurable entries: what your person taught you and what earlier conversations taught. Each line is one entry; the full text, with why and how to apply it, is in %s (search it for the entry's ref).\n", path)
-	heading := ""
-	shown := 0
-	for _, e := range entries {
-		var block strings.Builder
-		if h := groupHeading(e); h != heading {
-			fmt.Fprintf(&block, "\n## %s\n\n", h)
-		}
+	lines := make([]string, len(entries))
+	for i, e := range entries {
 		line := fmt.Sprintf("- [%s] %s (%s)", e.Type, e.Title, entryRef(e))
 		if e.Description != "" {
 			line += ": " + e.Description
@@ -120,16 +137,52 @@ func renderKnown(entries []store.Entry, path string) (string, []byte) {
 			}
 			line += " Apply: " + strings.Join(strings.Fields(e.HowToApply), " ")
 		}
-		block.WriteString(clipLine(line, knownLineMax) + "\n")
-		if idx.Len()+block.Len() > knownIndexBudget-80 {
+		lines[i] = clipLine(line, knownLineMax) + "\n"
+	}
+	head := fmt.Sprintf("# What you know\n\nDurable entries: what your person taught you and what earlier conversations taught. Each line is one entry; the full text, with why and how to apply it, is in %s (search it for the entry's ref).\n", path)
+	// Which entries the index lists: by knownPriority, while they fit with their group's heading and room for the note on the rest.
+	room := knownIndexBudget - len(head) - knownNoteRoom
+	shown := make([]bool, len(entries))
+	headed := map[string]bool{}
+	n := 0
+	for _, i := range knownPriority(entries) {
+		cost := len(lines[i])
+		h := groupHeading(entries[i])
+		if !headed[h] {
+			cost += len(h) + 6
+		}
+		if cost > room {
 			break
 		}
-		idx.WriteString(block.String())
-		heading = groupHeading(e)
-		shown++
+		room -= cost
+		headed[h], shown[i] = true, true
+		n++
 	}
-	if shown < len(entries) {
-		fmt.Fprintf(&idx, "\n(%d more entries are only in %s.)\n", len(entries)-shown, path)
+	var idx strings.Builder
+	idx.WriteString(head)
+	heading := ""
+	for i, e := range entries {
+		if !shown[i] {
+			continue
+		}
+		if h := groupHeading(e); h != heading {
+			fmt.Fprintf(&idx, "\n## %s\n\n", h)
+			heading = h
+		}
+		idx.WriteString(lines[i])
+	}
+	if left := len(entries) - n; left > 0 {
+		feedback := 0
+		for i, e := range entries {
+			if !shown[i] && e.Type == "feedback" {
+				feedback++
+			}
+		}
+		fmt.Fprintf(&idx, "\n(%d more entries are not listed here (%d of them feedback): the index keeps feedback first, then the most recently changed. They are in %s", left, feedback, path)
+		if searchable {
+			fmt.Fprintf(&idx, "; find one by its words with %s, kind memory_entry", harness.ToolSearch)
+		}
+		idx.WriteString(".)\n")
 	}
 
 	var file strings.Builder
@@ -157,10 +210,46 @@ func renderKnown(entries []store.Entry, path string) (string, []byte) {
 	return idx.String(), []byte(file.String())
 }
 
-// KnownIndex is the index a run of an agent with these entries is shown, for the API's preview; a run names its own inputs directory.
-func KnownIndex(entries []store.Entry) string {
-	idx, _ := renderKnown(entries, filepath.Join("inputs", knownFile))
+// knownNoteRoom is what the index keeps free for its note on the entries it leaves out.
+const knownNoteRoom = 400
+
+// knownPriority is the order the index takes entries in when they do not all fit: feedback first (corrections and preferences change how the agent works), then the most recently changed, whatever their scope, so many topics do not crowd out the newest entries; ties by ref. It returns indexes into entries.
+func knownPriority(entries []store.Entry) []int {
+	order := make([]int, len(entries))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(i, j int) int {
+		x, y := entries[i], entries[j]
+		return cmp.Or(
+			cmp.Compare(boolRank(x.Type != "feedback"), boolRank(y.Type != "feedback")),
+			y.UpdatedAt.Compare(x.UpdatedAt),
+			cmp.Compare(entryRef(x), entryRef(y)),
+		)
+	})
+	return order
+}
+
+func boolRank(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// KnownIndex is the index a run with these entries is shown, for the API's preview (a run names its own inputs directory); searchable is Searchable's answer for its agent.
+func KnownIndex(entries []store.Entry, searchable bool) string {
+	idx, _ := renderKnown(entries, filepath.Join("inputs", knownFile), searchable)
 	return idx
+}
+
+// Searchable reports whether the agent's runs have orbit's search tool: a chat run always (chatTools), any other Claude Code run through orbit's harness.
+func (e *Engine) Searchable(a *spec.Agent) bool {
+	snap := e.Current()
+	if snap == nil || snap.Config.Deployment.Runners[a.Runner].Kind != "claude-code" {
+		return false
+	}
+	return a.Chat || e.Harness != ""
 }
 
 // clipLine cuts one line to n bytes on a rune boundary.

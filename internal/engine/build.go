@@ -16,6 +16,7 @@ import (
 	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 // errDraining stops a build attempt from starting its sandbox on an
@@ -35,8 +36,9 @@ func (e *Engine) executeBuild(ctx, actx context.Context, snap *Snapshot, a *spec
 		return nil
 	}
 	var cost *float64
+	var used *tokens.Usage
 	if res != nil {
-		cost = res.CostUSD
+		cost, used = res.CostUSD, res.Tokens
 	}
 	if ctx.Err() != nil || errors.Is(err, build.ErrStopped) {
 		log.Info("build handed back", "attempt", c.Attempt, "err", err)
@@ -44,7 +46,7 @@ func (e *Engine) executeBuild(ctx, actx context.Context, snap *Snapshot, a *spec
 	}
 	kind := "claude-code"
 	if err != nil {
-		rr := store.RunResult{Attempt: c.Attempt, Error: err.Error(), CostUSD: cost}
+		rr := store.RunResult{Attempt: c.Attempt, Error: err.Error(), CostUSD: cost, Tokens: used}
 		if ferr := e.Store.FailBuild(context.WithoutCancel(ctx), c.ID, rr); ferr != nil {
 			return ferr
 		}
@@ -58,7 +60,7 @@ func (e *Engine) executeBuild(ctx, actx context.Context, snap *Snapshot, a *spec
 	report := buildReport(res)
 	out, _ := json.Marshal(res.Output)
 	rr := store.RunResult{Attempt: c.Attempt, Summary: res.Output.Summary, Report: report, Output: out,
-		CostUSD: res.CostUSD, Usage: res.Usage, Gate: res.GateName}
+		CostUSD: res.CostUSD, Usage: res.Usage, Tokens: res.Tokens, Gate: res.GateName}
 	pr := res.PRNumber
 	if err := e.Store.FinishBuild(context.WithoutCancel(ctx), c.ID, rr, store.TicketUpdate{
 		BaseSHA: res.BaseSHA, Branch: res.Branch, PRNumber: &pr, HeadSHA: res.HeadSHA,

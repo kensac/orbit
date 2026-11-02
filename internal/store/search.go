@@ -9,11 +9,12 @@ import (
 )
 
 // Full-text search over search_docs (the search migration): documents
-// derived by triggers from messages, runs, run_events and memory_versions.
+// derived by triggers from messages, runs, run_events, memory_versions,
+// memory_entry_versions and external_session_lines.
 
 // SearchKinds are the kinds of document search returns, in the order the
 // API documents them.
-var SearchKinds = []string{"message", "question", "report", "error", "narration", "tool_call", "memory", "memory_entry"}
+var SearchKinds = []string{"message", "question", "report", "error", "narration", "tool_call", "memory", "memory_entry", "session"}
 
 // MaxSearchResults bounds one page of results: each carries a snippet, and a
 // page is meant for a person or a model to read, not to export.
@@ -27,8 +28,11 @@ const maxSearchOffset = 1000
 // SearchQuery is one search. Q is web-search syntax (websearch_to_tsquery:
 // words, "quoted phrases", or, -excluded). Every other field narrows it.
 type SearchQuery struct {
-	Q              string
-	Agent          string
+	Q     string
+	Agent string
+	// EntryTopics, with Agent, widen it to the memory entries the agent reads beside its own: the profile's and these topics' (a run's own search).
+	EntryTopics    []string
+	EntryProfile   bool
 	ConversationID string
 	RunID          string
 	Kinds          []string
@@ -45,25 +49,27 @@ type SnippetPart struct {
 // SearchResult is one matching document.
 type SearchResult struct {
 	Kind string `json:"kind"`
-	// Agent is nil only for a profile or topic memory entry.
-	Agent          *string       `json:"agent"`
-	ConversationID *string       `json:"conversation_id"`
-	RunID          *string       `json:"run_id"`
-	Attempt        *int          `json:"attempt"`
-	Seq            *int          `json:"seq"`
-	MessageID      *string       `json:"message_id"`
-	MemoryVersion  *int64        `json:"memory_version_id"`
-	EntryID        *string       `json:"entry_id"`
-	EntryVersion   *int          `json:"entry_version"`
-	Scope          *string       `json:"scope"`
-	Owner          *string       `json:"owner"`
-	Title          *string       `json:"title"`
-	Author         *string       `json:"author"`
-	Tool           *string       `json:"tool"`
-	At             time.Time     `json:"at"`
-	Rank           float64       `json:"rank"`
-	Snippet        string        `json:"snippet"`
-	Parts          []SnippetPart `json:"snippet_parts"`
+	// Agent is nil for a profile or topic memory entry and an imported session's line.
+	Agent          *string `json:"agent"`
+	ConversationID *string `json:"conversation_id"`
+	RunID          *string `json:"run_id"`
+	Attempt        *int    `json:"attempt"`
+	Seq            *int    `json:"seq"`
+	MessageID      *string `json:"message_id"`
+	MemoryVersion  *int64  `json:"memory_version_id"`
+	EntryID        *string `json:"entry_id"`
+	EntryVersion   *int    `json:"entry_version"`
+	Scope          *string `json:"scope"`
+	Owner          *string `json:"owner"`
+	Title          *string `json:"title"`
+	Author         *string `json:"author"`
+	Tool           *string `json:"tool"`
+	// ExternalSessionID is the imported session a session line is of; Seq is then its line.
+	ExternalSessionID *string       `json:"external_session_id"`
+	At                time.Time     `json:"at"`
+	Rank              float64       `json:"rank"`
+	Snippet           string        `json:"snippet"`
+	Parts             []SnippetPart `json:"snippet_parts"`
 }
 
 // SearchPage is a page of results, best first, and how many matched.
@@ -100,6 +106,10 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchPage, error) 
 	if len(q.Kinds) > 0 {
 		kinds = q.Kinds
 	}
+	entryTopics := q.EntryTopics
+	if entryTopics == nil {
+		entryTopics = []string{}
+	}
 	rows, err := s.Pool.Query(ctx, `
 		WITH q AS (SELECT websearch_to_tsquery('english', $1) AS q),
 		m AS (
@@ -109,7 +119,8 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchPage, error) 
 		           END AS newest
 		    FROM search_docs d, q
 		    WHERE d.tsv @@ q.q
-		      AND ($2 = '' OR d.agent = $2)
+		      AND ($2 = '' OR d.agent = $2 OR (d.kind = 'memory_entry' AND d.agent IS NULL AND (
+		          (d.scope = 'profile' AND $12::boolean) OR (d.scope = 'topic' AND d.owner = ANY ($13::text[])))))
 		      AND ($3 = '' OR d.conversation_id = $3::uuid)
 		      AND ($4 = '' OR d.run_id = $4::uuid)
 		      AND ($5::text[] IS NULL OR d.kind = ANY ($5))
@@ -126,12 +137,13 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchPage, error) 
 		)
 		SELECT p.total, p.kind, p.agent, p.conversation_id::text, p.run_id::text, p.attempt, p.seq,
 		       p.message_id::text, p.memory_version_id, p.entry_id::text, p.entry_version, p.scope, p.owner, p.title,
-		       p.author, p.tool, p.at, p.rank::float8,
+		       p.author, p.tool, p.external_session_id::text, p.at, p.rank::float8,
 		       ts_headline('english', translate(p.body, $10 || $11, ''), q.q,
 		           'MaxFragments=2, MaxWords=30, MinWords=12, FragmentDelimiter=" ... ", StartSel=' || $10 || ', StopSel=' || $11)
 		FROM page p, q
 		ORDER BY p.rank DESC, p.at DESC, p.id DESC`,
-		q.Q, q.Agent, q.ConversationID, q.RunID, kinds, q.From, q.To, limit, offset, snipStart, snipStop)
+		q.Q, q.Agent, q.ConversationID, q.RunID, kinds, q.From, q.To, limit, offset, snipStart, snipStop,
+		q.EntryProfile, entryTopics)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +153,7 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchPage, error) 
 		var headline string
 		if err := rows.Scan(&page.Total, &r.Kind, &r.Agent, &r.ConversationID, &r.RunID, &r.Attempt, &r.Seq,
 			&r.MessageID, &r.MemoryVersion, &r.EntryID, &r.EntryVersion, &r.Scope, &r.Owner, &r.Title,
-			&r.Author, &r.Tool, &r.At, &r.Rank, &headline); err != nil {
+			&r.Author, &r.Tool, &r.ExternalSessionID, &r.At, &r.Rank, &headline); err != nil {
 			rows.Close()
 			return nil, err
 		}

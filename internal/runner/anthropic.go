@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 // anthropicAPI calls the Messages API directly: one request, no tools, with
@@ -115,7 +116,7 @@ func (a *anthropicAPI) Run(ctx context.Context, req Request, emit func(Event)) (
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, fmt.Errorf("parse anthropic response: %w", err)
 	}
-	res := &Result{Usage: m.Usage, SessionID: m.ID, Model: m.Model}
+	res := &Result{Usage: m.Usage, Tokens: tokens.FromAnthropic(m.Usage, m.Model), SessionID: m.ID, Model: m.Model}
 	for _, c := range m.Content {
 		if c.Type == "tool_use" && c.Name == "submit" {
 			res.Output = c.Input
