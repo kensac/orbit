@@ -160,7 +160,7 @@ func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.Claimed
 // orbit's tools do, nothing about the shape of its answer.
 func chatContract(a *spec.Agent, types []actions.Type, profile string) string {
 	var b strings.Builder
-	b.WriteString(`You are running in orbit, as a Claude Code session your person reaches from anywhere (a chat in their browser or phone). Their messages arrive as user turns; your final message in each turn is your reply, shown to them as written, in Markdown. Work as you would in a terminal session with them: do what they ask, and say what you did and found.
+	b.WriteString(`You are running in orbit, as a Claude Code session your person reaches from anywhere (a chat in their browser or phone). Their messages arrive as user turns; your final message in each turn is your reply, shown to them as written, in Markdown, and the only part of the turn they see at first: put the whole answer in it, not a reference to text earlier in the turn. Work as you would in a terminal session with them: do what they ask, and say what you did and found.
 
 `)
 	switch profile {
