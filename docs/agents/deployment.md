@@ -70,6 +70,22 @@ Rendered from Infisical (`HETZNER_ORBIT_*`). The Claude Code subscription
 token comes from `claude setup-token` and lasts a year; when it expires every
 run fails with `Not logged in`, which pages through the failure notification.
 
+## Seeding memory from Claude Code
+
+`orbit import claude-memory <dir> --scope <profile|topic:NAME|agent:NAME>` reads a Claude Code memory directory (`~/.claude/projects/<project>/memory`) and sends it to `POST /api/v1/memory/import`. Entries of the types in `--profile-types` (default `user`) go to the profile whatever `--scope` says. It is a dry run unless `--apply` is given: the server reports what it would create, update or leave alone. `--print` shows what was read from disk without calling a server. A file it cannot map (no frontmatter, an unknown type) is skipped with a warning. Repeating it is safe: it matches by key and changes only what changed.
+
+The API is `--api` (default `ORBIT_API_URL`, else the internal listener) with `--token` (default `ORBIT_API_TOKEN`).
+
+- **From the Mac**, against the public API with an authentik access token for a person in `ORBIT_OIDC_GROUP` (the entries are then authored by that person): `orbit import claude-memory <dir> --scope topic:homelab --api https://orbit.kanishksachdev.com --token <jwt>`, then again with `--apply`.
+- **On hetzner**, with the operator token on the internal listener: copy the directory into the container and run it there, where `ORBIT_API_TOKEN` and the internal listener are the defaults:
+
+  ```bash
+  docker cp ~/memory orbit:/tmp/memory
+  docker exec orbit orbit import claude-memory /tmp/memory --scope topic:homelab
+  docker exec orbit orbit import claude-memory /tmp/memory --scope topic:homelab --apply
+  docker exec orbit rm -r /tmp/memory
+  ```
+
 ## sandboxd and egress on oci
 
 The build sandbox runs on oci (tailnet `100.123.116.85`), not hetzner: a
