@@ -22,24 +22,13 @@ import (
 	"github.com/kensac/orbit/internal/auth"
 )
 
-// OAuthProxy lets an MCP client sign in with authentik. authentik has no
-// dynamic client registration, which the Claude apps need, so orbit is the
-// authorization server the client sees: it registers clients itself, sends
-// the person to authentik under orbit's own confidential client, and hands
-// the client authentik's access token, which /mcp verifies like any other.
-// Nothing is stored: client ids, states, codes and refresh tokens are
-// sealed (AES-GCM) under a key derived from the operator token, so any
-// instance can finish a flow another one started, and rotating the token
-// ends every registration and refresh token.
+// OAuthProxy lets an MCP client sign in with authentik. authentik has no dynamic client registration, which the Claude apps need, so orbit is the authorization server the client sees: it registers clients itself, sends the person to authentik under orbit's own confidential client, and hands the client authentik's access token, which /mcp verifies like any other. Nothing is stored: client ids, states, codes and refresh tokens are sealed (AES-GCM) under a key derived from the operator token, so any instance can finish a flow another one started, and rotating the token ends every registration and refresh token.
 type OAuthProxy struct {
-	// Issuer is the authentik provider's issuer (orbit-mcp), with its
-	// trailing slash, as in ORBIT_OIDC_ISSUER.
+	// Issuer is the authentik provider's issuer (orbit-mcp), with its trailing slash, as in ORBIT_OIDC_ISSUER.
 	Issuer       string
 	ClientID     string
 	ClientSecret string
-	// RedirectHosts are the hosts a registered client may redirect to
-	// (exact, or a subdomain of one). A loopback address is always allowed,
-	// for local clients.
+	// RedirectHosts are the hosts a registered client may redirect to (exact, or a subdomain of one). A loopback address is always allowed, for local clients.
 	RedirectHosts []string
 	Client        *http.Client
 
@@ -54,17 +43,13 @@ type upstreamMeta struct {
 	Token         string `json:"token_endpoint"`
 }
 
-// Lifetimes of what the proxy seals. A state covers one sign-in at
-// authentik; a code is exchanged by the client within seconds of the
-// redirect (RFC 6749 recommends at most 10 minutes).
+// Lifetimes of what the proxy seals. A state covers one sign-in at authentik; a code is exchanged by the client within seconds of the redirect (RFC 6749 recommends at most 10 minutes).
 const (
 	stateTTL = 15 * time.Minute
 	codeTTL  = 2 * time.Minute
 )
 
-// upstreamScope is what orbit asks authentik for: profile carries
-// preferred_username and groups, which the verifier requires, and
-// offline_access a refresh token so a connector stays signed in.
+// upstreamScope is what orbit asks authentik for: profile carries preferred_username and groups, which the verifier requires, and offline_access a refresh token so a connector stays signed in.
 const upstreamScope = "openid profile email offline_access"
 
 // DefaultRedirectHosts are the Claude apps' callback hosts.
@@ -104,8 +89,7 @@ func metaHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "max-age=300")
 }
 
-// protectedResource is RFC 9728 metadata: /mcp is protected by orbit's
-// own authorization server.
+// protectedResource is RFC 9728 metadata: /mcp is protected by orbit's own authorization server.
 func (s *Server) protectedResource(w http.ResponseWriter, _ *http.Request) {
 	metaHeaders(w)
 	base := s.publicURL()
@@ -141,8 +125,7 @@ type oauthClient struct {
 	Name      string   `json:"n,omitempty"`
 }
 
-// oauthRegister is RFC 7591 registration. Every client is public (PKCE,
-// no secret); its id seals its redirect URIs, so nothing is stored.
+// oauthRegister is RFC 7591 registration. Every client is public (PKCE, no secret); its id seals its redirect URIs, so nothing is stored.
 func (s *Server) oauthRegister(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RedirectURIs []string `json:"redirect_uris"`
@@ -260,8 +243,7 @@ func (s *Server) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, up.Authorization+"?"+v.Encode(), http.StatusFound)
 }
 
-// oauthCode is the code orbit gives the client: authentik's tokens, bound
-// to the client, its redirect and its PKCE challenge.
+// oauthCode is the code orbit gives the client: authentik's tokens, bound to the client, its redirect and its PKCE challenge.
 type oauthCode struct {
 	Kind      string      `json:"k"`
 	ClientID  string      `json:"c"`
@@ -270,8 +252,7 @@ type oauthCode struct {
 	Tokens    tokenAnswer `json:"t"`
 }
 
-// oauthRefresh is the refresh token orbit gives the client: authentik's,
-// usable only through orbit (it needs orbit's client secret anyway).
+// oauthRefresh is the refresh token orbit gives the client: authentik's, usable only through orbit (it needs orbit's client secret anyway).
 type oauthRefresh struct {
 	Kind     string `json:"k"`
 	ClientID string `json:"c"`
@@ -316,8 +297,7 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		back(url.Values{"error": {"access_denied"}, "error_description": {err.Error()}})
 		return
 	}
-	// Check the person now, so a sign-in orbit would refuse fails here with
-	// the reason rather than as a connector that never works.
+	// Check the person now, so a sign-in orbit would refuse fails here with the reason rather than as a connector that never works.
 	if s.Verifier != nil {
 		if _, err := s.Verifier.Verify(r.Context(), tok.AccessToken); err != nil {
 			var ae *auth.Error
@@ -389,8 +369,7 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// tokenResponse answers with authentik's access token and orbit's sealed
-// form of its refresh token (the previous one when authentik sent none).
+// tokenResponse answers with authentik's access token and orbit's sealed form of its refresh token (the previous one when authentik sent none).
 func (s *Server) tokenResponse(w http.ResponseWriter, clientID string, t tokenAnswer, prevRefresh string) {
 	upstream := t.RefreshToken
 	if upstream == "" {
@@ -419,8 +398,7 @@ func oauthError(w http.ResponseWriter, status int, code, desc string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": code, "error_description": desc})
 }
 
-// meta is authentik's endpoints, from the provider's discovery document,
-// fetched once.
+// meta is authentik's endpoints, from the provider's discovery document, fetched once.
 func (o *OAuthProxy) meta(ctx context.Context) (*upstreamMeta, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -495,8 +473,7 @@ func (o *OAuthProxy) client() *http.Client {
 	return http.DefaultClient
 }
 
-// spend marks a code used; false when it already was. Per instance: a code
-// replayed to the other instance of a rollout within codeTTL is the gap.
+// spend marks a code used; false when it already was. Per instance: a code replayed to the other instance of a rollout within codeTTL is the gap.
 func (o *OAuthProxy) spend(code string) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -545,8 +522,7 @@ func (o *OAuthProxy) seal(v any, ttl time.Duration) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(gcm.Seal(nonce, nonce, plain, nil)), nil
 }
 
-// open unseals s into v, refusing an expired one or one of another kind
-// (a state is never accepted as a code).
+// open unseals s into v, refusing an expired one or one of another kind (a state is never accepted as a code).
 func (o *OAuthProxy) open(s, kind string, v any) error {
 	raw, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {

@@ -337,14 +337,7 @@ first, `{"versions": [{"id": 12, "run_id": "uuid", "content": "<markdown>",
 
 ## MCP
 
-`/mcp` is an MCP server (Streamable HTTP, stateless) on both listeners, so
-the Claude apps and Claude Code can talk to orbit's agents. It takes what
-`/api/v1` takes on the same listener: an authentik access token (verified
-as above; the person is the author and decider), and on the internal
-listener the operator token. Without a valid token it answers `401` with
-`WWW-Authenticate: Bearer resource_metadata="<public_url>/.well-known/oauth-protected-resource/mcp"`.
-Every request stands alone (no `Mcp-Session-Id`), so a call may land on
-either instance of a rollout.
+`/mcp` is an MCP server (Streamable HTTP, stateless) on both listeners, so the Claude apps and Claude Code can talk to orbit's agents. It takes what `/api/v1` takes on the same listener: an authentik access token (verified as above; the person is the author and decider), and on the internal listener the operator token. Without a valid token it answers `401` with `WWW-Authenticate: Bearer resource_metadata="<public_url>/.well-known/oauth-protected-resource/mcp"`. Every request stands alone (no `Mcp-Session-Id`), so a call may land on either instance of a rollout.
 
 | tool | arguments | returns |
 |---|---|---|
@@ -357,27 +350,13 @@ either instance of a rollout.
 | `list_actions` | `agent`, `status` (default `pending`; `all`) | `actions` |
 | `approve_action`, `reject_action` | `action_id` | the decided `action`; a decided one is an error |
 
-- **Waiting.** `send_message` and `create_conversation` wait for the run
-  they woke up to `wait_seconds` (default 45, at most 300; `-1` returns at
-  once). A run still going when the wait ends is returned with its status
-  and a `note` to call `wait_for_reply`. A message that woke no run
-  (`wake_on_message` off) says so in `note`.
-- **Streaming.** When the call carries a `progressToken`, the wait sends
-  the run's narration (the stream's `text` and `tool` events, a tool as
-  `<name> <summary>`) as progress notifications on the call's response.
-- Results are one text content block of indented JSON. A tool error (an
-  unknown agent, a missing field, a store conflict) is a tool result with
-  `isError`.
+- **Waiting.** `send_message` and `create_conversation` wait for the run they woke up to `wait_seconds` (default 45, at most 300; `-1` returns at once). A run still going when the wait ends is returned with its status and a `note` to call `wait_for_reply`. A message that woke no run (`wake_on_message` off) says so in `note`.
+- **Streaming.** When the call carries a `progressToken`, the wait sends the run's narration (the stream's `text` and `tool` events, a tool as `<name> <summary>`) as progress notifications on the call's response.
+- Results are one text content block of indented JSON. A tool error (an unknown agent, a missing field, a store conflict) is a tool result with `isError`.
 
 ### Signing in: orbit's OAuth proxy
 
-authentik has no dynamic client registration, which the Claude apps
-require, so orbit is the authorization server an MCP client sees, and
-authentik signs the person in under orbit's own client. Nothing is
-stored: client ids, the state sent through authentik, codes and refresh
-tokens are sealed (AES-GCM) under a key derived from `ORBIT_API_TOKEN`, so
-either instance can finish a flow and rotating that token ends every
-registration and refresh token (a connector is then re-added).
+authentik has no dynamic client registration, which the Claude apps require, so orbit is the authorization server an MCP client sees, and authentik signs the person in under orbit's own client. Nothing is stored: client ids, the state sent through authentik, codes and refresh tokens are sealed (AES-GCM) under a key derived from `ORBIT_API_TOKEN`, so either instance can finish a flow and rotating that token ends every registration and refresh token (a connector is then re-added).
 
 | path | |
 |---|---|
@@ -388,8 +367,7 @@ registration and refresh token (a connector is then re-added).
 | `GET /oauth/callback` | authentik's redirect: exchanges its code, checks the access token as `/mcp` would (so a person outside the group fails here, with the reason), and redirects to the client with a code (valid 2 minutes, once) and `iss` |
 | `POST /oauth/token` | `authorization_code` (with `code_verifier`, the same `client_id` and `redirect_uri`) or `refresh_token`; returns authentik's access token and orbit's sealed refresh token, which refreshes through authentik |
 
-The access token is authentik's own (the `orbit-mcp` provider), so its
-issuer and client id are accepted wherever an authentik token is.
+The access token is authentik's own (the `orbit-mcp` provider), so its issuer and client id are accepted wherever an authentik token is.
 
 | variable | meaning |
 |---|---|
@@ -398,13 +376,7 @@ issuer and client id are accepted wherever an authentik token is.
 | `ORBIT_MCP_OAUTH_CLIENT_SECRET` | that provider's client secret (a confidential client). |
 | `ORBIT_MCP_REDIRECT_HOSTS` | comma list of hosts a client may redirect to (the host or a subdomain of it), default `claude.ai,claude.com`. Loopback is always allowed. |
 
-`ORBIT_OIDC_GROUP` is required with the issuer. The authentik provider
-needs the redirect URI `<public_url>/oauth/callback` (strict), the
-`openid`, `email`, `profile` and `offline_access` scope mappings (profile
-carries `preferred_username` and `groups`), the `authorization_code` and
-`refresh_token` grants, and the application bound to the group.
-traefik must route `/mcp`, `/.well-known/oauth-` and `/oauth/` past
-forward-auth, as it does `/api/`.
+`ORBIT_OIDC_GROUP` is required with the issuer. The authentik provider needs the redirect URI `<public_url>/oauth/callback` (strict), the `openid`, `email`, `profile` and `offline_access` scope mappings (profile carries `preferred_username` and `groups`), the `authorization_code` and `refresh_token` grants, and the application bound to the group. traefik must route `/mcp`, `/.well-known/oauth-` and `/oauth/` past forward-auth, as it does `/api/`.
 
 ## Usage
 

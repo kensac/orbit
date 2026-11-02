@@ -172,8 +172,7 @@ func TestMCPOperatorTokenOnTheInternalListener(t *testing.T) {
 	}
 }
 
-// TestOAuthProxy walks the sign-in an MCP client makes: register,
-// authorize (to authentik and back), exchange the code with PKCE, refresh.
+// TestOAuthProxy walks the sign-in an MCP client makes: register, authorize (to authentik and back), exchange the code with PKCE, refresh.
 func TestOAuthProxy(t *testing.T) {
 	var v *env
 	var refreshes int

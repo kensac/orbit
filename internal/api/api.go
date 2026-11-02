@@ -50,9 +50,7 @@ type Server struct {
 	// internal listener's POST /api/v1/drain starts it. Nil is never
 	// draining.
 	Drain *engine.Drain
-	// OAuth, when set, serves the authorization server MCP clients sign in
-	// through (oauth.go) on the public listener. Without it /mcp still
-	// takes an authentik token from a client that has one.
+	// OAuth, when set, serves the authorization server MCP clients sign in through (oauth.go) on the public listener. Without it /mcp still takes an authentik token from a client that has one.
 	OAuth *OAuthProxy
 }
 

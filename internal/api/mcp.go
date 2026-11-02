@@ -19,30 +19,21 @@ import (
 	"github.com/kensac/orbit/internal/store"
 )
 
-// MCP: orbit's agents as tools for an MCP client (the Claude apps), over
-// Streamable HTTP at /mcp. The same store calls the JSON API makes, with the
-// same person: the token's preferred_username is the author and decider.
+// MCP: orbit's agents as tools for an MCP client (the Claude apps), over Streamable HTTP at /mcp. The same store calls the JSON API makes, with the same person: the token's preferred_username is the author and decider.
 
-// mcpWaitDefault is how long send_message waits for the reply when the
-// caller does not say: inside the minute a client keeps a tool call open
-// without complaint, and long enough for a short answer.
+// mcpWaitDefault is how long send_message waits for the reply when the caller does not say: inside the minute a client keeps a tool call open without complaint, and long enough for a short answer.
 const mcpWaitDefault = 45 * time.Second
 
-// mcpWaitMax bounds one wait. A longer run is waited for again with
-// wait_for_reply, so no tool call outlives a client's timeout by much.
+// mcpWaitMax bounds one wait. A longer run is waited for again with wait_for_reply, so no tool call outlives a client's timeout by much.
 const mcpWaitMax = 5 * time.Minute
 
 // mcpPoll is how often a wait reads the run, as the stream does (streamPoll).
 const mcpPoll = 500 * time.Millisecond
 
-// mcpThreadLimit is read_thread's default page: the recent exchange, small
-// enough for a model's context.
+// mcpThreadLimit is read_thread's default page: the recent exchange, small enough for a model's context.
 const mcpThreadLimit = 20
 
-// mcpHandler serves /mcp. Stateless: every request stands alone, so a call
-// lands on whichever instance traefik picks (two run during a rollout) and
-// nothing is lost when one exits. Progress notifications ride on the
-// request's own response stream.
+// mcpHandler serves /mcp. Stateless: every request stands alone, so a call lands on whichever instance traefik picks (two run during a rollout) and nothing is lost when one exits. Progress notifications ride on the request's own response stream.
 func (s *Server) mcpHandler(internal bool) http.Handler {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "orbit", Version: "1"}, &mcp.ServerOptions{
 		Instructions: "orbit runs standing agents. list_agents shows them; send_message talks to one " +
@@ -60,8 +51,7 @@ func (s *Server) mcpHandler(internal bool) http.Handler {
 	})(h)
 }
 
-// mcpVerify accepts what /api/v1 accepts on the same listener: an
-// authentik token, and on the internal listener the operator token.
+// mcpVerify accepts what /api/v1 accepts on the same listener: an authentik token, and on the internal listener the operator token.
 func (s *Server) mcpVerify(internal bool) mcpauth.TokenVerifier {
 	return func(ctx context.Context, raw string, _ *http.Request) (*mcpauth.TokenInfo, error) {
 		if internal && s.Token != "" && subtle.ConstantTimeCompare([]byte(raw), []byte(s.Token)) == 1 {
@@ -344,11 +334,7 @@ func (s *Server) mcpAgent(name string) (*spec.Agent, error) {
 	return a, nil
 }
 
-// mcpWait waits up to seconds (0: mcpWaitDefault; negative: not at all) for
-// run id to finish, sending its narration as progress notifications when
-// the client asked for progress, and puts the run (a thread run item) in
-// out["reply"]. A run still going when the wait ends is reported as such,
-// with what to call next.
+// mcpWait waits up to seconds (0: mcpWaitDefault; negative: not at all) for run id to finish, sending its narration as progress notifications when the client asked for progress, and puts the run (a thread run item) in out["reply"]. A run still going when the wait ends is reported as such, with what to call next.
 func (s *Server) mcpWait(ctx context.Context, req *mcp.CallToolRequest, id string, seconds int, out map[string]any) error {
 	wait := mcpWaitDefault
 	switch {
@@ -389,8 +375,7 @@ func (s *Server) mcpWait(ctx context.Context, req *mcp.CallToolRequest, id strin
 	return nil
 }
 
-// mcpNarrator turns a run's transcript into progress notifications, the
-// MCP form of /runs/{id}/stream's text and tool events.
+// mcpNarrator turns a run's transcript into progress notifications, the MCP form of /runs/{id}/stream's text and tool events.
 type mcpNarrator struct {
 	s        *Server
 	req      *mcp.CallToolRequest

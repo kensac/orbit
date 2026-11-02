@@ -607,8 +607,7 @@ func oidcVerifier() (*auth.Verifier, error) {
 	issuers := auth.SplitList(os.Getenv("ORBIT_OIDC_ISSUER"))
 	clients := auth.SplitList(os.Getenv("ORBIT_OIDC_CLIENT_IDS"))
 	group := strings.TrimSpace(os.Getenv("ORBIT_OIDC_GROUP"))
-	// The MCP sign-in's provider issues the tokens /mcp is called with, so
-	// they are accepted wherever an authentik token is.
+	// The MCP sign-in's provider issues the tokens /mcp is called with, so they are accepted wherever an authentik token is.
 	if is, id := mcpOAuthEnv(); is != "" && id != "" {
 		if !slices.Contains(issuers, is) {
 			issuers = append(issuers, is)
@@ -637,8 +636,7 @@ func mcpOAuthEnv() (issuer, clientID string) {
 	return issuer, strings.TrimSpace(os.Getenv("ORBIT_MCP_OAUTH_CLIENT_ID"))
 }
 
-// mcpOAuth builds the MCP sign-in proxy from the environment, or nil when
-// ORBIT_MCP_OAUTH_ISSUER is unset.
+// mcpOAuth builds the MCP sign-in proxy from the environment, or nil when ORBIT_MCP_OAUTH_ISSUER is unset.
 func mcpOAuth(token string) (*api.OAuthProxy, error) {
 	issuer, id := mcpOAuthEnv()
 	secret := os.Getenv("ORBIT_MCP_OAUTH_CLIENT_SECRET")
