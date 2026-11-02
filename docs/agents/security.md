@@ -204,7 +204,8 @@ without docker):
   (every tailnet address), so an allowed name that resolves to one cannot
   reach the host's networks.
 - A build never shares a network with the workstation profile's open proxy: workstation sandboxes join `ORBIT_SANDBOX_WORKSTATION_NETWORK`, which sandboxd requires with the open proxy and refuses to be the build network, and both must be internal (`TestWorkstationOwnNetwork`, `TestConfigValidate`). Otherwise code in a build could name the open proxy and leave its allowlist behind.
-- The environment is sandboxd's fixed list plus one backend credential (`sandbox.AllowedEnv` permits `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, and an attach carrying both is refused); no orbit secret, no GitHub token. orbit chooses it as for an ordinary run, for builds and sandboxed chats alike (`build.SandboxEnv` through `claudeproto.Credential` and `claudeproto.Env`): the subscription token when set, else the API key.
+- The environment is sandboxd's fixed list plus a credential proxy token in one backend credential's place; no orbit secret, no GitHub token, and never the credential's value. orbit chooses the credential as for an ordinary run, for builds and sandboxed chats alike (`build.SandboxEnv` through `claudeproto.Credential` and `claudeproto.Env`): the subscription token when set, else the API key; `sandbox.AllowedEnv` permits `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` in an attach, refuses one carrying both, and sandboxd replaces the value with the token before the process starts (`TestServerFlow` opens the token sandboxd sent; `TestIntegrationIsolation` reads the variable inside a real sandbox).
+- **The backend is reached only through `orbit credproxy`** (`internal/credproxy`): `ANTHROPIC_BASE_URL` points at it and `NO_PROXY` names it. The token is the credential sealed (AES-256-GCM) under `ORBIT_CREDPROXY_KEY`, with the container's address on the sandbox network and the container's expiry. The proxy forwards only `POST /v1/messages` and `POST /v1/messages/count_tokens` (no query but `beta=true`) to `api.anthropic.com`, and only for a token that opens, presented in its own kind's header, from that address, before that time; everything else is 401 or 403 and never reaches the backend. It strips cookies, proxy and forwarding headers and any credential the request carried, dials only a public address for the backend's name, and streams the answer unbuffered. Unit-tested in `internal/credproxy` (every refusal, streaming, the public-address dial) and from inside a real sandbox by `TestIntegrationIsolation` (its token forwarded to the Messages API, another path and a forged token refused by the proxy). sandboxd refuses to start without `ORBIT_SANDBOX_CREDPROXY` and `ORBIT_CREDPROXY_KEY`, so no configuration hands a sandbox the credential.
 - Callers cannot pass docker options: the create request is the tar and a
   run id, the attach request is argv and env (unknown fields refused); the
   unit tests pin the full create document and reject any container the
@@ -220,14 +221,8 @@ without docker):
 
 **Not guaranteed:**
 
-- **The backend credential is readable by code the model runs** (same uid;
-  `/proc/<pid>/environ`), and an allowed host can carry it out: the Go
-  module proxy fetches any module path a request names, from a host the
-  path names, so a request for a crafted path is a message to whoever owns
-  that host. Hence tickets.md's precondition (only `kensac/orbit`, whose
-  diff is reviewed, until the credential proxy keeps the token out) and the
-  diff policy's exact-match scan before anything is committed. Treat every
-  allowlisted host as a channel for anything the sandbox holds.
+- **The token spends the credential while the sandbox lives.** Code the model runs can read it (same uid; `/proc/<pid>/environ`) and call the Messages API through the proxy until the container's expiry, as the CLI itself does; it cannot read the credential, use the token from anywhere else, or reach another backend endpoint with it. A leaked token is ciphertext of the credential: whoever also holds `ORBIT_CREDPROXY_KEY` (sandboxd's and the proxy's environment only) recovers the credential from it, so the diff policy refuses the token's pattern as it refuses the credential's exact value.
+- **An allowed host is still a channel for anything the session read**: the Go module proxy fetches any module path a request names, from a host the path names, so a request for a crafted path is a message to whoever owns that host. Hence tickets.md's precondition (only `kensac/orbit`, whose diff is reviewed, until the credential proxy is deployed) and the diff policy's scans before anything is committed. Treat every allowlisted host as a channel for anything the sandbox holds. With the proxy deployed the build allowlist does not need `api.anthropic.com` and should not have it (deployment.md): an open route there carries data out under any API key the model brings.
 - **The kernel is shared** with the host, hetzner today. A container escape is root on hetzner,
   which holds every other secret in the fleet; `ORBIT_SANDBOX_RUNTIME=
   runsc` (gVisor) narrows this where installed.
@@ -244,7 +239,7 @@ without docker):
 
 ## Sandboxed chats
 
-A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as a workstation when sandboxd is configured) runs Claude Code in a sandboxd container with `bypassPermissions`; a workstation has every tool. There is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the backend credential is in the container, readable by any command the model runs. A workstation's egress reaches any public host (`orbit egress` with `*`, still never a private, loopback, link-local or tailnet address), so the credential and anything the session read can leave the box, by design: it holds no GitHub token, no orbit secret, and nothing of the person's beyond what they gave the conversation. Pushing, merging, mail and spend stay orbit's actions, under the agent's rules. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
+A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as a workstation when sandboxd is configured) runs Claude Code in a sandboxd container with `bypassPermissions`; a workstation has every tool. There is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the container holds a credential proxy token, not the backend credential: any command the model runs can spend the credential through the proxy while the sandbox lives, and cannot carry it out. A person's own `claude` terminal in a box (docs/workspace.md, direct mode) holds the real subscription credential, by choice; orbit's runs never do. A workstation's egress reaches any public host (`orbit egress` with `*`, still never a private, loopback, link-local or tailnet address), so anything the session read can leave the box, by design: it holds no GitHub token, no orbit secret, and nothing of the person's beyond what they gave the conversation. Pushing, merging, mail and spend stay orbit's actions, under the agent's rules. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
 
 ## Boxes and terminals
 
@@ -298,7 +293,7 @@ run; `internal/build`):
   (`tickets_one_building`, `tickets_one_merging`), and an attempt destroys
   any sandbox an interrupted attempt of its run left before it starts its
   own, so a build never holds two sandboxes.
-- **Not guaranteed**: the backend credential is in the sandbox (above);
+- **Not guaranteed**: the token spends the credential while the sandbox lives (above);
   everything the sandbox section says it does not guarantee holds for a
   build.
 

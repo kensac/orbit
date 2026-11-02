@@ -11,6 +11,8 @@ import (
 	"net/netip"
 	"regexp"
 	"strings"
+
+	"github.com/kensac/orbit/internal/credproxy"
 )
 
 // Config is sandboxd's own configuration, from its environment. Nothing in
@@ -41,6 +43,12 @@ type Config struct {
 	Runtime string
 	// Docker is the docker socket's path (ORBIT_SANDBOX_DOCKER_SOCKET).
 	Docker string
+	// CredProxy is `orbit credproxy`'s host:port on Network (ORBIT_SANDBOX_CREDPROXY): every sandbox's ANTHROPIC_BASE_URL, so the CLI reaches its backend only through it.
+	CredProxy string
+	// WorkstationCredProxy is the credential proxy's host:port on the workstation profile's network, when that differs (ORBIT_SANDBOX_WORKSTATION_CREDPROXY, default CredProxy): a proxy addressed by IP has one address per network.
+	WorkstationCredProxy string
+	// CredProxyKey seals the token a sandbox gets in place of the backend credential (ORBIT_CREDPROXY_KEY, shared with `orbit credproxy`, never given to a sandbox).
+	CredProxyKey string
 	// BoxImage is the workstation image agents' boxes run, pinned by
 	// digest (ORBIT_SANDBOX_BOX_IMAGE). Unset refuses boxes.
 	BoxImage string
@@ -79,9 +87,12 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		WorkstationProxy:   getenv("ORBIT_SANDBOX_WORKSTATION_PROXY"),
 		WorkstationNetwork: getenv("ORBIT_SANDBOX_WORKSTATION_NETWORK"),
 		Docker:             def("ORBIT_SANDBOX_DOCKER_SOCKET", "/var/run/docker.sock"),
+		CredProxy:          def("ORBIT_SANDBOX_CREDPROXY", "orbit-credproxy:3129"),
+		CredProxyKey:       getenv("ORBIT_CREDPROXY_KEY"),
 		BoxImage:           getenv("ORBIT_SANDBOX_BOX_IMAGE"),
 		BoxRuntime:         getenv("ORBIT_SANDBOX_BOX_RUNTIME"),
 	}
+	c.WorkstationCredProxy = def("ORBIT_SANDBOX_WORKSTATION_CREDPROXY", c.CredProxy)
 	return c, c.Validate()
 }
 
@@ -116,6 +127,17 @@ func (c Config) Validate() error {
 		if host, port, err := net.SplitHostPort(p); err != nil || host == "" || port == "" || strings.ContainsAny(host, "/@ ") {
 			errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_WORKSTATION_PROXY %q must be host:port", p))
 		}
+	}
+	if host, port, err := net.SplitHostPort(c.CredProxy); err != nil || host == "" || port == "" || strings.ContainsAny(host, "/@ ,") {
+		errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_CREDPROXY %q must be host:port", c.CredProxy))
+	}
+	if p := c.WorkstationCredProxy; p != "" {
+		if host, port, err := net.SplitHostPort(p); err != nil || host == "" || port == "" || strings.ContainsAny(host, "/@ ,") {
+			errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_WORKSTATION_CREDPROXY %q must be host:port", p))
+		}
+	}
+	if len(c.CredProxyKey) < credproxy.MinKeyLen {
+		errs = append(errs, fmt.Errorf("ORBIT_CREDPROXY_KEY must be at least %d characters: a sandbox never gets the backend credential, only a token sealed with it", credproxy.MinKeyLen))
 	}
 	if c.Runtime != "" && c.Runtime != "runsc" {
 		errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_RUNTIME %q: only runsc may replace the default runtime", c.Runtime))
