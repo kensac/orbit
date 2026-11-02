@@ -59,6 +59,9 @@ type Engine struct {
 	Harness string
 	// HeartbeatEvery overrides heartbeatEvery when set; tests shorten it.
 	HeartbeatEvery time.Duration
+	// NewSandbox is sandboxd's client for sandboxed chats; nil is
+	// sandbox.NewClient (tests replace it).
+	NewSandbox func(addr, token string) (runner.SandboxClient, error)
 	// Builder runs build runs (internal/build); nil fails them.
 	Builder *build.Runner
 	// Drain is this instance's drain; a draining instance starts no build
@@ -144,7 +147,8 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		return e.executeLearn(ctx, actx, snap, a, c, start, log)
 	}
 
-	st := &attemptState{}
+	st := &attemptState{cancel: make(chan struct{})}
+	go e.watchCancel(actx, c, st, a.Chat, lose)
 	out, res, err := e.attempt(actx, snap, a, c, log, st)
 	if errors.Is(context.Cause(actx), errLostClaim) {
 		// The run is another attempt's now; anything written here would be
@@ -166,6 +170,9 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 	if errors.As(err, &sk) {
 		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
 	}
+	if cr := (cancelledRun{}); errors.As(err, &cr) || errors.Is(context.Cause(actx), errCancelled) {
+		return e.cancelled(ctx, snap, a, c, start, cr.out, res)
+	}
 	if err != nil {
 		return e.fail(ctx, snap, a, c, start, err, res)
 	}
@@ -175,6 +182,49 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		e.saveSession(ctx, c, st.home, st.workdir, res.SessionID)
 	}
 	return e.succeed(ctx, snap, a, c, start, out, res)
+}
+
+// cancelPoll is how often a running attempt checks whether its person asked
+// it to stop: the stop button should feel immediate, and the read is one
+// indexed row.
+const cancelPoll = 2 * time.Second
+
+// watchCancel stops the attempt when its person asks: a chat turn is
+// interrupted through the CLI's control channel (it ends with what it has),
+// any other run's backend is cancelled.
+func (e *Engine) watchCancel(ctx context.Context, c *store.ClaimedRun, st *attemptState, chat bool, lose context.CancelCauseFunc) {
+	t := time.NewTicker(cancelPoll)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			asked, err := e.Store.CancelRequested(ctx, c.ID)
+			if err != nil || !asked {
+				continue
+			}
+			st.stop()
+			if !chat {
+				lose(errCancelled)
+			}
+			return
+		}
+	}
+}
+
+// cancelled ends a run its person stopped, with whatever reply it had.
+func (e *Engine) cancelled(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, start time.Time, out *Output, res *runner.Result) error {
+	rr := store.RunResult{Attempt: c.Attempt, Status: store.StatusCancelled, Error: "stopped by its person"}
+	if out != nil {
+		rr.Summary, rr.Report = out.Summary, out.Report
+	}
+	fillResult(&rr, res)
+	if err := e.Store.FinishRun(context.WithoutCancel(ctx), c.ID, rr); err != nil {
+		return err
+	}
+	metrics.RunFinished(c.Agent, store.StatusCancelled, runnerKind(snap, a), time.Since(start), rr.CostUSD)
+	return nil
 }
 
 // heartbeat keeps the attempt's claim alive and cancels the attempt with
@@ -486,7 +536,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if chat {
 		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
-			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel})
+			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec})
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr != nil)
 	if tk != nil {

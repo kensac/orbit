@@ -186,6 +186,10 @@ without docker):
 - Tunnelled traffic is opaque: the proxy sees hostnames, not requests, so
   it cannot tell a download from an upload to an allowed host.
 
+## Sandboxed chats
+
+A sandboxed chat agent (`sandbox: true`, the built-in `orbit` when sandboxd is configured) runs Claude Code in a sandboxd container with `bypassPermissions` and whatever tools its spec names (Bash, Edit, Write, ...): there is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the backend credential is in the container, readable by any command the model runs, and an allowlisted egress host can carry it out. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
+
 ## Build runs
 
 What a build's model can do, and what stops it (docs/tickets.md, The build

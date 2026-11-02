@@ -85,6 +85,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/agents/{name}/thread", s.thread)
 	api("GET /api/v1/agents/{name}/conversations", s.listConversations)
 	api("POST /api/v1/agents/{name}/conversations", s.createConversation)
+	api("POST /api/v1/conversations", s.createConversation)
 	api("GET /api/v1/conversations/{id}", s.getConversation)
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
@@ -92,6 +93,8 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/conversations/{id}/uploads", s.createUpload)
 	api("POST /api/v1/conversations/{id}/uploads/url", s.uploadURL)
 	api("GET /api/v1/conversations/{id}/uploads/{upload}", s.getUpload)
+	api("GET /api/v1/conversations/{id}/files", s.workspaceFiles)
+	api("GET /api/v1/conversations/{id}/files/{path...}", s.workspaceFile)
 	// The signature in the URL is the credential (uploads.go).
 	mux.HandleFunc("PUT /api/v1/uploads/signed", s.signedUpload)
 	api("GET /api/v1/agents/{name}/memory", s.memoryHistory)

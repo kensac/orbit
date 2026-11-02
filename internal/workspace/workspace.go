@@ -198,7 +198,9 @@ func Unpack(archive io.Reader, route Route, clear ...string) (files int, err err
 			if err != nil {
 				return files, fmt.Errorf("%s: %w", name, err)
 			}
-			_, err = io.Copy(f, tr)
+			// The total is bounded above (MaxBytes) and the archive's
+			// reader is limited, so no entry can grow without bound.
+			_, err = io.Copy(f, io.LimitReader(tr, h.Size))
 			if cerr := f.Close(); err == nil {
 				err = cerr
 			}

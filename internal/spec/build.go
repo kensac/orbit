@@ -110,6 +110,28 @@ func ValidGlob(p string) bool {
 	return true
 }
 
+// SandboxService is sandboxd's address and the variable holding its token.
+type SandboxService struct {
+	Sandboxd string `yaml:"sandboxd" json:"sandboxd"`
+	// TokenEnv defaults to ORBIT_SANDBOX_TOKEN.
+	TokenEnv string `yaml:"token_env,omitempty" json:"token_env,omitempty"`
+}
+
+// SandboxService is the sandboxd sandboxed chats use: the sandbox
+// section's, else the build section's; "" when there is none.
+func (d Deployment) SandboxService() (addr, tokenEnv string) {
+	switch {
+	case d.Sandbox != nil && d.Sandbox.Sandboxd != "":
+		addr, tokenEnv = d.Sandbox.Sandboxd, d.Sandbox.TokenEnv
+	case d.Build != nil:
+		addr, tokenEnv = d.Build.Sandboxd, d.Build.TokenEnv
+	}
+	if tokenEnv == "" {
+		tokenEnv = "ORBIT_SANDBOX_TOKEN"
+	}
+	return addr, tokenEnv
+}
+
 func (c *Config) validateBuild() []error {
 	b := c.Deployment.Build
 	if b == nil {

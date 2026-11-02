@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kensac/orbit/internal/runner"
@@ -29,7 +30,13 @@ type attemptState struct {
 	keeps       bool
 	sessionID   string
 	baseCostUSD float64
+	// cancel is closed when a person asks the run to stop.
+	cancel     chan struct{}
+	cancelOnce sync.Once
 }
+
+// stop closes cancel once.
+func (st *attemptState) stop() { st.cancelOnce.Do(func() { close(st.cancel) }) }
 
 // spent reads what the attempt's session had cost when it stopped, from
 // its transcript: (this attempt's share, the session's running total), nil

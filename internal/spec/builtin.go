@@ -48,7 +48,8 @@ func Builtins(d Deployment) []*Agent {
 	if runner == "" {
 		return nil
 	}
-	sandbox := d.Build != nil && d.Build.Sandboxd != ""
+	addr, _ := d.SandboxService()
+	sandbox := addr != ""
 	// Claude Code's own tools. Writing and running commands only in a
 	// sandbox: on orbit's host they would reach orbit's own files.
 	tools := []string{"WebSearch", "WebFetch", "Task", "TodoWrite"}

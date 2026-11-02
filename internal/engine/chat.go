@@ -35,7 +35,9 @@ func (e *Engine) chatDirs(conversationID string) (workdir, home string) {
 }
 
 // workspaceMark records which stored snapshot the local workspace is.
-func workspaceMark(workdir string) string { return filepath.Join(filepath.Dir(workdir), "workspace.sha256") }
+func workspaceMark(workdir string) string {
+	return filepath.Join(filepath.Dir(workdir), "workspace.sha256")
+}
 
 // workspaceHidden are paths of a workdir that are not the person's files:
 // this attempt's inputs (stored as artifacts) and the CLI's state.
@@ -87,14 +89,15 @@ var sandboxProject = runner.SandboxConfigDir[len(sandbox.WorkDir)+1:] + "/projec
 // CLI's config directory there, so a session resumes in any sandbox; on the
 // way back they land in HOME where orbit's session code looks for them.
 func (e *Engine) sandboxPlan(d spec.Deployment, c *store.ClaimedRun, workdir, home string, emit func(string, any)) (*runner.Sandbox, error) {
-	token, _ := e.Env(d.Build.TokenEnv)
+	addr, tokenEnv := d.SandboxService()
+	token, _ := e.Env(tokenEnv)
 	newClient := e.NewSandbox
 	if newClient == nil {
 		newClient = func(addr, token string) (runner.SandboxClient, error) { return sandbox.NewClient(addr, token) }
 	}
-	client, err := newClient(d.Build.Sandboxd, token)
+	client, err := newClient(addr, token)
 	if err != nil {
-		return nil, fmt.Errorf("sandboxd: %w (%s)", err, d.Build.TokenEnv)
+		return nil, fmt.Errorf("sandboxd: %w (%s)", err, tokenEnv)
 	}
 	cred, _ := e.Env(buildCredential)
 	if cred == "" {
@@ -333,4 +336,88 @@ func chatSummary(reply string) string {
 		s = string(r[:summaryMax])
 	}
 	return s
+}
+
+// chatTurn is what a chat run's turn needs from its attempt.
+type chatTurn struct {
+	workdir, home, inputsDir string
+	now                      time.Time
+	run                      promptRun
+	rc                       *store.RunContext
+	convo                    []store.ConversationItem
+	inputs                   []runner.Input
+	types                    []actions.Type
+	sess                     *runner.Session
+	harness                  *runner.Harness
+	emit                     func(string, any)
+	cancel                   <-chan struct{}
+	rec                      *recovery
+}
+
+// errCancelled is a run a person stopped; Execute records it cancelled.
+var errCancelled = errors.New("stopped by its person")
+
+// cancelledRun carries what a stopped run had produced.
+type cancelledRun struct{ out *Output }
+
+func (cancelledRun) Error() string { return errCancelled.Error() }
+func (cancelledRun) Unwrap() error { return errCancelled }
+
+// chatTurn runs a chat agent's turn and reads its outcome from the reply and
+// the tools it called.
+func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, r runner.Runner, t chatTurn) (*Output, *runner.Result, error) {
+	d := snap.Config.Deployment
+	system := chatContract(a, t.types, a.Sandbox)
+	if t.run.Known != "" {
+		system += "\n" + knownContract
+	}
+	prompt := chatPrompt(a, t.now, t.run, t.rc, t.convo)
+	if t.rec != nil {
+		prompt = recoveryPrompt(t.rec, t.rc, t.now.Location())
+	}
+	for name, b := range map[string]string{"system.md": system, "prompt.md": prompt} {
+		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", name, "text/markdown", []byte(b)); err != nil {
+			return nil, nil, err
+		}
+	}
+	st := &chatState{}
+	chat := e.chatTools(a, t.types, d.Defaults.MemoryMaxBytes, st)
+	chat.Interrupt = t.cancel
+	if a.Sandbox {
+		sb, err := e.sandboxPlan(d, c, t.workdir, t.home, t.emit)
+		if err != nil {
+			return nil, nil, err
+		}
+		chat.Sandbox = sb
+		for _, files := range t.run.Attached {
+			for _, f := range files {
+				chat.Push = append(chat.Push, f.Path)
+			}
+		}
+		for _, in := range t.inputs {
+			chat.Push = append(chat.Push, in.Path)
+		}
+	}
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
+	defer cancel()
+	res, err := r.Run(runCtx, runner.Request{
+		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
+		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat,
+	}, func(ev runner.Event) { t.emit(ev.Kind, ev.Payload) })
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
+	}
+	if err != nil {
+		return nil, res, err
+	}
+	if len(res.Output) > 0 {
+		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "out", "output.json", "application/json", res.Output); err != nil {
+			return nil, res, err
+		}
+	}
+	out := chatOutput(res.Reply, st)
+	if res.Interrupted {
+		return nil, res, cancelledRun{out: out}
+	}
+	return out, res, nil
 }

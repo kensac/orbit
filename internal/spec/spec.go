@@ -61,6 +61,9 @@ type Deployment struct {
 	// Build is how orbit builds approved tickets (build.go). Without it no
 	// ticket is built.
 	Build *Build `yaml:"build,omitempty" json:"build,omitempty"`
+	// Sandbox is sandboxd for sandboxed chat agents, when it is not the
+	// build section's (SandboxService).
+	Sandbox *SandboxService `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
 	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
 }
@@ -666,6 +669,9 @@ func (c *Config) Validate() error {
 		errs = append(errs, c.validateAgent(c.Agents[n])...)
 	}
 	errs = append(errs, c.validateBuild()...)
+	if sb := c.Deployment.Sandbox; sb != nil && !strings.HasPrefix(sb.Sandboxd, "unix:/") && !strings.Contains(sb.Sandboxd, ":") {
+		errs = append(errs, fmt.Errorf("sandbox: sandboxd %q is neither host:port nor unix:/path", sb.Sandboxd))
+	}
 	errs = append(errs, c.validateMail()...)
 	return errors.Join(errs...)
 }
@@ -833,8 +839,8 @@ func (c *Config) validateAgent(a *Agent) []error {
 		if !a.Chat {
 			at("sandbox: needs chat: true")
 		}
-		if c.Deployment.Build == nil || c.Deployment.Build.Sandboxd == "" {
-			at("sandbox: needs build.sandboxd in orbit.yaml")
+		if addr, _ := c.Deployment.SandboxService(); addr == "" {
+			at("sandbox: needs sandboxd in orbit.yaml (a sandbox: or build: section)")
 		}
 	}
 	if ss := a.Session; ss != nil {
