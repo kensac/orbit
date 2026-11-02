@@ -36,6 +36,18 @@ CREATE TABLE build_decisions (
     UNIQUE (run_id, attempt, request_id)
 );
 
+-- Every sandbox a build attempt created, so a later attempt destroys what
+-- an interrupted one left (sandboxd's own lifetime is the backstop) and a
+-- build never holds two.
+CREATE TABLE build_sandboxes (
+    sandbox_id    text PRIMARY KEY,
+    run_id        uuid NOT NULL REFERENCES runs (id),
+    attempt       integer NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    destroyed_at  timestamptz
+);
+CREATE INDEX build_sandboxes_open ON build_sandboxes (run_id) WHERE destroyed_at IS NULL;
+
 -- The github:merge action the ticket loop proposed for a ticket's PR.
 ALTER TABLE tickets ADD COLUMN merge_action_id uuid REFERENCES actions (id);
 
@@ -49,6 +61,7 @@ CREATE UNIQUE INDEX tickets_one_merging ON tickets (repo) WHERE status IN ('merg
 DROP INDEX tickets_one_merging;
 DROP INDEX tickets_one_building;
 ALTER TABLE tickets DROP COLUMN merge_action_id;
+DROP TABLE build_sandboxes;
 DROP TABLE build_decisions;
 DROP TABLE ticket_builds;
 ALTER TABLE runs DROP CONSTRAINT runs_trigger_check;

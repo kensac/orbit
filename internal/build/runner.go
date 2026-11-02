@@ -76,7 +76,26 @@ type Deps struct {
 	Artifact func(direction, name, mediaType string, content []byte) error
 	// Record stores a permission decision before it is answered.
 	Record func(PermissionRequest, Decision) error
+	// Sandboxes is the run's record of the sandboxes its attempts made.
+	Sandboxes Ledger
+	// Stop, checked just before a sandbox is created, says the attempt
+	// must not start one (the instance is draining, or lost its claim).
+	Stop func() error
 }
+
+// Ledger records a run's sandboxes, so an attempt that follows an
+// interrupted one destroys what it left before creating its own: a build
+// never holds two sandboxes, and none outlives its run by more than
+// sandboxd's lifetime.
+type Ledger interface {
+	Open() ([]string, error)
+	Record(id string) error
+	Destroyed(id string) error
+}
+
+// ErrStopped is a build that did not start its sandbox because its attempt
+// must stop: it is handed back, not failed.
+var ErrStopped = errors.New("the build attempt was stopped before its sandbox started")
 
 // Result is a delivered build.
 type Result struct {
@@ -283,15 +302,51 @@ func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git) (*Output, 
 		return nil, costs{}, err
 	}
 	sb := d.Sandbox
+	if d.Sandboxes != nil {
+		// An earlier attempt of this run was interrupted with its sandbox
+		// up: it is destroyed, not reattached. Its CLI conversation lived
+		// in the attach stream that ended with that attempt, so nothing in
+		// it can be continued; the branch gate above already covers an
+		// attempt that got as far as pushing.
+		left, err := d.Sandboxes.Open()
+		if err != nil {
+			return nil, costs{}, err
+		}
+		for _, id := range left {
+			if err := sb.Destroy(ctx, id); err != nil {
+				return nil, costs{}, fmt.Errorf("destroy sandbox %s left by an earlier attempt: %w", id[:12], err)
+			}
+			if err := d.Sandboxes.Destroyed(id); err != nil {
+				return nil, costs{}, err
+			}
+			d.emit("orbit.build", map[string]any{"step": "reconcile", "destroyed": id})
+		}
+	}
+	if d.Stop != nil {
+		if err := d.Stop(); err != nil {
+			return nil, costs{}, fmt.Errorf("%w: %w", ErrStopped, err)
+		}
+	}
 	cr, err := sb.Create(ctx, j.RunID, tree)
 	if err != nil {
 		return nil, costs{}, fmt.Errorf("create the sandbox: %w", err)
 	}
-	defer func() {
+	destroy := func() {
 		if err := sb.Destroy(context.WithoutCancel(ctx), cr.ID); err != nil {
 			d.emit("orbit.build", map[string]any{"step": "destroy", "error": err.Error()})
+			return
 		}
-	}()
+		if d.Sandboxes != nil {
+			_ = d.Sandboxes.Destroyed(cr.ID)
+		}
+	}
+	if d.Sandboxes != nil {
+		if err := d.Sandboxes.Record(cr.ID); err != nil {
+			destroy()
+			return nil, costs{}, fmt.Errorf("%w: record the sandbox: %w", ErrStopped, err)
+		}
+	}
+	defer destroy()
 	d.emit("orbit.build", map[string]any{"step": "sandbox", "id": cr.ID, "expires_at": cr.ExpiresAt})
 
 	policy := Policy{Root: sandbox.WorkDir, Protected: j.Policy.Protected, Commands: j.Policy.Argv()}

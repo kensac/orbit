@@ -3,7 +3,6 @@ package build
 import (
 	"archive/tar"
 	"bufio"
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"

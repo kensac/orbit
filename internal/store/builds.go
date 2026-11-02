@@ -227,10 +227,50 @@ type Decision struct {
 // RecordDecision stores one permission decision. The handler writes it
 // before it answers, and denies when this fails, so no allow is ever
 // unrecorded.
+// Like every write of a running attempt it is fenced by the attempt: one
+// that lost its claim records nothing, so it allows nothing.
 func (s *Store) RecordDecision(ctx context.Context, d Decision) error {
-	_, err := s.Pool.Exec(ctx, `INSERT INTO build_decisions (run_id, attempt, request_id, tool, input, allowed, message)
-		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''))`, d.RunID, d.Attempt, d.RequestID, d.Tool, []byte(d.Input), d.Allowed, d.Message)
+	tag, err := s.Pool.Exec(ctx, `INSERT INTO build_decisions (run_id, attempt, request_id, tool, input, allowed, message)
+		SELECT $1, $2, $3, $4, $5, $6, NULLIF($7, '') FROM runs WHERE id = $1 AND status = 'running' AND attempt = $2`,
+		d.RunID, d.Attempt, d.RequestID, d.Tool, []byte(d.Input), d.Allowed, d.Message)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("decision for run %s attempt %d: %w (not its running claim)", d.RunID, d.Attempt, ErrConflict)
+	}
+	return nil
+}
+
+// RecordSandbox records a sandbox a running build attempt created, fenced
+// like RecordDecision: an attempt that lost its claim gets ErrConflict and
+// destroys the sandbox it just made.
+func (s *Store) RecordSandbox(ctx context.Context, runID string, attempt int, sandboxID string) error {
+	tag, err := s.Pool.Exec(ctx, `INSERT INTO build_sandboxes (sandbox_id, run_id, attempt)
+		SELECT $3, $1, $2 FROM runs WHERE id = $1 AND status = 'running' AND attempt = $2`, runID, attempt, sandboxID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("sandbox for run %s attempt %d: %w (not its running claim)", runID, attempt, ErrConflict)
+	}
+	return nil
+}
+
+// SandboxDestroyed marks a sandbox gone.
+func (s *Store) SandboxDestroyed(ctx context.Context, sandboxID string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE build_sandboxes SET destroyed_at = now() WHERE sandbox_id = $1 AND destroyed_at IS NULL`, sandboxID)
 	return err
+}
+
+// OpenSandboxes returns the sandboxes a run's attempts created and did not
+// see destroyed: what an interrupted attempt left behind.
+func (s *Store) OpenSandboxes(ctx context.Context, runID string) ([]string, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT sandbox_id FROM build_sandboxes WHERE run_id = $1 AND destroyed_at IS NULL ORDER BY created_at`, runID)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 // Decisions returns a run's permission decisions in order.
