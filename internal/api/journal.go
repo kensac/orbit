@@ -28,6 +28,10 @@ func (s *Server) readJournal(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "epoch must be a positive integer")
 		return
 	}
+	var limit int
+	if !queryInt(w, r, "limit", &limit) {
+		return
+	}
 	if err := s.Store.SyncJournal(r.Context(), id); err != nil {
 		respond(w, nil, err)
 		return
@@ -46,7 +50,7 @@ func (s *Server) readJournal(w http.ResponseWriter, r *http.Request) {
 		}
 		after, reset = journal.Resume(c, h.Epoch, h.Last)
 	}
-	items, more, err := s.Store.ReadJournal(r.Context(), id, h.Epoch, after, intParam(r, "limit"))
+	items, more, err := s.Store.ReadJournal(r.Context(), id, h.Epoch, after, limit)
 	if err != nil {
 		respond(w, nil, err)
 		return

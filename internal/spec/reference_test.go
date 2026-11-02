@@ -36,6 +36,7 @@ var referenceTables = map[string]any{
 	"`repos[]`":                         RepoRef{},
 	"`session`":                         SessionSpec{},
 	"`learn`":                           LearnSpec{},
+	"`hooks[]`":                         Hook{},
 }
 
 var (

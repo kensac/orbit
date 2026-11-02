@@ -340,6 +340,31 @@ func TestLoadAllMergesTheDatabaseAndBuiltins(t *testing.T) {
 	}
 }
 
+func TestContextFieldsAreValidatedAtLoad(t *testing.T) {
+	good := "topics: [finance]\nskills: [close]\nlearn: {idle: 1h}\nhooks:\n  - {event: PreToolUse, matcher: WebFetch, deny: no}\n  - {event: Stop, say: check}\n  - {event: PostToolUse, run: [gofmt, -l, .], timeout: 5s}\n"
+	if _, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\n" + good})); err != nil {
+		t.Fatalf("good: %v", err)
+	}
+	for _, bad := range []string{
+		"topics: [Finance]",
+		"topics: [a, a]",
+		"skills: [Bad]",
+		"learn: {idle: 1m}",
+		"learn: {runner: ghost}",
+		"hooks: [{event: Notification, say: x}]",
+		"hooks: [{event: Stop, matcher: X, say: x}]",
+		"hooks: [{event: Stop, deny: x}]",
+		"hooks: [{event: Stop, say: x, run: [y]}]",
+		"hooks: [{event: Stop}]",
+		"hooks: [{event: Stop, say: x, timeout: 5s}]",
+		"hooks: [{event: Stop, run: [y], timeout: 2m}]",
+	} {
+		if _, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\n" + bad + "\n"})); err == nil {
+			t.Errorf("%s: loaded", bad)
+		}
+	}
+}
+
 func TestDelegatesAreResolvedAndChecked(t *testing.T) {
 	cfg, err := Load(write(t, map[string]string{
 		"orbit.yaml":       base,
