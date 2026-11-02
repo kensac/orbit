@@ -881,3 +881,79 @@ func TestABatchNothingCanMoveWakesItsParentOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestATaskMayWaitForATaskOfAnEarlierBatch(t *testing.T) {
+	fr := &scriptRunner{scripts: map[string]func(runner.Request) string{}}
+	fr.scripts["planner"] = func(req runner.Request) string {
+		// What the person wrote since the last run, not the conversation.
+		inbox := ""
+		if i := strings.Index(req.Prompt, "since your last run"); i >= 0 {
+			inbox = req.Prompt[i:]
+		}
+		switch {
+		case strings.Contains(inbox, "now draft"):
+			return output("Delegated", "draft next", nil, delegateAction(`[{"key": "draft", "agent": "writer", "brief": "Write it up.", "after": ["facts"]}]`))
+		case strings.Contains(inbox, "now bogus"):
+			return output("Delegated", "x", nil, delegateAction(`[{"key": "x", "agent": "writer", "brief": "x", "after": ["nothing-here"]}]`))
+		case strings.Contains(req.Prompt, "Trigger: delegation"):
+			return output("Integrated", "ok", nil)
+		}
+		return output("Delegated", "on it", nil, delegateAction(`[{"key": "facts", "agent": "researcher", "brief": "Find the facts."}]`))
+	}
+	fr.scripts["researcher"] = func(runner.Request) string { return output("Facts found", "FACTS-REPORT", nil) }
+	fr.scripts["writer"] = func(runner.Request) string { return output("Drafted", "DRAFT", nil) }
+	d := newDelegation(t, fr)
+	d.message(t, "go")
+	// The first batch is still open when the second names it.
+	c, _ := d.s.ClaimRun(ctx, "test")
+	if err := d.e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.e.ExecuteActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// facts' run is claimed, not finished, while the second batch is made.
+	facts, _ := d.s.ClaimRun(ctx, "test")
+	if facts == nil || facts.Agent != "researcher" {
+		t.Fatalf("claimed %+v, want facts' run", facts)
+	}
+	second := d.message(t, "now draft")
+	c, _ = d.s.ClaimRun(ctx, "test")
+	if c == nil || c.ID != second {
+		t.Fatalf("claimed %+v, want the person's second message", c)
+	}
+	if err := d.e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.e.ExecuteActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.e.Execute(ctx, facts); err != nil {
+		t.Fatal(err)
+	}
+	ts := d.tasks(t, second)
+	if len(ts) != 1 || ts[0].Status != store.TaskWaiting || len(ts[0].DependsOn) != 1 || ts[0].DependsOn[0] != "facts" {
+		t.Fatalf("a task after an earlier batch's = %+v", ts)
+	}
+	d.step(t)
+	ts = d.tasks(t, second)
+	if ts[0].Status != store.TaskDone || !strings.Contains(fr.last("writer").Prompt, "FACTS-REPORT") {
+		t.Fatalf("dependent = %+v\n%s", ts[0], fr.last("writer").Prompt)
+	}
+	// A key that is neither in the batch nor an earlier task is refused.
+	d.message(t, "now bogus")
+	d.step(t)
+	// The message may be read by the parent's delegation wake, which is
+	// unattended: a person approves the proposal.
+	if pending, _ := d.s.ListActions(ctx, "planner", "pending", 0); len(pending) == 1 {
+		if err := d.s.DecideAction(ctx, pending[0].ID, true, "kanishk"); err != nil {
+			t.Fatal(err)
+		}
+		d.step(t)
+	}
+	var failed string
+	if err := d.s.Pool.QueryRow(ctx, `SELECT COALESCE(error, '') FROM actions WHERE type = 'delegate' ORDER BY created_at DESC LIMIT 1`).Scan(&failed); err != nil ||
+		!strings.Contains(failed, `depends on "nothing-here", which is neither in this delegation nor a task this conversation delegated before`) {
+		t.Fatalf("unknown dependency = %q %v", failed, err)
+	}
+}
