@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/robfig/cron/v3"
 
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -128,7 +127,7 @@ func (s *Scheduler) catchUp(ctx context.Context, cfg *spec.Config) error {
 		}
 		loc, _ := time.LoadLocation(a.Timezone)
 		for i, t := range a.Triggers {
-			sched, err := spec.ParseSchedule(t.Schedule)
+			sched, err := spec.TriggerSchedule(t, loc)
 			if err != nil {
 				continue
 			}
@@ -167,7 +166,7 @@ func (s *Scheduler) Tick(ctx context.Context, cfg *spec.Config, since, now time.
 		}
 		loc, _ := time.LoadLocation(a.Timezone)
 		for i, t := range a.Triggers {
-			sched, err := spec.ParseSchedule(t.Schedule)
+			sched, err := spec.TriggerSchedule(t, loc)
 			if err != nil {
 				continue
 			}
@@ -178,11 +177,12 @@ func (s *Scheduler) Tick(ctx context.Context, cfg *spec.Config, since, now time.
 	}
 }
 
-// newestFire is the latest fire of sched in (since, now].
-func newestFire(sched cron.Schedule, since, now time.Time) (time.Time, bool) {
+// newestFire is the latest fire of sched in (since, now]. A schedule that
+// has ended answers the zero time, which ends the walk.
+func newestFire(sched spec.Schedule, since, now time.Time) (time.Time, bool) {
 	var due time.Time
 	found := false
-	for f := sched.Next(since); !f.After(now); f = sched.Next(f) {
+	for f := sched.Next(since); !f.IsZero() && !f.After(now); f = sched.Next(f) {
 		due, found = f, true
 	}
 	return due, found

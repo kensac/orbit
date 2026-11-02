@@ -40,8 +40,9 @@ var ticketEdges = map[string][]string{
 	TicketMerging: {TicketMerged, TicketFailed, TicketAbandoned},
 	TicketMerged:  {TicketDone},
 	// failed -> merged is reconciliation: GitHub says the PR merged after
-	// orbit lost track of the merge it made.
-	TicketFailed: {TicketApproved, TicketOpen, TicketMerged, TicketAbandoned},
+	// orbit lost track of the merge it made. failed -> review is a person's
+	// rerun of the PR's failed checks, taken only by FinishRerun.
+	TicketFailed: {TicketApproved, TicketOpen, TicketMerged, TicketReview, TicketAbandoned},
 }
 
 // questionEdges is the whole lifecycle of a question.
@@ -289,7 +290,7 @@ func (s *Store) TransitionTicket(ctx context.Context, id, to, by string, u Ticke
 		if err != nil {
 			return err
 		}
-		if !CanTransition(kind, from, to) || planEdges[[2]string{from, to}] {
+		if !CanTransition(kind, from, to) || planEdges[[2]string{from, to}] || (from == TicketFailed && to == TicketReview) {
 			return fmt.Errorf("ticket %s: %s -> %s: %w", id, from, to, ErrConflict)
 		}
 		var detail map[string]any
