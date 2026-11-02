@@ -25,6 +25,10 @@ func TestAStoredConfigIsTheLoadedOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Where an agent is defined is control's to know (the API reads it); a worker runs the spec.
+	for _, a := range cfg.Agents {
+		a.Origin, a.Version = "", 0
+	}
 	if !reflect.DeepEqual(got, cfg) {
 		t.Fatalf("a worker's configuration differs from control's:\n%+v\n%+v", got.Deployment, cfg.Deployment)
 	}

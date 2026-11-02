@@ -698,7 +698,7 @@ and, to build tickets (without it approved tickets wait):
 build:
   sandboxd: 100.123.116.85:8091        # host:port on the tailnet, or unix:/path
   token_env: ORBIT_SANDBOX_TOKEN       # the default
-  agent: orbit                         # whose runner, timeout and merge rule a build uses
+  agent: builder                       # whose runner, timeout and merge rule a build uses
   author: "orbit-kensac[bot] <351241810+orbit-kensac[bot]@users.noreply.github.com>"
   repositories:
     kensac/orbit:
