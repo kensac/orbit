@@ -134,9 +134,9 @@ func TestAutoFallsBackToAskWhereTheCLIRefusesIt(t *testing.T) {
 	if !strings.Contains(log, "refused auto\nmode default\nturn 1 default") {
 		t.Errorf("log = %q", log)
 	}
-	got := evs.of("orbit.permission_mode")
+	got := evs.of("orbit.permissions")
 	if len(got) != 1 || got[0]["level"] != "auto" || got[0]["applied"] != "ask" || !strings.Contains(got[0]["reason"].(string), "Cannot set") {
-		t.Errorf("orbit.permission_mode = %v", got)
+		t.Errorf("orbit.permissions = %v", got)
 	}
 
 	bin, dir = fakeClaudeBin(t, fakeScenario{})
@@ -144,7 +144,7 @@ func TestAutoFallsBackToAskWhereTheCLIRefusesIt(t *testing.T) {
 	if log := read(t, dir+"/log"); !strings.Contains(log, "mode auto\nturn 1 auto") {
 		t.Errorf("log = %q", log)
 	}
-	if got := evs.of("orbit.permission_mode"); len(got) != 1 || got[0]["applied"] != "auto" {
-		t.Errorf("orbit.permission_mode = %v", got)
+	if got := evs.of("orbit.permissions"); len(got) != 1 || got[0]["applied"] != "auto" {
+		t.Errorf("orbit.permissions = %v", got)
 	}
 }

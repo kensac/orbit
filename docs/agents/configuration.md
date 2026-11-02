@@ -150,7 +150,7 @@ fails at runtime, not at load.
 
 ## Permissions
 
-`permissions: {level, ceiling}` is how a chat agent's Claude Code session asks before a tool runs, named as Orca names them and mapped onto Claude Code's permission modes: `locked` is `dontAsk` (the spec's allowlist, everything else denied unasked), `ask` is `default` with the stdio permission prompt, `edits` is `acceptEdits`, `auto` is `auto` where the CLI and model offer it (else `ask`, recorded as an `orbit.permission_mode` event), `full` is `bypassPermissions`. A level decides which calls run without a person; it never adds a tool (`tools` and the sandbox profile do).
+`permissions: {level, ceiling}` is how a chat agent's Claude Code session asks before a tool runs, named as Orca names them and mapped onto Claude Code's permission modes: `locked` is `dontAsk` (the spec's allowlist, everything else denied unasked), `ask` is `default` with the stdio permission prompt, `edits` is `acceptEdits`, `auto` is `auto` where the CLI and model offer it (else `ask`, recorded as an `orbit.permissions` event), `full` is `bypassPermissions`. A level decides which calls run without a person; it never adds a tool (`tools` and the sandbox profile do).
 
 - **Defaults.** A chat in a `sandbox` is `full` with ceiling `full`: the container is the boundary (security.md, Sandboxed chats). Every other agent is `locked`, and an agent that is not a chat runs unattended, so it can be nothing else.
 - **Limits.** `level` is at most `ceiling`. Without a `sandbox` the widest is `edits`: `auto` and `full` let a call run without a person on orbit's host, beside its secrets. A level that is not one of the five, or one the agent cannot run, resolves down at run time, never up (`Agent.ResolveLevel`); at load it is an error.

@@ -53,7 +53,7 @@ type modeSetter interface {
 	SetPermissionMode(ctx context.Context, mode string) error
 }
 
-// applyLevel puts a running process at level, and returns the level it is at: auto that the CLI refuses (a model without it) is ask, recorded as an orbit.permission_mode event either way. An error means the process is at neither and must not take the turn.
+// applyLevel puts a running process at level, and returns the level it is at: auto that the CLI refuses (a model without it) is ask, recorded as an orbit.permissions event either way. An error means the process is at neither and must not take the turn.
 func applyLevel(ctx context.Context, p modeSetter, level string, emit func(Event)) (string, error) {
 	err := p.SetPermissionMode(ctx, PermissionMode(level))
 	applied := level
@@ -71,6 +71,6 @@ func applyLevel(ctx context.Context, p modeSetter, level string, emit func(Event
 		ev["reason"] = err.Error()
 	}
 	b, _ := json.Marshal(ev)
-	emit(Event{Kind: "orbit.permission_mode", Payload: b})
+	emit(Event{Kind: "orbit.permissions", Payload: b})
 	return applied, nil
 }
