@@ -16,7 +16,7 @@ var clockRE = regexp.MustCompile(`^(?:([0-9]{2}):([0-9]{2})|([0-9]{1,2})(?::([0-
 var monthlyRE = regexp.MustCompile(`^(?:the ([0-9]{1,2})(st|nd|rd|th)(?: of every month)?|every month on the ([0-9]{1,2})(st|nd|rd|th))$`)
 var days = map[string]string{"monday": "MO", "tuesday": "TU", "wednesday": "WE", "thursday": "TH", "friday": "FR", "saturday": "SA", "sunday": "SU"}
 
-// Parse accepts daily, every weekday, every named weekday, every other named weekday, and an ordinal date of every month, each followed by "at" and an explicit time. loc is required; anchor selects the first eligible local date and the week of a fortnightly rule. The trigger must run in loc as the agent's timezone.
+// Parse accepts daily, every weekday, every named weekday, every other named weekday, and an ordinal date of every month, each followed by "at" and an explicit time. loc is required; anchor selects the first eligible local date; a fortnightly rule starts at its first valid occurrence strictly after anchor. The trigger must run in loc as the agent's timezone.
 func Parse(text string, anchor time.Time, loc *time.Location) (spec.Trigger, error) {
 	var trigger spec.Trigger
 	if loc == nil || loc == time.Local {
@@ -67,6 +67,23 @@ func Parse(text string, anchor time.Time, loc *time.Location) (spec.Trigger, err
 		return trigger, errors.New("anchor date has no local midnight; choose another anchor date")
 	}
 	trigger = spec.Trigger{RRule: fmt.Sprintf("%s;BYHOUR=%d;BYMINUTE=%d;BYSECOND=0", rule, hour, minute), Start: start}
+	if strings.Contains(rule, ";INTERVAL=2;") {
+		weekly := trigger
+		weekly.RRule = strings.Replace(trigger.RRule, ";INTERVAL=2;", ";", 1)
+		schedule, err := spec.TriggerSchedule(weekly, loc)
+		if err != nil {
+			return spec.Trigger{}, fmt.Errorf("weekly anchor: %w", err)
+		}
+		first := schedule.Next(anchor)
+		if first.IsZero() {
+			return spec.Trigger{}, errors.New("no upcoming occurrence for fortnightly anchor")
+		}
+		trigger.Start = first.In(loc).Format(time.DateOnly) + "T00:00:00"
+		midnight, err := time.ParseInLocation("2006-01-02T15:04:05", trigger.Start, loc)
+		if err != nil || midnight.Format("2006-01-02T15:04:05") != trigger.Start {
+			return spec.Trigger{}, errors.New("first occurrence date has no local midnight; choose another anchor")
+		}
+	}
 	if _, err := spec.TriggerSchedule(trigger, loc); err != nil {
 		return spec.Trigger{}, fmt.Errorf("compiled trigger: %w", err)
 	}

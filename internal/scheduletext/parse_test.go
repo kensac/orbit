@@ -125,3 +125,29 @@ func TestAnchorMidnightGapIsRefused(t *testing.T) {
 		t.Fatalf("midnight gap: %v", err)
 	}
 }
+
+func TestFortnightStartsAtFirstUpcomingValidOccurrence(t *testing.T) {
+	loc := location(t, "America/New_York")
+	for _, tc := range []struct{ text, anchor, first, second string }{
+		{"every other monday at 9am", "2026-11-01T12:00:00-05:00", "2026-11-02T09:00:00-05:00", "2026-11-16T09:00:00-05:00"},
+		{"every other monday at 9am", "2026-11-02T08:00:00-05:00", "2026-11-02T09:00:00-05:00", "2026-11-16T09:00:00-05:00"},
+		{"every other monday at 9am", "2026-11-02T10:00:00-05:00", "2026-11-09T09:00:00-05:00", "2026-11-23T09:00:00-05:00"},
+		{"every other monday at 9am", "2026-11-02T09:00:00-05:00", "2026-11-09T09:00:00-05:00", "2026-11-23T09:00:00-05:00"},
+		{"every other sunday at 02:30", "2026-03-07T12:00:00-05:00", "2026-03-15T02:30:00-04:00", "2026-03-29T02:30:00-04:00"},
+	} {
+		anchor := instant(t, tc.anchor)
+		tr, err := Parse(tc.text, anchor, loc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		schedule, err := spec.TriggerSchedule(tr, loc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		first := schedule.Next(anchor)
+		second := schedule.Next(first)
+		if first.Format(time.RFC3339) != tc.first || second.Format(time.RFC3339) != tc.second {
+			t.Fatalf("%s after %s: %s, %s", tc.text, tc.anchor, first, second)
+		}
+	}
+}
