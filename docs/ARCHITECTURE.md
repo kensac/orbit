@@ -218,7 +218,7 @@ execution is failed for a person to check, never retried.
 
 ## The journal
 
-A run's journal (`internal/journal`, `journal_items`) is its transcript in one typed shape for every backend: messages, thinking (with a token estimate), tool calls with their full input and bounded results, diffs, plans, approvals, questions, status, and turns whose state (running, completed, interrupted, unverifiable) is kept apart from the backend's verdict. Code derives it from `run_events` as each event is stored, and backfills older runs with the same code, so the two agree; `run_events` stays the record it is derived from. Items are append-only revisions addressed by (run, epoch, seq): an epoch is a timeline of attempts that continue each other's sessions, so a cursor never mixes a resumed attempt with an abandoned one. Large values are a bounded head with their size and digest, the whole value fetched by digest. Shapes: docs/api.md.
+A run's journal (`internal/journal`, `journal_items`) is its transcript in one typed shape for every backend: messages, thinking (with a token estimate), tool calls with their full input and bounded results, diffs, plans, approvals, questions, status, and turns whose state (running, completed, interrupted, unverifiable) is kept apart from the backend's verdict. Code derives it from `run_events` as each event is stored, and backfills older runs with the same code, so the two agree; `run_events` stays the record it is derived from. Items are append-only revisions addressed by (run, epoch, seq): an epoch is a timeline of attempts that continue each other's sessions, so a cursor never mixes a resumed attempt with an abandoned one. Large values are a bounded head with their size and digest, the whole value fetched by digest. The stream, a thread run's `steps` and `turn`, MCP progress and the run page (`/ui/runs/{id}`, each item's latest revision, a subagent's nested under its call) all read it. Shapes: docs/api.md.
 
 ## The API
 
@@ -227,8 +227,8 @@ A run's journal (`internal/journal`, `journal_items`) is its transcript in one t
 `/ui` sits behind forward-auth, and an internal one that also takes the
 operator token. A conversation is read as one thread (messages and runs
 interleaved, `Store.Thread`), and a run is watched as Server-Sent Events
-(`/runs/{id}/stream`), which poll the stored transcript and turn it into
-prose and tool calls in code (`runner.Narrate`). The stream reads only rows,
+(`/runs/{id}/stream`), which poll the run's journal and send its rows,
+with a prose-only view of them beside. The stream reads only rows,
 so it follows a run across a requeue, a deploy or another replica with no
 signalling between writers and readers. `GET /usage` and `GET /health` are
 the admin read side, computed from stored rows and the configuration in
@@ -323,8 +323,8 @@ for twice. The rollout contract is in docs/agents/deployment.md.
   share (`run_attempts.cost_usd`) and the session's total; a run's
   `cost_usd` is every attempt's.
 - **The stream follows it.** An attempt that resumed the previous one's
-  session continues its narration (`status.continues`); a client keeps what
-  it showed (docs/api.md).
+  session continues its journal timeline (the same `epoch`); a client keeps
+  what it showed (docs/api.md).
 - **Configuration** reloads when the directory's content changes. An invalid
   change is refused and the previous configuration kept
   (`orbit_config_valid` = 0).

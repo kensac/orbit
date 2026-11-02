@@ -381,7 +381,9 @@ func next(t *testing.T, ch <-chan sse) sse {
 			if !ok {
 				t.Fatal("stream ended early")
 			}
-			if e.Event != "ping" {
+			// item events are the journal rows; tests of them read them
+			// with nextItem.
+			if e.Event != "ping" && e.Event != "item" {
 				return e
 			}
 		case <-time.After(5 * time.Second):
@@ -412,10 +414,10 @@ func TestStreamFollowsARunThroughARequeue(t *testing.T) {
 	expect(t, ch, "status", `{"attempt":0,"status":"queued"}`)
 
 	_, a1 := claim(t, v, "claude-code")
-	expect(t, ch, "status", `{"attempt":1,"status":"running"}`)
+	expect(t, ch, "status", `{"attempt":1,"epoch":1,"status":"running"}`)
 	appendEvents(t, v, run, a1, assistantText("first try"))
 	firstTry := expect(t, ch, "text", `{"text":"first try"}`)
-	if firstTry.ID != "1.1.0" {
+	if firstTry.ID != "1.2" {
 		t.Fatalf("event id = %q", firstTry.ID)
 	}
 
@@ -424,13 +426,13 @@ func TestStreamFollowsARunThroughARequeue(t *testing.T) {
 	if err := v.s.HandBack(ctx, run, 1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	expect(t, ch, "status", `{"attempt":1,"status":"queued"}`)
+	expect(t, ch, "status", `{"attempt":1,"epoch":1,"status":"queued"}`)
 	_, a2 := claim(t, v, "claude-code")
 	// As the engine does before an attempt's first event: it starts over.
 	if err := v.s.SetRecovery(ctx, run, a2, 0, "the interrupted attempt's transcript is gone"); err != nil {
 		t.Fatal(err)
 	}
-	expect(t, ch, "status", `{"attempt":2,"status":"running"}`)
+	expect(t, ch, "status", `{"attempt":2,"epoch":2,"status":"running"}`)
 	appendEvents(t, v, run, a2,
 		`{"type":"system","subtype":"init"}`,
 		assistantText("Reading."),
@@ -449,6 +451,9 @@ wait:
 	for {
 		select {
 		case e := <-ch:
+			if e.Event == "item" {
+				continue // the rows the text and tool events came from
+			}
 			if e.Event != "ping" {
 				t.Fatalf("unexpected %v", e)
 			}
@@ -465,7 +470,7 @@ wait:
 		store.Outcome{Questions: []string{"q?"}}); err != nil {
 		t.Fatal(err)
 	}
-	expect(t, ch, "status", `{"attempt":2,"status":"succeeded"}`)
+	expect(t, ch, "status", `{"attempt":2,"epoch":2,"status":"succeeded"}`)
 	done := next(t, ch)
 	var d struct {
 		Kind      string `json:"kind"`
@@ -495,7 +500,7 @@ wait:
 
 	// A late client replays the final attempt, then gets done at once.
 	late, _ := openStream(t, v, run)
-	expect(t, late, "status", `{"attempt":2,"status":"succeeded"}`)
+	expect(t, late, "status", `{"attempt":2,"epoch":2,"status":"succeeded"}`)
 	expect(t, late, "text", `{"text":"Reading."}`)
 	tool := expect(t, late, "tool", "")
 	expect(t, late, "text", `{"text":"\n\nDone."}`)
@@ -504,7 +509,7 @@ wait:
 	// Resuming after the tool sends only what followed it, with the same
 	// separator a full replay has.
 	resumed, _ := resumeStream(t, v, run, tool.ID)
-	expect(t, resumed, "status", `{"attempt":2,"status":"succeeded"}`)
+	expect(t, resumed, "status", `{"attempt":2,"epoch":2,"status":"succeeded"}`)
 	expect(t, resumed, "text", `{"text":"\n\nDone."}`)
 	expect(t, resumed, "done", done.Data)
 
@@ -545,7 +550,7 @@ func TestStreamEndsWhenTheClientLeaves(t *testing.T) {
 	}
 }
 
-// TestStepsMatchTheStream holds store's SQL step count to runner.Narrate:
+// TestStepsMatchTheStream holds the store's step count to the stream:
 // a run's steps are exactly the tool events its stream shows.
 func TestStepsMatchTheStream(t *testing.T) {
 	v := newEnv(t, fastStreams)
