@@ -41,6 +41,7 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | Hook-driven live agent status | #37 agent-status | |
 | Worktrees, review comments on PR diffs, stacked PRs, check reruns, RRULE schedules with a precheck | #32 #43 | |
 | Migration fix (duplicate version 14) | #50 | |
+| Agent templates (a versioned library, typed parameters, created by code through `agent:define`), sharing and importing them as bundles, question forms (`fields` on questions, answers checked by code), skill writes under a rule (`skill:write`), skill references and built-in orbit skills | branches question-forms, templates, template-bundles, skill-rule, skill-references (claude-templates) | question forms first: templates ask for `user_prompt` parameters with a form |
 | Workspace: an IDE in the portfolio chat (explorer, editor, terminals with Claude Code (direct), diffs with line comments), one shell with the chat | #78 docs/workspace-contract (design); items below | design [docs/workspace.md](workspace.md), contract docs/api.md, Workspace |
 
 ### Workspace: implementation items, in order
@@ -65,7 +66,7 @@ Each is one PR. A portfolio item (kensac/personal-portfolio, `app/orbit`) meets 
 
 Editor: CodeMirror 6, not Monaco. Monaco's editor and its language workers are megabytes before compression, it is not supported on mobile browsers, and it brings its own theming; CodeMirror 6 is modular (a basic setup with a few languages is low hundreds of KB), works with touch, native selection and IME on phones, themes from CSS variables (the portfolio's tokens), and `@codemirror/merge` gives the diff view the same engine. Measure both bundles in W5's PR and record the numbers there.
 
-The Claude side also plans: agent templates and more sources (Gmail, Calendar, Drive, GitHub, Prometheus/Loki, RSS, the DuckDB lake), a homelab-ops agent, presence-aware notifications across devices, the "safeguard later" pass (a credential proxy so the Claude token stays out of the sandbox, a review of self-edit rights, rate limits), and deploying the worker fleet. Ask before starting any of these.
+The Claude side also plans: more sources (Gmail, Calendar, Drive, GitHub, Prometheus/Loki, RSS, the DuckDB lake), a homelab-ops agent, presence-aware notifications across devices, the "safeguard later" pass (a credential proxy so the Claude token stays out of the sandbox, a review of self-edit rights, rate limits), and deploying the worker fleet. Ask before starting any of these.
 
 ## Integration prerequisites
 

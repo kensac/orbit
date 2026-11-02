@@ -375,6 +375,8 @@ type chatTurn struct {
 	extra string
 	// plugin is the skills plugin directory, when the run has skills.
 	plugin string
+	// skills are the versions the run has, which its skill:write proposals resolve against.
+	skills []store.Skill
 	// repos is what the agent's repositories add (repos.go), or nil.
 	repos *repoRun
 }
@@ -449,6 +451,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 		}
 	}
 	out := chatOutput(res.Reply, st)
+	out.skills = t.skills
 	if res.Interrupted {
 		return nil, res, cancelledRun{out: out}
 	}

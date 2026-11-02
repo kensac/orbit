@@ -186,7 +186,7 @@ Every backend returns the same JSON (`internal/engine/contract.go`):
 `summary`, `report` (Markdown), `notify` (send, priority, title), `memory`
 (update, the complete new document), `questions`, `actions`, and, only for a
 run in a request ticket's conversation that is still being discussed,
-`plan` ([tickets.md](tickets.md)), `entries`, the memory entry writes the run makes, and `skills`, the skill writes (both below). The backend is
+`plan` ([tickets.md](tickets.md)), and `entries`, the memory entry writes the run makes (below); skills are written with the `skill:write` action (Skills, below). The backend is
 given a strict schema in which each action type's parameters are spelled out;
 the engine validates against a looser envelope and then judges each action on
 its own, so one malformed proposal is denied without losing the report.
@@ -254,7 +254,7 @@ orbit keeps Claude Code skills in a library (`skills`, `skill_versions`, `skill_
 - **Claude Code** loads them as real skills from a plugin, `<HOME>/.claude/orbit-skills-<digest>/`, passed with `--plugin-dir` (with `--setting-sources ""` Claude Code reads no skills directory of its own; verified on 2.1.316), with `Skill` added to the run's tools. The plugin holds a stub per skill: its name and description, which is what the CLI decides by, and an instruction to read the rest with `mcp__orbit__skill`. orbit's tool server serves each skill's `SKILL.md` and files from the run's own copy under its state directory, confined to the skill's directory after symlinks, so what the model follows is exactly the version the run was given, and a skill's files are readable without a path outside the workdir. The directory's name carries a digest of the skills' contents: an unchanged set is reused, a changed one replaces it, and because the digest is in the CLI's arguments, a live process holding the old set is closed rather than fed a turn. Without orbit's tools (no harness binary) the plugin holds each full `SKILL.md` instead, and its files are not reachable.
 - **Other backends** get every `SKILL.md` as one input file, `inputs/_skills.md`.
 
-A run records the versions it had (`skills.json`). Its output may write or retire skills (`skills`, at most `maxSkillWrites`, 3): applied in `RecordOutcome`, each in a savepoint like entry writes, against the version the run had, and a written skill is attached to the agent. `orbit import skills` seeds the library from a Claude Code skills directory.
+A run records the versions it had (`skills.json`). It writes or retires skills with the `skill:write` action, under its rule like any action (unnamed, it is denied and not offered): at most `maxSkillWrites` (3) per run, resolved by code when proposed against the version the run had (a retire must name one it has), with what the write changes worked out then (`actions.SkillChanges`: SKILL.md's diff and line counts, the files a write keeps, and which of them are scripts or executables), which the approval shows. Executed, it applies against that version (`store.ApplySkillWrite`; a newer one fails the action), and a written skill is attached to the agent; the action's result is the record of what it changed. `orbit import skills` seeds the library from a Claude Code skills directory.
 
 ## Actions and rules
 
@@ -262,7 +262,7 @@ An action type is code (`internal/actions`): a name, a parameter schema shown
 to the agent, a validator, and an executor. An agent's spec maps types to
 `auto`, `approve` or `deny`; unnamed types are denied and not offered.
 Today: `notify` (an extra message to one of the agent's channels),
-`continue` (wake this agent again later, above), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; a change that widens it waits for a person; docs/api.md, Defining agents), `webhook:<endpoint>` (a
+`continue` (wake this agent again later, above), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; a change that widens it waits for a person; docs/api.md, Defining agents), `skill:write` (write or retire a skill, Skills above), `webhook:<endpoint>` (a
 JSON body to an endpoint whose URL and credentials are configuration, never
 chosen by the model), and `github:merge` (squash one of orbit's own
 `orbit/*` PRs, only if its head is still the approved commit and every

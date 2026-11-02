@@ -525,7 +525,6 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	schema := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, true)
 	envelope := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, false)
 	schema, envelope = withEntries(schema, true), withEntries(envelope, false)
-	schema, envelope = withSkills(schema, true), withSkills(envelope, false)
 	tk, err := e.Store.TicketForConversation(ctx, c.ConversationID)
 	if err != nil {
 		return nil, nil, err
@@ -568,7 +567,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
 			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec,
-			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun})
+			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny), plugin: skillsPlugin, repos: repoRun, skills: skills})
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
 	if tk != nil {
@@ -581,7 +580,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		system += knownContract
 	}
 	system += entriesContract(topics)
-	system += skillsContract(skills, skillsPlugin != "")
+	system += skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny)
 	delegated, err := e.Store.ConversationTasks(ctx, c.ConversationID, c.ID)
 	if err != nil {
 		return nil, nil, err
@@ -730,6 +729,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		m := out.Memory.Content
 		o.Memory = &m
 	}
+	skillWrites := 0
 	for _, act := range out.Actions {
 		pa := store.ProposedAction{Type: act.Type, Params: act.Params, Reason: act.Reason, Rule: string(ruleFor(a, act.Type, c.Trigger))}
 		if t, ok := types[act.Type]; !ok {
@@ -752,6 +752,14 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 				e.Log.Info("agent:define widens an agent; held for approval", "run", c.ID, "widens", strings.Join(w, "; "))
 			}
 		}
+		if act.Type == actions.SkillWriteType && pa.Error == "" {
+			skillWrites++
+			if p, err := skillProposal(out.skills, act.Params, skillWrites); err != nil {
+				pa.Rule, pa.Error = string(spec.RuleDeny), err.Error()
+			} else {
+				pa.Params = p
+			}
+		}
 		if len(pa.Params) == 0 {
 			pa.Params = json.RawMessage(`{}`)
 		}
@@ -759,8 +767,6 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	writes, refused := resolveEntryWrites(a.Name, out.topics, out.known, out.Entries)
 	o.Entries = writes
-	skillWrites, skillsRefused := resolveSkillWrites(out.skills, out.Skills)
-	o.Skills = skillWrites
 	rr := store.RunResult{Attempt: c.Attempt, Status: "succeeded", Summary: out.Summary, Report: out.Report}
 	fillResult(&rr, res)
 	ids, err := e.Store.RecordOutcome(ctx, c.ID, a.Name, rr, o)
@@ -768,7 +774,6 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return err
 	}
 	e.recordEntryWrites(ctx, c, out.Entries, writes, refused)
-	e.recordSkillWrites(ctx, c, out.Skills, skillWrites, skillsRefused)
 	metrics.RunFinished(a.Name, "succeeded", runnerKind(snap, a), time.Since(start), rr.CostUSD)
 
 	// Delivery: the report, then each pending approval.
@@ -829,9 +834,14 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			continue
 		}
 		id := ids[i]
+		body := pa.Reason + "\n\n```json\n" + string(pa.Params) + "\n```"
+		if pa.Type == actions.SkillWriteType {
+			// The change and the skill's scripts come first, in words, so a person sees what a skill would make later runs do.
+			body = skillApprovalText(pa.Params) + "\n" + body
+		}
 		e.deliver(ctx, snap, a, &c.ID, &id, "approval", notify.Message{
 			Title:    fmt.Sprintf("%s wants to %s", a.Name, pa.Type),
-			Body:     pa.Reason + "\n\n```json\n" + string(pa.Params) + "\n```",
+			Body:     body,
 			Priority: notify.High,
 			Tags:     []string{"orbit", "approval"},
 			Link:     e.ApprovalLink(snap, id),
@@ -1017,7 +1027,7 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 			return e.Store.EnqueueContinuation(ctx, store.Continuation{
 				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
 		},
-		Define: e.defineAction}
+		Define: e.defineAction, SkillWrite: e.skillWriteAction}
 	for {
 		act, err := e.Store.ClaimApprovedAction(ctx)
 		if err != nil || act == nil {
