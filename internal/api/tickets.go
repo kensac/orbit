@@ -36,6 +36,9 @@ func (s *Server) createTicket(w http.ResponseWriter, r *http.Request) {
 		// Wake overrides the agent's wake_on_message for the first message.
 		Wake            *bool  `json:"wake"`
 		ClientRequestID string `json:"client_request_id"`
+		// StackOn files the request on top of another of the same
+		// repository (docs/tickets.md, Stacked tickets).
+		StackOn string `json:"stack_on"`
 	}
 	if !decode(w, r, 64<<10, &body, bodyOptional) {
 		return
@@ -67,7 +70,8 @@ func (s *Server) createTicket(w http.ResponseWriter, r *http.Request) {
 		wake = *body.Wake
 	}
 	res, replayed, err := s.Store.CreateTicket(r.Context(), store.NewTicket{Kind: body.Kind, Title: body.Title, Body: body.Body,
-		Agent: a.Name, SpecSHA: a.SHA, Repo: body.Repo, Author: actor(r, body.Author), Wake: wake, ClientID: body.ClientRequestID})
+		Agent: a.Name, SpecSHA: a.SHA, Repo: body.Repo, Author: actor(r, body.Author), Wake: wake, ClientID: body.ClientRequestID,
+		StackOn: body.StackOn})
 	if err == nil && res.RunID != "" && !replayed {
 		s.Wake()
 	}

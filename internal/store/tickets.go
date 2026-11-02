@@ -88,10 +88,12 @@ type Ticket struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 	// MergeActionID is the github:merge action proposed for its PR.
 	MergeActionID *string `json:"merge_action_id,omitempty"`
+	// StackOn is the request this one is stacked on.
+	StackOn *string `json:"stack_on,omitempty"`
 }
 
 const ticketCols = `id::text, kind, title, agent, conversation_id::text, repo, status, author, approved_plan, base_sha, branch,
-	pr_number, head_sha, merge_sha, error, created_at, updated_at, merge_action_id::text`
+	pr_number, head_sha, merge_sha, error, created_at, updated_at, merge_action_id::text, stack_on::text`
 
 // NewTicket is what filing a ticket needs. Body is its first message; Wake
 // enqueues a run in the ticket's conversation in the same transaction.
@@ -106,6 +108,9 @@ type NewTicket struct {
 	Wake    bool
 	// ClientID makes filing idempotent (receipts).
 	ClientID string
+	// StackOn is the request this one builds on: of the same repository,
+	// and not merged, done or abandoned.
+	StackOn string
 }
 
 // TicketCreated is what filing a ticket did.
@@ -127,8 +132,11 @@ func (s *Store) CreateTicket(ctx context.Context, t NewTicket) (res TicketCreate
 	if (t.Kind == "request") != (t.Repo != "") {
 		return res, false, fmt.Errorf("%w: a request names a repository and a question does not", ErrInvalid)
 	}
+	if t.StackOn != "" && t.Kind != "request" {
+		return res, false, fmt.Errorf("%w: only a request stacks on another", ErrInvalid)
+	}
 	req := map[string]any{"op": "ticket", "kind": t.Kind, "title": t.Title, "body": t.Body, "repo": t.Repo,
-		"author": t.Author, "wake": t.Wake}
+		"author": t.Author, "wake": t.Wake, "stack_on": t.StackOn}
 	raw, replayed, err := s.withReceipt(ctx, t.Agent, t.ClientID, req, func(tx pgx.Tx) (json.RawMessage, error) {
 		var r TicketCreated
 		err := tx.QueryRow(ctx, `INSERT INTO conversations (agent, title) VALUES ($1, $2) RETURNING id::text`,
@@ -139,10 +147,26 @@ func (s *Store) CreateTicket(ctx context.Context, t NewTicket) (res TicketCreate
 		if err != nil {
 			return nil, err
 		}
+		if t.StackOn != "" {
+			var kind, repo, status string
+			err := tx.QueryRow(ctx, `SELECT kind, COALESCE(repo, ''), status FROM tickets WHERE id = $1 FOR SHARE`, t.StackOn).Scan(&kind, &repo, &status)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("%w: stack_on names no ticket", ErrInvalid)
+			}
+			if err != nil {
+				return nil, err
+			}
+			switch {
+			case kind != "request" || repo != t.Repo:
+				return nil, fmt.Errorf("%w: stack_on must be a request of %s", ErrInvalid, t.Repo)
+			case status == TicketMerged || status == TicketDone || status == TicketAbandoned:
+				return nil, fmt.Errorf("%w: the ticket to stack on is %s; file against the default branch", ErrInvalid, status)
+			}
+		}
 		if err := tx.QueryRow(ctx, `
-			INSERT INTO tickets (kind, title, agent, conversation_id, repo, author)
-			VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, '')) RETURNING id::text`,
-			t.Kind, t.Title, t.Agent, r.ConversationID, t.Repo, t.Author).Scan(&r.TicketID); err != nil {
+			INSERT INTO tickets (kind, title, agent, conversation_id, repo, author, stack_on)
+			VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, '')::uuid) RETURNING id::text`,
+			t.Kind, t.Title, t.Agent, r.ConversationID, t.Repo, t.Author, t.StackOn).Scan(&r.TicketID); err != nil {
 			return nil, err
 		}
 		if err := ticketEvent(ctx, tx, r.TicketID, "", TicketOpen, t.Author, nil); err != nil {
@@ -444,4 +468,22 @@ func (s *Store) TicketMessages(ctx context.Context, id string) ([]TicketMessage,
 		return nil, err
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[TicketMessage])
+}
+
+// Restacked records a stacked ticket's branch moved onto a new base by
+// code: its base and head, only while it is in review at the head the
+// restack started from, with a ticket event that is not a transition.
+func (s *Store) Restacked(ctx context.Context, id, fromHead, base, head, onto string) error {
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE tickets SET base_sha = $3, head_sha = $4, updated_at = now()
+			WHERE id = $1 AND status = 'review' AND head_sha = $2`, id, fromHead, base, head)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("ticket %s is not in review at %s: %w", id, fromHead, ErrConflict)
+		}
+		return ticketEvent(ctx, tx, id, TicketReview, TicketReview, "orbit",
+			map[string]any{"restacked": map[string]any{"onto": onto, "base": base, "from": fromHead, "head": head}})
+	})
 }

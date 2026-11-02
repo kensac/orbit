@@ -262,3 +262,13 @@ func Classify(required []RequiredCheck, runs []CheckRun, statuses []Status) (Che
 	}
 	return ChecksPending, nil
 }
+
+// SetPRBase retargets a PR at another base branch: a stacked PR moves to
+// the default branch once the PR below it merged.
+func (c *Client) SetPRBase(ctx context.Context, repo string, number int, base string) error {
+	p, err := repoPath(repo)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodPatch, fmt.Sprintf("%s/pulls/%d", p, number), map[string]string{"base": base}, nil)
+}
