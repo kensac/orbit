@@ -12,7 +12,7 @@
 //	orbit import claude-memory <dir> --scope <s> [--apply]   seed memory entries through the API
 //	orbit import skills <dir> [--attach <agent>] [--apply]   seed the skills library through the API
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
-//	orbit hook --root <dir> --state <dir> [--figures]   orbit's hook, run by Claude Code
+//	orbit hook --root <dir> --state <dir> [--figures] [--status <socket>]   orbit's hook, run by Claude Code
 //	orbit agent-hook --root <dir> --def <hook>   one of an agent's own hooks, run by Claude Code
 //	orbit tls-cert --dir <d> [--owner uid:gid]   orbit-db's self-signed TLS certificate
 //	orbit sandboxd           the build sandbox service (holds the docker socket)
@@ -125,6 +125,7 @@ func harnessCmd(name string, args []string) error {
 	root := fs.String("root", "", "the run's working directory")
 	figures := fs.Bool("figures", false, "check the output's money amounts")
 	state := fs.String("state", "", "the directory the tool server and the hook share")
+	statusSock := fs.String("status", "", "the run's status socket the hook posts every event to")
 	search := fs.String("search", "", "the engine's search socket for this agent (mcp)")
 	repoSock := fs.String("repos", "", "the engine's repository tools socket for this agent (mcp)")
 	if err := fs.Parse(args); err != nil {
@@ -136,7 +137,7 @@ func harnessCmd(name string, args []string) error {
 	if name == "mcp" {
 		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, *repoSock, revision)
 	}
-	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state})
+	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state, Status: *statusSock})
 }
 
 // agentHookCmd runs one of an agent's own hooks for Claude Code (spec hooks): the definition is a flag orbit wrote, the event is stdin, and the exit code is the CLI's to read.

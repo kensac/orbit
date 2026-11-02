@@ -35,6 +35,7 @@ import (
 	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/sources"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/status"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -577,6 +578,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err != nil {
 		return nil, nil, err
 	}
+	var hooks *status.Listener
+	if hr != nil {
+		hooks, hr.Status = e.listenHooks(ctx, c, home, emit, log)
+		defer hooks.Close()
+	}
 	if chat {
 		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
@@ -628,6 +634,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
 	defer cancel()
 	res, err := r.Run(runCtx, req, func(ev runner.Event) { emit(ev.Kind, ev.Payload) })
+	// Every hook of the turn has run once the CLI returned; what they
+	// spooled is read now, before the outcome is recorded.
+	hooks.Close()
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
 	}
