@@ -41,11 +41,14 @@ func TestNextFiresOfAnRRule(t *testing.T) {
 }
 
 func TestAPausedTriggerSkipsItsFires(t *testing.T) {
-	a := &spec.Agent{Name: "a", Timezone: "America/New_York", Triggers: []spec.Trigger{
+	a := &spec.Agent{Name: "a", Triggers: []spec.Trigger{
 		{Schedule: "0 9 * * *", Paused: true},
 		{Schedule: "0 9 * * *", Paused: true, PausedUntil: "2026-11-05T09:00"},
 		{RRule: "FREQ=DAILY", Start: "2026-11-01T08:00", Paused: true, PausedUntil: "2026-11-04T12:00"},
 	}}
+	if err := a.SetTimezone("America/New_York"); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
 	got := NextFires(a, now)
 	// The first never fires; the third at its first fire after the pause (08:00 on the 5th); the second at its end, which is a fire time itself (09:00 on the 5th).

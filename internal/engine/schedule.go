@@ -64,7 +64,7 @@ func (e *Engine) planSchedule(ctx context.Context, proposer, typ string, p actio
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("%s: %w", typ, err)
 	}
-	res, err := actions.ApplySchedule(a, loaded.Timezone, typ, p, now)
+	res, err := actions.ApplySchedule(a, loaded.Location(), typ, p, now)
 	if err != nil {
 		return nil, 0, nil, err
 	}
