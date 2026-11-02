@@ -284,4 +284,4 @@ claude-code runners only.
 | `run` | argv | none | Runs the command (no shell) in the workdir with the event on stdin and only `PATH`, `HOME` and `LANG` set; stdout, stderr and the exit code go to Claude Code (exit 2 blocks). |
 | `timeout` | duration | `10s` | `run` only, at most `1m`; the command's process group is killed at it. |
 
-Exactly one of `say`, `deny` and `run`.
+Exactly one of `say`, `deny` and `run`. Only a file agent may have a `run` hook.

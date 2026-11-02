@@ -120,6 +120,14 @@ func (c *Config) validateTrust(a *Agent) []error {
 			}
 		}
 	}
+	if a.Restricted() {
+		for i, h := range a.Hooks {
+			if len(h.Run) > 0 {
+				// Like a precheck: a command on orbit's host, as orbit's user, who can read /proc/<orbit>/environ.
+				at("hooks[%d]: a run hook runs a command on orbit's host, so only an agent in the configuration files may have one", i)
+			}
+		}
+	}
 	if a.Restricted() && a.Sandbox == "" {
 		for _, t := range a.Tools {
 			if !slices.Contains(UnsandboxedTools, t) {

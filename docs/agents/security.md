@@ -65,7 +65,7 @@ A run writes memory entries directly, and a learning run writes them from a conv
 
 ## Agent hooks
 
-An agent's `run` hooks are commands from its configuration, never chosen by a model, but they read the event's JSON (tool inputs the model wrote) on stdin, so write them as parsers of untrusted input. They run as orbit's user with only `PATH`, `HOME` (the workdir) and `LANG` in their environment, so no orbit secret and no backend credential; the filesystem and network are not isolated beyond that, so a hook command is as trusted as anything else in the configuration. `say` and `deny` run no command.
+An agent's `run` hooks are commands from its configuration files, never chosen by a model (a database or built-in agent may not have one, What a model can define), but they read the event's JSON (tool inputs the model wrote) on stdin, so write them as parsers of untrusted input. They run as orbit's user with only `PATH`, `HOME` (the workdir) and `LANG` in their environment, so no orbit secret and no backend credential; the filesystem and network are not isolated beyond that, so a hook command is as trusted as anything else in the configuration. `say` and `deny` run no command.
 
 ## Skills
 
@@ -86,7 +86,7 @@ A database agent is written through the API or by `agent:define`, and the built-
 - **No `file` source.** It would read orbit's filesystem (`/proc/self/environ`, `/config`, `/data`); the fetcher refuses one for a restricted agent too.
 - **No `${VAR}` but a credential.** orbit.yaml's `credentials:` binds each variable it lists to a URL prefix; a restricted agent may reference only those, so it can never render `${ORBIT_GITHUB_APP_PRIVATE_KEY}` into a header. The fetcher sends a credential only in a request whose URL starts with its prefix and has no dot segment, and refuses a redirect outside it (Go resends custom headers to any host). The binding holds for file agents too; a file agent may still name any other variable.
 - **Without a sandbox, only `spec.UnsandboxedTools`** (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite): no Bash, Edit, Write or NotebookEdit, which would run commands or write files beside the secrets. The list is the one place to change. In a sandbox the container is the boundary and its profile decides the tools.
-- **No precheck** (Prechecks, below).
+- **No precheck and no `run` hook** (Prechecks and Agent hooks, below): either would run a command on orbit's host as orbit's user. `say` and `deny` hooks are allowed.
 - **A change that widens an agent waits for a person.** `spec.Widening` compares the change, loaded as it would run, with the agent's current version (nothing, for a new agent): a tool, a source added or changed, a credential, a delegate target, a need, a move to a sandbox profile, or an action type allowed more readily (deny, approve, auto). An `agent:define` that widens is recorded as `approve` whatever its rule says. One executing by rule alone is compared again against the agent as it is then, and fails if it widens, so a person's narrowing between proposal and execution holds.
 
 What is left: an agent with `WebFetch` can send what its run read to any host, and a change within the agent's current reach (its charter, its triggers, narrowing) applies without a person.

@@ -113,6 +113,16 @@ func TestADatabaseAgentGetsNoUnsandboxedWriteTools(t *testing.T) {
 	}
 }
 
+func TestADatabaseAgentRunsNoHookCommand(t *testing.T) {
+	err := loadDB(t, `{"name":"d","charter":"x","hooks":[{"event":"Stop","run":["sh","-c","cat /proc/1/environ"]},{"event":"PreToolUse","matcher":"Glob","deny":"no"}]}`, nil)
+	if err == nil || !strings.Contains(err.Error(), "hooks[0]: a run hook runs a command on orbit's host") || strings.Contains(err.Error(), "hooks[1]") {
+		t.Fatalf("err = %v", err)
+	}
+	if err := loadDB(t, `{"name":"d","charter":"x"}`, map[string]string{"agents/f.yaml": "name: f\ncharter: x\nhooks: [{event: Stop, run: [true]}]\n"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAWorkersStoredAgentKeepsFileAgentPowers(t *testing.T) {
 	// A worker rebuilds agents from the database without their origin; control already held them to their origin's limits.
 	a := &Agent{Name: "f", Tools: []string{"Bash"}, Sources: []Source{{Name: "n", Kind: "file", Path: "/x"}}, Gates: []Gate{{Kind: "precheck", Command: "true"}}}
