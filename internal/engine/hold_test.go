@@ -67,7 +67,7 @@ func TestAnAuthFailureHoldsTheRunner(t *testing.T) {
 	if c, err := s.ClaimRun(ctx, "test"); err != nil || c != nil {
 		t.Fatalf("claimed %+v %v: a held runner's scheduled run must wait", c, err)
 	}
-	// A person's manual run is not held; failing again, it notifies nothing new.
+	// A person's manual run is not held; failing again, it reports its own failure, as any run a person started does.
 	a := e.Current().Config.Agents["finance"]
 	if _, err := s.EnqueueRun(ctx, store.NewRun{Agent: "finance", SpecSHA: a.SHA, Trigger: "manual"}); err != nil {
 		t.Fatal(err)
@@ -75,8 +75,8 @@ func TestAnAuthFailureHoldsTheRunner(t *testing.T) {
 	if r := runClaimed(t, e, s); r.Trigger != "manual" || r.Status != "failed" {
 		t.Fatalf("manual while held = %s %s", r.Trigger, r.Status)
 	}
-	if got := titles(h); len(got) != 1 {
-		t.Fatalf("notifications = %q: the open hold already said it", got)
+	if got := titles(h); len(got) != 2 || got[1] != "finance run failed" {
+		t.Fatalf("notifications = %q: the hold's, then the manual run's own failure", got)
 	}
 	// The person logs in; their next run succeeds and resumes the runner.
 	fr.err = nil

@@ -80,6 +80,19 @@ mail:
 
 `port` defaults to 993 (implicit TLS); any other port must offer STARTTLS. `mailbox` defaults to `INBOX` and must be orbit's own: every unseen mail in it is read and marked seen. The server must deliver `local+anything@domain` to the mailbox (Postfix's `recipient_delimiter`). Without `agent`, a mail that is not a reply is recorded and ignored. `poll` is at least 10s. With the section, every mail orbit sends carries a reply address and Message-ID naming its run's conversation.
 
+## Subscription usage and low-priority agents
+
+```yaml
+usage_poll:                          # off without this block
+  every: 5m                          # default 5m, at least 1m
+  token_env: CLAUDE_CODE_OAUTH_TOKEN # default; the token claude-code runners use
+defer_low_priority: true             # hold priority: low agents' scheduled runs while the subscription is nearly spent
+```
+
+`usage_poll` makes control ask the endpoint Claude Code's own `/usage` screen reads (`spec.DefaultUsageURL`) with the subscription's OAuth token, and store each answer (`internal/usage`). **Best effort**: the endpoint is undocumented, so a change to it shows as failed polls in `/usage` (`subscription.poll.last_error`) and the windows fall back to what runs' streams reported. Two instances during a rollout share one poll per interval. The token stays on control and is sent only to that URL.
+
+`priority: low` on an agent (default normal) marks work that can wait. With `defer_low_priority`, while any subscription window not yet reset is above `usage.DeferLowAbove` (80%), that agent's scheduled runs are held in the queue, rechecked every `usage.DeferRecheck` (10m) and let go within `scheduler.DeferCheckEvery` (1m) of every window dropping below; each hold is recorded (`run_deferrals`, `/usage` `deferral.held`). Manual runs and a person's messages are never held. The reading is the freshest of polled and stream-reported values, so deferring works without `usage_poll`, on readings only as fresh as the last run.
+
 ## Capabilities
 
 `needs: [<capability>, ...]` on an agent says what a host must have to run it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated; `*` alone is every agent, control's default when unset; a worker's default is none). A capability is `name` or `name:qualifier`, lower case (`spec.CapabilityRE`). An agent with no needs runs on any host. Give an agent a need for anything only some hosts have: a network its sources are on (`docker-network:hetzner`), a source credential that lives only on some hosts (`sure`), the GitHub App's key (`github`, required with `repos`), a tool (`browser`). The table of capabilities and the hosts that have them is docs/agents/deployment.md, Worker fleet. A run whose agent needs what no host has waits queued; nothing fails it.
@@ -196,7 +209,7 @@ are constants in `internal/actions` (`ContinueMinDelay`, `ContinueMaxDelay`,
 
 ## Delegation
 
-`delegates: [<agent>, ...]` (or `["*"]`, every configured agent, itself included) names the agents an agent may hand tasks to; an unknown name fails the load. The `delegate` action needs it, and is denied unless named, like any action; `task:message` and `task:cancel` follow the `delegate` rule unless named themselves. In a run answering the person's message, `approve` on these applies directly (docs/ARCHITECTURE.md, Delegation). Bounds are constants in `internal/store` (`MaxTasksPerDelegation`, `MaxTaskDepth`, `MaxConversationTasks`).
+`delegates: [<agent>, ...]` (or `["*"]`, every configured agent, itself included) names the agents an agent may hand tasks to; an unknown name fails the load. The `delegate` action needs it, and is denied unless named, like any action; `task:message`, `task:cancel` and `task:retry` follow the `delegate` rule unless named themselves. In a run answering the person's message, `approve` on these applies directly (docs/ARCHITECTURE.md, Delegation). Bounds are constants in `internal/store` (`MaxTasksPerDelegation`, `MaxTaskDepth`, `MaxConversationTasks`, `MaxTaskFailures`).
 
 ## Checks
 
@@ -211,7 +224,8 @@ charter or memory gets those amounts sent back and then noted.
 `notify.when` (`always`, `agent`: when the run asks, or `never`) applies to
 unattended runs: schedule, manual, continue, build. A run answering a
 person's message never notifies, whatever it says: the person is reading
-the chat. Failures and pending approvals of unattended runs always notify, except a failure that holds its runner (the backend refused orbit's login, or the subscription window is spent): that sends one notification for the runner, and the runner's unattended runs wait until it answers again (docs/ARCHITECTURE.md, Reliability).
+the chat. Failures and pending approvals of unattended runs always notify, except a failure that holds its runner (the backend refused orbit's login, or the subscription window is spent): that sends one notification for the runner (or, for a run a person started, the run's own failure report), and the runner's unattended runs wait until it answers again (docs/ARCHITECTURE.md, Reliability).
+Another exception is a run that read a mail (`mail:`): its report, or a short note when it fails, is mailed to the sender as a reply, through the agent's first `smtp` channel (else the deployment's first by name) and no other channel, whatever `notify.when` is.
 
 ## Memory topics
 
