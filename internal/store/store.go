@@ -142,6 +142,11 @@ type AgentRow struct {
 	// NeedsInput is true while the agent waits on its person: an open
 	// question or an action pending approval.
 	NeedsInput bool `json:"needs_input"`
+	// Origin and Version are where the configuration in force defines the
+	// agent (file, database, builtin) and a database agent's version; the
+	// API fills them, empty for an agent no longer configured.
+	Origin  string `json:"origin,omitempty"`
+	Version int    `json:"version,omitempty"`
 }
 
 // RunSummary is the short form of a run.
