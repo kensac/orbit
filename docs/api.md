@@ -289,9 +289,13 @@ conversation:
    "body": "<a question>", "run_id": "uuid", "open": true}
  ],
  "has_more": true,
- "next_before": "opaque-cursor"}
+ "next_before": "opaque-cursor",
+ "meter": {"run_id": "uuid", "session_id": "...", "context_tokens": 3182, "context_window": 200000,
+           "session_cost_usd": 0.07, "cost_usd": 0.07, "runs": 2,
+           "tokens": {"input": 17, "cache_read": 8100, "cache_creation": 500, "output": 80}}}
 ```
 
+- **Meter** (on every page, of the conversation now): `run_id` is its latest finished run and `session_id` that run's backend session, the one the next run continues when it continues one; `context_tokens` is what the model held after its last call in that run (the last assistant message's input, cache read, cache creation and output tokens as the backend reported them; `null` when none reported usage); `context_window` the largest window the run's models reported (Claude Code's `modelUsage`), `null` when none did; `session_cost_usd` the backend's running total for that session. `cost_usd`, `tokens` (summed from each run's reported usage; Codex's cached input counts as `cache_read`) and `runs` are every finished run of the conversation. Before any run finished, the run and session fields are `null` and the totals 0.
 - **Order and paging.** Items are oldest first, totally ordered by (`at`, a
   run before a message at the same instant, `id`). A page is the newest
   `limit` items before `before`; omit `before` for the newest page. To page
@@ -884,7 +888,7 @@ After a conversation goes quiet, orbit runs a short learning pass over it (trigg
 | `create_conversation` | `agent`, `title`, `message`, `wait_seconds` | `conversation_id`, `message_id`, `run_id`, and `reply` as `send_message` |
 | `send_message` | `body`, and `agent` (its default conversation) or `conversation_id`; `reply_to`, `wait_seconds` | `message_id`, `run_id`, `reply`: the run as a thread run item (`report`, `questions`, `actions`, `status`) |
 | `wait_for_reply` | `run_id`, `wait_seconds` | `reply`, the run as a thread run item |
-| `read_thread` | `agent` or `conversation_id`, `limit` (default 20, at most 200), `before` | as a thread page: `items`, `has_more`, `next_before` |
+| `read_thread` | `agent` or `conversation_id`, `limit` (default 20, at most 200), `before` | as a thread page: `items`, `has_more`, `next_before`, `meter` |
 | `list_actions` | `agent`, `status` (default `pending`; `all` for every status), `run_id`, `limit`, `before` | as `GET /actions`: `actions`, `has_more`, `next_before` |
 | `approve_action`, `reject_action` | `action_id` | the decided `action`; a decided one is an error |
 | `search` | `q`, and as `GET /search`: `agent`, `conversation_id`, `run_id`, `kind`, `from`, `to`, `limit`, `offset` | as `GET /search` |

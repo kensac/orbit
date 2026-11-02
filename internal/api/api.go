@@ -308,7 +308,7 @@ func servePage(w http.ResponseWriter, r *http.Request, fetch func(before *store.
 	respond(w, resp, err)
 }
 
-// threadPage reads a thread page for HTTP and MCP alike: the before cursor and limit in, items, has_more and next_before out (listPage).
+// threadPage reads a thread page for HTTP and MCP alike: the before cursor and limit in, items, has_more and next_before out (listPage), with the conversation's meter.
 func threadPage(before string, limit int, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) (map[string]any, error) {
 	var c *store.ThreadCursor
 	if before != "" {
@@ -321,7 +321,9 @@ func threadPage(before string, limit int, fetch func(before *store.ThreadCursor,
 	if err != nil {
 		return nil, err
 	}
-	return listPage("items", page.Items, page.HasMore, page.NextBefore), nil
+	out := listPage("items", page.Items, page.HasMore, page.NextBefore)
+	out["meter"] = page.Meter
+	return out, nil
 }
 
 // listPage is a page as every paged list is served, over HTTP and MCP alike: the items under key (always an array), has_more, and next_before, null exactly when has_more is false.
