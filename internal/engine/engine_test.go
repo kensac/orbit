@@ -395,6 +395,11 @@ func TestApprovalSignature(t *testing.T) {
 	if !e.CheckApprovalSig("a1", sig) || e.CheckApprovalSig("a2", sig) || e.CheckApprovalSig("a1", "") {
 		t.Fatal("signature must name exactly one action")
 	}
+	// Recorded before the key derivation moved to internal/secret: an approval link already sent must keep working.
+	old := &engine.Engine{Secret: []byte("0123456789abcdef0123456789abcdef-golden")}
+	if !old.CheckApprovalSig("7a1c2d3e-0000-4000-8000-000000000001", "a1ba81769f93cc542236f4f5698826553c5a38d5252de274a1d29db9172ef66b") {
+		t.Fatal("an approval link signed before the change no longer verifies")
+	}
 }
 
 func TestARunAnsweringAMessageNotifiesNothing(t *testing.T) {

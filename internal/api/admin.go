@@ -19,12 +19,8 @@ const defaultUsageDays = 30
 // subscription's windows, and the API-equivalent cost of runs over a range
 // of days in the deployment's timezone (docs/api.md).
 func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
-	tz := s.Engine.Current().Config.Deployment.Timezone
-	loc, err := time.LoadLocation(tz)
-	if err != nil {
-		respond(w, nil, fmt.Errorf("deployment timezone %q: %w", tz, err))
-		return
-	}
+	d := s.Engine.Current().Config.Deployment
+	tz, loc := d.Timezone, d.Location()
 	now := time.Now()
 	from, to, err := usageRange(r.URL.Query().Get("from"), r.URL.Query().Get("to"), now.In(loc))
 	if err != nil {
