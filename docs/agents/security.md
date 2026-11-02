@@ -99,10 +99,11 @@ A worker rebuilds agents from the database without their origin and does not rep
 
 - A push leaves orbit for a third party (the browser vendor's push
   service, then the device's lock screen), so it carries only the
-  attention row's title (an agent name and a fixed phrase) and a link into
-  the app. Never a report, a question, an error, an action's parameters or a permission request's tool and input:
+  attention row's title (an agent name and a fixed phrase), a link into
+  the app and, on an approval or permission request, its action links (below). Never a report, a question, an error, an action's parameters or a permission request's tool and input:
   agents read finance data. The payload is encrypted to the device, so the
   push service sees only its size.
+- **Push action links** (`POST /api/v1/push/act?t=`, `internal/push/actions.go`) are an `/api/` route without a bearer token, as are signed upload URLs: the HMAC in the link, keyed from `ORBIT_API_TOKEN` (`secret.PushAction`), names one action or permission request, one decision, the person whose device was pushed and an expiry a day out, and its nonce is unique in `push_action_uses`, shared by every button of one notification, so one notification decides once. The link travels only inside the push, encrypted to the device; whoever holds the device's notification can make that one decision as that person, as they could by opening the app on it. A permission request is allowed only once from a push, never for the conversation. Rotating the token voids every outstanding link.
 - A subscription's endpoint is a URL a browser chose, and orbit posts to it
   from inside the network, so registration accepts only https URLs on the
   known push services (`push.AllowedEndpoint`).
@@ -121,7 +122,7 @@ A worker rebuilds agents from the database without their origin and does not rep
   request arrived on is a property of the socket; a header saying a request
   is internal could be sent by anyone, so none is trusted. Never give the
   internal port a traefik router or a public port mapping.
-- **Every key orbit signs or seals with is derived from the operator token** by `secret.Key.Derive(purpose)` (`internal/secret`): HMAC-SHA256 of a purpose label under the token, one label per use, so no two uses share a key and rotating the token voids all of them together. The purposes are `secret.Approval(id)` (`action:<id>`, whose output is the approval link's signature), `secret.Mail(id)` (`mail:<id>`, whose first 12 hex digits sign a mail token), `secret.UploadURL` (`orbit upload url`, the key of signed upload URLs) and `secret.MCPOAuth` (`orbit mcp oauth`, the OAuth proxy's sealing key). Each is byte-identical to what orbit signed before the package existed, and golden tests (`internal/secret`, `internal/mail`, `internal/engine`, `internal/api` `derive_test.go`) hold them there: changing a label voids every approval link, reply address, upload URL and in-flight OAuth sign-in already sent. A new use gets a new label; an existing label never changes.
+- **Every key orbit signs or seals with is derived from the operator token** by `secret.Key.Derive(purpose)` (`internal/secret`): HMAC-SHA256 of a purpose label under the token, one label per use, so no two uses share a key and rotating the token voids all of them together. The purposes are `secret.Approval(id)` (`action:<id>`, whose output is the approval link's signature), `secret.Mail(id)` (`mail:<id>`, whose first 12 hex digits sign a mail token), `secret.UploadURL` (`orbit upload url`, the key of signed upload URLs), `secret.MCPOAuth` (`orbit mcp oauth`, the OAuth proxy's sealing key) and `secret.PushAction` (`orbit push action`, the key of push action links). Those that predate the package are byte-identical to what orbit signed before it existed, and golden tests (every label has one) (`internal/secret`, `internal/mail`, `internal/engine`, `internal/api` `derive_test.go`) hold them there: changing a label voids every approval link, reply address, upload URL, push action link and in-flight OAuth sign-in already sent. A new use gets a new label; an existing label never changes.
 - `POST /api/v1/drain` takes an instance out of service; it exists only on
   the internal listener, so nobody on the public one can, whatever their
   token.
@@ -133,7 +134,7 @@ A worker rebuilds agents from the database without their origin and does not rep
   login. The GET only shows; deciding is a POST from the page, so a link
   preview cannot approve anything. Rotating the token invalidates every
   outstanding link.
-- **Signed upload URLs** (`PUT /api/v1/uploads/signed`, docs/api.md) are the one `/api/` route without a token: the HMAC in the URL, keyed from `ORBIT_API_TOKEN`, names one conversation, file name, type, size bound, person and a 15-minute expiry, and its nonce is unique in `uploads`, so a URL writes one file once. Anyone holding a live URL can upload that one file into that conversation; nothing else. Uploaded files are served as downloads (images inline) with `nosniff` and a CSP that runs nothing, never as pages.
+- **Signed upload URLs** (`PUT /api/v1/uploads/signed`, docs/api.md) are an `/api/` route without a bearer token, as are push action links (Web Push, above): the HMAC in the URL, keyed from `ORBIT_API_TOKEN`, names one conversation, file name, type, size bound, person and a 15-minute expiry, and its nonce is unique in `uploads`, so a URL writes one file once. Anyone holding a live URL can upload that one file into that conversation; nothing else. Uploaded files are served as downloads (images inline) with `nosniff` and a CSP that runs nothing, never as pages.
 - `/ui/runs/{id}` is read-only and relies on forward-auth. Reports can hold
   personal data; never route `/ui/` around authentik.
 - **`/mcp`** is the API as tools, with the same check: an authentik token (the person decides and authors), the operator token only on the internal listener. Its tools can do what `/api/v1` can (post, approve, reject); nothing more.

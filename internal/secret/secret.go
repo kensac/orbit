@@ -12,6 +12,8 @@ const (
 	UploadURL = "orbit upload url"
 	// MCPOAuth keys the MCP OAuth proxy's sealed state and codes (internal/api oauth.go).
 	MCPOAuth = "orbit mcp oauth"
+	// PushAction keys the action links in a push (Approve, Reject, Deny; internal/push actions.go).
+	PushAction = "orbit push action"
 )
 
 // Approval is the purpose that signs the approval link of one action: the link's signature is Derive(Approval(id)) itself, in hex.

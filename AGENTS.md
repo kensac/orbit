@@ -56,7 +56,7 @@ is the design; the topic documents below are the rules for changing it.
 - `internal/transforms/`: coded reducers over a source before the model sees it.
 - `internal/actions/`: action types, their parameter schemas and executors.
 - `internal/notify/`: channels (`ntfy`, `smtp`, `webhook`, `log`).
-- `internal/push/`: Web Push of attention rows to registered devices (title and link only, bursts folded); `internal/webpush/`: the RFC 8291 encryption and VAPID signing it sends with.
+- `internal/push/`: Web Push of attention rows to registered devices (title and link only, bursts folded, skipped for whoever is looking at the conversation; signed single-use action links on approvals and permission requests; close pushes when a row closes); `internal/webpush/`: the RFC 8291 encryption and VAPID signing it sends with.
 - `internal/scheduler/`: schedule triggers to queued runs, one leader.
 - `internal/store/`: every database read and write; `migrations/` is the schema.
 - `internal/secret/`: every signing and sealing key, derived from the operator token by purpose (security.md).

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/metrics"
+	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/webpush"
 )
@@ -56,7 +57,14 @@ type Payload struct {
 	Tag   string `json:"tag"`
 	Kind  string `json:"kind"`
 	Count int    `json:"count"`
+	// Actions are the notification's buttons: on a single pending action
+	// or permission request only (actions.go).
+	Actions []Action `json:"actions,omitempty"`
 }
+
+// KindClose is a push that carries no notification: the service worker
+// closes the one with its tag, because what it showed has closed.
+const KindClose = "close"
 
 // Sender sends pushes. Control instances only: it holds the VAPID key.
 type Sender struct {
@@ -66,7 +74,12 @@ type Sender struct {
 	// LinkBase is the app's path for orbit ("/orbit"); links are built
 	// under it (Link).
 	LinkBase string
-	Log      *slog.Logger
+	// Secret signs push action links; PublicURL is orbit's public origin
+	// they point at (Deployment.PublicURL). Either unset: no action
+	// buttons, only the link.
+	Secret    secret.Key
+	PublicURL func() string
+	Log       *slog.Logger
 }
 
 // FromEnv builds a Sender from ORBIT_VAPID_PUBLIC_KEY,
@@ -129,11 +142,64 @@ func (s *Sender) Deliver(ctx context.Context) error {
 		watching = nil
 	}
 	for author, devices := range byAuthor(subs) {
-		if send := unseen(items, watching[author]); len(send) > 0 {
-			s.sendTo(ctx, devices, summarize(s.LinkBase, send))
+		send := unseen(items, watching[author])
+		if len(send) == 0 {
+			continue
+		}
+		p := summarize(s.LinkBase, send)
+		if len(send) == 1 {
+			p.Actions = s.actions(send[0], author, time.Now())
+		}
+		s.sendTo(ctx, devices, p)
+		ids := make([]string, len(send))
+		for i, a := range send {
+			ids[i] = a.ID
+		}
+		if err := s.Store.RecordPushSent(ctx, author, p.Tag, ids); err != nil {
+			s.Log.Error("record push sent", "err", err)
 		}
 	}
 	return nil
+}
+
+// Close takes notifications whose rows have closed (decided elsewhere,
+// answered, expired, dismissed) off the devices they were sent to: a push
+// of kind close with the same tag, which the service worker uses to close
+// that notification, and the push service to drop one still undelivered
+// (the Topic header). Apple's push service is skipped: Safari counts a
+// push that shows no notification against the subscription and revokes it
+// after a few, so an iOS notification stays until it is tapped.
+func (s *Sender) Close(ctx context.Context) error {
+	closes, err := s.Store.ClaimClosedPush(ctx, MaxAge)
+	if err != nil || len(closes) == 0 {
+		return err
+	}
+	subs, err := s.Store.ListPushSubscriptions(ctx, "")
+	if err != nil {
+		return err
+	}
+	devices := byAuthor(subs)
+	for _, c := range closes {
+		var to []store.PushSubscription
+		for _, d := range devices[c.Author] {
+			if !silentRevokes(d.Endpoint) {
+				to = append(to, d)
+			}
+		}
+		s.sendTo(ctx, to, Payload{Tag: c.Tag, Kind: KindClose})
+	}
+	return nil
+}
+
+// silentRevokes reports whether endpoint's push service revokes a
+// subscription that receives pushes showing nothing (Apple's).
+func silentRevokes(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return true
+	}
+	h := u.Hostname()
+	return h == "push.apple.com" || strings.HasSuffix(h, ".push.apple.com")
 }
 
 // unseen is items without those of the conversation a person is looking
@@ -178,7 +244,7 @@ func summarize(base string, items []store.Attention) Payload {
 	}
 	return Payload{
 		Title: fmt.Sprintf("%d things need you: %s", len(items), strings.Join(agents, ", ")),
-		URL:   base + "/inbox", Tag: "orbit-inbox", Kind: "summary", Count: len(items),
+		URL:   base + "/inbox", Tag: store.SummaryTag, Kind: "summary", Count: len(items),
 	}
 }
 
@@ -195,7 +261,7 @@ func (s *Sender) send(ctx context.Context, author string, p Payload) (int, error
 func (s *Sender) sendTo(ctx context.Context, subs []store.PushSubscription, p Payload) int {
 	body, _ := json.Marshal(p)
 	urgency := "high"
-	if p.Kind == store.AttentionFailure || p.Kind == "test" {
+	if p.Kind == store.AttentionFailure || p.Kind == "test" || p.Kind == KindClose {
 		urgency = "normal"
 	}
 	sent := 0
