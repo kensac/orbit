@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/workspace"
 )
@@ -29,18 +30,10 @@ const UploadURLTTL = 15 * time.Minute
 // beyond the file itself.
 const multipartOverhead = 1 << 20
 
-// uploadSigner keys signed upload URLs from the operator token, so either
-// instance of a rollout verifies the other's, and rotating the token voids
-// every outstanding URL.
-func (s *Server) uploadKey() []byte {
-	m := hmac.New(sha256.New, []byte(s.Token))
-	m.Write([]byte("orbit upload url"))
-	return m.Sum(nil)
-}
-
 // uploadSig signs the values a signed upload URL carries, in a fixed order.
 func (s *Server) uploadSig(v url.Values) string {
-	m := hmac.New(sha256.New, s.uploadKey())
+	// Keyed from the operator token, so either instance of a rollout verifies the other's, and rotating the token voids every outstanding URL.
+	m := hmac.New(sha256.New, secret.Key(s.Token).Derive(secret.UploadURL))
 	for _, k := range []string{"c", "n", "t", "b", "e", "a", "k"} {
 		m.Write([]byte(k + "=" + v.Get(k) + "\x00"))
 	}
@@ -190,19 +183,16 @@ func (s *Server) signedUpload(w http.ResponseWriter, r *http.Request) {
 // getUpload is GET /conversations/{id}/uploads/{upload}: the file itself,
 // inline for an image, a download otherwise, never rendered as a page.
 func (s *Server) getUpload(w http.ResponseWriter, r *http.Request) {
-	u, b, err := s.Store.GetUpload(r.Context(), r.PathValue("id"), r.PathValue("upload"))
+	u, b, err := s.Store.OpenUpload(r.Context(), r.PathValue("id"), r.PathValue("upload"))
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	serveFile(w, u.Name, u.MediaType, b)
+	serveFile(w, r, u.Name, u.MediaType, u.CreatedAt, b)
 }
 
-// serveFile sends a stored file: images inline (the chat shows them),
-// everything else as an attachment, with nosniff and a CSP that runs
-// nothing, so a file a person or an agent wrote is never a page on orbit's
-// origin.
-func serveFile(w http.ResponseWriter, name, mediaType string, b []byte) {
+// serveFile sends a stored file: images inline (the chat shows them), everything else as an attachment, with nosniff and a CSP that runs nothing, so a file a person or an agent wrote is never a page on orbit's origin. http.ServeContent streams it from the store and answers Range requests (a video seeking) with only the bytes asked for.
+func serveFile(w http.ResponseWriter, r *http.Request, name, mediaType string, created time.Time, b *store.Blob) {
 	disp := "attachment"
 	mt, _, _ := mime.ParseMediaType(mediaType)
 	if strings.HasPrefix(mt, "image/") && mt != "image/svg+xml" {
@@ -212,8 +202,7 @@ func serveFile(w http.ResponseWriter, name, mediaType string, b []byte) {
 	w.Header().Set("Content-Disposition", mime.FormatMediaType(disp, map[string]string{"filename": name}))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
-	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
-	_, _ = w.Write(b)
+	http.ServeContent(w, r, "", created, b)
 }
 
 // workspaceFiles is GET /conversations/{id}/files: the regular files of the

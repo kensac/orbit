@@ -10,6 +10,10 @@ the engine never write SQL.
 change that drops or renames is expand, then contract, across two releases,
 because the previous image may still be running during a deploy.
 
+## Stored files
+
+`uploads.content` and `artifacts.content` are bytea, never updated. A reader serves one through `store.Blob`, a slice of `blobSlice` bytes per query (`substring`), so a GET holds a slice in memory, not the file, and a `Range` reads only its slices; `uploads.content` is stored uncompressed (`STORAGE EXTERNAL`), because a compressed value is decompressed from its start for every slice. `CreateUpload` finds a free name under a per-conversation advisory lock before its one INSERT, so the content crosses the wire once.
+
 ## Retention
 
 Nothing ages out. Rows that look disposable are the record: `run_events` is
@@ -18,7 +22,7 @@ an agent's beliefs changed.
 
 ## The journal
 
-`journal_items` is derived from `run_events` by `journal.Project`, a pure function of an attempt's events in order. Keep it pure: the live write (in `AppendEvent`'s transaction) and the backfill (`syncAttempt`, run at start and every 30 s for recent runs, and by a reader before it reads) must write the same rows, and `TestBackfillWritesWhatTheLiveWriterWould` holds them together. Rows are append-only: a change is a new revision, never an UPDATE. A body's shape changes only with a new `journal.Version` and an upcaster in `journal.Upcast`; stored rows keep their version. Every journal write of a run holds its advisory lock (`lockJournal`), which is what keeps `seq` gapless. A transition that ends an attempt (`finishRun`, `endAttempt`, `HandBack`) syncs that attempt in its own transaction, so the turn it left open closes with it.
+`journal_items` is derived from `run_events` by `journal.Project`, a pure function of an attempt's events in order. Keep it pure: the live write (in `AppendEvent`'s transaction) and the backfill (`syncAttempt`, run at start and every 30 s for recent runs, and by a reader before it reads) must write the same rows, and `TestBackfillWritesWhatTheLiveWriterWould` holds them together. Whether a run needs a sync is decided by `unsyncedSQL`: each attempt's newest event is one descent of `run_events`' primary key, compared with `journal_sources.through`, so an up-to-date journal costs a reader one read and no write (`TestAReaderOfAnUpToDateJournalWritesNothing`); never make that check read a run's whole transcript, because the stream runs it every 500 ms per open stream. The backfill skips and reports a run whose sync fails, so one bad run never holds back the others. Rows are append-only: a change is a new revision, never an UPDATE. A body's shape changes only with a new `journal.Version` and an upcaster in `journal.Upcast`; stored rows keep their version. Every journal write of a run holds its advisory lock (`lockJournal`), which is what keeps `seq` gapless. A transition that ends an attempt (`finishRun`, `endAttempt`, `HandBack`) syncs that attempt in its own transaction, so the turn it left open closes with it.
 
 ## State machines
 
