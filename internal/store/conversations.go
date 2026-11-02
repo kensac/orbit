@@ -129,10 +129,7 @@ type ConversationPage struct {
 // earlier page; the list never repeats one within a page walk started from
 // a fixed cursor.
 func (s *Store) ListConversations(ctx context.Context, agent string, archived bool, before *ConversationCursor, limit int) (*ConversationPage, error) {
-	if limit <= 0 {
-		limit = DefaultThreadLimit
-	}
-	limit = min(limit, MaxThreadLimit)
+	limit = clampLimit(limit, DefaultThreadLimit, MaxThreadLimit)
 	var at any
 	id := "ffffffff-ffff-ffff-ffff-ffffffffffff"
 	if before != nil {

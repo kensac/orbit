@@ -33,7 +33,7 @@ type commentBody struct {
 
 func (s *Server) addComment(w http.ResponseWriter, r *http.Request) {
 	var b commentBody
-	if !decodeBody(w, r, &b) {
+	if !decode(w, r, 64<<10, &b, bodyOptional) {
 		return
 	}
 	c, err := s.Store.AddReviewComment(r.Context(), store.NewComment{TicketID: r.PathValue("id"), Path: b.Path,
@@ -43,7 +43,7 @@ func (s *Server) addComment(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) editComment(w http.ResponseWriter, r *http.Request) {
 	var b commentBody
-	if !decodeBody(w, r, &b) {
+	if !decode(w, r, 64<<10, &b, bodyOptional) {
 		return
 	}
 	c, err := s.Store.EditReviewComment(r.Context(), r.PathValue("id"), r.PathValue("comment"), b.StartLine, b.EndLine, b.Body, actor(r, b.Author))
@@ -61,7 +61,7 @@ func (s *Server) submitReview(w http.ResponseWriter, r *http.Request) {
 		Author          string `json:"author"`
 		ClientRequestID string `json:"client_request_id"`
 	}
-	if !decodeBody(w, r, &b) {
+	if !decode(w, r, 64<<10, &b, bodyOptional) {
 		return
 	}
 	res, _, err := s.Store.SubmitReview(r.Context(), r.PathValue("id"), actor(r, b.Author), b.Body, b.ClientRequestID)
