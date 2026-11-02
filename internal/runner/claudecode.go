@@ -277,9 +277,9 @@ func (c *claudeCode) resumed(ctx context.Context, sess *Session, args, env []str
 func (c *claudeCode) oneShot(ctx context.Context, args, env []string, req Request, emit func(Event)) ([]byte, error) {
 	var final []byte
 	stderr, err := runCLI(ctx, c.bin, args, env, req.Workdir, req.Prompt, func(line []byte) {
-		kind := eventKind(line)
-		emit(Event{Kind: kind, Payload: line})
-		if isResult(kind) {
+		l := claudeproto.ParseLine(line)
+		emit(Event{Kind: l.Kind, Payload: line})
+		if l.IsResult() {
 			final = line
 		}
 	})
@@ -291,8 +291,6 @@ func (c *claudeCode) oneShot(ctx context.Context, args, env []string, req Reques
 	}
 	return final, nil
 }
-
-func isResult(kind string) bool { return kind == "result" || strings.HasPrefix(kind, "result.") }
 
 // parseClaudeResult reads the stream's final `result` line. is_error is the field to trust: a failed login reports subtype "success" with is_error (claudeproto.Result.Failure).
 func parseClaudeResult(line []byte) (*Result, error) {
@@ -321,12 +319,9 @@ func attachOnce(emit func(Event), attached func(string)) func(Event) {
 	seen := false
 	return func(ev Event) {
 		if !seen {
-			var h struct {
-				SessionID string `json:"session_id"`
-			}
-			if json.Unmarshal(ev.Payload, &h) == nil && h.SessionID != "" {
+			if id := claudeproto.ParseLine(ev.Payload).SessionID(); id != "" {
 				seen = true
-				attached(h.SessionID)
+				attached(id)
 			}
 		}
 		emit(ev)
