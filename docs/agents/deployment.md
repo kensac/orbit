@@ -70,6 +70,10 @@ Rendered from Infisical (`HETZNER_ORBIT_*`). The Claude Code subscription
 token comes from `claude setup-token` and lasts a year; when it expires every
 run fails with `Not logged in`, which pages through the failure notification.
 
+Web Push needs `ORBIT_VAPID_PUBLIC_KEY`, `ORBIT_VAPID_PRIVATE_KEY` (from
+`orbit vapid`) and `ORBIT_VAPID_SUBJECT` on control (docs/api.md, Attention
+and push); without them push is off and `serve` logs so.
+
 ## Seeding memory from Claude Code
 
 `orbit import claude-memory <dir> --scope <profile|topic:NAME|agent:NAME>` reads a Claude Code memory directory (`~/.claude/projects/<project>/memory`) and sends it to `POST /api/v1/memory/import`. Entries of the types in `--profile-types` (default `user`) go to the profile whatever `--scope` says. It is a dry run unless `--apply` is given: the server reports what it would create, update or leave alone. `--print` shows what was read from disk without calling a server. A file it cannot map (no frontmatter, an unknown type) is skipped with a warning. Repeating it is safe: it matches by key and changes only what changed.

@@ -17,10 +17,10 @@ A self-hosted Go service on Kanishk's server (hetzner) that runs Claude Code on 
 | Memory | typed memory entries at profile, topic and agent scope with every version kept; agents write their own; a learning pass over quiet conversations; `orbit import claude-memory` | #28 #44 |
 | Skills | a versioned skills library, real Claude Code skills per run, agents writing and retiring their own, `orbit import skills` | #49 |
 | Search | search across messages, reports, narration, tool calls and memory | #42 |
-| Tickets and builds | tickets on conversations, GitHub App tokens (App `orbit-kensac`, id 5571920), the build runner (sandboxed Claude Code, orbit commits and pushes), the ticket loop, `github:merge` gated on green checks, failed checks rerun once and compared with the base before a fix, review comments on a ticket's PR applied by a revise build | #9 #14 #17 #32 #58 |
+| Tickets and builds | tickets on conversations, GitHub App tokens (App `orbit-kensac`, id 5571920), the build runner (sandboxed Claude Code, orbit commits and pushes), the ticket loop, `github:merge` gated on green checks, failed checks rerun once and compared with the base before a fix, review comments on a ticket's PR applied by a revise build, stacked tickets restacked by code and merged in order | #9 #14 #17 #32 #58 #69 |
 | Sandbox | `orbit sandboxd` (one locked-down container per build; no persistent workspace exists in code yet), `orbit egress` (allowlist proxy, never GitHub), the build image | #15 |
 | Operations | seamless upgrades (readiness, drain, resuming interrupted attempts), the worker fleet (capabilities, control vs worker, sessions across hosts), usage and health APIs | #11 #16 #25 |
-| Surfaces | thread and SSE API with authentik JWT auth, MCP server with OAuth proxy, mail (replies continue a conversation), uploads, `orbitctl` terminal client with authentik device-code sign-in | #4 #21 #31 #45 #53 |
+| Surfaces | thread and SSE API with authentik JWT auth, MCP server with OAuth proxy, mail (replies continue a conversation), uploads, `orbitctl` terminal client with authentik device-code sign-in, attention events with an inbox API and Web Push to registered devices | #4 #21 #31 #45 #53 #41 |
 | Orchestration | `delegate` to other agents or fresh workers, each task in its own conversation; task DAGs; parent and child mailboxes (`task:message`, questions to the parent first); decision gates only a person resolves; `delegation` wakeups when tasks settle (never polling); the built-in `orbit` agent delegates to every agent; tasks in the thread, `/tasks` API and a live tasks stream (ARCHITECTURE.md, Delegation) | #46 |
 | Evaluations | `orbiteval`: deterministic checks and exact costs over saved run artifacts (no replay yet) | #54 |
 | Docs | the workboard, the user guide (docs/guide/), the extension design (docs/plugins.md) | #51 #52 #56 |
@@ -34,10 +34,9 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 |---|---|---|
 | General `orbit` agent: a plain Claude Code session per conversation in a sandboxed persistent workspace, owner messages as instructions, uploads/files endpoints for the chat, stopping a running reply | #59 chat (`agent:define` merged in #47) | the chat UI already calls the endpoints described in docs/api.md |
 | A live usage poller and deferring low-priority runs | #55 usage-poll | search merged in #42 |
-| Attention events, inbox API, Web Push (portfolio PWA) | #41 orbit-push-attention | the portfolio is already a PWA |
 | Memory restore endpoint, per-agent hooks | #57 context-hooks-2 (hooks) | skills library merged in #49 |
 | Hook-driven live agent status | #37 agent-status | |
-| Worktrees, stacked PRs | no open PR | review comments merged in #58, check reruns in #32, RRULE and precheck in #43 |
+| Worktrees | no open PR | stacked tickets merged in #69, review comments in #58, check reruns in #32, RRULE and precheck in #43 |
 
 The Claude side also plans: agent templates and more sources (Gmail, Calendar, Drive, GitHub, Prometheus/Loki, RSS, the DuckDB lake), a homelab-ops agent, presence-aware notifications across devices, the "safeguard later" pass (a credential proxy so the Claude token stays out of the sandbox, a review of self-edit rights, rate limits), and deploying the worker fleet. Ask before starting any of these.
 
