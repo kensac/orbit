@@ -4,15 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/kensac/orbit/internal/claudeproto"
 )
@@ -23,13 +20,11 @@ const maxLine = 16 << 20
 
 // runCLI starts a backend CLI with prompt on stdin, hands each stdout line
 // to onLine, and returns stderr's tail for error reporting. The process runs
-// in its own process group so a timeout kills its children too.
+// in its own process group (claudeproto.Command.Exec) so a timeout stops its
+// children too: SIGTERM, then SIGKILL after claudeproto.CloseGrace.
 func runCLI(ctx context.Context, bin string, args, env []string, dir, prompt string, onLine func([]byte)) (string, error) {
-	cmd := exec.Command(bin, args...)
-	cmd.Dir = dir
-	cmd.Env = env
+	cmd := claudeproto.Command{Bin: bin, Args: args, Env: env, Dir: dir}.Exec()
 	cmd.Stdin = strings.NewReader(prompt)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stderr := &claudeproto.Tail{}
 	cmd.Stderr = stderr
 	stdout, err := cmd.StdoutPipe()
@@ -43,13 +38,7 @@ func runCLI(ctx context.Context, bin string, args, env []string, dir, prompt str
 	go func() {
 		select {
 		case <-ctx.Done():
-			// SIGTERM the group, then SIGKILL if it lingers.
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-			select {
-			case <-done:
-			case <-time.After(10 * time.Second):
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			}
+			claudeproto.TerminateGroup(cmd.Process.Pid, done, claudeproto.CloseGrace)
 		case <-done:
 		}
 	}()
@@ -88,21 +77,6 @@ func writeTemp(dir, name string, content []byte) (string, error) {
 		return "", err
 	}
 	return f.Name(), f.Close()
-}
-
-// eventKind names a stream line by its type and subtype fields.
-func eventKind(line []byte) string {
-	var h struct {
-		Type    string `json:"type"`
-		Subtype string `json:"subtype"`
-	}
-	if json.Unmarshal(line, &h) != nil || h.Type == "" {
-		return "raw"
-	}
-	if h.Subtype != "" {
-		return h.Type + "." + h.Subtype
-	}
-	return h.Type
 }
 
 func exitDetail(err error, stderr string) error {
