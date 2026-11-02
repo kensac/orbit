@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"path/filepath"
 	"regexp"
 	"sync"
@@ -221,12 +220,8 @@ func (c *claudeCode) runLive(ctx context.Context, sess *Session, args, env []str
 		sess.Live.drop(p)
 		return nil, true, err
 	}
-	var r struct {
-		IsError          bool            `json:"is_error"`
-		SessionID        string          `json:"session_id"`
-		StructuredOutput json.RawMessage `json:"structured_output"`
-	}
-	if json.Unmarshal(final, &r) != nil || r.IsError || r.SessionID == "" || len(r.StructuredOutput) == 0 || string(r.StructuredOutput) == "null" {
+	r, perr := claudeproto.ParseResult(final)
+	if perr != nil || r.IsError || r.SessionID == "" || !r.HasOutput() {
 		sess.Live.drop(p)
 		return final, true, nil
 	}
