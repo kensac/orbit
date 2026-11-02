@@ -150,7 +150,9 @@ readable. Changing an archived agent is `404`; a file or built-in agent is
 
 `POST /agents/{name}/definitions/{version}/revert` puts an earlier version back: a new version with that version's spec and enabled state (`change: "revert"`, `reverts: <version>`), `200` in the same shape. A version that archived the agent cannot be reverted to (`400`); an archived agent is `404`.
 
-**Agents change agents.** An agent whose rules enable `agent:define` (the built-in `orbit` does, `auto`) proposes `{"spec": {...}}`: a whole agent, as `POST /agents` takes it, for a new agent or one already defined in the database or built in, itself included. Executed, it goes through the same validation and is stored as the next version with the run as `run_id`. A file agent cannot be changed this way (the action fails, naming why).
+A database or built-in agent's spec may not have a `file` source, a `${VAR}` that is not in orbit.yaml's `credentials`, without a `sandbox`, a tool outside `Read`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task` and `TodoWrite`, a precheck or a `run` hook: each is a `400` naming it (docs/agents/configuration.md, Agents in the database).
+
+**Agents change agents.** An agent whose rules enable `agent:define` (the built-in `orbit` does, `auto`) proposes `{"spec": {...}}`: a whole agent, as `POST /agents` takes it, for a new agent or one already defined in the database or built in, itself included. Executed, it goes through the same validation and is stored as the next version with the run as `run_id`. A file agent cannot be changed this way (the action fails, naming why). A change that widens the agent compared with its current version (a tool, source, credential, delegate target or need it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily; for a new agent, any of these) is recorded with `rule: "approve"` and waits as `pending` for a person, whatever the agent's rule; one executing by rule that widens the agent as it is by then fails, naming what it widens.
 
 `GET /agents/{name}/definitions` is `{"name": "news", "origin":
 "database", "versions": [<definition>, ...]}`, newest first (empty for a
@@ -268,6 +270,7 @@ conversation:
   {"kind": "message", "id": "uuid", "at": "...", "from": "person",
    "body": "How much did I spend on Uber Eats?", "author": "kanishk",
    "run_id": "uuid-of-run-that-read-it",
+   "reads": [{"run_id": "uuid-of-run-that-read-it", "attempt": 1, "read_at": "...", "released_at": null}],
    "attachments": [{"id": "uuid", "name": "receipt.png", "media_type": "image/png",
                     "bytes": 48213, "sha256": "hex", "created_at": "..."}]},
   {"kind": "run", "id": "uuid", "at": "...", "trigger": "message",
@@ -299,8 +302,8 @@ conversation:
 - **Messages.** `from` is `person` (to the agent) or `agent` (a question it
   asked). `author` is the person who wrote it (absent for questions).
   `reply_to`, when set, is the message it answers. `attachments` are the uploads it carries (Uploads, above), in order; always an array. `run_id` is the run that
-  read a person's message (`null` until one starts) or the run that asked a
-  question.
+  holds a person's message (`null` while it waits for a run: none has read it, or every attempt that did handed it back) or the run that asked a
+  question. `reads` (a person's message, once a run has read it) is every attempt that read it, oldest first: `{"run_id", "attempt", "read_at", "released_at"}`, where `released_at` is when a failed or interrupted attempt handed it back, `null` for the one holding it.
 - **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again), `build` (a ticket's build run, docs/tickets.md), `learn` (a learning run, below; only in an agent's learning conversation), `task` (in a delegated task's conversation: the task starting, or its parent writing to it) or `delegation` (the agent woken because tasks it delegated settled; below). `status` is
   `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
   ended without a backend call because a gate, code, found nothing to judge;
@@ -865,18 +868,19 @@ After a conversation goes quiet, orbit runs a short learning pass over it (trigg
 | tool | arguments | returns |
 |---|---|---|
 | `list_agents` | none | each configured agent: `name`, `description`, `enabled`, `needs_input`, `open_questions`, `pending_actions`, `last_run` |
-| `list_conversations` | `agent`, `archived`, `limit` | as `GET /agents/{name}/conversations` |
+| `list_conversations` | `agent`, `archived`, `limit`, `before` | as `GET /agents/{name}/conversations`: `conversations`, `has_more`, `next_before` |
 | `create_conversation` | `agent`, `title`, `message`, `wait_seconds` | `conversation_id`, `message_id`, `run_id`, and `reply` as `send_message` |
 | `send_message` | `body`, and `agent` (its default conversation) or `conversation_id`; `reply_to`, `wait_seconds` | `message_id`, `run_id`, `reply`: the run as a thread run item (`report`, `questions`, `actions`, `status`) |
 | `wait_for_reply` | `run_id`, `wait_seconds` | `reply`, the run as a thread run item |
-| `read_thread` | `agent` or `conversation_id`, `limit` (default 20), `before` | `items`, `has_more`, `next_before`, as a thread page |
-| `list_actions` | `agent`, `status` (default `pending`; `all`) | `actions` |
+| `read_thread` | `agent` or `conversation_id`, `limit` (default 20, at most 200), `before` | as a thread page: `items`, `has_more`, `next_before` |
+| `list_actions` | `agent`, `status` (default `pending`; `all` for every status), `run_id`, `limit`, `before` | as `GET /actions`: `actions`, `has_more`, `next_before` |
 | `approve_action`, `reject_action` | `action_id` | the decided `action`; a decided one is an error |
 | `search` | `q`, and as `GET /search`: `agent`, `conversation_id`, `run_id`, `kind`, `from`, `to`, `limit`, `offset` | as `GET /search` |
 
 - **Waiting.** `send_message` and `create_conversation` wait for the run they woke up to `wait_seconds` (default 45, at most 300; `-1` returns at once). A run still going when the wait ends is returned with its status and a `note` to call `wait_for_reply`. A message that woke no run (`wake_on_message` off) says so in `note`.
 - **Streaming.** When the call carries a `progressToken`, the wait sends the run's narration (the stream's `text` and `tool` events, a tool as `<name> <summary>`) as progress notifications on the call's response.
-- Results are one text content block of indented JSON. A tool error (an unknown agent, a missing field, a store conflict) is a tool result with `isError`.
+- **Same as HTTP.** A tool that mirrors an HTTP list or read makes the same store call and returns the same body as its HTTP counterpart, paging included: `before` is the previous page's `next_before`, which is `null` exactly when `has_more` is false. Only `read_thread`'s default `limit` (20) and `list_actions`' default `status` (`pending`) differ.
+- Results are one text content block of indented JSON. A tool error (an unknown agent, a missing field, a store conflict) is a tool result with `isError`, worded as the HTTP error body's `error` is (`not found`, `not a valid id`, `before: ...`, `no longer in a state that allows this`).
 
 ### Signing in: orbit's OAuth proxy
 

@@ -16,6 +16,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `build` | map | absent | How approved tickets become PRs. Without it no ticket is built. |
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
+| `credentials` | map of variable to credential | none | The variables sources may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
 
 ### `defaults`
 
@@ -101,6 +102,12 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `sandboxd` | `host:port` or `unix:/path` | `build.sandboxd` | The sandbox service for chat agents with `sandbox`. |
 | `token_env` | env var | `ORBIT_SANDBOX_TOKEN` | sandboxd's bearer token. |
 
+### `credentials.<VAR>`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `url_prefix` | http(s) URL, path ending in `/` | required | Every request the variable is rendered into, redirects included, must start with it; no user, query or fragment (configuration.md, Secrets). |
+
 ### `mail`
 
 | Field | Type | Default | What it does |
@@ -171,7 +178,7 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 |---|---|---|---|
 | `name` | `^[a-z][a-z0-9-]{0,62}$` | required | The input's name; unique among sources and transforms. |
 | `kind` | `http`, `prometheus`, `file` | required | How it is fetched (below). |
-| `url` | URL | required for http, prometheus | Target; may use `${VAR}` and `{{today}}`-style templates. |
+| `url` | URL | required for http, prometheus | Target; may use `${VAR}` and `{{today}}`-style templates. A credential in any field of the source is sent only under its `url_prefix`. |
 | `headers` | map | none | http request headers; values may use `${VAR}`. |
 | `query` | map | none | http query values; may use `${VAR}` and templates. |
 | `paginate` | map | absent | Page-numbered http pagination (below). |
@@ -183,7 +190,7 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 |---|---|---|
 | `http` | any URL with `GET`, with the headers given | Whatever the URL returns is model input, so it may carry instructions. |
 | `prometheus` | a Prometheus API | As http. |
-| `file` | any file orbit's user can read | Exposes orbit's host files to the model: name only files meant for it. |
+| `file` | any file orbit's user can read | Exposes orbit's host files to the model: name only files meant for it. Only a file agent may have one. |
 
 ### `sources[].paginate`
 
@@ -219,7 +226,7 @@ Checked in order on scheduled runs with no message waiting (configuration.md, Ga
 
 ### `tools`
 
-Every claude-code run has `Read`, `Glob` and `Grep`, confined to the run's workdir; with orbit's harness, `mcp__orbit__query`, `mcp__orbit__calc` and `mcp__orbit__search` (the agent's own records); with skills, `Skill`. `tools` adds Claude Code tool names, passed as given to `--tools` and `--allowedTools` (not checked at load; codex and anthropic runners fail the run if it is set). A listed tool is allowed by name with no path rule, and orbit's path guard covers only Read, Glob and Grep. The table is for runs on orbit's host; in a `sandbox` container the container is the boundary instead (a workstation has every tool and ignores `tools`).
+Every claude-code run has `Read`, `Glob` and `Grep`, confined to the run's workdir; with orbit's harness, `mcp__orbit__query`, `mcp__orbit__calc` and `mcp__orbit__search` (the agent's own records); with skills, `Skill`. `tools` adds Claude Code tool names, passed as given to `--tools` and `--allowedTools` (not checked at load; codex and anthropic runners fail the run if it is set). A listed tool is allowed by name with no path rule, and orbit's path guard covers only Read, Glob and Grep. The table is for runs on orbit's host; in a `sandbox` container the container is the boundary instead (a workstation has every tool and ignores `tools`). A database or built-in agent without a `sandbox` may list only `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite).
 
 | Tool | Grants | Risk |
 |---|---|---|
@@ -241,7 +248,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `task:message`, `task:cancel` | Messages or cancels a delegated task; follow the `delegate` rule unless named. | `delegates` |
 | `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint; never a URL or header of the model's. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
-| `agent:define` | Creates or changes database agents, itself included, as new revertible versions. | |
+| `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |
 
 ### `notify`
 
@@ -286,4 +293,4 @@ claude-code runners only.
 | `run` | argv | none | Runs the command (no shell) in the workdir with the event on stdin and only `PATH`, `HOME` and `LANG` set; stdout, stderr and the exit code go to Claude Code (exit 2 blocks). |
 | `timeout` | duration | `10s` | `run` only, at most `1m`; the command's process group is killed at it. |
 
-Exactly one of `say`, `deny` and `run`.
+Exactly one of `say`, `deny` and `run`. Only a file agent may have a `run` hook.
