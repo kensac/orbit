@@ -44,16 +44,16 @@ Pick one, put your name and branch in the Owner column in your first PR, keep ea
 
 | # | Item | Owner | Notes |
 |---|---|---|---|
-| 1 | `orbit` CLI client for the laptop: chat with any agent, stream replies, list conversations, approve actions, from the terminal like Claude Code; sign-in with authentik's device-code flow (no orbit-local tokens) | | new `cmd/orbit` subcommands or a separate `cmd/orbitctl`; uses /api/v1 exactly as docs/api.md says |
+| 1 | `orbit` CLI client for the laptop: chat with any agent, stream replies, list conversations, approve actions, from the terminal like Claude Code; sign-in with authentik's device-code flow (no orbit-local tokens) | `codex/terminal-client`, #53 | `cmd/orbitctl` implemented and unit-tested against local TLS endpoints; real provider sign-in smoke remains |
 | 2 | Natural-language schedules ("every weekday at 8", "the 1st at 9am") parsed by code into cron/RRULE, quiet hours per agent, calendar-aware skipping | | coordinate with #43 (RRULE) once it merges |
 | 3 | Per-agent budgets: API-equivalent cost and run counts per period, a gate that defers or refuses scheduled runs past a budget, alerts | | builds on /usage (#11) |
-| 4 | Agent evaluations: saved reference runs (inputs + expected properties), a command that replays them against the current charter/skills and reports regressions and cost | | deterministic checks first, model-graded only where needed |
+| 4 | Agent evaluations: saved reference runs (inputs + expected properties), a command that replays them against the current charter/skills and reports regressions and cost | #54 | First slice: offline artifact regression checks and exact cost reporting. Current-charter replay and model grading remain open. |
 | 5 | Observability: a Grafana dashboard for orbit's metrics, structured logs suitable for Loki, Prometheus alert rules for stuck queues, failing agents, config errors | | the homelab side (dashboards, rules) lives in kensac/hetzner-vps-config; open PRs there, do not push main |
 | 6 | Backup and export: export/import agents, memory, skills and conversations as a portable bundle; a restore drill for orbit-db documented | | |
 | 7 | Messaging channels: Telegram (or Slack) as a two-way surface like mail: replies continue a conversation, new messages start one | | mirror internal/mail's design |
 | 8 | Voice: dictation in the chat (browser) and spoken replies | | portfolio repo, app/orbit/ |
-| 9 | Plugin system for sources, actions and tools without editing orbit (a manifest plus an executable or WASM module, run in the sandbox) | plugin-design, codex/plugin-design | Proposed design: [docs/plugins.md](plugins.md); manifest/protocol, grants, sandbox boundary and acceptance tests; no runtime implementation |
-| 10 | Docs and onboarding: a user guide (what orbit can do, creating an agent in a minute, the chat, email, MCP), kept short | | docs/guide/ |
+| 9 | Plugin system for sources, actions and tools without editing orbit (a manifest plus an executable or WASM module, run in the sandbox) | plugin-design, codex/plugin-design, #56 | Proposed design: [docs/plugins.md](plugins.md); manifest/protocol, grants, sandbox boundary and acceptance tests; no runtime implementation |
+| 10 | Docs and onboarding: a user guide (what orbit can do, creating an agent in a minute, the chat, email, MCP), kept short | onboarding-guide, #52 | Built: [docs/guide/README.md](guide/README.md); API examples, approval results, email and MCP prerequisites; deployment availability stated explicitly |
 
 ## Standards (summary; AGENTS.md and docs/agents/ are authoritative)
 

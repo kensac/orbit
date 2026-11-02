@@ -79,6 +79,14 @@ type Server struct {
 	JobLogs map[int64]string
 	// MergeSHA is the commit the merge creates.
 	MergeSHA string
+	// Reruns are the Actions jobs rerun, in order. A rerun puts the check
+	// run with that id back in the queue, as GitHub's new attempt does,
+	// unless RerunStatus is set: then it is refused with that status.
+	Reruns      []int64
+	RerunStatus int
+	// CommitChecks are the check runs of commits other than the checked
+	// one (a build's base), by sha.
+	CommitChecks map[string][]map[string]any
 }
 
 // New starts a fake, stopped when the test ends.
@@ -244,6 +252,24 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/actions/jobs/") && strings.HasSuffix(r.URL.Path, "/logs"):
 		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/repos/kensac/orbit/actions/jobs/"), "/logs")
 		http.Redirect(w, r, f.Srv.URL+"/joblogs/"+id, http.StatusFound)
+	case r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/actions/jobs/") && strings.HasSuffix(r.URL.Path, "/rerun"):
+		var id int64
+		_, _ = fmt.Sscan(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/repos/kensac/orbit/actions/jobs/"), "/rerun"), &id)
+		if f.RerunStatus != 0 {
+			f.write(w, f.RerunStatus, map[string]string{"message": "Resource not accessible by integration"})
+			return
+		}
+		f.Reruns = append(f.Reruns, id)
+		for _, cr := range f.CheckRuns {
+			if n, _ := cr["id"].(int); int64(n) == id {
+				cr["status"], cr["conclusion"] = "queued", nil
+			}
+		}
+		w.WriteHeader(201)
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/commits/") && strings.HasSuffix(r.URL.Path, "/check-runs") &&
+		f.CommitChecks[strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/repos/kensac/orbit/commits/"), "/check-runs")] != nil:
+		runs := f.CommitChecks[strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/repos/kensac/orbit/commits/"), "/check-runs")]
+		f.write(w, 200, map[string]any{"total_count": len(runs), "check_runs": runs})
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/branches/main":
 		f.write(w, 200, map[string]any{"name": "main", "protected": f.Protection != nil, "protection": f.Protection})
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/rules/branches/main":

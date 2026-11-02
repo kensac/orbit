@@ -102,8 +102,20 @@ fails the run, naming it. A new kind is a function in
 |---|---|---|
 | `unchanged` | none | every input the model would see (by file name and sha256) is what the agent's newest succeeded run saw, under the same spec |
 | `items_above` | `input` (a source or transform), `items`, `n` | `input` has at most `n` records at `items` |
+| `precheck` | `command`, `timeout` (default 30s, at most 2m) | `sh -c <command>` exits 1 |
+
+A precheck runs in the run's workdir with the inputs written (`$ORBIT_INPUTS` is their directory), with only `PATH`, `HOME` (the workdir), `LANG`, `TZ`, `ORBIT_AGENT` and `ORBIT_RUN_ID` in its environment. Exit 0 goes on to the model; exit 1 skips, as grep's no match does, and the first line it printed is the skip's reason; any other status, a timeout or a command that cannot start fails the run, naming the status and the last line of stderr. Every precheck is an `orbit.precheck` event with its status, duration and output (4 KB of each). It runs as orbit, so only an agent in the configuration files may have one; a database agent with a precheck fails validation (docs/agents/security.md, Prechecks).
 
 A skipped run counts as a success for staleness (docs/agents/store.md).
+
+## Triggers
+
+`triggers:` in an agent are when it wakes on its own. Each is one of:
+
+- `schedule`: a five-field cron expression or a descriptor (`@daily`), read in the agent's `timezone`.
+- `rrule` and `start`: an RFC 5545 recurrence rule (`internal/rrule`), anchored at `start`, a local time in the agent's timezone (`2026-11-03T09:00`). For what cron cannot say: `FREQ=WEEKLY;INTERVAL=2;BYDAY=TU` (every other Tuesday), `FREQ=MONTHLY;BYDAY=-1FR` (the last Friday), `FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=2` (the second weekday), and series that end (`COUNT`, `UNTIL`). `start` sets the first period and the time of day the rule does not name. Supported: `FREQ` from `MINUTELY` to `YEARLY`, `INTERVAL`, `COUNT` (at most 10000), `UNTIL`, `BYMONTH`, `BYMONTHDAY`, `BYDAY` (ordinals in `MONTHLY` and `YEARLY`), `BYHOUR`, `BYMINUTE`, `BYSECOND`, `BYSETPOS`, `WKST`; anything else fails the load. Days and longer are wall-clock (09:00 stays 09:00 across daylight saving); hours and minutes are elapsed time.
+
+Either kind takes `prompt`, the reason for the wake. Both go through the same scheduler (one fire per trigger and time, `runs_one_per_fire`; after downtime only the newest missed fire), and an ended series never fires again.
 
 ## Templates in sources
 
@@ -150,6 +162,10 @@ the chat. Failures and pending approvals of unattended runs always notify.
 ## Memory topics
 
 `topics: [finance]` names the shared memory topics whose entries every run of the agent reads, beside the profile's and its own (docs/ARCHITECTURE.md, Memory entries). A topic exists as soon as an entry or an agent names it; the API can attach more (`PUT /agents/{name}/topics/{topic}`).
+
+## Skills
+
+`skills: [monthly-close]` names skills from orbit's library the agent runs with (docs/ARCHITECTURE.md, Skills). A name no skill has is skipped at run time and shown as `missing` in `GET /agents/{name}/context`; the API attaches more.
 
 ## Learning
 
