@@ -147,6 +147,10 @@ as a paginated `http` source is); `where` is the query tool's conditions
 fails the run, naming it. A new kind is a function in
 `internal/transforms`, its parameters in `parse`, and a test.
 
+## Prometheus queries
+
+An agent with a `prometheus` source can also query that Prometheus while it works: `prometheus_query` (docs/api.md, Prometheus), instant or range, read-only, bounded (at most 31 days, 1000 points and 500 series per query, 256 KiB per answer), sent to the source's URL with its credentials. The source's own `expr` is still fetched before the run, so a gate or a transform can decide on it with no model call; the tool is for what the run finds it needs to look at. Only `/api/v1/query` and `/api/v1/query_range` are ever requested.
+
 ## Gates
 
 `gates:` in an agent are checks, in code, that end a run as `skipped` (naming the gate in `runs.gate`) before any backend call, so a quiet day costs no tokens and sends nothing. They apply only to scheduled runs with no person's message waiting: a message, a manual run, a continuation, a build and a recovered attempt always reach the model. They are checked in order, after sources and transforms:

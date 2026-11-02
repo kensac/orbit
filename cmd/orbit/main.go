@@ -122,6 +122,7 @@ func harnessCmd(name string, args []string) error {
 	state := fs.String("state", "", "the directory the tool server and the hook share")
 	search := fs.String("search", "", "the engine's search socket for this agent (mcp)")
 	repoSock := fs.String("repos", "", "the engine's repository tools socket for this agent (mcp)")
+	promSock := fs.String("prometheus", "", "the engine's prometheus tool socket for this agent (mcp)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -129,7 +130,7 @@ func harnessCmd(name string, args []string) error {
 		return errors.New(name + ": --root is required")
 	}
 	if name == "mcp" {
-		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, *repoSock, revision)
+		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, *repoSock, *promSock, revision)
 	}
 	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state})
 }
