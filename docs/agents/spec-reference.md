@@ -17,6 +17,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `credentials` | map of variable to credential | none | The variables sources may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
+| `expires` | map of variable to `YYYY-MM-DD` | none | When a credential orbit cannot inspect stops working (the Claude Code subscription token), exported as `orbit_credential_expiry_timestamp_seconds{credential}` at midnight UTC of the date so an alert fires before it lapses. Nothing else reads it. |
 | `webhook_secrets` | map of variable to webhook secret | none | The signing secrets inbound webhooks are verified with, each bound to the agents whose webhook triggers may name it (below). |
 | `usage_poll` | map: `every` (default 5m, at least 1m), `token_env` (default `CLAUDE_CODE_OAUTH_TOKEN`) | absent | Poll the subscription's usage windows (configuration.md, Subscription usage and low-priority agents). |
 | `defer_low_priority` | bool | `false` | Hold `priority: low` agents' scheduled runs while a usage window is above `usage.DeferLowAbove`. |

@@ -166,7 +166,7 @@ type liveProcess interface {
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
-	Interrupt(ctx context.Context) error
+	Interrupt(ctx context.Context, cancelQueued bool) (*claudeproto.InterruptReceipt, error)
 }
 
 // closeIdle closes every idle live process, for a sandbox slot or memory.

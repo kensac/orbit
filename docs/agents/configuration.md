@@ -43,6 +43,15 @@ credentials:
 
 `url_prefix` is an http(s) URL with a host and a path ending in `/`, without user, query or fragment. A source sends a credential only in a request whose URL starts with it (redirects included); where the URL has no template, a mismatch fails the load. A database or built-in agent may reference only credentials; a file agent may also name any other variable (docs/agents/security.md, What a model can define).
 
+`expires:` records when a credential orbit cannot inspect stops working, so an alert fires before it does. The Claude Code subscription token (`claude setup-token`) lasts a year and gives no warning; record the day it lapses when you set it:
+
+```yaml
+expires:
+  CLAUDE_CODE_OAUTH_TOKEN: 2027-10-31
+```
+
+Each entry is `orbit_credential_expiry_timestamp_seconds{credential="CLAUDE_CODE_OAUTH_TOKEN"}` (midnight UTC of the date) on every instance that loads the configuration, refreshed on reload; nothing else reads it. Update it with the token.
+
 ## GitHub
 
 `github:` in `orbit.yaml` names the App (`app_id`), the variable holding its
