@@ -153,6 +153,9 @@ func runMCP(h *Harness, conns *Connectors, workdir, home string) string {
 		if h.Repos != "" {
 			args = append(args, "--repos", h.Repos)
 		}
+		if h.Prometheus != "" {
+			args = append(args, "--prometheus", h.Prometheus)
+		}
 		servers[harness.MCPServer] = map[string]any{"type": "stdio", "command": h.Bin, "args": args}
 	}
 	conns.addServers(servers)
@@ -180,6 +183,9 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 		}
 		if req.Harness.Repos != "" {
 			allowed = append(allowed, harness.RepoToolNames()...)
+		}
+		if req.Harness.Prometheus != "" {
+			allowed = append(allowed, harness.ToolPrometheus)
 		}
 		hooks = harnessHooks(req.Harness, req.Workdir, home)
 	}
