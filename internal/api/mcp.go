@@ -123,6 +123,11 @@ type mcpDecideIn struct {
 	ActionID string `json:"action_id" jsonschema:"the action's id, from list_actions or a reply"`
 }
 
+type mcpApproveIn struct {
+	ActionID string `json:"action_id" jsonschema:"the action's id, from list_actions or a reply"`
+	Always   bool   `json:"always,omitempty" jsonschema:"also let this agent do this type of action without asking from now on (a new, revertible version of the agent)"`
+}
+
 func (s *Server) addMCPTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "list_agents", Description: "List orbit's agents: what each is for, its last run, " +
 		"and whether it is waiting on you (an open question or an action to approve)."},
@@ -316,8 +321,25 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 			return mcpJSON(map[string]any{"action": a})
 		}
 	}
-	mcp.AddTool(srv, &mcp.Tool{Name: "approve_action", Description: "Approve an action an agent proposed; orbit executes it."},
-		decide(true))
+	mcp.AddTool(srv, &mcp.Tool{Name: "approve_action", Description: "Approve an action an agent proposed; orbit executes it. always: true also makes the type auto for that agent."},
+		func(ctx context.Context, req *mcp.CallToolRequest, in mcpApproveIn) (*mcp.CallToolResult, any, error) {
+			if !in.Always {
+				return decide(true)(ctx, req, mcpDecideIn{ActionID: in.ActionID})
+			}
+			by := mcpPerson(req)
+			if by == "" {
+				by = "operator"
+			}
+			out, err := s.approveAlways(ctx, in.ActionID, by, "")
+			if err != nil {
+				return nil, nil, mcpErr(err)
+			}
+			a, err := s.Store.GetAction(ctx, in.ActionID)
+			if err != nil {
+				return nil, nil, mcpErr(err)
+			}
+			return mcpJSON(map[string]any{"action": a, "always": out["always"]})
+		})
 	mcp.AddTool(srv, &mcp.Tool{Name: "reject_action", Description: "Reject an action an agent proposed; it never executes."},
 		decide(false))
 }
