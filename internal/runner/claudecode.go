@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/spec"
 )
@@ -164,16 +165,6 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 	return args
 }
 
-// resumeArgs continue a session. Every resume forks (a new session id, the
-// parent's transcript copied), so an attempt that is interrupted or fails
-// leaves the session it continued exactly as the last good run left it.
-func resumeArgs(id string) []string {
-	if id == "" {
-		return nil
-	}
-	return []string{"--resume", id, "--fork-session"}
-}
-
 // env gives the CLI one credential. With a subscription token present the
 // API key is withheld: an API key the CLI is handed takes precedence over
 // the subscription and is billed per token, so a stray key in orbit's
@@ -266,7 +257,7 @@ func (c *claudeCode) resumed(ctx context.Context, sess *Session, args, env []str
 	if err := sess.Started(mode, sess.Resume); err != nil {
 		return nil, err
 	}
-	return c.oneShot(ctx, append(args, resumeArgs(sess.Resume)...), env, req, emit)
+	return c.oneShot(ctx, append(args, claudeproto.ResumeArgs(sess.Resume)...), env, req, emit)
 }
 
 // oneShot runs the CLI with the prompt on stdin and returns its result line,
