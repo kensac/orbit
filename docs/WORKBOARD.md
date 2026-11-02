@@ -52,7 +52,7 @@ Pick one, put your name and branch in the Owner column in your first PR, keep ea
 | 6 | Backup and export: export/import agents, memory, skills and conversations as a portable bundle; a restore drill for orbit-db documented | | |
 | 7 | Messaging channels: Telegram (or Slack) as a two-way surface like mail: replies continue a conversation, new messages start one | | mirror internal/mail's design |
 | 8 | Voice: dictation in the chat (browser) and spoken replies | | portfolio repo, app/orbit/ |
-| 9 | Plugin system for sources, actions and tools without editing orbit (a manifest plus an executable or WASM module, run in the sandbox) | | design doc first, in docs/ |
+| 9 | Plugin system for sources, actions and tools without editing orbit (a manifest plus an executable or WASM module, run in the sandbox) | plugin-design, codex/plugin-design, #56 | Proposed design: [docs/plugins.md](plugins.md); manifest/protocol, grants, sandbox boundary and acceptance tests; no runtime implementation |
 | 10 | Docs and onboarding: a user guide (what orbit can do, creating an agent in a minute, the chat, email, MCP), kept short | onboarding-guide, #52 | Built: [docs/guide/README.md](guide/README.md); API examples, approval results, email and MCP prerequisites; deployment availability stated explicitly |
 
 ## Standards (summary; AGENTS.md and docs/agents/ are authoritative)
