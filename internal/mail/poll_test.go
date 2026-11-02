@@ -201,8 +201,8 @@ func TestPollRepliesNewMailsAndIgnores(t *testing.T) {
 	if _, err := f.s.StartRunContext(ctx, c.ID, c.Agent); err != nil {
 		t.Fatal(err)
 	}
-	if id, subj, err := f.s.MailForRun(ctx, c.ID); err != nil || !strings.HasPrefix(id, "<r") || !strings.HasPrefix(subj, "Re: ") {
-		t.Fatalf("mail for run = %q %q %v", id, subj, err)
+	if m, err := f.s.MailForRun(ctx, c.ID); err != nil || m == nil || !strings.HasPrefix(m.MessageID, "<r") || !strings.HasPrefix(m.Subject, "Re: ") || m.From != "me@example.com" {
+		t.Fatalf("mail for run = %+v %v", m, err)
 	}
 }
 

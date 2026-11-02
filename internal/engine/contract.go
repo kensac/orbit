@@ -155,7 +155,7 @@ How your result is used:
 	case "agent":
 		b.WriteString("Reports are delivered only when you set this to true.")
 	case "never":
-		b.WriteString("This agent's reports are never pushed; they stay in orbit.")
+		b.WriteString("This agent's reports are never pushed; they stay in orbit, except that a reply to a mail is mailed to its sender.")
 	}
 	b.WriteString(`
 - memory: your only persistence between runs. You receive the current memory below. To change it, set update to true and content to the COMPLETE new document (it replaces the old one). Keep it short: facts you will need next time, preferences the person stated, baselines to compare against. Do not copy the report into it.
