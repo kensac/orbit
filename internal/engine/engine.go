@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,6 +31,7 @@ import (
 	"github.com/kensac/orbit/internal/notify"
 	"github.com/kensac/orbit/internal/repos"
 	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/sources"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -51,8 +51,8 @@ type Engine struct {
 	Reloader func(context.Context) error
 	Env      func(string) (string, bool)
 	Client   *http.Client
-	// Secret signs approval links (see ApprovalSig).
-	Secret []byte
+	// Secret signs approval links (see ApprovalSig) and mail tokens.
+	Secret secret.Key
 	// NewRunner is runner.New, replaceable in tests.
 	NewRunner func(name string, rs spec.RunnerSpec, env func(string) (string, bool)) (runner.Runner, error)
 	Log       *slog.Logger
@@ -349,8 +349,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return nil, nil, err
 	}
 
-	loc, _ := time.LoadLocation(a.Timezone)
-	now := time.Now().In(loc)
+	now := time.Now().In(a.Location())
 
 	rec, skipped, err := e.planRecovery(ctx, a, c, r.Kind(), workdir, home)
 	if err != nil {
@@ -781,7 +780,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	metrics.RunFinished(a.Name, "succeeded", runnerKind(snap, a), time.Since(start), rr.CostUSD)
 
 	// Delivery: the report, then each pending approval.
-	link := e.runLink(snap, c.ID)
+	link := snap.Config.Deployment.RunURL(c.ID)
 	pr := notify.Priority(out.Notify.Priority)
 	if pr == "" {
 		pr = notify.Default
@@ -866,7 +865,7 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 	if a != nil && !Attended(c.Trigger) && routed == nil {
 		e.deliver(ctx, snap, a, &c.ID, nil, "failure", notify.Message{
 			Title: a.Name + " run failed", Body: runErr.Error(), Priority: notify.High,
-			Tags: []string{"orbit", "warning"}, Link: e.runLink(snap, c.ID),
+			Tags: []string{"orbit", "warning"}, Link: snap.Config.Deployment.RunURL(c.ID),
 		})
 	}
 	return nil
@@ -963,13 +962,6 @@ func (e *Engine) mailHeaders(ctx context.Context, snap *Snapshot, runID *string,
 	m.References = ref
 }
 
-func (e *Engine) runLink(snap *Snapshot, runID string) string {
-	if snap.Config.Deployment.PublicURL == "" {
-		return ""
-	}
-	return strings.TrimRight(snap.Config.Deployment.PublicURL, "/") + "/ui/runs/" + runID
-}
-
 // ApprovalLink is the page where a person approves or rejects an action. The
 // signature lets the link work from a phone without a login while naming
 // exactly one action.
@@ -980,11 +972,9 @@ func (e *Engine) ApprovalLink(snap *Snapshot, actionID string) string {
 	return strings.TrimRight(snap.Config.Deployment.PublicURL, "/") + "/ui/actions/" + actionID + "?sig=" + e.ApprovalSig(actionID)
 }
 
-// ApprovalSig is an HMAC of the action id under the deployment secret.
+// ApprovalSig is the action's approval purpose derived from the deployment secret (secret.Approval).
 func (e *Engine) ApprovalSig(actionID string) string {
-	m := hmac.New(sha256.New, e.Secret)
-	m.Write([]byte("action:" + actionID))
-	return hex.EncodeToString(m.Sum(nil))
+	return hex.EncodeToString(e.Secret.Derive(secret.Approval(actionID)))
 }
 
 // CheckApprovalSig reports whether sig is ApprovalSig(actionID).
@@ -1014,7 +1004,7 @@ func (e *Engine) DeliverOutbox(ctx context.Context) error {
 				m.Link = e.ApprovalLink(snap, *it.ActionID)
 				m.Buttons = []notify.Button{{Label: "Review", URL: m.Link}}
 			case it.RunID != nil:
-				m.Link = e.runLink(snap, *it.RunID)
+				m.Link = snap.Config.Deployment.RunURL(*it.RunID)
 			}
 			e.deliver(ctx, snap, a, it.RunID, it.ActionID, it.Purpose, m)
 		}
@@ -1053,7 +1043,7 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 			if a, ok := snap.Config.Agents[act.Agent]; ok {
 				e.deliver(ctx, snap, a, &act.RunID, &act.ID, "action", notify.Message{
 					Title: fmt.Sprintf("%s: %s failed", act.Agent, act.Type), Body: xerr.Error(),
-					Priority: notify.High, Tags: []string{"orbit", "warning"}, Link: e.runLink(snap, act.RunID),
+					Priority: notify.High, Tags: []string{"orbit", "warning"}, Link: snap.Config.Deployment.RunURL(act.RunID),
 				})
 			}
 		}
