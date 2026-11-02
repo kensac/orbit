@@ -54,7 +54,13 @@ type Job struct {
 	// Review is the review comments the run is given (review.json), as
 	// the person wrote them; empty when none waits.
 	Review json.RawMessage
-	Policy spec.BuildRepo
+	// StackBranch, for a ticket stacked on another whose PR is open, is
+	// that ticket's branch: a build starts from its head and opens its PR
+	// against it. Empty builds from the default branch.
+	StackBranch string
+	// StackPR is that ticket's PR, named in this one's body.
+	StackPR int
+	Policy  spec.BuildRepo
 	// Model and MaxTurns are the build agent's runner's; Timeout its.
 	Model    string
 	MaxTurns int
@@ -245,6 +251,15 @@ func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
 			return nil, fmt.Errorf("the PR's branch %s is gone; retry the ticket to build it again", branch)
 		}
 		start = branchSHA
+	} else if j.StackBranch != "" {
+		if err := g.fetch(ctx, read.GitAuthEnv(), "refs/heads/"+j.StackBranch, "refs/orbit/base"); err != nil {
+			return nil, fmt.Errorf("the branch %s this ticket stacks on: %w", j.StackBranch, err)
+		}
+		sha, err := g.run(ctx, nil, "rev-parse", "refs/orbit/base")
+		if err != nil {
+			return nil, err
+		}
+		start, res.BaseSHA = strings.TrimSpace(sha), strings.TrimSpace(sha)
 	} else {
 		if err := g.fetch(ctx, read.GitAuthEnv(), "refs/heads/"+defBranch, "refs/orbit/base"); err != nil {
 			return nil, err
@@ -460,7 +475,11 @@ func (r *Runner) deliver(ctx context.Context, j Job, d Deps, g git, res *Result,
 		return fmt.Errorf("find the PR: %w", err)
 	}
 	if pr == nil {
-		pr, err = c.CreatePR(ctx, j.Repo, github.NewPR{Title: title, Head: res.Branch, Base: defBranch, Body: full})
+		base := defBranch
+		if j.StackBranch != "" {
+			base = j.StackBranch
+		}
+		pr, err = c.CreatePR(ctx, j.Repo, github.NewPR{Title: title, Head: res.Branch, Base: base, Body: full})
 		if err != nil {
 			return fmt.Errorf("open the PR: %w", err)
 		}
@@ -507,6 +526,9 @@ func PRBody(model string, j Job, trust []string) string {
 	var b strings.Builder
 	b.WriteString(strings.TrimSpace(github.ScrubAttribution(model)))
 	fmt.Fprintf(&b, "\n\n---\n\nBuilt by orbit from ticket `%s` (%q), plan version %d.", j.TicketID, j.Title, j.PlanVersion)
+	if j.StackPR > 0 {
+		fmt.Fprintf(&b, "\n\nStacked on #%d: this PR's base is that one's branch until it merges; then orbit moves this branch onto the default branch, and only then merges it.", j.StackPR)
+	}
 	if len(trust) > 0 {
 		fmt.Fprintf(&b, "\n\n**Trust boundary:** this change touches what orbit itself may do: %s. Review those files before approving the merge.",
 			"`"+strings.Join(trust, "`, `")+"`")
