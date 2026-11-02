@@ -394,3 +394,50 @@ func TestPageCapPublishesPartial(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestResponseCapThroughCopy(t *testing.T) {
+	var b boundedBuffer
+	// LimitedReader has no WriterTo, so io.Copy exercises the destination's ReaderFrom if present.
+	r := io.LimitReader(strings.NewReader(strings.Repeat("x", maxResponseBytes+1)), maxResponseBytes+1)
+	if _, err := io.Copy(&b, r); err == nil || b.Len() > maxResponseBytes {
+		t.Fatalf("io.Copy bypassed response cap: bytes=%d error=%v", b.Len(), err)
+	}
+}
+
+func TestOversizedTLSResponseRetainsPartialManifest(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer private-token" {
+			t.Error("missing authentication")
+		}
+		if r.URL.Path != "/api/v1/agents/assistant" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"agent":{"name":"assistant","spec":{}},"memory":"`)
+		chunk := strings.Repeat("x", 32<<10)
+		for range maxResponseBytes / len(chunk) {
+			if _, err := io.WriteString(w, chunk); err != nil {
+				return
+			}
+		}
+		_, _ = io.WriteString(w, `"}`)
+	}))
+	defer srv.Close()
+	hc := client.HTTPClient()
+	hc.Transport = srv.Client().Transport
+	c := &client.Client{BaseURL: srv.URL, Token: "private-token", HTTP: hc}
+	target := filepath.Join(t.TempDir(), "oversized.zip")
+	m, err := Export(context.Background(), c, "assistant", target)
+	if !errors.Is(err, ErrIncomplete) || m.ResourceCoverageComplete {
+		t.Fatalf("oversized export coverage=%v error=%v", m.ResourceCoverageComplete, err)
+	}
+	for _, resource := range m.Resources {
+		if resource.File != "" || resource.Bytes != 0 || resource.Error != "resource fetch failed" {
+			t.Fatalf("oversized response retained as complete: %+v", resource)
+		}
+	}
+	if err := Verify(target); err != nil {
+		t.Fatal(err)
+	}
+}

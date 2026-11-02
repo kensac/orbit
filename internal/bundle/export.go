@@ -154,13 +154,17 @@ func (e *exporter) write(name string, data []byte) error {
 	return err
 }
 
-type boundedBuffer struct{ bytes.Buffer }
+// Keep the buffer named so io.Copy cannot bypass Write through a promoted ReaderFrom.
+type boundedBuffer struct{ buffer bytes.Buffer }
+
+func (b *boundedBuffer) Len() int      { return b.buffer.Len() }
+func (b *boundedBuffer) Bytes() []byte { return b.buffer.Bytes() }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
 	if len(p) > maxResponseBytes-b.Len() {
 		return 0, errors.New("response exceeds export bound")
 	}
-	return b.Buffer.Write(p)
+	return b.buffer.Write(p)
 }
 
 func (e *exporter) get(ctx context.Context, endpoint, coverage, cursor string) (map[string]json.RawMessage, *Resource, error) {
