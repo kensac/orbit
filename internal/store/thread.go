@@ -52,15 +52,27 @@ type ThreadMessage struct {
 	Body    string    `json:"body"`
 	Author  *string   `json:"author,omitempty"`
 	ReplyTo *string   `json:"reply_to,omitempty"`
-	// RunID is the run that read it (person) or asked it (agent).
+	// RunID is the run that holds it (person; nil while it waits for a
+	// run) or asked it (agent).
 	RunID *string `json:"run_id"`
 	// SteeredInto is the run whose turn in progress took it (delivery steer).
 	SteeredInto *string `json:"steered_into,omitempty"`
+	// Reads are the attempts that read a person's message, oldest first;
+	// a handed-back one has ReleasedAt set (message_reads).
+	Reads []MessageRead `json:"reads,omitempty"`
 	// Open is set on a question: true until answered (openQuestion).
 	Open *bool `json:"open,omitempty"`
 	// Attachments are the files a person's message carries; always an
 	// array.
 	Attachments []Upload `json:"attachments"`
+}
+
+// MessageRead is one attempt's read of a person's message.
+type MessageRead struct {
+	RunID      string     `json:"run_id"`
+	Attempt    int        `json:"attempt"`
+	ReadAt     time.Time  `json:"read_at"`
+	ReleasedAt *time.Time `json:"released_at"`
 }
 
 // ThreadRun is a run with what it said: its report, its questions and the
@@ -325,8 +337,13 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 		}
 		if len(msgIDs) > 0 {
 			rows, err := tx.Query(ctx, `
-				SELECT id::text, created_at, direction, body, author, reply_to::text, run_id::text, steered_into::text,
-				       CASE WHEN direction = 'from_agent' THEN (`+openQuestion+`) END
+				SELECT id::text, created_at, direction, body, author, reply_to::text,
+				       CASE WHEN `+waitingMessage+` THEN NULL ELSE run_id::text END,
+				       CASE WHEN direction = 'from_agent' THEN (`+openQuestion+`) END, steered_into::text,
+				       (SELECT json_agg(json_build_object('run_id', x.run_id, 'attempt', x.attempt,
+				                                          'read_at', x.read_at, 'released_at', x.released_at)
+				                        ORDER BY x.read_at, x.attempt)
+				        FROM message_reads x WHERE x.message_id = m.id)
 				FROM messages m WHERE id = ANY($1::uuid[])`, msgIDs)
 			if err != nil {
 				return err
@@ -334,9 +351,16 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 			for rows.Next() {
 				m := ThreadMessage{Kind: "message"}
 				var dir string
-				if err := rows.Scan(&m.ID, &m.At, &dir, &m.Body, &m.Author, &m.ReplyTo, &m.RunID, &m.SteeredInto, &m.Open); err != nil {
+				var reads []byte
+				if err := rows.Scan(&m.ID, &m.At, &dir, &m.Body, &m.Author, &m.ReplyTo, &m.RunID, &m.Open, &m.SteeredInto, &reads); err != nil {
 					rows.Close()
 					return err
+				}
+				if reads != nil {
+					if err := json.Unmarshal(reads, &m.Reads); err != nil {
+						rows.Close()
+						return err
+					}
 				}
 				m.From = map[string]string{"to_agent": "person", "from_agent": "agent"}[dir]
 				page.Items = append(page.Items, ThreadItem{Message: &m})

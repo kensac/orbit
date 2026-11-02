@@ -65,6 +65,9 @@ github:
   app_id: 123456
   private_key_env: ORBIT_GITHUB_APP_PRIVATE_KEY
   repositories: [kensac/orbit]
+  # What agents may read (an agent's repos:), separate from what tickets and
+  # merges may target above.
+  read_repositories: [kensac/orbit]
 
 # How approved tickets are built (docs/tickets.md, The build run): in a
 # sandbox from orbit sandboxd, run by the agent named here, under each

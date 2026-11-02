@@ -1,0 +1,78 @@
+// orbitexport writes and verifies portable public-API exports.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"time"
+
+	"github.com/kensac/orbit/internal/bundle"
+	"github.com/kensac/orbit/internal/client"
+)
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, args []string, out, notice io.Writer) error {
+	fs := flag.NewFlagSet("orbitexport", flag.ContinueOnError)
+	fs.SetOutput(notice)
+	endpoint := fs.String("url", os.Getenv("ORBIT_URL"), "public Orbit HTTPS URL")
+	issuer := fs.String("issuer", os.Getenv("ORBIT_OIDC_ISSUER"), "authentik device provider issuer")
+	timeout := fs.Duration("timeout", 10*time.Minute, "overall sign-in and export timeout")
+	id := fs.String("client-id", os.Getenv("ORBIT_OIDC_CLIENT_ID"), "public device provider client ID")
+	fs.Usage = func() {
+		_, _ = fmt.Fprintln(notice, "Usage: orbitexport [flags] export AGENT NEW_OUTPUT.zip\n       orbitexport verify OUTPUT.zip")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	a := fs.Args()
+	if len(a) == 2 && a[0] == "verify" {
+		if err := bundle.Verify(a[1]); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintln(out, "Bundle checksums verified. This does not prove completeness or restorability.")
+		return err
+	}
+	if len(a) != 3 || a[0] != "export" {
+		fs.Usage()
+		return errors.New("expected export AGENT NEW_OUTPUT.zip or verify OUTPUT.zip")
+	}
+	if err := client.ValidateURL(*endpoint); err != nil {
+		return err
+	}
+	if _, err := client.Segment(a[1]); err != nil {
+		return err
+	}
+	if *timeout <= 0 {
+		return errors.New("timeout must be positive")
+	}
+	ctx, cancel := context.WithTimeout(ctx, *timeout)
+	defer cancel()
+	hc := client.HTTPClient()
+	token, err := client.Login(ctx, hc, *issuer, *id, notice)
+	if err != nil {
+		return err
+	}
+	c := client.Client{BaseURL: *endpoint, Token: token, HTTP: hc}
+	m, err := bundle.Export(ctx, &c, a[1], a[2])
+	if err != nil && !errors.Is(err, bundle.ErrIncomplete) {
+		return err
+	}
+	if _, writeErr := fmt.Fprintf(out, "Exported %d resource records to %s; consistent snapshot: false; database backup: false.\n", len(m.Resources), a[2]); writeErr != nil {
+		return writeErr
+	}
+	return err
+}

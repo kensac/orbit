@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/auth"
+	"github.com/kensac/orbit/internal/secret"
 )
 
 // OAuthProxy lets an MCP client sign in with authentik. authentik has no dynamic client registration, which the Claude apps need, so orbit is the authorization server the client sees: it registers clients itself, sends the person to authentik under orbit's own confidential client, and hands the client authentik's access token, which /mcp verifies like any other. Nothing is stored: client ids, states, codes and refresh tokens are sealed (AES-GCM) under a key derived from the operator token, so any instance can finish a flow another one started, and rotating the token ends every registration and refresh token.
@@ -55,11 +55,9 @@ const upstreamScope = "openid profile email offline_access"
 // DefaultRedirectHosts are the Claude apps' callback hosts.
 var DefaultRedirectHosts = []string{"claude.ai", "claude.com"}
 
-// SetKey derives the sealing key from secret (the operator token).
-func (o *OAuthProxy) SetKey(secret []byte) {
-	m := hmac.New(sha256.New, secret)
-	m.Write([]byte("orbit mcp oauth"))
-	o.key = m.Sum(nil)
+// SetKey derives the sealing key from root (the operator token).
+func (o *OAuthProxy) SetKey(root secret.Key) {
+	o.key = root.Derive(secret.MCPOAuth)
 }
 
 func (s *Server) publicURL() string {
