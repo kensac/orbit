@@ -3,6 +3,8 @@
 Instructions for any coding agent working in this repository. Read this file
 first, then the topic document covering what you are about to do.
 
+**[docs/WORKBOARD.md](docs/WORKBOARD.md) says what is built, who is working on what right now, and what is free to take.** Read it before starting, and update it in your PR.
+
 These are instructions, not history. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 is the design; the topic documents below are the rules for changing it.
 
