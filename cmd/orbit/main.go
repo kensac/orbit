@@ -4,6 +4,7 @@
 //	orbit serve              control: API, scheduler, delivery, actions, config sync, and executors
 //	orbit worker             executors only: claim and run what this host's capabilities cover
 //	orbit migrate            apply database migrations and exit
+//	orbit restore-check [--expect FILE]   read a restored orbit-db read only (deploy/restore-drill.sh)
 //	orbit validate [dir]     load and check a configuration directory
 //	orbit run <agent> [prompt]   queue a manual run (a running serve picks it up)
 //	orbit approve <action-id> / orbit reject <action-id>
@@ -79,6 +80,8 @@ func main() {
 		err = withStore(ctx, func(s *store.Store) error { return s.Migrate(ctx) })
 	case "validate":
 		err = validate(os.Args[2:])
+	case "restore-check":
+		err = restoreCheckCmd(ctx, os.Args[2:])
 	case "run":
 		err = enqueue(ctx, os.Args[2:])
 	case "approve", "reject":
@@ -151,7 +154,7 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | restore-check [--expect file] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress")
 	os.Exit(2)
 }
 
