@@ -245,17 +245,49 @@ func IsStatus(err error, status int) bool {
 const maxResponse = 4 << 20
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	b, err := c.send(ctx, method, path, body, maxResponse)
+	if err != nil {
+		return err
+	}
+	if out == nil || len(b) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(b, out); err != nil {
+		return fmt.Errorf("%s %s: decode: %w", method, path, err)
+	}
+	return nil
+}
+
+// send makes one request and returns the body of a 2xx answer, at most
+// limit bytes of it. The client follows redirects (a job log is one), and
+// net/http drops the Authorization header when one leaves this host.
+func (c *Client) send(ctx context.Context, method, path string, body any, limit int64) ([]byte, error) {
+	resp, err := c.open(ctx, method, path, body)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// open makes one request and returns a 2xx response for the caller to read
+// and close; any other answer is an APIError.
+func (c *Client) open(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		rd = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Authorization", c.auth)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -266,14 +298,11 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse))
-	if err != nil {
-		return err
+		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		var m struct {
 			Message string `json:"message"`
 		}
@@ -281,13 +310,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		if m.Message == "" {
 			m.Message = http.StatusText(resp.StatusCode)
 		}
-		return &APIError{Method: method, Path: path, Status: resp.StatusCode, Message: m.Message}
+		return nil, &APIError{Method: method, Path: path, Status: resp.StatusCode, Message: m.Message}
 	}
-	if out == nil || len(b) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(b, out); err != nil {
-		return fmt.Errorf("%s %s: decode: %w", method, path, err)
-	}
-	return nil
+	return resp, nil
 }

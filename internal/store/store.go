@@ -757,6 +757,17 @@ type Outcome struct {
 	Memory    *string
 	Questions []string
 	Actions   []ProposedAction
+	// Plan is a plan the run proposed for its ticket (tickets.go).
+	Plan *PlanProposal
+}
+
+// PlanProposal is a ticket plan a run proposed. RecordOutcome sets Version
+// to the stored version, or leaves it 0 when the ticket could no longer take
+// a plan (it moved on while the run worked), which keeps the run's outcome.
+type PlanProposal struct {
+	TicketID string
+	Body     string
+	Version  int
 }
 
 // RecordOutcome stores memory, questions and actions together with the run's
@@ -785,17 +796,16 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 				return err
 			}
 		}
+		if p := o.Plan; p != nil {
+			v, err := proposePlan(ctx, tx, p.TicketID, runID, p.Body)
+			if err != nil && !errors.Is(err, ErrConflict) {
+				return err
+			}
+			p.Version = v
+		}
 		for _, a := range o.Actions {
-			status := map[string]string{"auto": "approved", "approve": "pending", "deny": "denied"}[a.Rule]
-			var id string
-			if err := tx.QueryRow(ctx, `
-				INSERT INTO actions (run_id, agent, type, params, reason, rule, status, decided_by, decided_at, error, created_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7,
-				        CASE WHEN $6 = 'approve' THEN NULL ELSE 'rule' END,
-				        CASE WHEN $6 = 'approve' THEN NULL ELSE now() END,
-				        NULLIF($8, ''), clock_timestamp())
-				RETURNING id::text`,
-				runID, agent, a.Type, []byte(a.Params), a.Reason, a.Rule, status, a.Error).Scan(&id); err != nil {
+			id, err := insertAction(ctx, tx, runID, agent, a)
+			if err != nil {
 				return err
 			}
 			ids = append(ids, id)
@@ -803,6 +813,23 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 		return nil
 	})
 	return ids, err
+}
+
+// insertAction stores one proposal with the state its rule gives it: auto
+// arrives approved by rule, approve waits for a person, deny is recorded
+// and never executed.
+func insertAction(ctx context.Context, tx pgx.Tx, runID, agent string, a ProposedAction) (string, error) {
+	status := map[string]string{"auto": "approved", "approve": "pending", "deny": "denied"}[a.Rule]
+	var id string
+	err := tx.QueryRow(ctx, `
+		INSERT INTO actions (run_id, agent, type, params, reason, rule, status, decided_by, decided_at, error, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7,
+		        CASE WHEN $6 = 'approve' THEN NULL ELSE 'rule' END,
+		        CASE WHEN $6 = 'approve' THEN NULL ELSE now() END,
+		        NULLIF($8, ''), clock_timestamp())
+		RETURNING id::text`,
+		runID, agent, a.Type, []byte(a.Params), a.Reason, a.Rule, status, a.Error).Scan(&id)
+	return id, err
 }
 
 // ---------------------------------------------------------------- actions

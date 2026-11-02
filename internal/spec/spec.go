@@ -55,6 +55,9 @@ type Deployment struct {
 	// GitHub is the App orbit reaches GitHub as. Without it, no ticket may
 	// name a repository and github:* actions are refused at load.
 	GitHub *GitHub `yaml:"github,omitempty" json:"github,omitempty"`
+	// Build is how orbit builds approved tickets (build.go). Without it no
+	// ticket is built.
+	Build *Build `yaml:"build,omitempty" json:"build,omitempty"`
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -332,6 +335,7 @@ func Load(dir string) (*Config, error) {
 		cfg.Agents[a.Name] = a
 	}
 	cfg.applyDefaults()
+	cfg.applyBuildDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -485,6 +489,7 @@ func (c *Config) Validate() error {
 	for _, n := range names {
 		errs = append(errs, c.validateAgent(c.Agents[n])...)
 	}
+	errs = append(errs, c.validateBuild()...)
 	return errors.Join(errs...)
 }
 

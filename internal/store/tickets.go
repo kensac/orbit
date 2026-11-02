@@ -34,9 +34,11 @@ var ticketEdges = map[string][]string{
 	TicketPlanned:  {TicketPlanned, TicketOpen, TicketApproved, TicketAbandoned},
 	TicketApproved: {TicketBuilding, TicketAbandoned},
 	TicketBuilding: {TicketReview, TicketFailed, TicketAbandoned},
-	TicketReview:   {TicketMerging, TicketFailed, TicketAbandoned},
-	TicketMerging:  {TicketMerged, TicketFailed, TicketAbandoned},
-	TicketMerged:   {TicketDone},
+	// review -> building is a fix attempt on failing checks; review ->
+	// merged is reconciliation of a PR a person merged on GitHub.
+	TicketReview:  {TicketMerging, TicketBuilding, TicketMerged, TicketFailed, TicketAbandoned},
+	TicketMerging: {TicketMerged, TicketFailed, TicketAbandoned},
+	TicketMerged:  {TicketDone},
 	// failed -> merged is reconciliation: GitHub says the PR merged after
 	// orbit lost track of the merge it made.
 	TicketFailed: {TicketApproved, TicketOpen, TicketMerged, TicketAbandoned},
@@ -83,10 +85,12 @@ type Ticket struct {
 	Error          *string   `json:"error,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	// MergeActionID is the github:merge action proposed for its PR.
+	MergeActionID *string `json:"merge_action_id,omitempty"`
 }
 
 const ticketCols = `id::text, kind, title, agent, conversation_id::text, repo, status, author, approved_plan, base_sha, branch,
-	pr_number, head_sha, merge_sha, error, created_at, updated_at`
+	pr_number, head_sha, merge_sha, error, created_at, updated_at, merge_action_id::text`
 
 // NewTicket is what filing a ticket needs. Body is its first message; Wake
 // enqueues a run in the ticket's conversation in the same transaction.
@@ -303,22 +307,46 @@ func (s *Store) TransitionTicket(ctx context.Context, id, to, by string, u Ticke
 func (s *Store) ProposePlan(ctx context.Context, id, runID, body string) (int, error) {
 	var version int
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		kind, from, err := lockTicket(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		if kind != "request" || (from != TicketOpen && from != TicketPlanned) {
-			return fmt.Errorf("ticket %s (%s, %s) cannot take a plan: %w", id, kind, from, ErrConflict)
-		}
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO ticket_plans (ticket_id, version, body, run_id)
-			SELECT $1, COALESCE(max(version), 0) + 1, $2, NULLIF($3, '')::uuid FROM ticket_plans WHERE ticket_id = $1
-			RETURNING version`, id, body, runID).Scan(&version); err != nil {
-			return err
-		}
-		return setStatus(ctx, tx, id, from, TicketPlanned, "agent", TicketUpdate{}, map[string]any{"plan": version})
+		var err error
+		version, err = proposePlan(ctx, tx, id, runID, body)
+		return err
 	})
 	return version, err
+}
+
+// proposePlan is ProposePlan inside a caller's transaction (RecordOutcome
+// stores a run's plan with the rest of its outcome). ErrConflict, before
+// anything is written, means the ticket cannot take a plan now.
+func proposePlan(ctx context.Context, tx pgx.Tx, id, runID, body string) (int, error) {
+	kind, from, err := lockTicket(ctx, tx, id)
+	if err != nil {
+		return 0, err
+	}
+	if kind != "request" || (from != TicketOpen && from != TicketPlanned) {
+		return 0, fmt.Errorf("ticket %s (%s, %s) cannot take a plan: %w", id, kind, from, ErrConflict)
+	}
+	var version int
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO ticket_plans (ticket_id, version, body, run_id)
+		SELECT $1, COALESCE(max(version), 0) + 1, $2, NULLIF($3, '')::uuid FROM ticket_plans WHERE ticket_id = $1
+		RETURNING version`, id, body, runID).Scan(&version); err != nil {
+		return 0, err
+	}
+	return version, setStatus(ctx, tx, id, from, TicketPlanned, "agent", TicketUpdate{}, map[string]any{"plan": version})
+}
+
+// TicketForConversation returns the ticket discussed in a conversation, or
+// nil when the conversation is not a ticket's.
+func (s *Store) TicketForConversation(ctx context.Context, conversationID string) (*Ticket, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT `+ticketCols+` FROM tickets WHERE conversation_id = $1`, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	t, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByPos[Ticket])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return &t, err
 }
 
 // ApprovePlan approves one plan version: only while the ticket is planned
