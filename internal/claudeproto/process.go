@@ -31,8 +31,8 @@ type Process struct {
 	once   sync.Once
 }
 
-// Start starts the CLI and its Conn.
-func Start(c Command, h Handler) (*Process, error) {
+// Exec is the command unstarted, in its own process group so that stopping the group stops the tools and hooks it started too. Its environment is Env alone, empty for a nil Env.
+func (c Command) Exec() *exec.Cmd {
 	cmd := exec.Command(c.Bin, c.Args...)
 	cmd.Dir = c.Dir
 	cmd.Env = c.Env
@@ -41,6 +41,12 @@ func Start(c Command, h Handler) (*Process, error) {
 		cmd.Env = []string{}
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return cmd
+}
+
+// Start starts the CLI and its Conn.
+func Start(c Command, h Handler) (*Process, error) {
+	cmd := c.Exec()
 	p := &Process{cmd: cmd, stderr: &Tail{}, exited: make(chan struct{})}
 	cmd.Stderr = p.stderr
 	stdin, err := cmd.StdinPipe()
@@ -112,15 +118,20 @@ func (p *Process) stop(wait, term time.Duration) {
 			case <-time.After(wait):
 			}
 		}
-		_ = syscall.Kill(-pid, syscall.SIGTERM)
-		select {
-		case <-p.exited:
-		case <-time.After(term):
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-			<-p.exited
-		}
+		TerminateGroup(pid, p.exited, term)
 	})
 	<-p.exited
+}
+
+// TerminateGroup sends SIGTERM to process group pgid, then SIGKILL if exited is not closed within grace, and returns once exited is closed. SIGTERM first because the CLI saves its session's running cost when it exits on one (runner.TranscriptCost).
+func TerminateGroup(pgid int, exited <-chan struct{}, grace time.Duration) {
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	select {
+	case <-exited:
+	case <-time.After(grace):
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		<-exited
+	}
 }
 
 // Tail keeps the last 8 KB written to it, for an error message. It is written by the process while a turn may read it, hence the lock.
