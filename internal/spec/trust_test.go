@@ -148,9 +148,9 @@ func TestWidening(t *testing.T) {
 	moved.URL = "https://evil.example/"
 	next := &Agent{Tools: []string{"WebSearch", "WebFetch"}, Sources: []Source{moved, {Name: "b", Kind: "http", URL: "https://b/", Query: map[string]string{"k": "${OTHER}"}}},
 		Needs: []string{"sure", "docker-network:hetzner"}, Actions: ActionSet{"notify": RuleAuto, "continue": RuleApprove, "webhook:x": RuleDeny},
-		Delegates: []string{"builder"}, Sandbox: "workstation"}
+		Delegates: []string{"builder"}, Sandbox: "workstation", Triggers: []Trigger{{Schedule: "@daily"}, {Webhook: "issues", Secret: "HOOK"}}}
 	want := []string{"tool WebFetch", "source tx", "source b", "credential OTHER", "action continue: approve, was deny",
-		"action notify: auto, was approve", "sandbox workstation", "delegate to builder", "need docker-network:hetzner"}
+		"action notify: auto, was approve", "sandbox workstation", "delegate to builder", "need docker-network:hetzner", "webhook issues"}
 	if w := Widening(cur, next); !reflect.DeepEqual(w, want) {
 		t.Fatalf("widening =\n%q\nwant\n%q", w, want)
 	}

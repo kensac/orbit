@@ -4,13 +4,17 @@ orbit's control instance runs on hetzner, from `hetzner-vps-config/compose.orbit
 
 ## Image
 
-`build-push-ghcr.yml` pushes `ghcr.io/kensac/orbit:{sha-<commit>,latest}` on
-every push to main, for amd64 and arm64. hetzner pins a digest; a release
-reaches it when that pin moves.
+`build-push-ghcr.yml` publishes `ghcr.io/kensac/orbit:{sha-<commit>,latest}` and `ghcr.io/kensac/orbit-build:{sha-<commit>,latest}`, for amd64 and arm64, only for a main commit whose CI run succeeded (`workflow_run`, every job in ci.yml). It pushes each image by digest with no tag, smokes it natively on both architectures, and only then tags it, so nothing can pin an image that failed:
+
+- `deploy/smoke.sh IMAGE [REVISION]`: a throwaway Postgres, `orbit migrate` on the empty database, `orbit validate` on `examples/`, `orbit serve` (no executors, a dummy for every variable the examples reference) until docker says `healthy` and `orbit healthcheck --ready` passes, and `orbit version` is the commit. CI runs it on every pull request's image too.
+- `deploy/build-smoke.sh IMAGE`: the build image's tools as uid 10001 on a read-only root, as sandboxd runs it.
+- `.github/scripts/publish-tags.sh`: points `sha-<short>` and then `latest` at exactly the smoked digest (it checks), and never moves `latest` back to an older commit when CI runs finish out of order. Each image's `org.opencontainers.image.revision` label is its commit.
+
+A failed CI run or smoke publishes nothing; to publish that commit after a flake, re-run its CI run or the failed publish run. hetzner pins a digest; a release reaches it when that pin moves.
 
 ### The workstation image
 
-`ghcr.io/kensac/orbit-workstation:{sha-<commit>,latest}` (`deploy/workstation.Dockerfile`, workflow `workstation.yml`) is an agent's persistent box: a container sandboxd keeps per agent under gVisor (`runsc`), where a person gets Claude Code in a browser terminal as on a laptop and the agent's own turns run beside it. It runs on hetzner (amd64) and oci (arm64), so it is built for both; a pull request that touches it builds it natively on each architecture and runs every tool's `--version` as its user, and main pushes it. Like the build image it is pinned by digest where it runs, so a push reaches a box only when that pin moves.
+`ghcr.io/kensac/orbit-workstation:{sha-<commit>,latest}` (`deploy/workstation.Dockerfile`, workflow `workstation.yml`) is an agent's persistent box: a container sandboxd keeps per agent under gVisor (`runsc`), where a person gets Claude Code in a browser terminal as on a laptop and the agent's own turns run beside it. It runs on hetzner (amd64) and oci (arm64), so it is built for both; a pull request that touches it builds it natively on each architecture and runs every tool as its user (`deploy/workstation-smoke.sh`). Publishing is gated the same way as orbit's: after a main commit's CI run succeeds, and only when its inputs (the Dockerfile, `deploy/workstation/`, `deploy/cli/`, the smoke and the workflow) changed since the commit `latest` was built from, it is pushed by digest, smoked natively on both architectures, and only then tagged. Like the build image it is pinned by digest where it runs, so a push reaches a box only when that pin moves.
 
 - **Tools:** Debian trixie with git, jq, ripgrep, fd, fzf, curl, wget, make, build-essential, tmux, neovim, nano, sqlite3, psql, ssh, less, procps, iproute2, unzip and sudo; Go (go.mod's toolchain), Node 24 with npm and pnpm (corepack, `deploy/workstation/package.json`), python3 with uv, yq, gh, and Docker (engine, CLI, containerd, buildx, compose) for a dockerd inside the box; Claude Code at deploy/cli's lockfile with its auto-updater off.
 - **User:** `agent`, uid 10001 (sandboxd's uid), `HOME=/home/agent`, passwordless sudo (which needs a container without `no-new-privileges`), in the `docker` group. `/work` is its own. Locale `en_US.UTF-8`, `TERM=xterm-256color`; `/etc/tmux.conf` sets `set-clipboard on`, `window-size latest`, `mouse on` and 10,000 lines of history.
@@ -52,6 +56,8 @@ the internal listener. Set compose `stop_grace_period` to at least
 `ORBIT_DRAIN` from the environment; `ORBIT_DRAIN_MAX` (a Go duration)
 overrides the drain's cap, which defaults to the longest agent timeout plus
 5 minutes.
+
+Routers: `/api/`, `/mcp` with the OAuth paths, and `/hooks/` (webhook deliveries, signed, docs/api.md) go past forward-auth, each with a priority above the host's catch-all; everything else (`/ui/`) is behind it. A webhook secret in orbit.yaml is in force only once its variable is in orbit's environment (a missing one answers `503`).
 
 A request that reaches the old instance in the seconds before traefik drops
 it is still served (the API is DB-backed); a run it enqueues is claimed by

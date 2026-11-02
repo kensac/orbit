@@ -81,6 +81,8 @@ type Deployment struct {
 	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
 	// Expires records when a credential orbit cannot inspect stops working (the Claude Code subscription token lasts a year), keyed by its variable, as YYYY-MM-DD (expires.go). It only feeds orbit_credential_expiry_timestamp_seconds, so an alert fires before the date.
 	Expires map[string]string `yaml:"expires,omitempty" json:"expires,omitempty"`
+	// WebhookSecrets are the signing secrets inbound webhooks are verified with, keyed by variable, each bound to the agents that may use it (webhook.go).
+	WebhookSecrets map[string]WebhookSecret `yaml:"webhook_secrets,omitempty" json:"webhook_secrets,omitempty"`
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -376,9 +378,9 @@ const MaxSessionIdle = 24 * time.Hour
 // resume picks up after it closes.
 const MaxSessionLive = time.Hour
 
-// Trigger is one way an agent wakes: a cron Schedule, or an RRule (RFC
-// 5545, internal/rrule) anchored at Start. Exactly one is set; the struct
-// leaves room for event triggers.
+// Trigger is one way an agent wakes: a cron Schedule, an RRule (RFC
+// 5545, internal/rrule) anchored at Start, or a Webhook (webhook.go).
+// Exactly one is set.
 type Trigger struct {
 	Schedule string `yaml:"schedule" json:"schedule"`
 	// RRule is a recurrence rule ("FREQ=WEEKLY;INTERVAL=2;BYDAY=TU"), for
@@ -391,6 +393,14 @@ type Trigger struct {
 	Start string `yaml:"start,omitempty" json:"start,omitempty"`
 	// Prompt is the reason for this wake, appended to the charter.
 	Prompt string `yaml:"prompt,omitempty" json:"prompt,omitempty"`
+	// Webhook names an inbound route, POST /hooks/<agent>/<webhook>: a delivery signed with Secret starts a run.
+	Webhook string `yaml:"webhook,omitempty" json:"webhook,omitempty"`
+	// Secret is the variable holding the webhook's signing secret, one of orbit.yaml's webhook_secrets bound to this agent.
+	Secret string `yaml:"secret,omitempty" json:"secret,omitempty"`
+	// MaxBytes bounds a delivery's body; a larger one is refused.
+	MaxBytes int64 `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
+	// MissedGrace is how late a schedule fire may start; a later one is skipped as missed (MissedGraceFor).
+	MissedGrace Duration `yaml:"missed_grace,omitempty" json:"missed_grace,omitempty"`
 }
 
 // Schedule is when a trigger fires: the first fire strictly after a time,
@@ -407,6 +417,8 @@ var startLayouts = []string{"2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-
 // timezone).
 func TriggerSchedule(t Trigger, loc *time.Location) (Schedule, error) {
 	switch {
+	case t.IsWebhook():
+		return nil, ErrWebhookTrigger
 	case t.Schedule != "" && t.RRule != "":
 		return nil, errors.New("schedule and rrule cannot both be set")
 	case t.Schedule != "":
@@ -638,7 +650,7 @@ var (
 	// Kinds every adapter registry must cover. Kept here so validation does
 	// not import the adapters (which import spec).
 	channelKinds = []string{"ntfy", "smtp", "webhook", "log"}
-	sourceKinds  = []string{"http", "prometheus", "file"}
+	sourceKinds  = []string{"http", "prometheus", "file", "webhook"}
 	runnerKinds  = []string{"claude-code", "codex", "anthropic"}
 	notifyWhen   = []string{"", "always", "agent", "never"}
 	verifyChecks = []string{"figures"}
@@ -900,6 +912,7 @@ func (c *Config) Validate() error {
 	}
 	errs = append(errs, c.validateCredentials()...)
 	errs = append(errs, c.validateExpires()...)
+	errs = append(errs, c.validateWebhookSecrets()...)
 	errs = append(errs, c.validateBuild()...)
 	if sb := c.Deployment.Sandbox; sb != nil && !strings.HasPrefix(sb.Sandboxd, "unix:/") && !strings.Contains(sb.Sandboxd, ":") {
 		errs = append(errs, fmt.Errorf("sandbox: sandboxd %q is neither host:port nor unix:/path", sb.Sandboxd))
@@ -933,6 +946,16 @@ func (c *Config) validateAgent(a *Agent) []error {
 		at("tools: runner %q is %s, which takes no tools (only a claude-code runner does)", a.Runner, r.Kind)
 	}
 	for i, t := range a.Triggers {
+		if t.IsWebhook() {
+			errs = append(errs, c.validateWebhookTrigger(a, i, t)...)
+			continue
+		}
+		if t.Secret != "" || t.MaxBytes != 0 {
+			at("trigger %d: secret and max_bytes are for a webhook trigger", i)
+		}
+		if g := time.Duration(t.MissedGrace); g != 0 && (g < MinMissedGrace || g > MaxMissedGrace) {
+			at("trigger %d: missed_grace must be between %s and %s", i, MinMissedGrace, MaxMissedGrace)
+		}
 		if _, err := TriggerSchedule(t, a.Location()); err != nil {
 			at("trigger %d: %v", i, err)
 		}
@@ -964,6 +987,13 @@ func (c *Config) validateAgent(a *Agent) []error {
 		case "file":
 			if s.Path == "" {
 				at("source %q: path is required", s.Name)
+			}
+		case "webhook":
+			if s.URL != "" || s.Expr != "" || s.Path != "" || len(s.Headers) > 0 || len(s.Query) > 0 || s.Paginate != nil {
+				at("source %q: a webhook source is the delivery that started the run, and takes no url, expr, path, headers, query or paginate", s.Name)
+			}
+			if !a.hasWebhook() {
+				at("source %q: a webhook source needs a webhook trigger", s.Name)
 			}
 		}
 	}

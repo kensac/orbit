@@ -310,6 +310,9 @@ func referencedEnv(cfg *spec.Config) []string {
 	if g := cfg.Deployment.GitHub; g != nil {
 		refs[g.PrivateKeyEnv] = true
 	}
+	for v := range cfg.Deployment.WebhookSecrets {
+		refs[v] = true
+	}
 	if m := cfg.Deployment.Mail; m != nil {
 		refs[m.IMAP.UsernameEnv], refs[m.IMAP.PasswordEnv] = true, true
 	}
