@@ -93,14 +93,8 @@ func (s *Store) DefaultConversationID(ctx context.Context, agent string) (string
 // LatestSnapshot is a conversation's newest snapshot without its archive,
 // or ErrNotFound when it has none.
 func (s *Store) LatestSnapshot(ctx context.Context, conversationID string) (*Workspace, error) {
-	var w Workspace
-	err := s.Pool.QueryRow(ctx, `SELECT id, conversation_id::text, run_id::text, attempt, sha256, bytes, files, created_at
-		FROM workspaces WHERE conversation_id = $1 ORDER BY id DESC LIMIT 1`, conversationID).
-		Scan(&w.ID, &w.ConversationID, &w.RunID, &w.Attempt, &w.SHA256, &w.Bytes, &w.Files, &w.CreatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	return &w, err
+	return scanSnapshot(s.Pool.QueryRow(ctx, `SELECT `+snapshotCols+`
+		FROM workspaces WHERE conversation_id = $1 ORDER BY id DESC LIMIT 1`, conversationID), false)
 }
 
 // SnapshotArchive is one snapshot's tar, by id.

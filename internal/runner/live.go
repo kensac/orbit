@@ -149,6 +149,21 @@ func (l *Live) drop(p *liveProc) {
 	p.stop(true)
 }
 
+// discard closes the idle live process of key, if there is one.
+func (l *Live) discard(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	p := l.procs[key]
+	if p == nil || p.busy {
+		return
+	}
+	if p.timer != nil {
+		p.timer.Stop()
+	}
+	delete(l.procs, key)
+	l.async(func() { p.stop(false) })
+}
+
 func (l *Live) expire(p *liveProc) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
