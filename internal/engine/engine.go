@@ -399,7 +399,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env,
 		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted()}
-	vars := sources.Vars(now)
+	vars := sources.Vars{Now: now, Trigger: c.Trigger}
 	var inputs []runner.Input
 	if rec != nil {
 		// The session read these; it continues on exactly them.

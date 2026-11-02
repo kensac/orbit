@@ -438,6 +438,33 @@ type Source struct {
 	Path string `yaml:"path,omitempty" json:"path,omitempty"`
 	// MaxBytes bounds one source's fetched size.
 	MaxBytes int64 `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
+	// ByTrigger overrides query values for runs of one trigger: a person's
+	// message may want a wider window than the schedule's review.
+	ByTrigger map[string]SourceOverride `yaml:"by_trigger,omitempty" json:"by_trigger,omitempty"`
+}
+
+// SourceOverride is what a source changes for runs of one trigger.
+type SourceOverride struct {
+	// Query values replace the source's own by key, and add keys it lacks.
+	Query map[string]string `yaml:"query" json:"query"`
+}
+
+// SourceTriggers are the run triggers a source may override for: the
+// agent's own runs that fetch sources (a build fetches none, and a
+// learning pass reads conversations, not sources).
+var SourceTriggers = []string{"schedule", "manual", "message", "continue", "task", "delegation"}
+
+// QueryFor is the source's query for a run of trigger: its own values with
+// that trigger's override over them.
+func (s Source) QueryFor(trigger string) map[string]string {
+	o, ok := s.ByTrigger[trigger]
+	if !ok {
+		return s.Query
+	}
+	q := make(map[string]string, len(s.Query)+len(o.Query))
+	maps.Copy(q, s.Query)
+	maps.Copy(q, o.Query)
+	return q
 }
 
 // Transform is code run over one source's bytes before the run: its output
@@ -932,6 +959,22 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if p := s.Paginate; p != nil && (p.PageParam == "" || p.ItemsPath == "") {
 				at("source %q: paginate needs page_param and items_path", s.Name)
 			}
+			for _, tr := range slices.Sorted(maps.Keys(s.ByTrigger)) {
+				switch o := s.ByTrigger[tr]; {
+				case !slices.Contains(SourceTriggers, tr):
+					at("source %q: by_trigger: unknown trigger %q (want one of %v)", s.Name, tr, SourceTriggers)
+				case len(o.Query) == 0:
+					at("source %q: by_trigger.%s: query is required", s.Name, tr)
+				case s.Paginate != nil && hasKey(o.Query, s.Paginate.PageParam):
+					at("source %q: by_trigger.%s: query may not set the page parameter %q", s.Name, tr, s.Paginate.PageParam)
+				}
+			}
+		case "prometheus", "file":
+			if len(s.ByTrigger) > 0 {
+				at("source %q: by_trigger is only for http sources", s.Name)
+			}
+		}
+		switch s.Kind {
 		case "prometheus":
 			if s.URL == "" || s.Expr == "" {
 				at("source %q: prometheus needs url and expr", s.Name)
@@ -1213,4 +1256,9 @@ func EnvRefs(s string) []string {
 		out = append(out, m[1])
 	}
 	return out
+}
+
+func hasKey(m map[string]string, k string) bool {
+	_, ok := m[k]
+	return ok
 }
