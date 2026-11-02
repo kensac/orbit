@@ -47,6 +47,13 @@ mail:
     password_env: ORBIT_SMTP_PASS
   allow: [me@example.com]
 
+# Secrets a source may send, each only to URLs under its prefix. These are
+# the only ${VAR}s an agent defined through the API or by agent:define may
+# reference (docs/agents/configuration.md, Secrets).
+credentials:
+  SURE_API_KEY:
+    url_prefix: https://sure.example.com/api/
+
 endpoints:
   home-assistant:
     url: http://homeassistant.example.ts.net:8123/api/webhook/orbit
