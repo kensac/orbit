@@ -212,10 +212,11 @@ messages below.
 ```json
 {"files": [{"path": "src/main.go", "bytes": 13, "modified_at": "..."}],
  "snapshot": {"id": 4, "conversation_id": "uuid", "run_id": "uuid", "attempt": 1,
+              "source": "run", "author": null,
               "sha256": "hex", "bytes": 10240, "files": 3, "created_at": "..."}}
 ```
 
-Regular files only, by path; orbit's own state (`.orbit/`, the run's `inputs/`) is left out. `snapshot` is `null` (and `files` empty) for a conversation without one. `GET /conversations/{id}/files/{path}` is one file, always as a download (`application/octet-stream`, `Content-Disposition: attachment`, `nosniff`, a CSP that runs nothing), 404 for a path the snapshot does not have.
+Regular files only, by path; orbit's own state (`.orbit/`, the run's `inputs/`) is left out. `snapshot` is `null` (and `files` empty) for a conversation without one; one a person's workspace write stored has `source: "person"`, `author` the person, and `run_id` and `attempt` null. `GET /conversations/{id}/files/{path}` is one file, always as a download (`application/octet-stream`, `Content-Disposition: attachment`, `nosniff`, a CSP that runs nothing), 404 for a path the snapshot does not have.
 
 `PATCH /conversations/{id}` `{"title": "...", "archived": true}` (either
 field) returns the updated `{"conversation": {...}}`. A title is at most 240
@@ -624,7 +625,7 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
 
 ## Workspace
 
-The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). **Built:** finding a workspace, the file reads (tree, stat, files, download) and the audit, on the snapshot backend. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
+The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). **Built:** finding a workspace, the file reads (tree, stat, files, download), the writes (write, mkdir, rename, trash and restore, upload and signed upload) and the audit, on the snapshot backend. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
 
 A workspace is a file tree a person and an agent share. Routes take the authentik token as above; writes, trash, uploads, terminals and git writes also require membership of `ORBIT_WORKSPACE_GROUP` (default `ORBIT_OIDC_GROUP`; `403`, `check: "group"`). Errors carry a `check` beside `error`, as authentication errors do:
 
@@ -633,9 +634,10 @@ A workspace is a file tree a person and an agent share. Routes take the authenti
 | `request` | 400 | a malformed parameter: a cursor not from `next_cursor` or `next_before` |
 | `path` | 400 | not clean (`a/`, `./a`, `a//b`), absolute, outside the tree, or through a symlink; the wrong kind for the route (a directory to `files`, a file to `tree`, a symlink to `files` or `download`) |
 | `not_found` | 404 | no such path, ref, terminal or comment |
-| `exists` | 409 | the target of a create, rename or restore exists |
+| `exists` | 409 | the target of a create, rename, restore or upload exists (the body carries `current`, the entry there, for a write or an upload), or a signed upload URL was used |
 | `version` | 412 | `If-Match` is not the current version; the body carries `current` (the entry, or `null` when it is gone) |
 | `version_required` | 428 | a write to an existing file without `If-Match` |
+| `group` | 403 | a write by a person outside `ORBIT_WORKSPACE_GROUP` |
 | `read_only`, `no_shell`, `no_git` | 409 | the backend does not have that capability (`capabilities`, below) |
 | `busy` | 409 | a snapshot write while a run of the conversation is running |
 | `too_large` | 413 | over a size limit (workspace.md, Auth, scope and limits) |
@@ -650,7 +652,7 @@ A workspace is a file tree a person and an agent share. Routes take the authenti
 ```json
 {"id": "uuid", "scope": "conversation", "conversation_id": "uuid", "agent": "orbit",
  "backend": "snapshot", "cwd": "",
- "capabilities": {"read": true, "write": false, "terminals": false, "git": false,
+ "capabilities": {"read": true, "write": true, "terminals": false, "git": false,
                   "watch": false, "presets": []},
  "as_of": {"snapshot_id": 4, "run_id": "uuid", "at": "..."},
  "box": null, "created_at": "..."}
@@ -658,8 +660,8 @@ A workspace is a file tree a person and an agent share. Routes take the authenti
 
 - A conversation of a chat agent (`chat: true`) has a workspace; it is made the first time it is asked for, or with the conversation's first snapshot. On the snapshot backend, `GET /agents/{name}/workspace` is the agent's default conversation's workspace, where its agent-level routes speak.
 - `scope` is `conversation` (the snapshot backend: one per conversation) or `agent` (a box: one per agent, shared by its conversations). From a conversation, `cwd` is that conversation's directory in the tree (`""` on the snapshot backend, `conversations/<id>` in a box); a client opens there and lets the person go up. From an agent, `cwd` is `""`.
-- `backend` is informative; a client decides from `capabilities`. `presets` lists the terminal presets (`shell`, `claude`). `capabilities` is the backend's, narrowed for the person asking: `write` is false for a person outside `ORBIT_WORKSPACE_GROUP`. On the snapshot backend today it is `{"read": true, "write": false, "terminals": false, "git": false, "watch": false, "presets": []}`: its writes and change stream are planned.
-- `as_of` is the snapshot read (snapshot backend), `null` before the first one and in a box.
+- `backend` is informative; a client decides from `capabilities`. `presets` lists the terminal presets (`shell`, `claude`). `capabilities` is the backend's, narrowed for the person asking: `write` is false for a person outside `ORBIT_WORKSPACE_GROUP`. On the snapshot backend today it is `{"read": true, "write": true, "terminals": false, "git": false, "watch": false, "presets": []}`: its change stream is planned.
+- `as_of` is the snapshot read (snapshot backend), `null` before the first one and in a box. Its `run_id` is `null` when a person's write stored it.
 - *(planned)* `box` is `{"host": "oci", "arch": "arm64", "state": "running", "image": "sha256:..."}` in a box, `state` one of `starting`, `running`, `stopped`. A request to a stopped box starts it, waits up to 30 s, then answers `box_starting`.
 - A conversation of an agent without chat workspaces returns `{"workspace": null}`.
 - Every conversation shape above carries `workspace_id` (the same id): set for each conversation of a chat agent and any conversation with a snapshot, `null` otherwise.
@@ -681,20 +683,23 @@ Reads are limited to 100 requests a second per person per workspace (per orbit i
 - `GET /workspaces/{id}/tree?path=&cursor=&limit=` lists one directory: `{"path", "entries": [<entry>], "next_cursor": null}`, directories first, then by name (bytewise); `limit` defaults to 500, at most 2000 (a larger one is clamped); `next_cursor` is opaque, `null` on the last page. `version` is omitted from tree entries (it costs a read of every file). An empty workspace's root is an empty list.
 - `GET /workspaces/{id}/stat?path=` is `{"entry": <entry>}`, with `version`.
 - `GET /workspaces/{id}/files?path=&ref=` is a file for the editor: `{"entry": <entry>, "text": "...", "reason": null}`. `text` is the whole file as UTF-8, byte for byte (line endings and a BOM kept). When it cannot be edited, `text` is absent and `reason` is `binary` (a NUL in the first 8000 bytes, or not UTF-8) or `too_large` (over 2 MiB, checked first). *(planned)* `ref` reads a past version from `history` (below); until history is built every `ref` is `not_found`. The response's `ETag` is the version, quoted.
-- *(planned)* `PUT /workspaces/{id}/files?path=` writes the body (raw bytes, at most 8 MiB) as the file. `If-Match: "<version>"` is required for an existing file; `If-None-Match: *` creates and fails `exists` if it is there. Parent directories are created. `200` (or `201` created) `{"entry": <entry>}`.
-- *(planned)* `POST /workspaces/{id}/mkdir` `{"path"}`: `201 {"entry"}`.
-- *(planned)* `POST /workspaces/{id}/rename` `{"from", "to", "version"?}`: `200 {"entry"}` at `to`. Never overwrites (`exists`); `version` guards a file's content as `If-Match` does.
-- *(planned)* `POST /workspaces/{id}/trash` `{"path", "version"?}` moves a file or directory to the trash: `200 {"trash": <item>}`. `GET /workspaces/{id}/trash?cursor=&limit=` lists items, newest first: `{"items": [...], "next_cursor"}`. `POST /workspaces/{id}/trash/{item}/restore` `{"to"?}` puts it back at its path or `to`: `200 {"entry"}`. There is no route that empties the trash.
+- `PUT /workspaces/{id}/files?path=` writes the body (raw bytes, at most 8 MiB, else `too_large`) as the file. `If-Match: "<version>"` is required for an existing file (`version_required` without it; `If-Match: *` accepts any version); `If-None-Match: *` creates and fails `exists` if it is there; an `If-Match` on a path that is not there is `version` with `current: null`. Parent directories are created; a path under a file, a directory or a symlink at the path, the root and orbit's own state are `path` errors. An existing file keeps its mode, a new one is `0644`. `200` (or `201` created) `{"entry": <entry>}`.
+- `POST /workspaces/{id}/mkdir` `{"path"}`: `201 {"entry"}`, parents created; `exists` when the path is there.
+- `POST /workspaces/{id}/rename` `{"from", "to", "version"?}`: `200 {"entry"}` at `to`, with everything under a directory. Never overwrites (`exists`); `version` guards a file's content as `If-Match` does (given for a directory, it is `version`). A move into itself or of the root is a `path` error.
+- `POST /workspaces/{id}/trash` `{"path", "version"?}` moves a file or directory to the trash: `200 {"trash": <item>}`; `version` as for rename. `GET /workspaces/{id}/trash?cursor=&limit=` lists items, newest first: `{"items": [...], "next_cursor"}` (`limit` defaults to 100, at most 500). `POST /workspaces/{id}/trash/{item}/restore` `{"to"?}` (the body is optional) puts it back at its path or `to`, with everything that was under it: `200 {"entry"}`, `exists` when the target is there. An item may be restored more than once (a copy each time); `restored_at` is the latest. There is no route that empties the trash: on the snapshot backend an item's content is the snapshot it was trashed from, kept like every snapshot. An item's `bytes` is the total of its files; `by` is the person, `null` for the operator token.
 
 ```json
 {"id": "uuid", "path": "notes/old.md", "kind": "file", "bytes": 210,
  "trashed_at": "...", "by": "kanishk", "restored_at": null}
 ```
 
-- *(planned)* `POST /workspaces/{id}/upload?dir=` takes `multipart/form-data`, any number of file parts, each at most 64 MiB, named by the part's file name (cleaned as conversation uploads are). An existing name is `exists` unless `overwrite=1`, which trashes the old file first. `201 {"entries": [<entry>]}`. `POST /workspaces/{id}/upload/url` `{"path", "bytes", "media_type"}` returns a signed `PUT` URL exactly as `POST /conversations/{id}/uploads/url` does, up to 1 GiB, writing to `path` (`exists` applies).
+- `POST /workspaces/{id}/upload?dir=` takes `multipart/form-data`, any number of file parts, each at most 64 MiB (`too_large`), named by the part's file name (cleaned as conversation uploads are, without numbering), into `dir` (created when missing; default the root), all in one write. An existing name is `exists` unless `overwrite=1`, which trashes the old file first (a directory there is always `exists`); a name twice in one form is a `request` error. `201 {"entries": [<entry>]}`, in form order.
+- `POST /workspaces/{id}/upload/url` `{"path", "bytes", "media_type"?}` returns a signed `PUT` URL shaped as `POST /conversations/{id}/uploads/url`'s (`{"url", "method": "PUT", "headers", "expires_at", "max_bytes"}`), for `bytes` up to 1 GiB, writing to `path`; `exists` applies when it is issued and when it is used. The URL is `/api/v1/workspaces/signed?...`: no `Authorization` header (the signature, under a key of its own derived from `ORBIT_API_TOKEN`, names the workspace, the path, the type, `bytes` as the most it accepts, the person, who must be in the workspace group when it is issued, and an expiry 15 minutes ahead). It uploads once (a second `PUT` is `409` `exists`); an altered or expired URL is `403`, a larger body `413` `too_large`. `media_type` sets only the `Content-Type` the browser sends. It needs `public_url` in `orbit.yaml` (`503` without it).
 - `GET /workspaces/{id}/download?path=&ref=` is a file as a download (`application/octet-stream`, `Content-Disposition: attachment`, `nosniff`, a CSP that runs nothing, its version as the `ETag`), or a directory as `application/gzip` (a tar.gz named `<directory>.tar.gz`, `workspace.tar.gz` for the root, whose paths start with the directory's name; `.orbit/` left out), at most 1 GiB. `inline=1` serves a raster image (not SVG, as its content sniffs) inline with its own type, for a preview; any other file stays an attachment. A symlink is a `path` error. `ref` is as for `GET /files`.
 
-*(planned)* On the snapshot backend a write, mkdir, rename, trash, restore or upload stores a new snapshot, refused with `busy` while a run of the conversation is running; `as_of` moves to it.
+On the snapshot backend a write, mkdir, rename, trash, restore or upload stores a new snapshot (`source: person`, `run_id` null), made from the newest and applied again from the newest when another write got in first; it is refused with `busy` while a run of the conversation is running, since the run's own snapshot would follow it. `as_of` moves to it. The whole snapshot holds at most 256 MiB (`too_large`), so a signed upload larger than that is refused when it is asked for. Writes are limited to 20 a second per person per workspace (per instance), as reads are. A request's `X-Request-Id` (up to 128 printable characters; one is made when it has none) is echoed in the response and recorded with its events.
+
+The next turn of the conversation's agent is told, by code, which files the person changed since the agent last saw the workspace (added, modified, removed, renamed; at most 100 lines), and its working directory has the person's version: a live session process, whose sandbox holds the old copy, is not reused, and the session resumes in a new one started from the workspace as it is.
 
 ### History
 
@@ -800,7 +805,7 @@ A client with 4 MiB of output queued is closed (code 4008) and reattaches with a
 
 ### Audit
 
-`GET /workspaces/{id}/events?before=&limit=`: `{"events": [{"id", "at", "person", "op", "path", "from", "version_before", "version_after", "bytes", "terminal_id", "run_id", "request_id"}], "next_before"}`, newest first. `id` is a number; `limit` defaults to 100, at most 500; `next_before` is opaque, `null` on the last page. Fields an operation has no value for are `null` (`person` for the operator token). Reads are not recorded. Until the writes below are built the audit is empty. `op` is each write route's name (`write`, `mkdir`, `rename`, `trash`, `restore`, `upload`, `commit`, `push`, `terminal.create`, `terminal.attach`, `terminal.detach`, `terminal.kill`, `review`). Terminal input is never recorded.
+`GET /workspaces/{id}/events?before=&limit=`: `{"events": [{"id", "at", "person", "op", "path", "from", "version_before", "version_after", "bytes", "terminal_id", "run_id", "request_id"}], "next_before"}`, newest first. `id` is a number; `limit` defaults to 100, at most 500; `next_before` is opaque, `null` on the last page. Fields an operation has no value for are `null` (`person` for the operator token, `version_before` for a create, `version_after` for a trash, `bytes` for a mkdir). Built today: `write`, `mkdir`, `rename`, `trash` (also before an upload's overwrite), `restore` and `upload`, one row per file. Reads are not recorded. `op` is each write route's name (`write`, `mkdir`, `rename`, `trash`, `restore`, `upload`, `commit`, `push`, `terminal.create`, `terminal.attach`, `terminal.detach`, `terminal.kill`, `review`). Terminal input is never recorded.
 
 ## Memory
 

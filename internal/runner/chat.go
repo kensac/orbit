@@ -57,6 +57,11 @@ type Chat struct {
 	// Interrupt, when closed, interrupts the turn (a person pressed stop):
 	// the CLI ends it with a result, and the run reports Interrupted.
 	Interrupt <-chan struct{}
+	// Fresh is a workspace a person changed since the last turn: a live
+	// process (its sandbox's copy of the workspace, or a cwd the restore
+	// replaced) is not reused, and the session resumes in a new one
+	// started from the workdir as it is now.
+	Fresh bool
 }
 
 // SandboxClient is sandboxd's four operations (*sandbox.Client).
@@ -310,7 +315,9 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	var p *liveProc
 	mode, parent := "fresh", resume
 	if sess != nil && sess.Live != nil {
-		if p = sess.Live.take(sess.Key, key, resume); p != nil {
+		if req.Chat.Fresh {
+			sess.Live.discard(sess.Key)
+		} else if p = sess.Live.take(sess.Key, key, resume); p != nil {
 			mode = "live"
 		}
 	}

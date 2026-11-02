@@ -306,6 +306,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	keepScratch := func() bool { return ctx.Err() != nil }
 	withSession := a.Session != nil && a.Session.Resume && claudeCode
 	chat := a.Chat && claudeCode
+	// What the person changed in a chat's workspace since the last turn.
+	var wsNote string
+	var wsFresh bool
 	if withSession || chat {
 		base := filepath.Join(e.DataDir, "agents", a.Name)
 		workdir, home = filepath.Join(base, "work"), filepath.Join(base, "home")
@@ -313,6 +316,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			// A chat's workspace is its conversation's, kept between
 			// messages and stored after every run.
 			workdir, home = e.chatDirs(c.ConversationID)
+			var err error
+			if wsNote, wsFresh, err = e.personChanges(ctx, c.ConversationID); err != nil {
+				return nil, nil, err
+			}
 			if err := e.restoreWorkspace(ctx, c.ConversationID, workdir); err != nil {
 				return nil, nil, err
 			}
@@ -556,8 +563,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	if chat {
 		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
-			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
-			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec,
+			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached,
+				WorkspaceChanges: wsNote}, fresh: wsFresh,
+			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec,
 			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin})
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)

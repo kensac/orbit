@@ -55,9 +55,10 @@ type capabilities struct {
 	Presets   []string `json:"presets"`
 }
 
-// snapshotCapabilities are the snapshot backend's: reads only, until its
-// writes and change stream are built.
-var snapshotCapabilities = capabilities{Read: true, Presets: []string{}}
+// snapshotCapabilities are the snapshot backend's: reads and writes, no
+// terminals or git (orbit never runs git over a snapshot), and no change
+// stream until it is built.
+var snapshotCapabilities = capabilities{Read: true, Write: true, Presets: []string{}}
 
 type asOfDoc struct {
 	SnapshotID int64     `json:"snapshot_id"`
@@ -171,41 +172,59 @@ func (s *Server) snapshot(ctx context.Context, t *store.WorkspaceTree) (*workspa
 	if err != nil {
 		return nil, nil, err
 	}
+	snap, err := s.snapshotByID(ctx, meta.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return snap, meta, nil
+}
+
+// snapshotByID returns one stored snapshot, indexed, from the cache or
+// the database.
+func (s *Server) snapshotByID(ctx context.Context, id int64) (*workspace.Snapshot, error) {
 	st := s.wsState()
 	st.mu.Lock()
-	if c, ok := st.cache[meta.ID]; ok {
+	if c, ok := st.cache[id]; ok {
 		st.tick++
 		c.used = st.tick
 		st.mu.Unlock()
-		return c.snap, meta, nil
+		return c.snap, nil
 	}
 	st.mu.Unlock()
-	archive, err := s.Store.SnapshotArchive(ctx, meta.ID)
+	archive, err := s.Store.SnapshotArchive(ctx, id)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	snap, err := workspace.Open(archive, hiddenFile)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
+	s.cacheSnapshot(id, snap)
+	return snap, nil
+}
+
+// cacheSnapshot keeps an indexed snapshot, evicting the least recently used
+// beyond snapshotCacheBytes (never the one just added).
+func (s *Server) cacheSnapshot(id int64, snap *workspace.Snapshot) {
+	st := s.wsState()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if _, ok := st.cache[meta.ID]; !ok {
-		st.tick++
-		st.cache[meta.ID] = &cachedSnapshot{snap: snap, used: st.tick}
-		st.bytes += snap.Size()
-		for st.bytes > snapshotCacheBytes && len(st.cache) > 1 {
-			var oldest int64 = -1
-			for id, c := range st.cache {
-				if id != meta.ID && (oldest < 0 || c.used < st.cache[oldest].used) {
-					oldest = id
-				}
-			}
-			st.bytes -= st.cache[oldest].snap.Size()
-			delete(st.cache, oldest)
-		}
+	if _, ok := st.cache[id]; ok {
+		return
 	}
-	return snap, meta, nil
+	st.tick++
+	st.cache[id] = &cachedSnapshot{snap: snap, used: st.tick}
+	st.bytes += snap.Size()
+	for st.bytes > snapshotCacheBytes && len(st.cache) > 1 {
+		var oldest int64 = -1
+		for k, c := range st.cache {
+			if k != id && (oldest < 0 || c.used < st.cache[oldest].used) {
+				oldest = k
+			}
+		}
+		st.bytes -= st.cache[oldest].snap.Size()
+		delete(st.cache, oldest)
+	}
 }
 
 // bucket is a token bucket: rate tokens a second, at most rate held.
@@ -253,6 +272,14 @@ func (s *Server) allow(w http.ResponseWriter, r *http.Request, workspaceID, clas
 	return ok
 }
 
+// rate is a configured rate, or def when unset.
+func (s *Server) rate(set, def float64) float64 {
+	if set > 0 {
+		return set
+	}
+	return def
+}
+
 // workspaceRoutes adds the workspace API.
 func (s *Server) workspaceRoutes(api func(string, http.HandlerFunc)) {
 	api("GET /api/v1/conversations/{id}/workspace", s.conversationWorkspace)
@@ -272,7 +299,7 @@ func (s *Server) readRoute(h func(http.ResponseWriter, *http.Request, *store.Wor
 			wsFail(w, err)
 			return
 		}
-		if !s.allow(w, r, t.ID, "read", readRate) {
+		if !s.allow(w, r, t.ID, "read", s.rate(s.WorkspaceReadRate, readRate)) {
 			return
 		}
 		h(w, r, t)
@@ -327,7 +354,7 @@ func (s *Server) serveConversationWorkspace(w http.ResponseWriter, r *http.Reque
 		wsFail(w, err)
 		return
 	}
-	if !s.allow(w, r, t.ID, "read", readRate) {
+	if !s.allow(w, r, t.ID, "read", s.rate(s.WorkspaceReadRate, readRate)) {
 		return
 	}
 	doc, err := s.workspaceDoc(r, t)
@@ -350,10 +377,7 @@ func (s *Server) workspaceDoc(r *http.Request, t *store.WorkspaceTree) (*workspa
 	case err != nil:
 		return nil, err
 	default:
-		doc.AsOf = &asOfDoc{SnapshotID: meta.ID, At: meta.CreatedAt}
-		if meta.RunID != "" {
-			doc.AsOf.RunID = &meta.RunID
-		}
+		doc.AsOf = &asOfDoc{SnapshotID: meta.ID, RunID: meta.RunID, At: meta.CreatedAt}
 	}
 	return doc, nil
 }

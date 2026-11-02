@@ -218,8 +218,49 @@ session: {resume: true, idle: 1h, live: 5m}
 	if kept, err := os.ReadFile(filepath.Join(e.DataDir, "conversations", conv, "box-home", ".kept")); profile == spec.SandboxWorkstation && (err != nil || string(kept) != "1\n2\n") {
 		t.Fatalf("a workstation's home is kept: %q %v", kept, err)
 	}
+
+	// The person changes the workspace between turns: the next turn is
+	// told by code, and runs in a new sandbox made from the person's version
+	// (the live one's copy is stale), resuming the session.
+	tree, err := s.ConversationWorkspace(ctx, conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, _ := s.LatestWorkspace(ctx, conv)
+	snapNow, err := workspace.Open(base.Archive, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ed := snapNow.Edit(time.Now())
+	_ = ed.PutFile("uploads/person.txt", []byte("gamma\n"))
+	_ = ed.Remove("made-1.txt")
+	archive, n, err := ed.Archive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutPersonWrite(ctx, store.PersonWrite{WorkspaceID: tree.ID, ConversationID: conv, BaseID: base.ID,
+		Archive: archive, Files: n, Person: "kanishk"}); err != nil {
+		t.Fatal(err)
+	}
+	r3 := send("third", "delta\n")
+	if got := deref(r3.Report); r3.Status != "succeeded" || got != "reply 1 saw beta delta alpha gamma token tok-1" {
+		t.Fatalf("run 3 = %s %q %q: a new sandbox from the person's version", r3.Status, got, deref(r3.Error))
+	}
+	if fs.created != 2 {
+		t.Fatalf("sandboxes created = %d, want a new one after the person's change", fs.created)
+	}
+	var prompt string
+	if err := s.Pool.QueryRow(ctx, `SELECT convert_from(content, 'UTF8') FROM artifacts WHERE run_id = $1 AND name = 'prompt.md'`, r3.ID).Scan(&prompt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "- added uploads/person.txt\n") || !strings.Contains(prompt, "- removed made-1.txt (it is in the workspace's trash)\n") {
+		t.Fatalf("prompt = %q", prompt)
+	}
+	if latest, _, _ := s.PersonChanges(ctx, conv); latest != nil {
+		t.Fatal("after the turn, the agent has seen the person's version")
+	}
 	e.Live.Close()
-	if fs.gone != 1 {
+	if fs.gone != 2 {
 		t.Fatalf("sandboxes destroyed = %d", fs.gone)
 	}
 }

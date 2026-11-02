@@ -62,6 +62,9 @@ type Server struct {
 	// in to change a workspace. Empty is ORBIT_OIDC_GROUP's, which every
 	// verified person is in.
 	WorkspaceGroup string
+	// WorkspaceReadRate and WorkspaceWriteRate override the workspace's
+	// per-person rates (readRate, writeRate) when set; tests raise them.
+	WorkspaceReadRate, WorkspaceWriteRate float64
 
 	wsOnce sync.Once
 	ws     *workspaceState
@@ -154,6 +157,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/review", s.submitReview)
 	s.memoryRoutes(api)
 	s.workspaceRoutes(api)
+	s.workspaceWriteRoutes(api, mux)
 	s.skillsRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
@@ -590,6 +594,12 @@ const (
 // what the field was for (a dropped client_request_id loses idempotency).
 // It writes the 400 itself; false means the handler returns.
 func decode(w http.ResponseWriter, r *http.Request, limit int64, into any, rule bodyRule) bool {
+	return decodeOr(w, r, limit, into, rule, func(msg string) { writeErr(w, http.StatusBadRequest, msg) })
+}
+
+// decodeOr is decode with the 400 written by fail, for routes whose errors
+// have their own shape (the workspace's carry a check).
+func decodeOr(w http.ResponseWriter, r *http.Request, limit int64, into any, rule bodyRule, fail func(msg string)) bool {
 	if rule == bodyOptional && r.ContentLength == 0 {
 		return true
 	}
@@ -601,14 +611,14 @@ func decode(w http.ResponseWriter, r *http.Request, limit int64, into any, rule 
 		// An empty body sent without a length (chunked).
 		return true
 	case errors.Is(err, io.EOF):
-		writeErr(w, http.StatusBadRequest, "a JSON body is required")
+		fail("a JSON body is required")
 		return false
 	case err != nil:
-		writeErr(w, http.StatusBadRequest, err.Error())
+		fail(err.Error())
 		return false
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		writeErr(w, http.StatusBadRequest, "the body must be one JSON value")
+		fail("the body must be one JSON value")
 		return false
 	}
 	return true
