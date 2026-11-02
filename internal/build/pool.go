@@ -34,6 +34,12 @@ type Pool struct {
 	// CloneURL is where a repository is fetched from;
 	// https://github.com/<repo>.git when nil.
 	CloneURL func(repo string) string
+	// Seed, when set, names a local mirror of repo (repos.Mirrors.Has): a
+	// new clone first takes the mirror's default branch head from it, with
+	// no token and no network, so its fetch from GitHub transfers only what
+	// the mirror lacked. The clone stays self-contained (the objects are
+	// copied, never borrowed), because the sandbox gets the whole tree.
+	Seed func(repo string) (string, bool)
 }
 
 var keyRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,99}$`)
@@ -130,7 +136,21 @@ func (p *Pool) Acquire(ctx context.Context, key, repo, home string) (git, error)
 		_ = os.RemoveAll(dir)
 		return git{}, err
 	}
+	p.seed(ctx, g, repo)
 	return g, nil
+}
+
+// seed copies the mirror's default branch head into a new clone. It is
+// only a head start: a failure leaves the clone as it was, to fetch whole.
+func (p *Pool) seed(ctx context.Context, g git, repo string) {
+	if p.Seed == nil {
+		return
+	}
+	mirror, ok := p.Seed(repo)
+	if !ok {
+		return
+	}
+	_, _ = g.run(ctx, nil, "fetch", "--quiet", "--no-tags", "--depth=1", "file://"+mirror, "+HEAD:refs/orbit/seed")
 }
 
 func initClone(ctx context.Context, bin, dir, home, url string) error {
@@ -215,6 +235,7 @@ func (p *Pool) warmOne(ctx context.Context, slug, repo string, auth []string) er
 		return fail(err)
 	}
 	g := git{bin: p.bin(), dir: dir, home: home}
+	p.seed(ctx, g, repo)
 	_, defSHA, _, err := g.remoteHeads(ctx, auth, "")
 	if err != nil {
 		return fail(err)

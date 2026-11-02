@@ -11,6 +11,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -25,6 +27,7 @@ import (
 	"github.com/kensac/orbit/internal/auth"
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/push"
+	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -57,6 +60,17 @@ type Server struct {
 	Push *push.Sender
 	// OAuth, when set, serves the authorization server MCP clients sign in through (oauth.go) on the public listener. Without it /mcp still takes an authentik token from a client that has one.
 	OAuth *OAuthProxy
+	// Boxes returns sandboxd's client for agents' boxes (terminals.go);
+	// nil is no boxes, and every workspace has no terminals.
+	Boxes func() (*sandbox.Client, error)
+	// WorkspaceOrigins are the Origins a terminal socket accepts
+	// (ORBIT_WORKSPACE_ORIGINS); empty is DefaultWorkspaceOrigins.
+	WorkspaceOrigins []string
+	// TerminalPing overrides terminalPing when set; tests shorten it.
+	TerminalPing time.Duration
+
+	termMu      sync.Mutex
+	termClients map[string]int
 }
 
 // Handler returns the public listener's routes, the ones traefik serves.
@@ -145,6 +159,14 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/comments/{comment}/edit", s.editComment)
 	api("POST /api/v1/tickets/{id}/comments/{comment}/withdraw", s.withdrawComment)
 	api("POST /api/v1/tickets/{id}/review", s.submitReview)
+	api("GET /api/v1/agents/{name}/workspace", s.agentWorkspace)
+	api("POST /api/v1/workspaces/{id}/terminals", s.createTerminal)
+	api("GET /api/v1/workspaces/{id}/terminals", s.listTerminals)
+	api("GET /api/v1/terminals/{tid}", s.getTerminal)
+	api("POST /api/v1/terminals/{tid}/kill", s.killTerminal)
+	api("POST /api/v1/terminals/{tid}/attach", s.attachTicket)
+	// The ticket in Sec-WebSocket-Protocol is the credential (terminals.go).
+	mux.HandleFunc("GET /api/v1/terminals/{tid}/ws", s.terminalSocket)
 	s.memoryRoutes(api)
 	s.skillsRoutes(api)
 
@@ -277,32 +299,39 @@ func (s *Server) thread(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// servePage is the one way a thread page is served, whichever conversation:
-// the before cursor and limit in, items, has_more and next_before out.
+// servePage is the one way a thread page is served over HTTP, whichever conversation (threadPage).
 func servePage(w http.ResponseWriter, r *http.Request, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) {
-	var before *store.ThreadCursor
-	if b := r.URL.Query().Get("before"); b != "" {
-		c, err := store.ParseThreadCursor(b)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, "before: "+err.Error())
-			return
-		}
-		before = c
-	}
 	var limit int
 	if !queryInt(w, r, "limit", &limit) {
 		return
 	}
-	page, err := fetch(before, limit)
+	resp, err := threadPage(r.URL.Query().Get("before"), limit, fetch)
+	respond(w, resp, err)
+}
+
+// threadPage reads a thread page for HTTP and MCP alike: the before cursor and limit in, items, has_more and next_before out (listPage).
+func threadPage(before string, limit int, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) (map[string]any, error) {
+	var c *store.ThreadCursor
+	if before != "" {
+		var err error
+		if c, err = store.ParseThreadCursor(before); err != nil {
+			return nil, requestError("before: " + err.Error())
+		}
+	}
+	page, err := fetch(c, limit)
 	if err != nil {
-		respond(w, nil, err)
-		return
+		return nil, err
 	}
-	resp := map[string]any{"items": orEmpty(page.Items), "has_more": page.HasMore, "next_before": nil}
-	if page.HasMore {
-		resp["next_before"] = page.NextBefore
+	return listPage("items", page.Items, page.HasMore, page.NextBefore), nil
+}
+
+// listPage is a page as every paged list is served, over HTTP and MCP alike: the items under key (always an array), has_more, and next_before, null exactly when has_more is false.
+func listPage[T any](key string, items []T, hasMore bool, next string) map[string]any {
+	resp := map[string]any{key: orEmpty(items), "has_more": hasMore, "next_before": nil}
+	if hasMore {
+		resp["next_before"] = next
 	}
-	respond(w, resp, nil)
+	return resp
 }
 
 func (s *Server) memoryHistory(w http.ResponseWriter, r *http.Request) {
@@ -463,16 +492,17 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"deliveries": orEmpty(d)}, err)
 }
 
+// getArtifact is GET /artifacts/{id}: the content, streamed from the store, with Range support.
 func (s *Server) getArtifact(w http.ResponseWriter, r *http.Request) {
-	b, mt, err := s.Store.GetArtifactContent(r.Context(), r.PathValue("id"))
+	a, b, err := s.Store.OpenArtifact(r.Context(), r.PathValue("id"))
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	w.Header().Set("Content-Type", mt)
+	w.Header().Set("Content-Type", a.MediaType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'")
-	_, _ = w.Write(b)
+	http.ServeContent(w, r, "", a.CreatedAt, b)
 }
 
 // ---------------------------------------------------------------- actions
@@ -483,28 +513,27 @@ func (s *Server) listActions(w http.ResponseWriter, r *http.Request) {
 	if !queryInt(w, r, "limit", &f.Limit) {
 		return
 	}
+	resp, err := s.actionPage(r.Context(), f, q.Get("before"))
+	respond(w, resp, err)
+}
+
+// actionPage is a page of actions for HTTP and MCP alike; before is the previous page's next_before.
+func (s *Server) actionPage(ctx context.Context, f store.ActionFilter, before string) (map[string]any, error) {
 	if f.RunID != "" && !store.IsUUID(f.RunID) {
-		writeErr(w, http.StatusBadRequest, "run_id: not a run id")
-		return
+		return nil, requestError("run_id: not a run id")
 	}
-	if b := q.Get("before"); b != "" {
-		c, err := store.ParseConversationCursor(b)
+	if before != "" {
+		c, err := store.ParseConversationCursor(before)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, "before: "+err.Error())
-			return
+			return nil, requestError("before: " + err.Error())
 		}
 		f.Before = c
 	}
-	page, err := s.Store.ListActionsPage(r.Context(), f)
+	page, err := s.Store.ListActionsPage(ctx, f)
 	if err != nil {
-		respond(w, nil, err)
-		return
+		return nil, err
 	}
-	resp := map[string]any{"actions": orEmpty(page.Actions), "has_more": page.HasMore, "next_before": nil}
-	if page.HasMore {
-		resp["next_before"] = page.NextBefore
-	}
-	respond(w, resp, nil)
+	return listPage("actions", page.Actions, page.HasMore, page.NextBefore), nil
 }
 
 func (s *Server) getAction(w http.ResponseWriter, r *http.Request) {
@@ -522,17 +551,25 @@ func (s *Server) decide(approve bool) http.HandlerFunc {
 			return
 		}
 		// A person decides as themselves; by is for the operator token.
+		by := body.By
 		if p := principalOf(r); p.Person != "" {
-			body.By = p.Person
-		} else if body.By == "" {
-			body.By = "operator"
+			by = p.Person
 		}
-		replayed, err := s.Store.DecideActionOnce(r.Context(), r.PathValue("id"), approve, body.By, body.ClientRequestID)
-		if err == nil && !replayed {
-			s.Wake()
-		}
+		err := s.decideAction(r.Context(), r.PathValue("id"), approve, by, body.ClientRequestID)
 		respond(w, map[string]any{"ok": err == nil}, err)
 	}
+}
+
+// decideAction records a decision for HTTP and MCP alike, as by ("" is the operator), and wakes the action loop unless it replayed an earlier one.
+func (s *Server) decideAction(ctx context.Context, id string, approve bool, by, clientID string) error {
+	if by == "" {
+		by = "operator"
+	}
+	replayed, err := s.Store.DecideActionOnce(ctx, id, approve, by, clientID)
+	if err == nil && !replayed {
+		s.Wake()
+	}
+	return err
 }
 
 // ---------------------------------------------------------------- helpers
@@ -540,24 +577,39 @@ func (s *Server) decide(approve bool) http.HandlerFunc {
 func respond(w http.ResponseWriter, v any, err error) { respondStatus(w, http.StatusOK, v, err) }
 
 func respondStatus(w http.ResponseWriter, status int, v any, err error) {
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		writeErr(w, http.StatusNotFound, "not found")
-	case store.IsBadID(err):
-		writeErr(w, http.StatusBadRequest, "not a valid id")
-	case errors.Is(err, store.ErrReplyElsewhere), errors.Is(err, store.ErrInvalid):
-		writeErr(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, store.ErrReceiptMismatch):
-		writeErr(w, http.StatusConflict, err.Error())
-	case errors.Is(err, store.ErrConflict):
-		writeErr(w, http.StatusConflict, "no longer in a state that allows this")
-	case err != nil:
-		writeErr(w, http.StatusInternalServerError, err.Error())
-	default:
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(v)
+	if err != nil {
+		code, msg := errorStatus(err)
+		writeErr(w, code, msg)
+		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// requestError is a request its caller must change, told to them as is (HTTP 400).
+type requestError string
+
+func (e requestError) Error() string { return string(e) }
+
+// errorStatus is how an error is told to a caller, the same over HTTP (the status) and MCP (the message, mcpErr).
+func errorStatus(err error) (int, string) {
+	var bad requestError
+	switch {
+	case errors.As(err, &bad):
+		return http.StatusBadRequest, err.Error()
+	case errors.Is(err, store.ErrNotFound):
+		return http.StatusNotFound, "not found"
+	case store.IsBadID(err):
+		return http.StatusBadRequest, "not a valid id"
+	case errors.Is(err, store.ErrReplyElsewhere), errors.Is(err, store.ErrInvalid):
+		return http.StatusBadRequest, err.Error()
+	case errors.Is(err, store.ErrReceiptMismatch):
+		return http.StatusConflict, err.Error()
+	case errors.Is(err, store.ErrConflict):
+		return http.StatusConflict, "no longer in a state that allows this"
+	}
+	return http.StatusInternalServerError, err.Error()
 }
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
