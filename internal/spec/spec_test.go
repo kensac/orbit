@@ -105,6 +105,10 @@ func TestGatesAreValidatedAtLoad(t *testing.T) {
 		"[{kind: unchanged, n: 3}]",
 		"[{kind: items_above, input: ghost}]",
 		"[{kind: items_above, input: s, n: -1}]",
+		"[{kind: precheck}]",
+		"[{kind: precheck, command: 'true', timeout: 5m}]",
+		"[{kind: precheck, command: 'true', input: s}]",
+		"[{kind: unchanged, command: 'true'}]",
 	} {
 		_, err := Load(write(t, map[string]string{"orbit.yaml": base,
 			"agents/a.yaml": "name: a\ncharter: x\nsources: [{name: s, kind: file, path: /x}]\ngates: " + bad + "\n"}))
@@ -256,5 +260,34 @@ build:
 	if _, err := Load(write(t, map[string]string{"orbit.yaml": base + "build: {sandboxd: unix:/s, agent: b, author: \"A <a@b>\", repositories: {kensac/orbit: {commands: [ls]}}}\n",
 		"agents/b.yaml": "name: b\ncharter: x\n"})); err == nil || !strings.Contains(err.Error(), "needs a github block") {
 		t.Fatalf("build without github = %v", err)
+	}
+}
+
+func TestTriggersTakeCronOrAnRRule(t *testing.T) {
+	load := func(triggers string) error {
+		_, err := Load(write(t, map[string]string{"orbit.yaml": base,
+			"agents/a.yaml": "name: a\ncharter: x\ntimezone: America/New_York\ntriggers: " + triggers + "\n"}))
+		return err
+	}
+	for _, ok := range []string{
+		`[{schedule: "0 9 * * *"}]`,
+		`[{rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU", start: "2026-11-03T09:00"}]`,
+		`[{rrule: "RRULE:FREQ=MONTHLY;BYDAY=-1FR", start: "2026-11-01 17:30"}]`,
+	} {
+		if err := load(ok); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for bad, want := range map[string]string{
+		`[{}]`: "schedule or rrule is required",
+		`[{schedule: "0 9 * * *", rrule: "FREQ=DAILY", start: "2026-11-03T09:00"}]`: "schedule and rrule cannot both",
+		`[{rrule: "FREQ=DAILY"}]`:                                  "an rrule needs a start",
+		`[{rrule: "FREQ=DAILY", start: "tomorrow"}]`:               `start "tomorrow": want local time`,
+		`[{rrule: "FREQ=FORTNIGHTLY", start: "2026-11-03T09:00"}]`: "rrule: FREQ=FORTNIGHTLY",
+		`[{schedule: "0 9 * * *", start: "2026-11-03T09:00"}]`:     "start is for an rrule",
+	} {
+		if err := load(bad); err == nil || !strings.Contains(err.Error(), "trigger 0: "+want) {
+			t.Errorf("%s: err = %v, want %q", bad, err, want)
+		}
 	}
 }

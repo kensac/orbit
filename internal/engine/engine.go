@@ -371,7 +371,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		for _, in := range inputs {
 			docs[in.Name] = in.Content
 		}
-		sk, err := e.gate(ctx, a, inputs, docs)
+		sk, err := e.gate(ctx, a, c, workdir, inputsDir, inputs, docs, emit)
 		if err != nil {
 			return nil, nil, err
 		}

@@ -216,6 +216,10 @@ run; `internal/build`):
   everything the sandbox section says it does not guarantee holds for a
   build.
 
+## Prechecks
+
+A `precheck` gate runs a shell command from an agent's spec in orbit's own process tree, as orbit's user, before the model is called. Its environment is the fixed list in `engine.precheckEnv` (no secret, no credential), but the same user can read what orbit can, `/proc/<orbit>/environ` included. So a precheck is configuration a person writes and reviews, like a source URL, and nothing a model produces ever becomes one: no action writes an agent spec. Its output reaches only the run's events, never a prompt.
+
 ## Adding a capability
 
 A new tool grant, action type, channel or source is a security change. Say
