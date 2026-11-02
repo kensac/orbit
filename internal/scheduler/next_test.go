@@ -9,9 +9,12 @@ import (
 
 func TestNextFires(t *testing.T) {
 	off := false
-	a := &spec.Agent{Name: "a", Timezone: "America/New_York", Triggers: []spec.Trigger{
+	a := &spec.Agent{Name: "a", Triggers: []spec.Trigger{
 		{Schedule: "0 9 * * *"}, {Schedule: "30 7 * * *"},
 	}}
+	if err := a.SetTimezone("America/New_York"); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC) // 07:00 in New York (EST since 06:00Z)
 	got := NextFires(a, now)
 	if len(got) != 2 || got[0].TriggerIndex != 1 || !got[0].At.Equal(time.Date(2026, 11, 1, 12, 30, 0, 0, time.UTC)) ||
@@ -25,9 +28,12 @@ func TestNextFires(t *testing.T) {
 }
 
 func TestNextFiresOfAnRRule(t *testing.T) {
-	a := &spec.Agent{Name: "a", Timezone: "America/New_York", Triggers: []spec.Trigger{
+	a := &spec.Agent{Name: "a", Triggers: []spec.Trigger{
 		{RRule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU", Start: "2026-11-03T09:00"},
 	}}
+	if err := a.SetTimezone("America/New_York"); err != nil {
+		t.Fatal(err)
+	}
 	got := NextFires(a, time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC))
 	if len(got) != 1 || got[0].RRule == "" || got[0].Schedule != "" || !got[0].At.Equal(time.Date(2026, 11, 17, 14, 0, 0, 0, time.UTC)) {
 		t.Fatalf("next = %+v", got)
