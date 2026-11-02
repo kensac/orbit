@@ -348,12 +348,6 @@ Most of what a person has worked out with Claude Code lives in the CLI's transcr
   `run_deferrals`) while a window is above `usage.DeferLowAbove`, enqueueing a
   fire already held so no executor claims it in between, and lets them go
   once every window is below (`scheduler/defer.go`).
-- **Low-priority work waits for the subscription.** With
-  `defer_low_priority`, the scheduler's leader holds the scheduled runs of
-  `priority: low` agents in the queue (`run_after`, recorded in
-  `run_deferrals`) while a window is above `usage.DeferLowAbove`, enqueueing a
-  fire already held so no executor claims it in between, and lets them go
-  once every window is below (`scheduler/defer.go`).
 - **Shutdown** is a drain (Upgrades, below): runs in progress finish under
   their own timeouts, and only past the drain's cap are they handed back.
   Nothing a run does outside its own rows happens before it finishes, so
