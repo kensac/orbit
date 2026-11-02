@@ -21,13 +21,15 @@ func (s *Server) sealCredentials(c containerState, env map[string]string) (map[s
 		if s.sealer == nil {
 			return nil, errors.New("no credential proxy key: refusing to hand a sandbox the backend credential")
 		}
-		n, ok := c.NetworkSettings.Networks[s.cfg.Network]
+		// The container's own network (a profile may choose one), on which the credential proxy sees its address.
+		network := c.HostConfig.NetworkMode
+		n, ok := c.NetworkSettings.Networks[network]
 		if !ok {
-			return nil, fmt.Errorf("sandbox is not on %s", s.cfg.Network)
+			return nil, fmt.Errorf("sandbox is not on %s", network)
 		}
 		addr, err := netip.ParseAddr(n.IPAddress)
 		if err != nil {
-			return nil, fmt.Errorf("sandbox has no address on %s", s.cfg.Network)
+			return nil, fmt.Errorf("sandbox has no address on %s", network)
 		}
 		exp, err := strconv.ParseInt(c.Config.Labels[LabelExpires], 10, 64)
 		if err != nil {
