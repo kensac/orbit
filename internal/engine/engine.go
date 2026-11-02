@@ -855,7 +855,7 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 	if reply != nil {
 		e.deliver(ctx, snap, a, &c.ID, nil, purposeMailFailure, mailReply(reply, notify.Message{
 			Title: a.Name + " could not answer", Body: "The run answering your mail failed: " + shortError(runErr) + "\n\nYour mail is kept: reply to try again, and the next run reads both.",
-			Priority: notify.High, Link: e.runLink(snap, c.ID),
+			Priority: notify.High, Link: snap.Config.Deployment.RunURL(c.ID),
 		}))
 		return nil
 	}
