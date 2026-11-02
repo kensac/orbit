@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/spec"
 )
 
@@ -65,6 +66,15 @@ type Harness struct {
 	// Search is the engine's search socket for the run's agent; empty
 	// offers no search tool.
 	Search string
+	// AgentHooks are the agent's own hooks (spec hooks), run by `orbit agent-hook` beside orbit's.
+	AgentHooks []AgentHook
+}
+
+// AgentHook is one agent hook: when it fires, and what orbit's binary does.
+type AgentHook struct {
+	Event   string
+	Matcher string
+	Def     harness.AgentHookDef
 }
 
 // Session is how one run uses a persistent Claude Code session. The engine
