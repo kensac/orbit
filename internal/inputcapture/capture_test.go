@@ -197,3 +197,71 @@ func TestRecordedMemoryInput(t *testing.T) {
 		t.Fatalf("recorded memory input: %+v %v", m, err)
 	}
 }
+
+func TestBoundedCopyCannotBypassLimit(t *testing.T) {
+	b := bounded{max: 4}
+	// LimitedReader has no WriterTo, so io.Copy exercises the destination method set.
+	n, err := io.Copy(&b, &io.LimitedReader{R: strings.NewReader("secret-overflow"), N: 100})
+	if err == nil || n > 4 || b.Len() > 4 {
+		t.Fatalf("limit bypassed: copied=%d buffered=%d err=%v", n, b.Len(), err)
+	}
+}
+
+func TestTLSResponseByteCaps(t *testing.T) {
+	for _, metadata := range []bool{true, false} {
+		name := "content"
+		if metadata {
+			name = "metadata"
+		}
+		t.Run(name, func(t *testing.T) {
+			a := artifact("inputs/a", "ok")
+			listing, _ := json.Marshal(map[string]any{"artifacts": []Artifact{a}})
+			s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/runs/run/artifacts" {
+					_, _ = w.Write(listing)
+					if metadata {
+						_, _ = io.Copy(w, strings.NewReader(strings.Repeat(" ", MaxMetadata)))
+					}
+					return
+				}
+				_, _ = w.Write([]byte("secret-overflow"))
+			}))
+			defer s.Close()
+			c := &client.Client{BaseURL: s.URL, Token: "test-secret", HTTP: s.Client()}
+			// Check the real HTTP copy path directly, including retained bytes.
+			endpoint := "artifacts/artifact"
+			max := 2
+			if metadata {
+				endpoint = "runs/run/artifacts"
+				max = MaxMetadata
+			}
+			data, err := fetch(context.Background(), c, endpoint, max)
+			if err == nil || len(data) > max {
+				t.Fatalf("HTTP response bypassed cap: %d bytes, %v", len(data), err)
+			}
+			target := filepath.Join(t.TempDir(), "capture")
+			m, err := Capture(context.Background(), c, "run", 2, target)
+			if !errors.Is(err, ErrIncomplete) || m.Complete || len(m.Inputs) != 0 {
+				t.Fatalf("capture: %+v %v", m, err)
+			}
+			expected := "input content unavailable or exceeds declared size"
+			if metadata {
+				expected = "artifact listing unavailable or exceeds limit"
+			}
+			if m.Error != expected {
+				t.Fatalf("failure reason %q, want %q", m.Error, expected)
+			}
+			saved, err := os.ReadFile(filepath.Join(target, "manifest.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(saved), "secret-overflow") || strings.Contains(string(saved), "test-secret") {
+				t.Fatal("retained failure leaked content or credentials")
+			}
+			entries, _ := os.ReadDir(target)
+			if len(entries) != 1 {
+				t.Fatalf("retained unverified content: %v", entries)
+			}
+		})
+	}
+}

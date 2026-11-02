@@ -64,16 +64,20 @@ type Manifest struct {
 // ErrIncomplete indicates a retained capture whose manifest explains a sanitized failure.
 var ErrIncomplete = errors.New("input capture incomplete; inspect manifest.json")
 
+// A named buffer prevents io.Copy from bypassing Write through ReaderFrom.
 type bounded struct {
-	bytes.Buffer
-	max int
+	buffer bytes.Buffer
+	max    int
 }
+
+func (b *bounded) Len() int      { return b.buffer.Len() }
+func (b *bounded) Bytes() []byte { return b.buffer.Bytes() }
 
 func (b *bounded) Write(p []byte) (int, error) {
 	if len(p) > b.max-b.Len() {
 		return 0, errors.New("response limit")
 	}
-	return b.Buffer.Write(p)
+	return b.buffer.Write(p)
 }
 
 func fetch(ctx context.Context, f Fetcher, endpoint string, max int) ([]byte, error) {
