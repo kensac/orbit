@@ -47,6 +47,8 @@ type Message struct {
 	Tags     []string
 	Link     string
 	Buttons  []Button
+	// Mail headers, used by smtp only. ReplyTo and MessageID name the conversation (internal/mail), so a reply continues it; InReplyTo is the person's mail a report answers; References threads them; Subject, when set, replaces Title as the subject.
+	ReplyTo, MessageID, InReplyTo, References, Subject string
 }
 
 // Channel delivers messages.
@@ -204,17 +206,25 @@ func (s *smtpChannel) Send(ctx context.Context, m Message) error {
 	for _, b := range m.Buttons {
 		fmt.Fprintf(&body, "\n%s: %s", b.Label, b.URL)
 	}
-	msg := strings.Join([]string{
+	subject := m.Title
+	if m.Subject != "" {
+		subject = m.Subject
+	}
+	hdr := []string{
 		"From: " + s.from,
 		"To: " + strings.Join(s.to, ", "),
-		"Subject: " + mime.QEncoding.Encode("utf-8", m.Title),
+		"Subject: " + mime.QEncoding.Encode("utf-8", headerLine(subject)),
 		"Date: " + time.Now().Format(time.RFC1123Z),
-		"MIME-Version: 1.0",
-		"Content-Type: text/plain; charset=utf-8",
-		"Content-Transfer-Encoding: 8bit",
-		"",
-		strings.ReplaceAll(body.String(), "\n", "\r\n"),
-	}, "\r\n")
+	}
+	for _, h := range [][2]string{{"Reply-To", m.ReplyTo}, {"Message-ID", m.MessageID},
+		{"In-Reply-To", m.InReplyTo}, {"References", m.References}} {
+		if v := headerLine(h[1]); v != "" {
+			hdr = append(hdr, h[0]+": "+v)
+		}
+	}
+	hdr = append(hdr, "MIME-Version: 1.0", "Content-Type: text/plain; charset=utf-8", "Content-Transfer-Encoding: 8bit",
+		"", strings.ReplaceAll(body.String(), "\n", "\r\n"))
+	msg := strings.Join(hdr, "\r\n")
 
 	addr := net.JoinHostPort(s.host, strconv.Itoa(s.port))
 	d := net.Dialer{Timeout: 30 * time.Second}
@@ -272,6 +282,9 @@ func (s *smtpChannel) Send(ctx context.Context, m Message) error {
 	}
 	return c.Quit()
 }
+
+// headerLine keeps a header value on one line, so a value can never add a header of its own.
+func headerLine(v string) string { return strings.Join(strings.Fields(v), " ") }
 
 func addrOnly(a string) string {
 	if i := strings.LastIndexByte(a, '<'); i >= 0 {
