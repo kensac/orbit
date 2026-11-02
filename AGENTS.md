@@ -81,6 +81,7 @@ is the design; the topic documents below are the rules for changing it.
 - `internal/sandboxd/`, `internal/egress/`, `internal/sandbox/`: the build
   sandbox service (the only holder of a docker socket), its egress proxy,
   and orbit's client for it.
+- `internal/workspace/`: packs and unpacks a chat conversation's workspace as a tar, for its sandbox and the snapshot kept after each run.
 - `deploy/`: the image (`Dockerfile`), the build sandbox's image
   (`build.Dockerfile`) and the pinned agent CLIs (`cli/`).
 
