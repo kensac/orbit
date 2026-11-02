@@ -93,7 +93,9 @@ type ThreadRun struct {
 	Questions []ThreadQuestion `json:"questions"`
 	Error     *string          `json:"error"`
 	CostUSD   *float64         `json:"cost_usd"`
-	Actions   []ThreadAction   `json:"actions"`
+	// Tokens is every attempt's token counts together, null when none were reported.
+	Tokens  *Tokens        `json:"tokens"`
+	Actions []ThreadAction `json:"actions"`
 	// Gate names what ended a skipped run; null otherwise.
 	Gate *string `json:"gate"`
 	// Tasks are the tasks the run delegated, in the order it listed them.
@@ -165,7 +167,7 @@ const latestTurn = `(
 // in one round trip; the correlated aggregates use messages_run,
 // actions_run and journal_items' key, so a page costs the same queries
 // however many runs it holds.
-const threadRunSelect = `
+var threadRunSelect = `
 	SELECT r.id::text, r.created_at, r.trigger, r.status, r.attempt, r.started_at, r.finished_at,
 	       ` + stepsCount + `, ` + latestTurn + `, r.summary, r.report, r.error, r.cost_usd::float8, r.gate,
 	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', (` + openQuestion + `)) ORDER BY m.created_at, m.id)
@@ -181,14 +183,15 @@ const threadRunSelect = `
 	                                                       FROM task_deps x JOIN tasks d ON d.id = x.depends_on
 	                                                       WHERE x.task_id = k.id), '[]'))
 	                                 ORDER BY k.created_at, k.id)
-	                 FROM tasks k WHERE k.parent_run_id = r.id), '[]')
+	                 FROM tasks k WHERE k.parent_run_id = r.id), '[]'),
+	       ` + runTokens + `
 	FROM runs r`
 
 func scanThreadRun(row pgx.Row) (*ThreadRun, error) {
 	r := ThreadRun{Kind: "run"}
 	var questions, actions, tasks []byte
 	if err := row.Scan(&r.ID, &r.At, &r.Trigger, &r.Status, &r.Attempt, &r.StartedAt, &r.FinishedAt, &r.Steps,
-		&r.Turn, &r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions, &tasks); err != nil {
+		&r.Turn, &r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions, &tasks, &r.Tokens); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}

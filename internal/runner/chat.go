@@ -430,7 +430,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		}
 		return nil, err
 	}
-	out := &Result{Reply: res.Result, CostUSD: res.TotalCostUSD, SessionID: res.SessionID, Interrupted: interrupted}
+	out := &Result{Reply: res.Result, Tokens: res.Tokens(), CostUSD: res.TotalCostUSD, SessionID: res.SessionID, Interrupted: interrupted}
 	usage, _ := json.Marshal(map[string]any{"usage": res.Usage, "model_usage": res.ModelUsage, "num_turns": res.NumTurns})
 	out.Usage = usage
 	out.Output, _ = json.Marshal(map[string]any{"reply": res.Result})

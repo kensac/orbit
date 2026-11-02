@@ -21,6 +21,7 @@ import (
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/testdb"
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 var ctx = context.Background()
@@ -89,7 +90,8 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 		return nil, ctx.Err()
 	}
 	cost := 0.25
-	return &runner.Result{Output: json.RawMessage(f.output), CostUSD: &cost, SessionID: sid}, f.err
+	used := &tokens.Usage{Count: tokens.Count{Input: 10, Output: 5, CacheRead: 300, CacheCreation: 90}, Model: "claude-fake", NumTurns: 2}
+	return &runner.Result{Output: json.RawMessage(f.output), CostUSD: &cost, SessionID: sid, Tokens: used}, f.err
 }
 
 // hooks collects what the webhook channel and endpoint receive.
@@ -233,6 +235,15 @@ func TestRunEndToEnd(t *testing.T) {
 	run, _ := s.GetRun(ctx, c.ID)
 	if run.Status != "succeeded" || *run.Summary != "October spend was $5,914" || *run.CostUSD != 0.25 {
 		t.Fatalf("run = %s err=%v", run.Status, *run.Error)
+	}
+	// The backend's tokens are the attempt's, and the prefix it was sent is recorded with it.
+	want := runner.PrefixOf("claude-code", "fake", fr.got.Prompt[len("# Charter\n\n"):strings.Index(fr.got.Prompt, "\n\n# This run")], fr.got)
+	if tk := run.Tokens; tk == nil || tk.Input != 10 || tk.CacheRead != 300 || tk.NumTurns != 2 || tk.Model != "claude-fake" ||
+		tk.CacheHitRatio == nil || *tk.CacheHitRatio != 0.75 {
+		t.Fatalf("tokens = %+v", run.Tokens)
+	}
+	if run.Prefix == nil || run.Prefix.SHA != want.SHA || run.Prefix.Parts["charter"] != want.Parts["charter"] || run.Prefix.Changed != nil {
+		t.Fatalf("prefix = %+v, want %+v", run.Prefix, want)
 	}
 	// The source was fetched with the credential, both pages merged, and
 	// written where the prompt says it is.

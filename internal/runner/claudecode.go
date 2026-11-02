@@ -310,7 +310,7 @@ func parseClaudeResult(line []byte) (*Result, error) {
 	usage, _ := json.Marshal(map[string]any{
 		"usage": r.Usage, "model_usage": r.ModelUsage, "num_turns": r.NumTurns,
 	})
-	res := &Result{Usage: usage, CostUSD: r.TotalCostUSD, SessionID: r.SessionID}
+	res := &Result{Usage: usage, Tokens: r.Tokens(), CostUSD: r.TotalCostUSD, SessionID: r.SessionID}
 	if r.IsError {
 		return res, fmt.Errorf("%w: claude-code %s/%s: %s", ErrBackend, r.Subtype, r.TerminalReason, firstLine(r.Failure()))
 	}
