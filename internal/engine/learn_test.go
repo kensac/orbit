@@ -2,6 +2,7 @@ package engine_test
 
 import (
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -61,7 +62,8 @@ func TestARunWritesItsOwnEntries(t *testing.T) {
 	var rows []map[string]any
 	for _, a := range arts {
 		if a.Name == "entries.json" {
-			b, _, _ := s.GetArtifactContent(ctx, a.ID)
+			_, blob, _ := s.OpenArtifact(ctx, a.ID)
+			b, _ := io.ReadAll(blob)
 			_ = json.Unmarshal(b, &rows)
 		}
 	}

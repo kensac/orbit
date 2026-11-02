@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/notify"
 	"github.com/kensac/orbit/internal/spec"
@@ -63,6 +64,14 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 	if d.GitHub != nil && a.RuleFor(MergeType) != spec.RuleDeny {
 		out = append(out, mergeType(d))
 	}
+	if d.GitHub != nil && a.Chat {
+		if a.RuleFor(CloneType) != spec.RuleDeny {
+			out = append(out, cloneType(d))
+		}
+		if a.RuleFor(PRType) != spec.RuleDeny {
+			out = append(out, prType(d))
+		}
+	}
 	if a.RuleFor(DefineType) != spec.RuleDeny {
 		out = append(out, defineType(a))
 	}
@@ -85,7 +94,9 @@ func defineType(a *spec.Agent) Type {
 		Description: "Create an agent or change one (yourself included, \"" + a.Name + "\"): spec is the whole agent, " +
 			"the same fields as an agents/<name>.yaml file (name, description, charter, triggers, sources, tools, actions, " +
 			"session, notify, ...; durations as strings like \"15m\"). It replaces the agent's spec as a new version; " +
-			"every version is kept and can be reverted. Agents defined in configuration files cannot be changed this way.",
+			"every version is kept and can be reverted. Agents defined in configuration files cannot be changed this way. " +
+			"A change that adds a tool, source, credential, delegate target or need, or allows an action more readily, waits for a person's approval. " +
+			"Such an agent may use, without a sandbox, only the tools " + strings.Join(spec.UnsandboxedTools, ", ") + "; never a file source or a ${VAR} but orbit.yaml's credentials.",
 		ParamsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -313,6 +324,8 @@ type Executor struct {
 	// It returns the queued run's id, and queued false when one was
 	// already waiting (whose id it returns instead).
 	Continue func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (id string, queued bool, err error)
+	// Git is where github:clone and github:pr run git.
+	Git build.Git
 	// Define applies an agent:define for the call's run.
 	Define func(ctx context.Context, c Call, spec json.RawMessage) (json.RawMessage, error)
 }
@@ -326,6 +339,11 @@ type Call struct {
 	RunID  string
 	Type   string
 	Params json.RawMessage
+	// Workspace is the run's conversation's workspace, for github:clone
+	// and github:pr; nil for an agent without one.
+	Workspace Workspace
+	// Rule is the rule it was recorded under: auto, or approve when a person approved it.
+	Rule spec.Rule
 }
 
 // Execute performs one action and returns a JSON result to store.
@@ -406,6 +424,10 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 		return result, nil
 	case typ == MergeType:
 		return e.merge(ctx, params)
+	case typ == CloneType:
+		return e.clone(ctx, c)
+	case typ == PRType:
+		return e.publish(ctx, c)
 	case typ == store.DecisionType:
 		// A person approved it; the task it holds starts at the next
 		// reconcile. Nothing else happens here.

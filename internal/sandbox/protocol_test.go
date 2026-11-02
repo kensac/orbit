@@ -67,25 +67,28 @@ func TestReadFrameRejectsMalformed(t *testing.T) {
 }
 
 func TestAttachRequestValidate(t *testing.T) {
-	ok := AttachRequest{Argv: []string{"claude", "-p"}, Env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "t"}}
-	if err := ok.Validate(); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"} {
+		ok := AttachRequest{Argv: []string{"claude", "-p"}, Env: map[string]string{name: "t"}}
+		if err := ok.Validate(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
 	}
 	many := make([]string, MaxArgs+1)
 	for i := range many {
 		many[i] = "a"
 	}
 	for name, r := range map[string]AttachRequest{
-		"empty argv":      {},
-		"empty argv0":     {Argv: []string{""}},
-		"too many args":   {Argv: many},
-		"too long":        {Argv: []string{"x", strings.Repeat("a", MaxArgvBytes)}},
-		"NUL in argv":     {Argv: []string{"sh", "a\x00b"}},
-		"other env":       {Argv: []string{"x"}, Env: map[string]string{"GITHUB_TOKEN": "t"}},
-		"api key env":     {Argv: []string{"x"}, Env: map[string]string{"ANTHROPIC_API_KEY": "t"}},
-		"path env":        {Argv: []string{"x"}, Env: map[string]string{"PATH": "/evil"}},
-		"NUL in env":      {Argv: []string{"x"}, Env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "a\x00"}},
-		"oversized value": {Argv: []string{"x"}, Env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": strings.Repeat("a", MaxEnvValue+1)}},
+		"empty argv":       {},
+		"empty argv0":      {Argv: []string{""}},
+		"too many args":    {Argv: many},
+		"too long":         {Argv: []string{"x", strings.Repeat("a", MaxArgvBytes)}},
+		"NUL in argv":      {Argv: []string{"sh", "a\x00b"}},
+		"other env":        {Argv: []string{"x"}, Env: map[string]string{"GITHUB_TOKEN": "t"}},
+		"both credentials": {Argv: []string{"x"}, Env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "t", "ANTHROPIC_API_KEY": "k"}},
+		"other auth env":   {Argv: []string{"x"}, Env: map[string]string{"ANTHROPIC_AUTH_TOKEN": "t"}},
+		"path env":         {Argv: []string{"x"}, Env: map[string]string{"PATH": "/evil"}},
+		"NUL in env":       {Argv: []string{"x"}, Env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "a\x00"}},
+		"oversized value":  {Argv: []string{"x"}, Env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": strings.Repeat("a", MaxEnvValue+1)}},
 	} {
 		if err := r.Validate(); err == nil {
 			t.Errorf("%s: accepted", name)

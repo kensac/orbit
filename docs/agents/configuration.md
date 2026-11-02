@@ -23,13 +23,25 @@ database agent of their name. Each instance reloads when the directory's
 content or the newest definition changes, so a definition written on one
 instance is in force on all within the 30 s poll.
 
-An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one.
+An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential, delegate target or need it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily) waits for a person's approval whatever the rule.
+
+Database and built-in agents are held to what orbit.yaml offers (`spec.validateTrust`): no `file` source, no `${VAR}` that is not in `credentials:`, without a `sandbox`, only the tools in `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite), no precheck and no `run` hook. A spec breaking one fails validation, naming it.
 
 ## Secrets
 
-Never in YAML. Channels name variables with `*_env`; source headers, query
-values and endpoint headers use `${VAR}`. An unset variable is an error, never
+Never in YAML. Channels name variables with `*_env`; source urls, headers, query
+values, Prometheus expressions and endpoint headers use `${VAR}`. An unset variable is an error, never
 an empty string.
+
+`credentials:` in `orbit.yaml` names the variables sources may send, each bound to the URLs it may go to:
+
+```yaml
+credentials:
+  SURE_API_KEY:
+    url_prefix: https://sure.example.com/api/
+```
+
+`url_prefix` is an http(s) URL with a host and a path ending in `/`, without user, query or fragment. A source sends a credential only in a request whose URL starts with it (redirects included); where the URL has no template, a mismatch fails the load. A database or built-in agent may reference only credentials; a file agent may also name any other variable (docs/agents/security.md, What a model can define).
 
 ## GitHub
 
@@ -37,6 +49,17 @@ an empty string.
 private key (`private_key_env`: PEM, or base64 of the PEM for a one-line env
 file), and the `repositories` tickets and `github:merge` may target. Without
 it, a request ticket or a `github:merge` rule fails validation.
+
+`read_repositories` (optional) lists the repositories agents may read (`repos`, below). It is separate from `repositories`: reading a repository never permits a ticket or a merge there, and a repository in `repositories` is not readable unless it is listed here too.
+
+## Repositories
+
+`repos: [{repo: owner/name, ref: main}]` on an agent gives every run the tree of each repository at `ref` (a branch, a tag or a full commit sha; empty is the default branch), fetched by orbit just before the run (`internal/repos`, docs/ARCHITECTURE.md, Repositories):
+
+- Each `repo` must be in `github.read_repositories`; each repository's name (the part after the owner) must be unique within the agent, because its tree is `inputs/repos/<name>/`.
+- The agent must list `github` in `needs` (only a host holding the App's key fetches; docs/agents/deployment.md, Capabilities), and its runner must read files: `claude-code` or `codex`, not `anthropic`.
+- Claude Code runs also get the read-only repository tools (`git_log`, `git_show`, `git_diff`, `git_blame`, `pr_list`, `pr_view`; docs/api.md, Repositories), so history needs no Bash and GitHub needs no WebFetch.
+- `_repos.json` (repo, ref, sha) is an input, so the `unchanged` gate skips a scheduled run only while every repository's commit is the one the last succeeded run read.
 
 ## Build
 
@@ -57,9 +80,22 @@ mail:
 
 `port` defaults to 993 (implicit TLS); any other port must offer STARTTLS. `mailbox` defaults to `INBOX` and must be orbit's own: every unseen mail in it is read and marked seen. The server must deliver `local+anything@domain` to the mailbox (Postfix's `recipient_delimiter`). Without `agent`, a mail that is not a reply is recorded and ignored. `poll` is at least 10s. With the section, every mail orbit sends carries a reply address and Message-ID naming its run's conversation.
 
+## Subscription usage and low-priority agents
+
+```yaml
+usage_poll:                          # off without this block
+  every: 5m                          # default 5m, at least 1m
+  token_env: CLAUDE_CODE_OAUTH_TOKEN # default; the token claude-code runners use
+defer_low_priority: true             # hold priority: low agents' scheduled runs while the subscription is nearly spent
+```
+
+`usage_poll` makes control ask the endpoint Claude Code's own `/usage` screen reads (`spec.DefaultUsageURL`) with the subscription's OAuth token, and store each answer (`internal/usage`). **Best effort**: the endpoint is undocumented, so a change to it shows as failed polls in `/usage` (`subscription.poll.last_error`) and the windows fall back to what runs' streams reported. Two instances during a rollout share one poll per interval. The token stays on control and is sent only to that URL.
+
+`priority: low` on an agent (default normal) marks work that can wait. With `defer_low_priority`, while any subscription window not yet reset is above `usage.DeferLowAbove` (80%), that agent's scheduled runs are held in the queue, rechecked every `usage.DeferRecheck` (10m) and let go within `scheduler.DeferCheckEvery` (1m) of every window dropping below; each hold is recorded (`run_deferrals`, `/usage` `deferral.held`). Manual runs and a person's messages are never held. The reading is the freshest of polled and stream-reported values, so deferring works without `usage_poll`, on readings only as fresh as the last run.
+
 ## Capabilities
 
-`needs: [<capability>, ...]` on an agent says what a host must have to run it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated; `*` alone is every agent, control's default when unset; a worker's default is none). A capability is `name` or `name:qualifier`, lower case (`spec.CapabilityRE`). An agent with no needs runs on any host. Give an agent a need for anything only some hosts have: a network its sources are on (`docker-network:hetzner`), a source credential that lives only on some hosts (`sure`), a tool (`browser`). The table of capabilities and the hosts that have them is docs/agents/deployment.md, Worker fleet. A run whose agent needs what no host has waits queued; nothing fails it.
+`needs: [<capability>, ...]` on an agent says what a host must have to run it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated; `*` alone is every agent, control's default when unset; a worker's default is none). A capability is `name` or `name:qualifier`, lower case (`spec.CapabilityRE`). An agent with no needs runs on any host. Give an agent a need for anything only some hosts have: a network its sources are on (`docker-network:hetzner`), a source credential that lives only on some hosts (`sure`), the GitHub App's key (`github`, required with `repos`), a tool (`browser`). The table of capabilities and the hosts that have them is docs/agents/deployment.md, Worker fleet. A run whose agent needs what no host has waits queued; nothing fails it.
 
 ## Transforms
 
@@ -156,6 +192,7 @@ charter or memory gets those amounts sent back and then noted.
 unattended runs: schedule, manual, continue, build. A run answering a
 person's message never notifies, whatever it says: the person is reading
 the chat. Failures and pending approvals of unattended runs always notify.
+The exception is a run that read a mail (`mail:`): its report, or a short note when it fails, is mailed to the sender as a reply, through the agent's first `smtp` channel (else the deployment's first by name) and no other channel, whatever `notify.when` is.
 
 ## Memory topics
 
