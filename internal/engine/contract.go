@@ -203,6 +203,9 @@ type promptRun struct {
 	// "" when it has none. Repeated in a continued session, as memory is:
 	// it may have changed since the session's last run.
 	Known string
+	// Attached are the files the messages carry, by message id, as placed
+	// in the workdir.
+	Attached map[string][]placedUpload
 }
 
 // userPrompt is the run's content: charter, why it woke, memory and inbox.
@@ -251,6 +254,9 @@ func userPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 				at += " " + from
 			}
 			fmt.Fprintf(&b, "- %s: %s\n", at, m.Body)
+			for _, f := range run.Attached[m.ID] {
+				fmt.Fprintf(&b, "  - attached: %s (%s, %d bytes)\n", f.Path, f.MediaType, f.Bytes)
+			}
 		}
 	}
 	if len(rc.Questions) > 0 {

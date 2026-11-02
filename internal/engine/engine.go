@@ -303,6 +303,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "memory.md", "text/markdown", []byte(rc.Memory)); err != nil {
 		return nil, nil, err
 	}
+	attached, err := e.placeUploads(ctx, workdir, rc)
+	if err != nil {
+		return nil, nil, err
+	}
 	if len(rc.Messages) > 0 {
 		b, _ := json.Marshal(rc.Messages)
 		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "messages.json", "application/json", b); err != nil {
@@ -498,7 +502,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return nil, nil, err
 	}
 	trigger := c.Trigger
-	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Tasks: delegated},
+	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached, Tasks: delegated},
 		rc, convo, inputs)
 	if rec != nil {
 		prompt = recoveryPrompt(rec, rc, now.Location())
