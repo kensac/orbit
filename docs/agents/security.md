@@ -165,6 +165,51 @@ without docker):
 - Tunnelled traffic is opaque: the proxy sees hostnames, not requests, so
   it cannot tell a download from an upload to an allowed host.
 
+## Build runs
+
+What a build's model can do, and what stops it (docs/tickets.md, The build
+run; `internal/build`):
+
+- **Every Edit, Write and Bash call is decided by orbit's process**, outside
+  the container, by `build.Policy`: ask rules in the CLI's settings send
+  each one to the stdio permission prompt (without them the CLI runs
+  commands it deems read-only unasked; seen on 2.1.316), and deny rules
+  refuse pushes, network clients, `gh`, `docker`, `sudo` and writes under
+  `.git` or `.github` before orbit is asked. Each decision is a
+  `build_decisions` row written before the answer; a failed write, or an
+  attempt that lost its claim, answers deny. `TestToolPolicy` holds the
+  table; `TestRealCLIPermissionProtocol` checked the protocol against the
+  real CLI on 2026-11-01 (allowed and denied writes and commands, deny
+  rules refusing unasked). The policy keeps a run on task; it is not the
+  boundary, because commands it allows run code the model wrote.
+- **The diff policy is where unseen writes are caught**: a file a test
+  wrote, a symlink, a submodule, a protected path, a large file, the
+  backend credential or a credential pattern in an added line all refuse
+  the build before anything is committed. The model's `.git` never reaches
+  orbit's clone, and orbit's git runs with no hooks and no user config.
+- **No GitHub token reaches the sandbox.** The read token clones and is
+  revoked before the sandbox starts; the delivery token exists only in the
+  environment of `git push` and orbit's API calls, and pushes one refspec,
+  `+<sha>:refs/heads/orbit/<8 hex of the ticket id>`, which the code
+  cannot build for any other ref. Neither has `workflows`, so GitHub
+  refuses a workflow change too. An Actions log is fetched by following
+  its storage redirect by hand, with no credential.
+- **The PR is orbit's**: title and body from the model's result, scrubbed
+  of attribution, with the ticket and plan version and, for orbit itself,
+  a trust boundary line. A compromised model can therefore at most open a
+  PR on its own branch with a diff the policy passed; merging it needs
+  green required checks and, for orbit, a person (`tickets.MergeRule`).
+- **Ticket text is data**: the build's instructions are the approved plan;
+  the ticket and any failure report reach the prompt inside a delimited
+  data block whose delimiter and control characters are escaped.
+- **One build and one merge at a time per repository**
+  (`tickets_one_building`, `tickets_one_merging`), and an attempt destroys
+  any sandbox an interrupted attempt of its run left before it starts its
+  own, so a build never holds two sandboxes.
+- **Not guaranteed**: the backend credential is in the sandbox (above);
+  everything the sandbox section says it does not guarantee holds for a
+  build.
+
 ## Adding a capability
 
 A new tool grant, action type, channel or source is a security change. Say

@@ -139,7 +139,9 @@ the session continued when the agent has one.
 
 Every backend returns the same JSON (`internal/engine/contract.go`):
 `summary`, `report` (Markdown), `notify` (send, priority, title), `memory`
-(update, the complete new document), `questions`, `actions`. The backend is
+(update, the complete new document), `questions`, `actions`, and, only for a
+run in a request ticket's conversation that is still being discussed,
+`plan` ([tickets.md](tickets.md)). The backend is
 given a strict schema in which each action type's parameters are spelled out;
 the engine validates against a looser envelope and then judges each action on
 its own, so one malformed proposal is denied without losing the report.
@@ -277,7 +279,7 @@ for twice. The rollout contract is in docs/agents/deployment.md.
 
 A build run's model writes files and runs commands, so it runs in a
 container that holds nothing worth taking. Three pieces, all in this
-repository and all built; a build run does not call them yet (tickets.md):
+repository and all built; build runs use them (below, and tickets.md):
 
 ```
 orbit (hetzner) --tailnet, bearer token--> orbit sandboxd (oci, holds the docker socket)
@@ -319,6 +321,34 @@ orbit (hetzner) --tailnet, bearer token--> orbit sandboxd (oci, holds the docker
 What this guarantees and what it does not: docs/agents/security.md. How it
 is deployed: docs/agents/deployment.md.
 
+## Tickets: the build runner and the ticket loop
+
+[tickets.md](tickets.md) is the design; this is where it lives.
+
+```
+ticket approved --ticket loop (internal/tickets)--> build run (trigger build) in the queue
+  -> executor claims it -> engine (build.go) -> internal/build:
+       clone (contents:read token) -> sandbox create (tar) -> attach: claude -p ... --permission-prompt-tool stdio
+       <- can_use_tool requests answered by build.Policy in orbit's process, each a build_decisions row first
+       -> archive (tar) -> diff policy -> commit as orbit-kensac[bot] -> push orbit/<id> (deliver token) -> PR
+  -> FinishBuild: run succeeded and ticket review, one transaction
+ticket loop, every 30 s: checks green -> github:merge proposed (approve for orbit itself)
+  -> action loop executes it -> merged -> done (on deploy, for orbit)
+```
+
+- **`internal/build`** is deterministic code around one model call: the
+  tool policy (`policy.go`, `shell.go`: a Bash command is parsed with a
+  shell parser, never matched with a regex), the stdio permission protocol
+  (`protocol.go`), the diff policy (`diff.go`), and the run itself
+  (`runner.go`). It holds the GitHub tokens; the sandbox holds only the
+  backend credential.
+- **`internal/engine/build.go`** turns a claimed build run into a job from
+  the ticket, its approved plan and the configuration in force, records
+  decisions, sandboxes, events and artifacts under the attempt's claim,
+  hands the run back on a drain, and moves the ticket with the run.
+- **`internal/tickets`** is the loop: no state of its own, every decision
+  from the store and GitHub at that moment, each transition guarded.
+
 ## Not built yet
 
 The direction, so changes now do not close it off:
@@ -329,13 +359,8 @@ The direction, so changes now do not close it off:
   without a backend call, recorded as its own status (`skipped`, naming the
   gate) so a run that judged nothing is distinguishable from one that did.
 
-- **Tickets and a build agent**: [tickets.md](tickets.md). A request or
-  question thread a person files and discusses with an agent; an approved
-  plan becomes a build run in a sandboxd container (above) with a checkout
-  and write tools, no orbit secrets, and no GitHub credential; orbit commits,
-  pushes `orbit/*` and opens the PR itself, and merging is an action
-  (`github:merge`) whose executor refuses unless every required check is
-  green, because in the fleet a merge is a deploy.
+- **Tickets, what is left**: review comments on a PR's diff, and webhook
+  events in place of the loop's polling ([tickets.md](tickets.md)).
 - **Event triggers** from webhooks (a ticket assigned, a comment).
 - **A worker fleet.** Executors on several hosts, as jobtracker's are; the
   queue already allows it (SKIP LOCKED claims, `runs_one_running`,
