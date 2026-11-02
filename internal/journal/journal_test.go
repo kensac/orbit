@@ -420,3 +420,18 @@ func TestUpcastKeepsNewerRowsAsStored(t *testing.T) {
 		t.Fatal("a version 0 row read without error")
 	}
 }
+
+func TestALevelAppliedIsAPermissionsItem(t *testing.T) {
+	m := &memJournal{}
+	m.feed(t, 1, `orbit.permissions {"level":"auto","applied":"ask","mode":"default","when":"start","source":"conversation","version":3,"set_by":"kanishk","reason":"auto mode unavailable"}`,
+		`orbit.permissions {"level":"locked","applied":"locked","mode":"dontAsk","when":"live","source":"agent"}`,
+		`orbit.permissions {"nothing":true}`)
+	if len(m.items) != 3 || m.items[0].Kind != KindPermissions || m.items[1].Kind != KindPermissions || m.items[2].Kind != KindStatus {
+		t.Fatalf("items:\n%s", m.dump())
+	}
+	var p Permissions
+	_ = json.Unmarshal(m.items[0].Body, &p)
+	if p.Level != "auto" || p.Applied != "ask" || p.Version != 3 || p.SetBy != "kanishk" || p.Reason == "" || m.items[0].ID != "permissions:1.1.0" {
+		t.Fatalf("first = %s %+v", m.items[0].ID, p)
+	}
+}

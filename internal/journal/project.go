@@ -203,6 +203,15 @@ func (p *projector) event() {
 // ---------------------------------------------------------------- orbit
 
 func (p *projector) orbit() {
+	if p.ev.Kind == "orbit.permissions" {
+		var body Permissions
+		if json.Unmarshal(p.ev.Payload, &body) != nil || body.Level == "" {
+			p.status()
+			return
+		}
+		p.write(p.local("permissions"), KindPermissions, "", body)
+		return
+	}
 	if p.ev.Kind != "orbit.permission" {
 		p.status()
 		return

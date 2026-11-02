@@ -45,6 +45,8 @@ const (
 	KindQuestion = "question"
 	KindStatus   = "status"
 	KindTurn     = "turn"
+	// KindPermissions is a chat run's permission level being applied: at its start, or changed during the turn.
+	KindPermissions = "permissions"
 )
 
 // Item is one stored revision of a journal item.
@@ -191,6 +193,19 @@ type Approval struct {
 	Input     json.RawMessage `json:"input"`
 	State     string          `json:"state"`
 	Message   string          `json:"message,omitempty"`
+}
+
+// Permissions is a permission level applied to a chat run's process (orbit.permissions): the level asked for, the one the process is at (auto that the CLI refused is ask), its Claude Code mode, when (start, turn or live) and what set it.
+type Permissions struct {
+	Level     string     `json:"level"`
+	Applied   string     `json:"applied"`
+	Mode      string     `json:"mode"`
+	When      string     `json:"when"`
+	Source    string     `json:"source"`
+	Version   int        `json:"version,omitempty"`
+	SetBy     string     `json:"set_by,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	Reason    string     `json:"reason,omitempty"`
 }
 
 // Question is something the agent asked its person: one of its output's

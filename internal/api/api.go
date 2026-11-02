@@ -103,6 +103,8 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/conversations", s.createConversation)
 	api("GET /api/v1/conversations/{id}", s.getConversation)
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
+	api("GET /api/v1/conversations/{id}/permissions", s.getPermissions)
+	api("PUT /api/v1/conversations/{id}/permissions", s.putPermissions)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
 	api("POST /api/v1/conversations/{id}/messages", s.conversationMessage)
 	api("GET /api/v1/conversations/{id}/tasks", s.conversationTasks)

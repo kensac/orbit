@@ -224,6 +224,32 @@ characters (400 otherwise). The default conversation cannot be archived
 `POST /conversations/{id}/messages` takes and returns exactly what
 `POST /agents/{name}/messages` does (below), in that conversation.
 
+### Conversation permissions
+
+A conversation has a permission level for the runs its person's messages start (`trigger` `message`): one of `locked`, `ask`, `edits`, `auto`, `full`, narrowest first (docs/agents/configuration.md, Permissions), never wider than its agent's `ceiling`. Without one of its own it is at its agent's `level`. Every other run (schedule, manual, continue, task, delegation) is at the agent's level, or the conversation's when that is narrower: an unattended run never takes a raised level.
+
+`GET /conversations/{id}/permissions`
+
+```json
+{"permissions": {
+  "level": "edits", "source": "conversation",
+  "agent_level": "ask", "ceiling": "full",
+  "levels": ["locked", "ask", "edits", "auto", "full"],
+  "current": {"version": 3, "level": "edits", "set_by": "kanishk", "set_at": "...", "expires_at": "..."},
+  "history": [{"version": 3, "level": "edits", "set_by": "kanishk", "set_at": "...", "expires_at": "..."}]}}
+```
+
+- `level` is what the next run its person's message starts runs at; `source` is `conversation` when `current` sets it, else `agent` (no version, the newest is `level: ""`, or it expired).
+- `levels` are the levels a `PUT` may set: those up to `ceiling`. A report agent's is `["locked"]`.
+- `current` is the newest version, in force or not, `null` for none; `history` is every version, newest first, at most 50. A version is never changed: each `PUT` adds one. `level: ""` is a version that returned the conversation to its agent's own. `expires_at` is `null` for one that does not expire.
+
+`PUT /conversations/{id}/permissions` `{"level": "edits", "expires_in": "1h"}` adds a version and returns `200` with the same `{"permissions": ...}` (without `history`).
+
+- `level` is required: a level name, or `null` for the agent's own. One that is not a level, or above the agent's `ceiling`, is `400`.
+- `expires_in` (optional) is a duration (`30m`, `1h`, `24h`), at most `168h`; after it the conversation is at its agent's level again. Not allowed with `null` (`400`).
+- The person is the token's; only with the operator token, `"by"` names it (default `operator`).
+- A reply being written takes the change within 2 s: orbit moves its Claude Code process with `set_permission_mode`, without restarting it, so a lowering holds from the next tool call. Raising works the same way for a run its person's message started; an unattended run takes only a lowering. A live process waiting between messages is moved before it takes the next run. Each application is a `permissions` item in the run's journal.
+
 ## Uploads
 
 Files a person gives an agent, as Claude Code takes a file: uploaded into a conversation, then carried by a message. The run that reads the message finds each file in its working directory at `uploads/<name>` and is told so in its prompt (`attached: uploads/<name> (<type>, <n> bytes)`); an image is readable with Claude Code's `Read`, as a picture. A file is at most 64 MiB (`store.MaxUploadBytes`), and kept whole (`uploads`).
@@ -434,7 +460,7 @@ An attempt (`store.Attempt`), oldest first:
 {"attempt": 1, "seq": 12, "at": "...", "kind": "assistant", "payload": {}}
 ```
 
-`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.figures_unverified`, and a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`.
+`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.figures_unverified`, and a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`, and a chat run's `orbit.permission` (a permission request's decision) and `orbit.permissions` (its level applied; The journal, `permissions`).
 
 ### The journal
 
@@ -488,6 +514,7 @@ A row:
 | `diff` | `diff:<call id>` (Codex: `diff:codex.<item id>.<n>`) | `{"call_id": "toolu_02", "path": "notes.md", "change": "edit", "patch": <bounded>}`; a change a file tool made, once it succeeded. `path` is relative to the run's directory. `change` is `edit` or `write` (Claude Code), or Codex's `add`, `delete`, `update`. `patch` is a unified diff of the replaced text (`--- a/<path>`, `+++ b/<path>`, one `@@` hunk per replacement, without line numbers, which Claude Code does not report); absent when the backend said only that the file changed (Codex). |
 | `plan` | `plan` (one per epoch) | `{"entries": [{"text": "read the inputs", "status": "completed"}], "text": "..."}`; the agent's working plan. `entries` is its todo list (Claude Code's `TodoWrite`, Codex's `todo_list`), each `status` `pending`, `in_progress` or `completed`. `text` (when present) is a plan it presented (`ExitPlanMode`). Each update is a revision. |
 | `approval` | `approval:<request id>` | `{"request_id": "...", "tool": "Bash", "input": {...}, "state": "pending", "message": "..."}`; a build's backend asking orbit's policy whether a tool call may run. Revision 1 is the request (`pending`); the decision is the next, `allowed` or `denied`, with orbit's `message`. Actions waiting for a person are a run's `actions`, not these. |
+| `permissions` | `permissions:<a>.<s>.<i>` | `{"level": "auto", "applied": "ask", "mode": "default", "when": "start", "source": "conversation", "version": 3, "set_by": "kanishk", "expires_at": "...", "reason": "..."}`; a chat run's permission level applied to its Claude Code process: `when` is `start` (a new process), `turn` (a live process taking the run) or `live` (changed during the turn, Conversation permissions). `level` is what was asked for, `applied` what the process is at (`auto` the CLI refuses is `ask`), `mode` its Claude Code mode. `source` is `conversation` (with `version`, `set_by` and `expires_at` when set) or `agent`. `reason` is the CLI's refusal, or why a change was not applied. One per application, never revised. |
 | `question` | `question:<a>.<s>.<i>` (a question tool's: `question:<call id>.<n>`) | `{"text": "Which card?", "header": "...", "options": [{"label": "...", "description": "..."}], "multi_select": true}`; something the agent asked its person: a question in its final answer (`options` empty), or a question tool's, with what it offered. The thread's question messages are the ones a person replies to. |
 | `status` | `status:<a>.<s>.0` | `{"code": "orbit.source_fetched", "detail": <bounded>}`; something that happened to the run that is not the model's output: orbit's steps (`orbit.*`, as in Events), the backend's session start (`system.init`), a rate limit report (`rate_limit_event`), a line that was not JSON (`raw`). `detail` is the event's payload. |
 | `turn` | `turn:<a>.<n>` | below |

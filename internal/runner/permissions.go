@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
+	"time"
 
 	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/spec"
@@ -48,29 +50,150 @@ func permissionEvent(req claudeproto.PermissionRequest, p claudeproto.Permission
 	return b
 }
 
+// LevelChoice is why a run is at its level, recorded with every application of it (orbit.permissions).
+type LevelChoice struct {
+	// Source is "conversation" when the conversation's own version set the level, else "agent".
+	Source    string     `json:"source"`
+	Version   int        `json:"version,omitempty"`
+	SetBy     string     `json:"set_by,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+// LevelChange is a new level for the turn in progress: its person changed the conversation's, or it expired.
+type LevelChange struct {
+	Level  string
+	Choice LevelChoice
+}
+
 // modeSetter is a process whose permission mode can change while it runs.
 type modeSetter interface {
 	SetPermissionMode(ctx context.Context, mode string) error
 }
 
-// applyLevel puts a running process at level, and returns the level it is at: auto that the CLI refuses (a model without it) is ask, recorded as an orbit.permissions event either way. An error means the process is at neither and must not take the turn.
-func applyLevel(ctx context.Context, p modeSetter, level string, emit func(Event)) (string, error) {
-	err := p.SetPermissionMode(ctx, PermissionMode(level))
-	applied := level
+// setLevel puts a running process at level, and returns the level it is at: auto that the CLI refuses (a model without it) is ask, with the refusal as reason. An error means the process is at neither.
+func setLevel(ctx context.Context, p modeSetter, level string) (applied, reason string, err error) {
+	err = p.SetPermissionMode(ctx, PermissionMode(level))
 	var refused *claudeproto.ControlError
 	if err != nil && level == spec.LevelAuto && errors.As(err, &refused) {
-		applied = spec.LevelAsk
-		if err2 := p.SetPermissionMode(ctx, PermissionMode(applied)); err2 != nil {
-			return "", err2
+		if err2 := p.SetPermissionMode(ctx, PermissionMode(spec.LevelAsk)); err2 != nil {
+			return "", "", err2
 		}
-	} else if err != nil {
-		return "", err
+		return spec.LevelAsk, err.Error(), nil
 	}
-	ev := map[string]any{"level": level, "applied": applied, "mode": PermissionMode(applied)}
 	if err != nil {
-		ev["reason"] = err.Error()
+		return "", "", err
 	}
-	b, _ := json.Marshal(ev)
-	emit(Event{Kind: "orbit.permissions", Payload: b})
-	return applied, nil
+	return level, "", nil
+}
+
+// levelEvent is orbit.permissions: the level a run asked for, the one its process is at, and when it was applied: "start" (a new process), "turn" (a live process taking the run) or "live" (during the turn).
+func levelEvent(level, applied, when, reason string, choice LevelChoice) Event {
+	m := map[string]any{"level": level, "applied": applied, "mode": PermissionMode(applied), "when": when, "source": choice.Source}
+	if choice.Version > 0 {
+		m["version"] = choice.Version
+	}
+	if choice.SetBy != "" {
+		m["set_by"] = choice.SetBy
+	}
+	if choice.ExpiresAt != nil {
+		m["expires_at"] = choice.ExpiresAt
+	}
+	if reason != "" {
+		m["reason"] = reason
+	}
+	b, _ := json.Marshal(m)
+	return Event{Kind: "orbit.permissions", Payload: b}
+}
+
+// procLevel is what a chat process's permissions are: the level last asked for, the level it is at (auto refused is ask), and the CLI mode its stream last reported (the model's EnterPlanMode moves it, an approved ExitPlanMode moves it back to default).
+type procLevel struct {
+	mu                sync.Mutex
+	want, level, mode string
+}
+
+func (l *procLevel) set(want, level string) {
+	l.mu.Lock()
+	l.want, l.level, l.mode = want, level, PermissionMode(level)
+	l.mu.Unlock()
+}
+
+// needs reports whether the process must be moved to take a run at level.
+func (l *procLevel) needs(level string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.want != level || l.mode != PermissionMode(l.level)
+}
+
+func (l *procLevel) applied() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.level
+}
+
+// observe reads the mode the CLI reports on its init and status lines.
+func (l *procLevel) observe(line claudeproto.Line) {
+	if line.Kind != "system.init" && line.Kind != "system.status" {
+		return
+	}
+	var v struct {
+		Mode string `json:"permissionMode"`
+	}
+	if json.Unmarshal(line.Raw, &v) == nil && v.Mode != "" {
+		l.mu.Lock()
+		l.mode = v.Mode
+		l.mu.Unlock()
+	}
+}
+
+// apply moves the process to level and records it.
+func (l *procLevel) apply(ctx context.Context, p modeSetter, level, when string, choice LevelChoice, emit func(Event)) error {
+	applied, reason, err := setLevel(ctx, p, level)
+	if err != nil {
+		return err
+	}
+	l.set(level, applied)
+	emit(levelEvent(level, applied, when, reason, choice))
+	return nil
+}
+
+// withoutMode drops --permission-mode and its value: a live process is kept across level changes (set_permission_mode moves it), so the level is not part of what it runs.
+func withoutMode(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--permission-mode" {
+			i++
+			continue
+		}
+		out = append(out, args[i])
+	}
+	return out
+}
+
+// watchLevel applies the level changes the engine sends during the turn, until turnCtx ends; the returned channel closes once it has stopped, so nothing is recorded after the run. A change the process refuses is recorded with its reason; a lowering it refuses interrupts the turn, so nothing more runs at the wider level.
+func watchLevel(ctx, turnCtx context.Context, p *liveProc, chat *Chat, emit func(Event)) <-chan struct{} {
+	done := make(chan struct{})
+	if chat.Changes == nil {
+		close(done)
+		return done
+	}
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-turnCtx.Done():
+				return
+			case ch := <-chat.Changes:
+				was := p.lv.applied()
+				actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
+				if err := p.lv.apply(actx, p.proc, ch.Level, "live", ch.Choice, emit); err != nil {
+					emit(levelEvent(ch.Level, was, "live", "not applied: "+err.Error(), ch.Choice))
+					if spec.LevelRank(ch.Level) < spec.LevelRank(was) {
+						_ = p.proc.Interrupt(actx)
+					}
+				}
+				cancel()
+			}
+		}
+	}()
+	return done
 }

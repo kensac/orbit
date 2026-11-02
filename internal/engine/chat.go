@@ -413,7 +413,11 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	chat := e.chatTools(a, t.types, d.Defaults.MemoryMaxBytes, st)
 	e.repoChatTools(a, chat)
 	chat.Interrupt = t.cancel
-	chat.Level, chat.Ceiling = a.PermissionLevel(), a.PermissionCeiling()
+	lc, err := e.runLevel(ctx, a, c)
+	if err != nil {
+		return nil, nil, err
+	}
+	chat.Level, chat.Ceiling, chat.Choice = lc.Level, a.PermissionCeiling(), lc.Choice
 	if a.Sandbox != "" {
 		sb, err := e.sandboxPlan(d, a.Sandbox, c, t.workdir, t.home, t.plugin, t.emit)
 		if err != nil {
@@ -434,6 +438,9 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
 	defer cancel()
+	changes := make(chan runner.LevelChange, 1)
+	chat.Changes = changes
+	go e.watchLevel(runCtx, a, c, lc, changes)
 	res, err := r.Run(runCtx, runner.Request{
 		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
 		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin,

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/spec"
@@ -146,5 +147,68 @@ func TestAutoFallsBackToAskWhereTheCLIRefusesIt(t *testing.T) {
 	}
 	if got := evs.of("orbit.permissions"); len(got) != 1 || got[0]["applied"] != "auto" {
 		t.Errorf("orbit.permissions = %v", got)
+	}
+}
+
+func TestALiveChatProcessMovesBetweenLevels(t *testing.T) {
+	bin, dir := fakeClaudeBin(t, fakeScenario{})
+	r, err := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := NewLive(2)
+	defer live.Close()
+	work, home := t.TempDir(), t.TempDir()
+	run := func(level, resume string) (*events, string) {
+		t.Helper()
+		evs := &events{}
+		var mode string
+		sess := &Session{Home: home, Resume: resume, KeepDays: 1, Live: live, Key: "k", Open: true, LiveIdle: time.Minute,
+			Started: func(m, _ string) error { mode = m; return nil }}
+		if _, err := r.Run(context.Background(), Request{Workdir: work, System: "s", Prompt: "hi", Session: sess,
+			Chat: &Chat{Level: level, Ceiling: spec.LevelEdits, Choice: LevelChoice{Source: "conversation", Version: 2}}}, evs.emit); err != nil {
+			t.Fatal(err)
+		}
+		return evs, mode
+	}
+	evs, _ := run(spec.LevelAsk, "")
+	if got := evs.of("orbit.permissions"); len(got) != 1 || got[0]["when"] != "start" || got[0]["applied"] != "ask" || got[0]["version"] != float64(2) {
+		t.Fatalf("first run = %v", got)
+	}
+	evs, mode := run(spec.LevelEdits, "fake-1")
+	if mode != "live" {
+		t.Fatalf("the second run took mode %q, want the live process", mode)
+	}
+	if got := evs.of("orbit.permissions"); len(got) != 1 || got[0]["when"] != "turn" || got[0]["mode"] != "acceptEdits" {
+		t.Fatalf("second run = %v", got)
+	}
+	run(spec.LevelEdits, "fake-1")
+	if starts := lines(t, dir+"/starts"); len(starts) != 1 {
+		t.Fatalf("%d processes, want one moved between levels", len(starts))
+	}
+	if log := read(t, dir+"/log"); strings.Count(log, "mode ") != 1 || !strings.Contains(log, "turn 1 default\nmode acceptEdits\nturn 2 acceptEdits\nturn 3 acceptEdits") {
+		t.Fatalf("log = %q: one set_permission_mode, for the change", log)
+	}
+}
+
+func TestALevelChangeDuringTheTurnReachesTheProcess(t *testing.T) {
+	bin, dir := fakeClaudeBin(t, fakeScenario{Ask: []json.RawMessage{json.RawMessage(`{"tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"t1"}`)}})
+	changes := make(chan LevelChange, 1)
+	evs := chatRun(t, bin, &Chat{Level: spec.LevelEdits, Ceiling: spec.LevelEdits, Changes: changes,
+		Prompt: func(_ context.Context, _ claudeproto.PermissionRequest) claudeproto.Permission {
+			// The person lowers the level while the CLI waits on this request.
+			changes <- LevelChange{Level: spec.LevelLocked, Choice: LevelChoice{Source: "conversation", Version: 4}}
+			deadline := time.Now().Add(10 * time.Second)
+			for time.Now().Before(deadline) && !strings.Contains(read(t, dir+"/log"), "mode dontAsk") {
+				time.Sleep(10 * time.Millisecond)
+			}
+			return claudeproto.Permission{Message: "lowered"}
+		}})
+	got := evs.of("orbit.permissions")
+	if len(got) != 2 || got[1]["when"] != "live" || got[1]["applied"] != "locked" || got[1]["version"] != float64(4) {
+		t.Fatalf("orbit.permissions = %v", got)
+	}
+	if log := read(t, dir+"/log"); !strings.Contains(log, "turn 1 acceptEdits\nmode dontAsk\nanswer") {
+		t.Fatalf("log = %q: the mode changed before the request was answered", log)
 	}
 }

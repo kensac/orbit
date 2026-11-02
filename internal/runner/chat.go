@@ -60,6 +60,10 @@ type Chat struct {
 	Interrupt <-chan struct{}
 	// Level is the run's permission level (spec.Levels, resolved by the engine), and Ceiling the widest its conversation may set: a process whose ceiling is full is launched so that it can be raised to it.
 	Level, Ceiling string
+	// Choice is why the run is at Level, recorded with it.
+	Choice LevelChoice
+	// Changes carries a new level for the turn in progress (the engine's poll of the conversation's); nil when the level cannot change during the run.
+	Changes <-chan LevelChange
 	// Prompt answers the CLI's permission requests during the turn; nil denies each one.
 	Prompt Prompt
 }
@@ -338,14 +342,22 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	if sess != nil {
 		resume = sess.Resume
 	}
-	key := hashArgs(c.bin, req.Workdir, extra, env)
+	// The level is not part of the key: a live process moves between levels with set_permission_mode.
+	key := hashArgs(c.bin, req.Workdir, withoutMode(extra), env)
+	level, choice := req.Chat.Level, req.Chat.Choice
 
 	var p *liveProc
-	started := false
 	mode, parent := "fresh", resume
 	if sess != nil && sess.Live != nil {
 		if p = sess.Live.take(sess.Key, key, resume); p != nil {
 			mode = "live"
+			if !p.lv.needs(level) {
+				emit(levelEvent(level, p.lv.applied(), "turn", "", choice))
+			} else if err := p.lv.apply(ctx, p.proc, level, "turn", choice, emit); err != nil {
+				// A process that cannot be moved is not used: the turn starts a new one at the level.
+				sess.Live.drop(p)
+				p, mode = nil, "fresh"
+			}
 		}
 	}
 	if p == nil {
@@ -368,11 +380,23 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			return nil, err
 		}
 		p = &liveProc{proc: proc, tools: tools, busy: true}
-		started = true
 		if sess != nil {
 			p.key = sess.Key
 		}
 		p.hash = key
+		first := level
+		if level == spec.LevelAuto {
+			first = spec.LevelAsk
+		}
+		p.lv.set(first, first)
+		if level != first {
+			if err := p.lv.apply(ctx, p.proc, level, "start", choice, emit); err != nil {
+				dropOrKill(sess, p)
+				return nil, fmt.Errorf("set the permission level: %w", err)
+			}
+		} else {
+			emit(levelEvent(level, level, "start", "", choice))
+		}
 	} else if sb, ok := p.proc.(*sandboxProc); ok && len(req.Chat.Push) > 0 {
 		if err := sb.push(ctx, req.Chat.Push); err != nil {
 			dropOrKill(sess, p)
@@ -387,12 +411,6 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	}
 	p.tools.set(req.Chat, emit)
 	defer p.tools.set(nil, nil)
-	if started && req.Chat.Level == spec.LevelAuto {
-		if _, err := applyLevel(ctx, p.proc, req.Chat.Level, emit); err != nil {
-			dropOrKill(sess, p)
-			return nil, fmt.Errorf("set the permission level: %w", err)
-		}
-	}
 
 	interrupted := false
 	turnCtx, endTurn := context.WithCancel(ctx)
@@ -411,8 +429,13 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			}
 		}()
 	}
-	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) { emit(Event{Kind: l.Kind, Payload: l.Raw}) })
+	changed := watchLevel(ctx, turnCtx, p, req.Chat, emit)
+	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) {
+		p.lv.observe(l)
+		emit(Event{Kind: l.Kind, Payload: l.Raw})
+	})
 	endTurn()
+	<-changed
 	if sb, ok := p.proc.(*sandboxProc); ok {
 		// The workspace comes back after every turn, a failed one too:
 		// what the agent wrote is the person's.
