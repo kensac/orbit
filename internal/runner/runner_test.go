@@ -565,3 +565,23 @@ func TestShellQuote(t *testing.T) {
 		t.Fatalf("got %s", got)
 	}
 }
+
+func TestClaudeCodeArgsAreTheTransportsThenOrbits(t *testing.T) {
+	bin, dir := fakeCLI(t, `echo '{"type":"result","subtype":"success","is_error":false,"structured_output":{}}'`)
+	r, _ := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
+	if _, err := r.Run(context.Background(), Request{Workdir: t.TempDir(), OutputSchema: json.RawMessage(`{}`)}, func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	if argv := read(t, filepath.Join(dir, "argv")); !strings.HasPrefix(argv, "-p\n--output-format\nstream-json\n--verbose\n--no-session-persistence\n--json-schema\n") {
+		t.Fatalf("argv:\n%s", argv)
+	}
+}
+
+func TestClaudeCodeReportsTheErrorsOfAFailedTurn(t *testing.T) {
+	bin, _ := fakeCLI(t, `echo '{"type":"result","subtype":"error_max_turns","is_error":true,"terminal_reason":"max_turns","errors":["Reached maximum number of turns (3)"]}'`)
+	r, _ := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
+	_, err := r.Run(context.Background(), Request{Workdir: t.TempDir(), OutputSchema: json.RawMessage(`{}`)}, func(Event) {})
+	if !errors.Is(err, ErrBackend) || !strings.Contains(err.Error(), "Reached maximum number of turns (3)") {
+		t.Fatalf("err = %v", err)
+	}
+}
