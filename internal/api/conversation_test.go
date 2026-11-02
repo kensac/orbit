@@ -407,10 +407,33 @@ func expect(t *testing.T, ch <-chan sse, event, data string) sse {
 	return e
 }
 
+// testWriteTimeout is the test server's write timeout. Every ordinary request in a test is held to it too, and a handler that outlasts it has its connection closed (the client sees EOF), so it stays well above a slow handler under -race on a loaded CI database.
+const testWriteTimeout = 2 * time.Second
+
 func fastStreams(a *api.Server, hs *http.Server) {
 	a.StreamPoll, a.StreamPing = 20*time.Millisecond, 100*time.Millisecond
-	// Far shorter than the stream lives: the stream must clear it.
-	hs.WriteTimeout = 300 * time.Millisecond
+	hs.WriteTimeout = testWriteTimeout
+}
+
+// A stream outlives the server's write timeout: it clears its own deadline, or the first ping after the timeout fails and the stream ends.
+func TestStreamsOutliveTheWriteTimeout(t *testing.T) {
+	r := newEnv(t, fastStreams)
+	run := enqueue(t, r)
+	runs, _ := openStream(t, r, run)
+	expect(t, runs, "status", `{"attempt":0,"status":"queued"}`)
+	v := newEnv(t, fastStreams)
+	_, conv, made := delegated(t, v)
+	tasks, _ := openSSE(t, v, "/api/v1/conversations/"+conv+"/tasks/stream", "")
+	expect(t, tasks, "tasks", "")
+
+	time.Sleep(testWriteTimeout + 500*time.Millisecond)
+	claim(t, r, "claude-code")
+	expect(t, runs, "status", `{"attempt":1,"epoch":1,"status":"running"}`)
+	if code, body := call(t, "POST", v.srv.URL+"/api/v1/tasks/"+made[0].ID+"/cancel", v.person("kanishk"), ""); code != 200 {
+		t.Fatalf("cancel = %d %v", code, body)
+	}
+	for !strings.Contains(expect(t, tasks, "tasks", "").Data, `"status":"cancelled"`) {
+	}
 }
 
 func TestStreamFollowsARunThroughARequeue(t *testing.T) {
