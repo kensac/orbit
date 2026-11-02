@@ -182,17 +182,35 @@ const (
 	ApprovalPending = "pending"
 	ApprovalAllowed = "allowed"
 	ApprovalDenied  = "denied"
+	// ApprovalExpired and ApprovalWithdrawn are a chat run's approvals that nobody answered: past their time, or given up by the CLI or the run. Both were denied.
+	ApprovalExpired   = "expired"
+	ApprovalWithdrawn = "withdrawn"
 )
 
-// Approval is a backend asking orbit's policy whether a tool call may run
-// (a build's permission protocol). Revision 1 is the request; the decision
-// is the next.
+// Approval is a backend asking whether a tool call may run: a build's, decided by orbit's policy, or a chat run's, put to its person (docs/api.md, Approvals). Revision 1 is the request, with the CLI's account of why it asked; a chat run's next revision opens it for its person (approval_id, expires_at), and the last is the decision.
 type Approval struct {
 	RequestID string          `json:"request_id"`
 	Tool      string          `json:"tool"`
 	Input     json.RawMessage `json:"input"`
 	State     string          `json:"state"`
 	Message   string          `json:"message,omitempty"`
+	// ApprovalID is the approval a person answers (POST /approvals/{id}); absent for a build's and for one decided without a person.
+	ApprovalID string `json:"approval_id,omitempty"`
+	// Kind is "tool", or "plan" for ExitPlanMode presenting a plan.
+	Kind               string          `json:"kind,omitempty"`
+	Level              string          `json:"level,omitempty"`
+	DecisionReason     string          `json:"decision_reason,omitempty"`
+	DecisionReasonType string          `json:"decision_reason_type,omitempty"`
+	BlockedPath        string          `json:"blocked_path,omitempty"`
+	MatchedRule        json.RawMessage `json:"matched_rule,omitempty"`
+	Suggestions        json.RawMessage `json:"suggestions,omitempty"`
+	Title              string          `json:"title,omitempty"`
+	Description        string          `json:"description,omitempty"`
+	ExpiresAt          *time.Time      `json:"expires_at,omitempty"`
+	Scope              string          `json:"scope,omitempty"`
+	DecidedBy          string          `json:"decided_by,omitempty"`
+	// Grant is the approval whose conversation-wide allow answered this request.
+	Grant string `json:"grant,omitempty"`
 }
 
 // Permissions is a permission level applied to a chat run's process (orbit.permissions): the level asked for, the one the process is at (auto that the CLI refused is ask), its Claude Code mode, when (start, turn or live) and what set it.

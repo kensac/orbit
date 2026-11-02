@@ -212,3 +212,33 @@ func TestALevelChangeDuringTheTurnReachesTheProcess(t *testing.T) {
 		t.Fatalf("log = %q: the mode changed before the request was answered", log)
 	}
 }
+
+func TestTheLevelIsPutBackWhenAPlanIsApproved(t *testing.T) {
+	bin, dir := fakeClaudeBin(t, fakeScenario{Plan: true, Ask: []json.RawMessage{
+		json.RawMessage(`{"tool_name":"ExitPlanMode","input":{"plan":"write a.txt"},"tool_use_id":"t1","requires_user_interaction":true}`),
+		json.RawMessage(`{"tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"t2"}`),
+	}})
+	changes := make(chan LevelChange, 1)
+	evs := chatRun(t, bin, &Chat{Level: spec.LevelEdits, Ceiling: spec.LevelEdits, Changes: changes,
+		Prompt: func(_ context.Context, req claudeproto.PermissionRequest) claudeproto.Permission {
+			if req.Tool == "ExitPlanMode" {
+				// A change while planning waits for the plan.
+				changes <- LevelChange{Level: spec.LevelAsk}
+				time.Sleep(100 * time.Millisecond)
+				return claudeproto.Permission{Allow: true}
+			}
+			deadline := time.Now().Add(10 * time.Second)
+			for time.Now().Before(deadline) && !strings.Contains(read(t, dir+"/log"), "left plan\nmode default") {
+				time.Sleep(10 * time.Millisecond)
+			}
+			return claudeproto.Permission{Allow: true}
+		}})
+	log := read(t, dir+"/log")
+	if strings.Contains(log, "entered plan\nmode") || !strings.Contains(log, "left plan\nmode default\nanswer ask-1-1") {
+		t.Fatalf("log = %q: the level waits for the plan, then is applied", log)
+	}
+	got := evs.of("orbit.permissions")
+	if len(got) != 3 || got[1]["when"] != "live" || got[1]["applied"] != "edits" || got[2]["when"] != "plan" || got[2]["applied"] != "ask" {
+		t.Fatalf("orbit.permissions = %v", got)
+	}
+}

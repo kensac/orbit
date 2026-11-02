@@ -435,3 +435,25 @@ func TestALevelAppliedIsAPermissionsItem(t *testing.T) {
 		t.Fatalf("first = %s %+v", m.items[0].ID, p)
 	}
 }
+
+func TestAChatApprovalCarriesTheCLIsReasonAndThePersonsDecision(t *testing.T) {
+	m := &memJournal{}
+	m.feed(t, 1,
+		// orbit's opening of the approval can land before the request line it answers.
+		`orbit.approval {"request_id":"q1","approval_id":"ap-1","kind":"tool","tool":"Bash","level":"ask","state":"pending","expires_at":"2026-11-02T08:00:00Z"}`,
+		`{"type":"control_request","request_id":"q1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"npm test"},"decision_reason":"runs a command","decision_reason_type":"rule","blocked_path":"/x","matched_ask_rule":{"source":"cliArg","tool_name":"Bash"},"permission_suggestions":[{"type":"addRules"}],"title":"Run npm test"}}`,
+		`orbit.approval {"request_id":"q1","approval_id":"ap-1","kind":"tool","state":"allowed","scope":"conversation","decided_by":"kanishk"}`,
+		`orbit.permission {"request_id":"q1","tool":"Bash","allowed":true,"message":""}`)
+	var ap Approval
+	it := m.latest(t, "approval:q1", &ap)
+	if it.Revision != 3 || ap.State != ApprovalAllowed || ap.ApprovalID != "ap-1" || ap.Scope != "conversation" || ap.DecidedBy != "kanishk" ||
+		ap.DecisionReason != "runs a command" || ap.DecisionReasonType != "rule" || ap.BlockedPath != "/x" || ap.Title != "Run npm test" ||
+		!strings.Contains(string(ap.MatchedRule), "cliArg") || !strings.Contains(string(ap.Suggestions), "addRules") || ap.ExpiresAt == nil || ap.Level != "ask" {
+		t.Fatalf("approval = r%d %+v", it.Revision, ap)
+	}
+	var second Approval
+	_ = json.Unmarshal(m.items[2].Body, &second)
+	if second.State != ApprovalPending || second.ApprovalID != "ap-1" || second.Tool != "Bash" {
+		t.Fatalf("the request line kept orbit's opening: %s", m.items[2].Body)
+	}
+}

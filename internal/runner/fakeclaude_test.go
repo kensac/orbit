@@ -16,6 +16,8 @@ import (
 type fakeScenario struct {
 	Refuse []string          `json:"refuse"`
 	Ask    []json.RawMessage `json:"ask"`
+	// Plan puts the session in plan mode before the asks, as the model's EnterPlanMode does; an allowed ExitPlanMode leaves it for default, as the real CLI does.
+	Plan bool `json:"plan"`
 }
 
 func TestMain(m *testing.M) {
@@ -96,6 +98,11 @@ func fakeClaude(dir string) {
 		turn++
 		fmt.Fprintln(logf, "turn", turn, mode)
 		send(map[string]any{"type": "system", "subtype": "init", "permissionMode": mode, "session_id": "fake-1"})
+		if sc.Plan {
+			mode = "plan"
+			fmt.Fprintln(logf, "entered plan")
+			send(map[string]any{"type": "system", "subtype": "status", "status": nil, "permissionMode": mode, "session_id": "fake-1"})
+		}
 		for i, ask := range sc.Ask {
 			id := fmt.Sprintf("ask-%d-%d", turn, i)
 			var req map[string]any
@@ -111,6 +118,11 @@ func fakeClaude(dir string) {
 					resp, _ := r["response"].(map[string]any)
 					body, _ := json.Marshal(resp["response"])
 					fmt.Fprintln(logf, "answer", resp["request_id"], string(body))
+					if req["tool_name"] == "ExitPlanMode" && strings.Contains(string(body), `"allow"`) {
+						mode = "default"
+						fmt.Fprintln(logf, "left plan")
+						send(map[string]any{"type": "system", "subtype": "status", "status": nil, "permissionMode": mode, "session_id": "fake-1"})
+					}
 					break
 				}
 			}

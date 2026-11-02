@@ -109,6 +109,37 @@ func levelEvent(level, applied, when, reason string, choice LevelChoice) Event {
 type procLevel struct {
 	mu                sync.Mutex
 	want, level, mode string
+	// left is signalled when the CLI leaves plan mode for a mode other than its level's (an approved ExitPlanMode goes to default), so the level is put back.
+	left chan struct{}
+}
+
+func (l *procLevel) leftPlan() chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.left == nil {
+		l.left = make(chan struct{}, 1)
+	}
+	return l.left
+}
+
+// planning reports whether the CLI is in plan mode: a level change waits until it leaves, so it never cuts a plan short.
+func (l *procLevel) planning() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.mode == "plan"
+}
+
+// defer records a level to apply once the plan is done.
+func (l *procLevel) deferTo(level string) {
+	l.mu.Lock()
+	l.want = level
+	l.mu.Unlock()
+}
+
+func (l *procLevel) wanted() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.want
 }
 
 func (l *procLevel) set(want, level string) {
@@ -140,8 +171,16 @@ func (l *procLevel) observe(line claudeproto.Line) {
 	}
 	if json.Unmarshal(line.Raw, &v) == nil && v.Mode != "" {
 		l.mu.Lock()
+		was := l.mode
 		l.mode = v.Mode
+		left := was == "plan" && v.Mode != "plan" && (v.Mode != PermissionMode(l.level) || l.want != l.level)
 		l.mu.Unlock()
+		if left {
+			select {
+			case l.leftPlan() <- struct{}{}:
+			default:
+			}
+		}
 	}
 }
 
@@ -169,12 +208,20 @@ func withoutMode(args []string) []string {
 	return out
 }
 
-// watchLevel applies the level changes the engine sends during the turn, until turnCtx ends; the returned channel closes once it has stopped, so nothing is recorded after the run. A change the process refuses is recorded with its reason; a lowering it refuses interrupts the turn, so nothing more runs at the wider level.
+// watchLevel applies the level changes the engine sends during the turn, and puts the level back when the CLI leaves plan mode, until turnCtx ends; the returned channel closes once it has stopped, so nothing is recorded after the run. A change while the CLI is planning waits for the plan to end. A change the process refuses is recorded with its reason; a lowering it refuses interrupts the turn, so nothing more runs at the wider level.
 func watchLevel(ctx, turnCtx context.Context, p *liveProc, chat *Chat, emit func(Event)) <-chan struct{} {
 	done := make(chan struct{})
-	if chat.Changes == nil {
-		close(done)
-		return done
+	choice := chat.Choice
+	apply := func(level, when string) {
+		was := p.lv.applied()
+		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
+		defer cancel()
+		if err := p.lv.apply(actx, p.proc, level, when, choice, emit); err != nil {
+			emit(levelEvent(level, was, when, "not applied: "+err.Error(), choice))
+			if spec.LevelRank(level) < spec.LevelRank(was) {
+				_ = p.proc.Interrupt(actx)
+			}
+		}
 	}
 	go func() {
 		defer close(done)
@@ -183,15 +230,15 @@ func watchLevel(ctx, turnCtx context.Context, p *liveProc, chat *Chat, emit func
 			case <-turnCtx.Done():
 				return
 			case ch := <-chat.Changes:
-				was := p.lv.applied()
-				actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
-				if err := p.lv.apply(actx, p.proc, ch.Level, "live", ch.Choice, emit); err != nil {
-					emit(levelEvent(ch.Level, was, "live", "not applied: "+err.Error(), ch.Choice))
-					if spec.LevelRank(ch.Level) < spec.LevelRank(was) {
-						_ = p.proc.Interrupt(actx)
-					}
+				choice = ch.Choice
+				if p.lv.planning() {
+					p.lv.deferTo(ch.Level)
+					emit(levelEvent(ch.Level, p.lv.applied(), "live", "the session is planning: the level applies when the plan ends", choice))
+					continue
 				}
-				cancel()
+				apply(ch.Level, "live")
+			case <-p.lv.leftPlan():
+				apply(p.lv.wanted(), "plan")
 			}
 		}
 	}()

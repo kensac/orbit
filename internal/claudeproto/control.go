@@ -26,6 +26,17 @@ type PermissionRequest struct {
 	BlockedPath    string          `json:"blocked_path"`
 	DecisionReason string          `json:"decision_reason"`
 	Suggestions    json.RawMessage `json:"permission_suggestions"`
+	// DecisionReasonType is why the ask escalated, as a word: rule, mode, workingDir, safetyCheck, classifier, ... (sdk.d.ts SDKControlPermissionRequest).
+	DecisionReasonType string `json:"decision_reason_type"`
+	// MatchedRule is the permissions.ask rule that forced the prompt, {source, tool_name, rule_content}, when one did.
+	MatchedRule json.RawMessage `json:"matched_ask_rule"`
+	Title       string          `json:"title"`
+	DisplayName string          `json:"display_name"`
+	Description string          `json:"description"`
+	// SuppressAlwaysAllow is an ask whose "don't ask again" rule would grant more than this call.
+	SuppressAlwaysAllow bool `json:"suppress_always_allow_rule"`
+	// RequiresUserInteraction is an ask a stored grant or an automatic approval must not answer (ExitPlanMode's, a classifier's block handed to a person).
+	RequiresUserInteraction bool `json:"requires_user_interaction"`
 }
 
 // Permission is the answer to a PermissionRequest (sdk.d.ts PermissionResult).

@@ -440,7 +440,11 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	defer cancel()
 	changes := make(chan runner.LevelChange, 1)
 	chat.Changes = changes
-	go e.watchLevel(runCtx, a, c, lc, changes)
+	lvl := &currentLevel{}
+	lvl.set(lc.Level)
+	deadline, _ := runCtx.Deadline()
+	chat.Prompt = e.approvalPrompt(a, c, lvl, deadline, t.emit)
+	go e.watchLevel(runCtx, a, c, lc, lvl, changes)
 	res, err := r.Run(runCtx, runner.Request{
 		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
 		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin,
