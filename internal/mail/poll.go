@@ -20,6 +20,7 @@ import (
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
 
+	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 )
@@ -35,7 +36,7 @@ type Poller struct {
 	Store  *store.Store
 	Config func() *spec.Config
 	// Secret signs conversation tokens (the operator token, as for approval links).
-	Secret []byte
+	Secret secret.Key
 	Env    func(string) (string, bool)
 	Log    *slog.Logger
 	// Wake nudges the executor when a mail woke a run.

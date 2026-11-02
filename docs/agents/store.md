@@ -10,6 +10,10 @@ the engine never write SQL.
 change that drops or renames is expand, then contract, across two releases,
 because the previous image may still be running during a deploy.
 
+## Stored files
+
+`uploads.content` and `artifacts.content` are bytea, never updated. A reader serves one through `store.Blob`, a slice of `blobSlice` bytes per query (`substring`), so a GET holds a slice in memory, not the file, and a `Range` reads only its slices; `uploads.content` is stored uncompressed (`STORAGE EXTERNAL`), because a compressed value is decompressed from its start for every slice. `CreateUpload` finds a free name under a per-conversation advisory lock before its one INSERT, so the content crosses the wire once.
+
 ## Retention
 
 Nothing ages out. Rows that look disposable are the record: `run_events` is
@@ -18,7 +22,7 @@ an agent's beliefs changed.
 
 ## The journal
 
-`journal_items` is derived from `run_events` by `journal.Project`, a pure function of an attempt's events in order. Keep it pure: the live write (in `AppendEvent`'s transaction) and the backfill (`syncAttempt`, run at start and every 30 s for recent runs, and by a reader before it reads) must write the same rows, and `TestBackfillWritesWhatTheLiveWriterWould` holds them together. Rows are append-only: a change is a new revision, never an UPDATE. A body's shape changes only with a new `journal.Version` and an upcaster in `journal.Upcast`; stored rows keep their version. Every journal write of a run holds its advisory lock (`lockJournal`), which is what keeps `seq` gapless. A transition that ends an attempt (`finishRun`, `endAttempt`, `HandBack`) syncs that attempt in its own transaction, so the turn it left open closes with it.
+`journal_items` is derived from `run_events` by `journal.Project`, a pure function of an attempt's events in order. Keep it pure: the live write (in `AppendEvent`'s transaction) and the backfill (`syncAttempt`, run at start and every 30 s for recent runs, and by a reader before it reads) must write the same rows, and `TestBackfillWritesWhatTheLiveWriterWould` holds them together. Whether a run needs a sync is decided by `unsyncedSQL`: each attempt's newest event is one descent of `run_events`' primary key, compared with `journal_sources.through`, so an up-to-date journal costs a reader one read and no write (`TestAReaderOfAnUpToDateJournalWritesNothing`); never make that check read a run's whole transcript, because the stream runs it every 500 ms per open stream. The backfill skips and reports a run whose sync fails, so one bad run never holds back the others. Rows are append-only: a change is a new revision, never an UPDATE. A body's shape changes only with a new `journal.Version` and an upcaster in `journal.Upcast`; stored rows keep their version. Every journal write of a run holds its advisory lock (`lockJournal`), which is what keeps `seq` gapless. A transition that ends an attempt (`finishRun`, `endAttempt`, `HandBack`) syncs that attempt in its own transaction, so the turn it left open closes with it.
 
 ## State machines
 
@@ -48,10 +52,14 @@ an agent's beliefs changed.
 
 - outbox (`outbox`, written by a worker's engine): unsent, claimed by one control instance (`ClaimOutbox`, reclaimed after `OutboxReclaimAfter`), then `sent_at` set once its deliveries are recorded. Rows are kept.
 - workspaces (`workspaces`): a chat conversation's snapshot after each run that changed it, never updated; the newest is the workspace.
+- boxes and terminals (`boxes`, `terminals`, `terminal_tickets`, `terminals.go`): a box row per agent, created on first use, never updated. A terminal is running until `EndTerminal` sets `ended_at` and `end_reason` once (`WHERE ended_at IS NULL`; `terminals_ended` holds them together); `CreateTerminal` counts the running ones under the box row's lock. A ticket is stored as its sha256 and used once by a guarded UPDATE (`used_at IS NULL AND expires_at > now()`, the terminal and origin matching); used and expired rows are kept.
 - session transcripts (`session_transcripts`): written once per session id (`ON CONFLICT DO NOTHING`; a resume forks to a new id), never updated.
 - deployment (`deployment_specs`, `deployment_current`): every version kept, as `agent_specs`; `SyncDeployment` moves the pointer before `SyncAgents` records the agents loaded with it.
 
 - search (`search_docs`): derived, not written by any store method. Triggers on `messages`, `runs` (summary, report, error), `run_events` (the backends' prose and tool calls), `memory_versions` and `memory_entry_versions` insert one document per searchable piece, keyed by the row it came from (`ref`), so every writer indexes alike; a document that cannot be built raises a warning and never fails the write. A new searchable table gets its trigger and its backfill in one migration.
+
+- usage samples (`usage_samples`): one row per poll of the subscription usage endpoint, `ok` with the body as received or not with the error; parsed when read (`usage.ParsePoll`), never rewritten.
+- deferral (`run_deferrals`, one per run): `DeferRun` pushes a queued schedule run's `run_after` and upserts its row (`times`, the window and reading) in one transaction, refusing a run no longer queued; `ReleaseDeferrals` clears `run_after` and sets `released_at` together. A run is held only while queued, so a claim is never blocked by anything but `run_after`.
 
 A client request id (`receipts`) is written in the same transaction as the
 message or decision it records, so a retry returns the first result and a

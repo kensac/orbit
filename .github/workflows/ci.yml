@@ -35,8 +35,8 @@ jobs:
       - run: make lint
       - run: make test
       - run: make vuln
-      # The image builds, for both architectures the fleet runs. Pushing is
-      # build-push-ghcr.yml's job, on main only.
+      # The image builds. Publishing is build-push-ghcr.yml's job, for a
+      # main commit whose run of this workflow succeeded.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         if: github.event_name == 'pull_request'
@@ -44,8 +44,14 @@ jobs:
           context: .
           file: deploy/Dockerfile
           push: false
+          load: true
+          tags: orbit:ci
           platforms: linux/amd64
           cache-from: type=gha
+      # It boots: migrates an empty database, loads the examples, becomes
+      # healthy and ready (deploy/smoke.sh, as before a publish).
+      - if: github.event_name == 'pull_request'
+        run: deploy/smoke.sh orbit:ci
       # The build sandbox's image builds too (internal/sandboxd).
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         if: github.event_name == 'pull_request'
@@ -57,10 +63,6 @@ jobs:
           tags: orbit-build:ci
           platforms: linux/amd64
           cache-from: type=gha
-      # It runs the way sandboxd runs it: its tools work as uid 10001 on a
-      # read-only root, and /work is that uid's.
+      # It runs the way sandboxd runs it (deploy/build-smoke.sh).
       - if: github.event_name == 'pull_request'
-        run: >-
-          docker run --rm --read-only --tmpfs /tmp --user 10001:10001 --cap-drop ALL
-          --security-opt no-new-privileges:true orbit-build:ci
-          sh -c 'claude --version && go version && git --version && node --version && rg --version | head -1 && make --version | head -1 && test "$(stat -c %u /work)" = 10001'
+        run: deploy/build-smoke.sh orbit-build:ci

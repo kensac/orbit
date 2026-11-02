@@ -49,6 +49,8 @@ type Message struct {
 	Buttons  []Button
 	// Mail headers, used by smtp only. ReplyTo and MessageID name the conversation (internal/mail), so a reply continues it; InReplyTo is the person's mail a report answers; References threads them; Subject, when set, replaces Title as the subject.
 	ReplyTo, MessageID, InReplyTo, References, Subject string
+	// To, when set, replaces the channel's recipients (smtp only): a reply to a mail goes to its sender.
+	To []string `json:",omitempty"`
 }
 
 // Channel delivers messages.
@@ -198,6 +200,10 @@ type smtpChannel struct {
 }
 
 func (s *smtpChannel) Send(ctx context.Context, m Message) error {
+	to := s.to
+	if len(m.To) > 0 {
+		to = m.To
+	}
 	var body strings.Builder
 	body.WriteString(m.Body)
 	if m.Link != "" {
@@ -212,7 +218,7 @@ func (s *smtpChannel) Send(ctx context.Context, m Message) error {
 	}
 	hdr := []string{
 		"From: " + s.from,
-		"To: " + strings.Join(s.to, ", "),
+		"To: " + headerLine(strings.Join(to, ", ")),
 		"Subject: " + mime.QEncoding.Encode("utf-8", headerLine(subject)),
 		"Date: " + time.Now().Format(time.RFC1123Z),
 	}
@@ -265,7 +271,7 @@ func (s *smtpChannel) Send(ctx context.Context, m Message) error {
 	if err := c.Mail(addrOnly(s.from)); err != nil {
 		return err
 	}
-	for _, t := range s.to {
+	for _, t := range to {
 		if err := c.Rcpt(addrOnly(t)); err != nil {
 			return err
 		}
