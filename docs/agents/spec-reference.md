@@ -146,6 +146,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `topics` | list of names | none | Shared memory topics every run reads, beside the profile's and its own. |
 | `skills` | list of names | none | Skills from orbit's library the agent runs with; an unknown one is skipped and shown as `missing`. |
 | `learn` | map | on | Learning runs over quiet conversations (below). |
+| `hooks` | list | none | Claude Code hooks for the agent's runs, beside orbit's own; claude-code only, at most 20 (below). |
 | `chat` | bool | `false` | A Claude Code session whose reply is its final message, with memory, questions and actions as orbit's tools; a workspace per conversation. claude-code only. |
 | `sandbox` | `workstation`, `build` | none | Needs `chat` and a sandboxd. Runs the CLI in a sandboxd container per conversation: `workstation` has every Claude Code tool and egress to any public host; `build` has its `tools` and the build allowlist (security.md, Sandboxed chats). |
 | `needs` | list of capabilities | none | What a host must have to run the agent (`docker-network:hetzner`); without any, every host. |
@@ -264,3 +265,16 @@ claude-code runners only.
 | `enabled` | bool | `true` | `false` turns learning off. |
 | `idle` | duration | `30m` | Quiet before a conversation is learned from, `5m` to `24h`. |
 | `runner` | runner name | the agent's | The runner learning runs use (a cheaper model). |
+
+### `hooks[]`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `event` | `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `Stop` | required | When the hook fires. `SessionStart` fires once per Claude Code process, so not for every run of a live one. |
+| `matcher` | tool names joined by `\|` | every tool | Tool events only: which tools it fires for. |
+| `say` | text, at most 2 KB | none | Tells the model the text as context; at `Stop`, sends it back once with it. |
+| `deny` | text, at most 2 KB | none | `PreToolUse` only: refuses the tool with this reason. |
+| `run` | argv | none | Runs the command (no shell) in the workdir with the event on stdin and only `PATH`, `HOME` and `LANG` set; stdout, stderr and the exit code go to Claude Code (exit 2 blocks). |
+| `timeout` | duration | `10s` | `run` only, at most `1m`; the command's process group is killed at it. |
+
+Exactly one of `say`, `deny` and `run`.
