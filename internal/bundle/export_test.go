@@ -259,7 +259,7 @@ func TestVerifyTampering(t *testing.T) {
 	if _, err := Export(context.Background(), c, "assistant", source); err != nil {
 		t.Fatal(err)
 	}
-	for _, kind := range []string{"hash", "unsafe", "unlisted", "duplicate-member", "duplicate-reference", "negative-size", "oversized-size", "fileless", "trailing-manifest", "unknown-manifest-field", "inconsistent-coverage"} {
+	for _, kind := range []string{"hash", "unsafe", "unlisted", "duplicate-member", "duplicate-reference", "negative-size", "oversized-size", "fileless", "trailing-manifest", "unknown-manifest-field", "inconsistent-coverage", "duplicate-completeness", "duplicate-resource-key", "escaped-duplicate-key", "duplicate-identity-key", "invalid-manifest-utf8", "manifest-nesting-limit"} {
 		t.Run(kind, func(t *testing.T) {
 			target := filepath.Join(dir, kind+".zip")
 			extra := ""
@@ -278,6 +278,19 @@ func TestVerifyTampering(t *testing.T) {
 				}
 				if name == "manifest.json" {
 					switch kind {
+					case "invalid-manifest-utf8":
+						b = bytes.Replace(b, []byte(`"name": "assistant"`), []byte("\"name\": \"assista\xffnt\""), 1)
+					case "manifest-nesting-limit":
+						value := strings.Repeat("[", 65) + "0" + strings.Repeat("]", 65)
+						b = bytes.Replace(b, []byte(`"name": "assistant"`), []byte(`"id":`+value+`,"name":"assistant"`), 1)
+					case "duplicate-completeness":
+						b = bytes.Replace(b, []byte(`"backup_complete": false`), []byte(`"backup_complete": true,"backup_complete": false`), 1)
+					case "escaped-duplicate-key":
+						b = bytes.Replace(b, []byte(`"backup_complete": false`), []byte(`"backup_complete": true,"backup_\u0063omplete": false`), 1)
+					case "duplicate-resource-key":
+						b = bytes.Replace(b, []byte(`"coverage": "current"`), []byte(`"coverage": "error","coverage": "current"`), 1)
+					case "duplicate-identity-key":
+						b = bytes.Replace(b, []byte(`"name": "assistant"`), []byte(`"name": "other","name": "assistant"`), 1)
 					case "unknown-manifest-field":
 						b = bytes.Replace(b, []byte(`"format_version"`), []byte(`"unknown":true,"format_version"`), 1)
 					case "inconsistent-coverage":

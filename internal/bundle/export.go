@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/client"
+	"github.com/kensac/orbit/internal/jsonstrict"
 )
 
 // ErrIncomplete means the published archive records an incomplete resource.
@@ -507,8 +508,16 @@ func verify(filename string, validated *Manifest) error {
 	if err != nil {
 		return err
 	}
+	data, err := io.ReadAll(io.LimitReader(r, maxResponseBytes+1))
+	_ = r.Close()
+	if err != nil {
+		return err
+	}
+	if err := jsonstrict.ValidateJSON(data, maxResponseBytes); err != nil {
+		return fmt.Errorf("manifest: %w", err)
+	}
 	var m Manifest
-	dec := json.NewDecoder(io.LimitReader(r, maxResponseBytes+1))
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	err = dec.Decode(&m)
 	if err == nil {
@@ -517,7 +526,6 @@ func verify(filename string, validated *Manifest) error {
 			err = errors.New("trailing manifest data")
 		}
 	}
-	_ = r.Close()
 	if err != nil {
 		return err
 	}

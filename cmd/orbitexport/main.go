@@ -1,4 +1,4 @@
-// orbitexport writes and verifies portable public-API exports.
+// orbitexport writes, verifies and inspects portable public-API exports.
 package main
 
 import (
