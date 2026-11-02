@@ -27,6 +27,7 @@ import (
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/harness"
+	"github.com/kensac/orbit/internal/journal"
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/notify"
@@ -383,7 +384,8 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 
 	seq := 0
 	figures := a.Verifies("figures")
-	var transcript [][]byte // the backend's message lines, for the figure check
+	var transcript [][]byte  // the backend's message lines, for the figure check
+	var said []journal.Event // the lines that can hold the agent's prose, for fullReport
 	emit := func(kind string, payload any) {
 		b, ok := payload.([]byte)
 		if !ok {
@@ -393,6 +395,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			transcript = append(transcript, b)
 		}
 		seq++
+		if kind == "assistant" || kind == "response" || strings.HasPrefix(kind, "item.") {
+			said = append(said, journal.Event{Attempt: c.Attempt, Seq: seq, Kind: kind, Payload: b})
+		}
 		if err := e.Store.AppendEvent(context.WithoutCancel(ctx), c.ID, c.Attempt, seq, kind, b); err != nil {
 			log.Warn("append event", "err", err)
 		}
@@ -620,6 +625,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	out.known, out.topics, out.skills = knownEntries, topics, skills
 	out.task = task
+	prose := fullReport(out, journal.FinalProse(said))
 	if figures {
 		// The hook already sent the output back for these, up to
 		// MaxFigureDenials times (claude-code); this is the same check on
@@ -632,7 +638,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		for _, t := range harness.OrbitToolResults(transcript) {
 			backed.AddText(t)
 		}
-		if missing := backed.Unbacked(harness.ReportText(res.Output)); len(missing) > 0 {
+		if missing := backed.Unbacked(harness.ReportText(res.Output) + "\n" + prose); len(missing) > 0 {
 			emit("orbit.figures_unverified", map[string]any{"amounts": missing})
 			out.Report = strings.TrimRight(out.Report, "\n") + "\n\n_orbit could not trace these amounts to the inputs or a computed result: " +
 				strings.Join(missing, ", ") + "._"

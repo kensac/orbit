@@ -182,6 +182,8 @@ given a strict schema in which each action type's parameters are spelled out;
 the engine validates against a looser envelope and then judges each action on
 its own, so one malformed proposal is denied without losing the report.
 
+The person reads the report, so it must hold the whole answer: the contract says so, and the engine enforces it (`fullReport`). When the run's final assistant prose (`journal.FinalProse`: its last run of top-level assistant messages, projected from the transcript as the journal is) holds more than the submitted report (that is empty, one line where the prose has several, or shorter), the prose becomes the report. The submitted summary stays, and `output.json` keeps the submitted report.
+
 ## Backends are interchangeable
 
 A runner takes a fully built request and returns the output JSON. Nothing an
