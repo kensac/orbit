@@ -467,8 +467,7 @@ pinned in `deploy/cli`):
   (`SDKControlPermissionRequest`, `sdk.d.ts`) and waits for a
   `control_response` carrying `{behavior: "allow", updatedInput}` or
   `{behavior: "deny", message}` (`PermissionResult`). orbit is Go and does
-  not use the SDK; it speaks this protocol directly, which the SDK is the
-  readable reference for.
+  not use the SDK; it speaks this protocol directly (`internal/claudeproto`), which the SDK is the readable reference for.
 - `canUseTool` is asked only when the decision is "ask": `allowedTools`
   entries "execute automatically without asking" (`Options.allowedTools`),
   and in `dontAsk` mode an ask is denied without asking anyone
