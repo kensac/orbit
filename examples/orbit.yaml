@@ -70,7 +70,7 @@ build:
   author: "orbit-kensac[bot] <351241810+orbit-kensac[bot]@users.noreply.github.com>"
   repositories:
     kensac/orbit:
-      commands: [go build, go test, go vet, gofmt, make check, make fmt, make test,
+      commands: [go build, go test, go vet, gofmt, make check, make check-sandbox, make fmt, make test,
                  git status, git diff, git log, git show, ls, rg]
       protected: ["deploy/**"]
       max_diff_lines: 2000
