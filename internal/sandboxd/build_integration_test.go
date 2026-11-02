@@ -97,7 +97,7 @@ func TestIntegrationBuild(t *testing.T) {
 		Title: "Add hello", Repo: "kensac/orbit", Plan: "Add hello.txt.\n\nFAKE-SCRIPT: " + string(steps), PlanVersion: 1,
 		Ticket: json.RawMessage(`{"title":"Add hello"}`), Purpose: "build",
 		Policy:  spec.BuildRepo{Commands: []string{"go test"}, Protected: []string{"deploy/**"}, MaxDiffLines: 100},
-		Timeout: 2 * time.Minute, Credential: "placeholder-credential-value",
+		Timeout: 2 * time.Minute, Env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "placeholder-credential-value"},
 		Author: build.Identity{Name: "orbit-kensac[bot]", Email: "351241810+orbit-kensac[bot]@users.noreply.github.com"},
 	}, build.Deps{App: app, Sandbox: sb, Record: func(r build.PermissionRequest, dec build.Decision) error {
 		decisions = append(decisions, r.Tool+" "+map[bool]string{true: "allow", false: "deny"}[dec.Allow])

@@ -629,6 +629,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	out.known, out.topics, out.skills = knownEntries, topics, skills
 	out.task = task
+	prose := fullReport(out, events.prose())
 	if figures {
 		// The hook already sent the output back for these, up to
 		// MaxFigureDenials times (claude-code); this is the same check on
@@ -641,7 +642,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		for _, t := range harness.OrbitToolResults(events.messages()) {
 			backed.AddText(t)
 		}
-		if missing := backed.Unbacked(harness.ReportText(res.Output)); len(missing) > 0 {
+		if missing := backed.Unbacked(harness.ReportText(res.Output) + "\n" + prose); len(missing) > 0 {
 			emit("orbit.figures_unverified", map[string]any{"amounts": missing})
 			out.Report = strings.TrimRight(out.Report, "\n") + "\n\n_orbit could not trace these amounts to the inputs or a computed result: " +
 				strings.Join(missing, ", ") + "._"
