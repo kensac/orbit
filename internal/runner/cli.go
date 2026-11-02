@@ -11,9 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
+
+	"github.com/kensac/orbit/internal/claudeproto"
 )
 
 // maxLine bounds one stream line. A tool result echoing a large input file
@@ -29,8 +30,8 @@ func runCLI(ctx context.Context, bin string, args, env []string, dir, prompt str
 	cmd.Env = env
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	var stderr tailBuffer
-	cmd.Stderr = &stderr
+	stderr := &claudeproto.Tail{}
+	cmd.Stderr = stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", err
@@ -76,29 +77,6 @@ func runCLI(ctx context.Context, bin string, args, env []string, dir, prompt str
 	return stderr.String(), waitErr
 }
 
-// tailBuffer keeps the last 8 KB written to it. A live process's stderr is
-// written while a turn may read it, hence the lock.
-type tailBuffer struct {
-	mu sync.Mutex
-	b  []byte
-}
-
-func (t *tailBuffer) Write(p []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.b = append(t.b, p...)
-	if len(t.b) > 8<<10 {
-		t.b = t.b[len(t.b)-8<<10:]
-	}
-	return len(p), nil
-}
-
-func (t *tailBuffer) String() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return string(t.b)
-}
-
 // writeTemp writes content to a file in dir and returns its path.
 func writeTemp(dir, name string, content []byte) (string, error) {
 	f, err := os.CreateTemp(dir, name)
@@ -130,15 +108,7 @@ func eventKind(line []byte) string {
 func exitDetail(err error, stderr string) error {
 	var ee *exec.ExitError
 	if errors.As(err, &ee) && strings.TrimSpace(stderr) != "" {
-		return fmt.Errorf("%w: %s", err, firstLine(lastLines(stderr, 3)))
+		return fmt.Errorf("%w: %s", err, claudeproto.LastLines(stderr, 3))
 	}
 	return err
-}
-
-func lastLines(s string, n int) string {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
-	}
-	return strings.Join(lines, " | ")
 }
