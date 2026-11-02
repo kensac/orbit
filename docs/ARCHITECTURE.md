@@ -7,12 +7,12 @@ alone, what waits for approval, what it may not do at all).
 
 ## Code first, model last
 
-The model is the expensive, slow, non-deterministic part, so it gets only the part of a job that needs judgment. Everything else is code that runs before it: the harness fetches and paginates sources, and runs an agent's transforms (`internal/transforms`: coded reducers over a source, such as per-category totals with transfers removed, each output an input of its own), and then its gates (`unchanged`, `items_above`: a scheduled run whose inputs are what the last review judged, or that has nothing to review, ends `skipped`, naming the gate, without a backend call, so a quiet day costs no tokens). A report's numbers should come from code, with the model explaining them.
+The model is the expensive, slow, non-deterministic part, so it gets only the part of a job that needs judgment. Everything else is code that runs before it: the harness fetches and paginates sources, and runs an agent's transforms (`internal/transforms`: coded reducers over a source, such as per-category totals with transfers removed, each output an input of its own), and then its gates (`unchanged`, `items_above`, `precheck`: a scheduled run whose inputs are what the last review judged, that has nothing to review, or whose precheck command says there is nothing to do, ends `skipped`, naming the gate, without a backend call, so a quiet day costs no tokens). A report's numbers should come from code, with the model explaining them.
 
 ## One run
 
 ```
-trigger (schedule | manual | message | continue; a ticket's build runs its own path, below)
+trigger (schedule: cron or RRULE | manual | message | continue; a ticket's build runs its own path, below)
   -> runs row, status queued
   -> executor claims it (FOR UPDATE SKIP LOCKED; at most one running per agent;
      a continuation not before its run_after)
