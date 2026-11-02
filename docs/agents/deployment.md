@@ -4,13 +4,17 @@ orbit's control instance runs on hetzner, from `hetzner-vps-config/compose.orbit
 
 ## Image
 
-`build-push-ghcr.yml` pushes `ghcr.io/kensac/orbit:{sha-<commit>,latest}` on
-every push to main, for amd64 and arm64. hetzner pins a digest; a release
-reaches it when that pin moves.
+`build-push-ghcr.yml` publishes `ghcr.io/kensac/orbit:{sha-<commit>,latest}` and `ghcr.io/kensac/orbit-build:{sha-<commit>,latest}`, for amd64 and arm64, only for a main commit whose CI run succeeded (`workflow_run`, every job in ci.yml). It pushes each image by digest with no tag, smokes it natively on both architectures, and only then tags it, so nothing can pin an image that failed:
+
+- `deploy/smoke.sh IMAGE [REVISION]`: a throwaway Postgres, `orbit migrate` on the empty database, `orbit validate` on `examples/`, `orbit serve` (no executors, a dummy for every variable the examples reference) until docker says `healthy` and `orbit healthcheck --ready` passes, and `orbit version` is the commit. CI runs it on every pull request's image too.
+- `deploy/build-smoke.sh IMAGE`: the build image's tools as uid 10001 on a read-only root, as sandboxd runs it.
+- `.github/scripts/publish-tags.sh`: points `sha-<short>` and then `latest` at exactly the smoked digest (it checks), and never moves `latest` back to an older commit when CI runs finish out of order. Each image's `org.opencontainers.image.revision` label is its commit.
+
+A failed CI run or smoke publishes nothing; to publish that commit after a flake, re-run its CI run or the failed publish run. hetzner pins a digest; a release reaches it when that pin moves.
 
 ### The workstation image
 
-`ghcr.io/kensac/orbit-workstation:{sha-<commit>,latest}` (`deploy/workstation.Dockerfile`, workflow `workstation.yml`) is an agent's persistent box: a container sandboxd keeps per agent under gVisor (`runsc`), where a person gets Claude Code in a browser terminal as on a laptop and the agent's own turns run beside it. It runs on hetzner (amd64) and oci (arm64), so it is built for both; a pull request that touches it builds it natively on each architecture and runs every tool's `--version` as its user, and main pushes it. Like the build image it is pinned by digest where it runs, so a push reaches a box only when that pin moves.
+`ghcr.io/kensac/orbit-workstation:{sha-<commit>,latest}` (`deploy/workstation.Dockerfile`, workflow `workstation.yml`) is an agent's persistent box: a container sandboxd keeps per agent under gVisor (`runsc`), where a person gets Claude Code in a browser terminal as on a laptop and the agent's own turns run beside it. It runs on hetzner (amd64) and oci (arm64), so it is built for both; a pull request that touches it builds it natively on each architecture and runs every tool as its user (`deploy/workstation-smoke.sh`). Publishing is gated the same way as orbit's: after a main commit's CI run succeeds, and only when its inputs (the Dockerfile, `deploy/workstation/`, `deploy/cli/`, the smoke and the workflow) changed since the commit `latest` was built from, it is pushed by digest, smoked natively on both architectures, and only then tagged. Like the build image it is pinned by digest where it runs, so a push reaches a box only when that pin moves.
 
 - **Tools:** Debian trixie with git, jq, ripgrep, fd, fzf, curl, wget, make, build-essential, tmux, neovim, nano, sqlite3, psql, ssh, less, procps, iproute2, unzip and sudo; Go (go.mod's toolchain), Node 24 with npm and pnpm (corepack, `deploy/workstation/package.json`), python3 with uv, yq, gh, and Docker (engine, CLI, containerd, buildx, compose) for a dockerd inside the box; Claude Code at deploy/cli's lockfile with its auto-updater off.
 - **User:** `agent`, uid 10001 (sandboxd's uid), `HOME=/home/agent`, passwordless sudo (which needs a container without `no-new-privileges`), in the `docker` group. `/work` is its own. Locale `en_US.UTF-8`, `TERM=xterm-256color`; `/etc/tmux.conf` sets `set-clipboard on`, `window-size latest`, `mouse on` and 10,000 lines of history.
@@ -23,6 +27,7 @@ Never recreate the container in place: traefik routes nothing until the new
 one is healthy, and runs in progress are cut. Instead, two instances run
 side by side for the switch (docs/ARCHITECTURE.md, Upgrades):
 
+0. **Preflight the new image** against the live database, before anything starts: `orbit preflight --config /config` in a one-off container of the new image with the service's environment and networks (compose: `docker compose run --rm --no-deps -l traefik.enable=false --entrypoint orbit orbit preflight --config /config`). It exits non-zero, and the rollout stops with the old instance untouched, when a pending migration is not expand-only, fails on the live schema or rows (a dry run, rolled back), or the configuration does not load (docs/agents/store.md, Migrations). An image without the command (before it existed) is rolled out without it.
 1. **Start the new container** beside the old one, same image config,
    environment, networks, `/config` mount and **the same `/data` volume**
    (sessions live there; a new instance on its own volume starts every
@@ -53,6 +58,8 @@ the internal listener. Set compose `stop_grace_period` to at least
 overrides the drain's cap, which defaults to the longest agent timeout plus
 5 minutes.
 
+Routers: `/api/`, `/mcp` with the OAuth paths, and `/hooks/` (webhook deliveries, signed, docs/api.md) go past forward-auth, each with a priority above the host's catch-all; everything else (`/ui/`) is behind it. A webhook secret in orbit.yaml is in force only once its variable is in orbit's environment (a missing one answers `503`).
+
 A request that reaches the old instance in the seconds before traefik drops
 it is still served (the API is DB-backed); a run it enqueues is claimed by
 the new one within its 5 s poll.
@@ -75,11 +82,32 @@ container's own layer every restart starts those sessions fresh.
 
 It also holds `mirrors/`, a bare mirror of each repository agents read (`repos`), and `checkouts/`, the builds' kept clones. Both are caches: a lost one is fetched again on the next run that needs it. The two instances of a rollout share them; a fetch takes a lock file beside its mirror.
 
+## Restore drill
+
+`deploy/restore-drill.sh DUMP IMAGE` proves a nightly orbit-db dump restores and that orbit can read it, without touching anything live. On hetzner, as root, with the dump `db-dump.timer` writes and the running image:
+
+```bash
+rev=$(docker exec orbit orbit version)
+curl -fsSL "https://raw.githubusercontent.com/kensac/orbit/$rev/deploy/restore-drill.sh" -o /tmp/restore-drill.sh
+bash /tmp/restore-drill.sh /root/db-dumps/orbit-db.dump "$(docker inspect -f '{{.Config.Image}}' orbit)"
+```
+
+It starts a throwaway Postgres (the pinned 18-alpine) on an internal docker network, so nothing in the drill can reach anything, and:
+
+1. counts every table's rows in the dump itself (each `COPY` block of `pg_restore --data-only`);
+2. restores with `pg_restore --exit-on-error --no-owner --no-acl`, and requires every table's restored count to equal the dump's;
+3. runs `orbit preflight` (when the image has it: the next rollout's migrations, dry-run on real rows) and `orbit migrate` on the copy;
+4. sets the database `default_transaction_read_only` and runs `orbit restore-check --expect <the dump's counts>`, which reads it on a read-only connection through the store's own queries (agents, recent runs with their attempts, events, artifacts and deliveries, conversations, messages, memory entries, skills, tickets, actions, attention) and fails if the schema is behind the image, a table is missing, or one holds fewer rows than the dump (migrations only add);
+5. removes the database, its volume and the network, pass or fail.
+
+The last line is `restore-drill: ok`; any failure names its step. It needs disk for one more copy of the database while it runs. Run it after a Postgres or orbit-db change, and as a periodic check that the dumps are usable.
+
 ## Credentials
 
 Rendered from Infisical (`HETZNER_ORBIT_*`). The Claude Code subscription
 token comes from `claude setup-token` and lasts a year; when it expires every
 run fails with `Not logged in`, which pages through the failure notification.
+Record the day it lapses in orbit.yaml's `expires:` (configuration.md, Secrets) whenever it is set, so `orbit_credential_expiry_timestamp_seconds` warns two weeks ahead (Alerts, below).
 
 Web Push needs `ORBIT_VAPID_PUBLIC_KEY`, `ORBIT_VAPID_PRIVATE_KEY` (from
 `orbit vapid`) and `ORBIT_VAPID_SUBJECT` on control (docs/api.md, Attention
@@ -115,6 +143,7 @@ The build sandbox runs on hetzner today, beside orbit, in `hetzner-vps-config` a
 - **The credential proxy key:** `ORBIT_CREDPROXY_KEY`, at least 32 characters, `HETZNER_ORBIT_CREDPROXY_KEY` in Infisical, read by orbit-credproxy and orbit-sandboxd and nothing else. sandboxd also takes `ORBIT_SANDBOX_CREDPROXY` (default `orbit-credproxy:3129`) and `ORBIT_SANDBOX_WORKSTATION_CREDPROXY` (the proxy's address on the workstation profile's network when it is addressed by IP; default the same), and refuses to start without the key: there is no configuration in which a sandbox holds the backend credential. Rotating the key invalidates every live sandbox's token (their runs fail with `Failed to authenticate. API Error: 401`).
 - **Token:** `ORBIT_SANDBOX_TOKEN`, at least 32 characters, `HETZNER_ORBIT_SANDBOX_TOKEN` in Infisical, read by both sandboxd and orbit (`build.token_env`).
 - **Images:** `ghcr.io/kensac/orbit-build` is pushed by `build-push-ghcr.yml` beside the orbit image. sandboxd pulls it through the Engine API without credentials, so the package must be public (it is built from this public repository and holds nothing private) or pulled on the host before sandboxd starts.
+- **Health:** sandboxd answers `GET /healthz` (up) and `GET /readyz` without the token: 200 or 503 with `{"ready", "checks"}`, where `checks` names `docker` (the daemon answers), `network` and, when set, `workstation_network` (still internal), `proxy:<host>` for `ORBIT_SANDBOX_PROXY` and `ORBIT_SANDBOX_WORKSTATION_PROXY`, and `credproxy:<host>` for `ORBIT_SANDBOX_CREDPROXY` and `ORBIT_SANDBOX_WORKSTATION_CREDPROXY` (the container named as the host is running, and healthy when it has a healthcheck; a host given as an IP is reported `unchecked`), each `ok` or the failure; answers are cached for 10 s. egress answers an origin-form `GET /healthz` on its listener (a proxied request is never answered by it). Neither image healthcheck fits them (it probes `ORBIT_LISTEN`), so compose gives each `test: ["CMD", "orbit", "healthcheck", "--url", "<its /healthz>"]`. orbit control asks the configured sandboxd's `/readyz` every 30 s (Alerts, below).
 - **Claiming it is deployed:** `docker logs orbit-sandboxd` shows `sandboxd: serving` (it exits on a failed host check: no seccomp, a network that is not internal, an image it cannot get), `docker logs orbit-egress` shows `egress: serving` with the allowlist, and `docker logs orbit-credproxy` shows `credproxy: serving` and, once a run has used it, `credproxy: forwarded` lines with the run's id and `status=200`.
 
 **Workstation profile** (sandboxed chats, `sandbox: workstation`, and agents' boxes): its own internal network, `orbit-workstation`, and a second `orbit egress` with `ORBIT_EGRESS_PROFILE=workstation` (the open web: any public host on any port but SMTP's, plain HTTP too; docs/agents/security.md, Workstation egress) on the `orbit-workstation` and `orbit-egress` networks, never on `orbit-sandbox`, named for example `orbit-egress-open`; sandboxd's environment gains `ORBIT_SANDBOX_WORKSTATION_PROXY=orbit-egress-open:3128` and `ORBIT_SANDBOX_WORKSTATION_NETWORK=orbit-workstation`. sandboxd refuses to start with the proxy and no network of its own, or with the build network, so a build can never reach the open proxy. Without the proxy sandboxd refuses that profile (400), and the built-in agent's runs fail naming the variable. Its deny lists, the same on every host that runs boxes:
@@ -162,6 +191,19 @@ sandboxd (on the fleet daemon, as today, with the docker-ws socket mounted) take
 - The fleet daemon's iptables `FORWARD` policy is `DROP`, and a packet must pass every table, so `DOCKER-USER` gets four rules (inserted only if absent): accept within `orbws-sbx` and within `orbws-box` (bridged traffic seen through `br_netfilter`), from `orbws-out` to any other interface, and established or related traffic back to it. These only let through what the nftables tables also pass. Hosts with firewalld add the three bridges to its `docker` zone.
 
 **Claiming it is deployed**, by the verification playbook on each host: `runsc --version` names the pinned release; `docker -H unix:///run/docker-ws/sock/docker.sock info` lists `runsc` as the default runtime, the data-root and `name=seccomp`; a container run there reports gVisor's kernel (`dmesg` starts with gVisor's banner); `nft list table inet orbit_ws` and `nft list table bridge orbit_ws_l2` match the file; the fleet daemon's `docker ps` does not list docker-ws's containers. From a probe container on `orbit-ws-box`: the workstation egress tunnels to `example.com:443` and `example.com:22`; it refuses `orbit.kanishksachdev.com`, `169.254.169.254`, the host's public address, a tailnet address and port 25; a direct TCP connection to `1.1.1.1:443`, to the bridge's gateway on 22 and to a second probe container on the same bridge all fail; `orbit-ws-sandbox`'s build egress refuses `example.com`. sandboxd starts against it (`sandboxd: serving`), and a build and a workstation chat each run end to end.
+
+## Alerts
+
+Prometheus rules for these live in the homelab repository (`hetzner-vps-config/prometheus/rules/orbit.yml`); orbit exports what they need:
+
+| metric | means | alert on |
+|---|---|---|
+| `orbit_runs_queued_oldest_age_seconds` | seconds the oldest due queued run has waited since it became due (0 when none) | a queue no executor drains (no worker with the capability, every executor wedged) |
+| `orbit_runs_total{agent,status}` | finished runs, per instance | an agent failing with no success or skip in hours |
+| `orbit_config_valid` | 0 while the files on disk do not load | a change that is not in force |
+| `orbit_sandboxd_ready` | control's probe of the configured sandboxd's `/readyz`; absent without one | builds and sandboxed chats cannot start |
+| `orbit_egress_ready{proxy}` | each egress proxy's container, as sandboxd reported it; absent when sandboxd did not answer | sandboxes cannot reach the model or package registries |
+| `orbit_credential_expiry_timestamp_seconds{credential}` | `expires:` in orbit.yaml, midnight UTC | the Claude Code token lapsing within 14 days |
 
 ## Building tickets: what hetzner needs
 

@@ -114,6 +114,13 @@ func harness(t *testing.T, fr *fakeRunner) (*engine.Engine, *store.Store, *hooks
 // harnessWith appends extra to the agent's YAML.
 func harnessWith(t *testing.T, fr *fakeRunner, extra string) (*engine.Engine, *store.Store, *hooks) {
 	t.Helper()
+	return harnessFiles(t, fr, extra, nil)
+}
+
+// harnessFiles is harnessWith plus files: "orbit.yaml" is appended to the
+// deployment, any other name is written into the configuration directory.
+func harnessFiles(t *testing.T, fr *fakeRunner, extra string, files map[string]string) (*engine.Engine, *store.Store, *hooks) {
+	t.Helper()
 	s := testdb.New(t)
 	h := &hooks{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -159,7 +166,12 @@ channels:
   hook: {kind: webhook, url: %[1]s/notify}
 endpoints:
   ep: {url: %[1]s/endpoint}
-`, srv.URL))
+%[2]s`, srv.URL, files["orbit.yaml"]))
+	for name, body := range files {
+		if name != "orbit.yaml" {
+			write(name, body)
+		}
+	}
 	write("agents/finance.yaml", fmt.Sprintf(`
 name: finance
 charter: Review my spending.

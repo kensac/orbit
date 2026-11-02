@@ -23,7 +23,7 @@ database agent of their name. Each instance reloads when the directory's
 content or the newest definition changes, so a definition written on one
 instance is in force on all within the 30 s poll.
 
-An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential, delegate target or need it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily) waits for a person's approval whatever the rule.
+An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential, delegate target, need or webhook trigger it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily) waits for a person's approval whatever the rule.
 
 Database and built-in agents are held to what orbit.yaml offers (`spec.validateTrust`): no `file` source, no `${VAR}` that is not in `credentials:`, without a `sandbox`, only the tools in `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite), no precheck and no `run` hook. A spec breaking one fails validation, naming it.
 
@@ -58,6 +58,15 @@ credentials:
 ```
 
 `url_prefix` is an http(s) URL with a host and a path ending in `/`, without user, query or fragment. A source sends a credential only in a request whose URL starts with it (redirects included); where the URL has no template, a mismatch fails the load. A database or built-in agent may reference only credentials; a file agent may also name any other variable (docs/agents/security.md, What a model can define).
+
+`expires:` records when a credential orbit cannot inspect stops working, so an alert fires before it does. The Claude Code subscription token (`claude setup-token`) lasts a year and gives no warning; record the day it lapses when you set it:
+
+```yaml
+expires:
+  CLAUDE_CODE_OAUTH_TOKEN: 2027-10-31
+```
+
+Each entry is `orbit_credential_expiry_timestamp_seconds{credential="CLAUDE_CODE_OAUTH_TOKEN"}` (midnight UTC of the date) on every instance that loads the configuration, refreshed on reload; nothing else reads it. Update it with the token.
 
 ## GitHub
 
@@ -131,14 +140,14 @@ at load (unknown params fail):
 | `sure-monthly` | `items` | Sure transactions per month and category: income, spending, net, transfers left out |
 
 `items` is the dot path to the records (empty: the document is the array,
-as a paginated `http` source is); `where` is the query tool's conditions
+as a paginated `http` source is; `.`: the document itself is the one record, as a webhook delivery's event is); `where` is the query tool's conditions
 (`field`, `op`, `value`). Sums are exact decimals. A transform that fails
 fails the run, naming it. A new kind is a function in
 `internal/transforms`, its parameters in `parse`, and a test.
 
 ## Gates
 
-`gates:` in an agent are checks, in code, that end a run as `skipped` (naming the gate in `runs.gate`) before any backend call, so a quiet day costs no tokens and sends nothing. They apply only to scheduled runs with no person's message waiting: a message, a manual run, a continuation, a build and a recovered attempt always reach the model. They are checked in order, after sources and transforms:
+`gates:` in an agent are checks, in code, that end a run as `skipped` (naming the gate in `runs.gate`) before any backend call, so a quiet day costs no tokens and sends nothing. They apply only to scheduled and webhook runs with no person's message waiting: a message, a manual run, a continuation, a build and a recovered attempt always reach the model. They are checked in order, after sources and transforms:
 
 | kind | fields | skips when |
 |---|---|---|
@@ -156,8 +165,41 @@ A skipped run counts as a success for staleness (docs/agents/store.md).
 
 - `schedule`: a five-field cron expression or a descriptor (`@daily`), read in the agent's `timezone`.
 - `rrule` and `start`: an RFC 5545 recurrence rule (`internal/rrule`), anchored at `start`, a local time in the agent's timezone (`2026-11-03T09:00`). For what cron cannot say: `FREQ=WEEKLY;INTERVAL=2;BYDAY=TU` (every other Tuesday), `FREQ=MONTHLY;BYDAY=-1FR` (the last Friday), `FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=2` (the second weekday), and series that end (`COUNT`, `UNTIL`). `start` sets the first period and the time of day the rule does not name. Supported: `FREQ` from `MINUTELY` to `YEARLY`, `INTERVAL`, `COUNT` (at most 10000), `UNTIL`, `BYMONTH`, `BYMONTHDAY`, `BYDAY` (ordinals in `MONTHLY` and `YEARLY`), `BYHOUR`, `BYMINUTE`, `BYSECOND`, `BYSETPOS`, `WKST`; anything else fails the load. Days and longer are wall-clock (09:00 stays 09:00 across daylight saving); hours and minutes are elapsed time.
+- `webhook`: a signed delivery to `POST /hooks/<agent>/<webhook>` (Webhooks, below).
 
-Either kind takes `prompt`, the reason for the wake. Both go through the same scheduler (one fire per trigger and time, `runs_one_per_fire`; after downtime only the newest missed fire), and an ended series never fires again.
+Every kind takes `prompt`, the reason for the wake. `schedule` and `rrule` go through the same scheduler (one fire per trigger and time, `runs_one_per_fire`; after downtime only the newest missed fire), and an ended series never fires again.
+
+**Missed fires.** A fire that starts too late is not run hours late: a schedule run claimed more than its trigger's `missed_grace` after its fire time (after downtime, or behind a long queue) ends `skipped` with gate `missed`, before anything is read or fetched, and notifies nothing. The default grace is the time from that fire to the trigger's next one, at most an hour (`spec.DefaultMissedGraceMax`): a five-minute trigger's fire may start up to five minutes late, a daily one's up to an hour. Set `missed_grace` (1m to 168h) for a job that must still run late, such as a monthly close. Only a run's first attempt is judged; a missed fire is no success for staleness.
+
+## Webhooks
+
+A webhook trigger starts a run when a sender (GitHub, anything speaking Standard Webhooks) POSTs a signed delivery to `/hooks/<agent>/<webhook>` (docs/api.md, Webhooks). Its secret is an environment variable `orbit.yaml` binds, like a credential, to the agents that may name it, with the sender's signature scheme:
+
+```yaml
+# orbit.yaml
+webhook_secrets:
+  ORBIT_HOOK_GITHUB:
+    scheme: github        # X-Hub-Signature-256; or standard (webhook-id, webhook-timestamp, webhook-signature)
+    agents: [triage]
+```
+
+```yaml
+# agents/triage.yaml
+triggers:
+  - webhook: issues               # POST /hooks/triage/issues
+    secret: ORBIT_HOOK_GITHUB
+    max_bytes: 262144             # default 1 MiB, at most 8 MiB
+sources:
+  - name: event                   # the delivery's body, as received
+    kind: webhook
+```
+
+- **Verified before anything is stored.** The body's HMAC-SHA256 under the secret must match the sender's signature (constant-time). `github` reads `X-Hub-Signature-256` and the delivery id from `X-GitHub-Delivery`; `standard` signs `<webhook-id>.<webhook-timestamp>.<body>` (a `whsec_` secret is base64 after the prefix) and refuses a timestamp more than `spec.WebhookTolerance` (5 minutes) from orbit's clock, which is its replay protection. GitHub signs no timestamp, so there the delivery id is.
+- **Once per delivery.** The run and the delivery are one transaction, unique per agent, trigger and delivery id (`webhook_deliveries_once`): a sender's retry, or a second instance receiving it, answers the first run and starts nothing.
+- **The body is a source.** A `webhook` source is the body of the delivery that started the run, stored as received (`webhook_deliveries`), so transforms, gates (`items_above` with `items: .` counts one event), the `unchanged` gate and withholding apply as to a fetched source. On a run no delivery started (manual, schedule, message) it is absent: its transforms are skipped and an `items_above` gate on it skips the run. The run's prompt names the delivery id and the event.
+- GitHub's `ping` (sent when a hook is created) is answered `200` without a run. A disabled agent refuses deliveries (`409`), and a secret unset in the environment is `503`, never an unauthenticated route.
+
+A database agent may have a webhook trigger only under a secret bound to its name, and adding one widens it (waits for a person). Binding a name no agent has yet lets whoever defines that agent receive the deliveries.
 
 `paused: true` stops a trigger firing; with `paused_until` (a local time, as `start`) it fires again from then, and the fires in between are skipped, not caught up (`spec.TriggerSchedule` applies it, so the scheduler, `next_fires` and validation agree).
 

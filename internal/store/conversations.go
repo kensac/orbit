@@ -68,6 +68,9 @@ type Conversation struct {
 	// questions are to the delegating agent, so they do not count as
 	// waiting on the person.
 	TaskID *string `json:"task_id"`
+	// WorkspaceID is its workspace's id (docs/api.md, Workspace), null
+	// until it has one.
+	WorkspaceID *string `json:"workspace_id"`
 	// AgentStatus is the agent's status in this conversation
 	// (status.Aggregate over its current run).
 	AgentStatus status.Status `json:"agent_status" db:"-"`
@@ -86,6 +89,7 @@ func (c *Conversation) derive() {
 var conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived, c.created_at, c.last_activity_at,
 	(SELECT t.id::text FROM tickets t WHERE t.conversation_id = c.id), c.purpose,
 	(SELECT k.id::text FROM tasks k WHERE k.conversation_id = c.id),
+	(SELECT wt.id::text FROM workspace_trees wt WHERE wt.conversation_id = c.id),
 	EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND ` + personQuestion + `),
 	EXISTS (SELECT 1 FROM actions x JOIN runs xr ON xr.id = x.run_id
 	        WHERE xr.conversation_id = c.id AND x.status = 'pending'),

@@ -1,7 +1,6 @@
 package store_test
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/kensac/orbit/internal/store"
@@ -17,20 +16,10 @@ func TestTokensMigrationBackfillsFromRunUsage(t *testing.T) {
 	if err := s.MigrateTo(ctx, tokensMigration-1); err != nil {
 		t.Fatal(err)
 	}
-	seed(t, s, "a")
+	conv := oldAgent(t, s, "a")
 	finished := func(kind, model, usage string) string {
 		t.Helper()
-		id := manual(t, s, "a")
-		if _, err := s.ClaimRun(ctx, "w"); err != nil {
-			t.Fatal(err)
-		}
-		if err := s.SetRunner(ctx, id, 1, kind, model, "sha-a"); err != nil {
-			t.Fatal(err)
-		}
-		if err := s.FinishRun(ctx, id, store.RunResult{Attempt: 1, Status: "succeeded", Usage: json.RawMessage(usage)}); err != nil {
-			t.Fatal(err)
-		}
-		return id
+		return oldRun(t, s, "a", conv, `runner_kind = $2, model = NULLIF($3, ''), usage = $4::jsonb`, kind, model, usage)
 	}
 	// As runner.parseClaudeResult wrapped the recorded line's fields.
 	claude := finished("claude-code", "haiku", `{"usage":{"input_tokens":2,"cache_creation_input_tokens":2960,"cache_read_input_tokens":649,"output_tokens":4},
