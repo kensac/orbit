@@ -22,6 +22,7 @@ trigger (schedule: cron or RRULE | manual | message | continue | task | delegati
   -> a fresh session: the recent thread, packed into a byte budget, as conversation.md
   -> sources fetched by the harness, written to <workdir>/inputs/, stored as artifacts
   -> transforms run over sources, each output an input (a source only transforms read is withheld)
+  -> repositories (repos): each fetched into orbit's mirror, its tree at the ref's commit under inputs/repos/<name>, _repos.json an input
   -> gates (scheduled runs, no message waiting): one that finds nothing to judge ends the run skipped
   -> runner called with: system contract, prompt, workdir, tools, output schema
   -> output validated against the contract
@@ -122,6 +123,7 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
   (below): the tool server asks the engine over a per-agent unix socket
   (`engine/search.go`), the engine fills in the agent, and its results are
   not ledgered, since an earlier run's words back no figure.
+  With `repos`, the repository tools (Repositories, below) are served the same way, over a socket of their own, and are not ledgered either.
 - **Hooks** (`orbit hook`, from `--settings`; with `--setting-sources ""` no
   other hook is loaded, so `disableAllHooks` is on whenever orbit has none):
   PreToolUse on Read, Glob and Grep denies a path that leaves the workdir after
@@ -136,6 +138,12 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
   per-run context belongs in the prompt, where it already is), PostToolUse
   and Stop (the stream already records every tool result, and the output to
   verify is the StructuredOutput call, not the stop).
+
+## Repositories
+
+An agent reads git repositories through orbit, not through the web (`internal/repos`, `engine/repos.go`; configuration.md, Repositories). orbit keeps a bare mirror of each repository in `github.read_repositories` that an agent names, under `<data>/mirrors/`: every branch, tag and pull request head (`refs/pull/<n>/head`), fetched before each run with a `contents: read` token that exists only for that fetch. The run gets the tree at the ref's commit, without `.git`, at `inputs/repos/<name>/`, and `_repos.json` (repo, ref, sha) as an input: the prompt names each path and commit, the `unchanged` gate sees a new commit as a change, and a recovered attempt extracts the same commits again. A tree is not stored as artifacts; its commit is the record, and the mirror can give it again.
+
+History and GitHub's state are tools orbit runs, never a credential or a `.git` in the model's reach: `git_log`, `git_show`, `git_diff` and `git_blame` over the mirror, and `pr_list` (every page up to its limit, `merged_at` set only for a merge) and `pr_view` (with the head commit's check runs and statuses) from GitHub with a read token minted per call. A Claude Code report agent reaches them through `orbit mcp`, which asks the engine over a per-agent unix socket (as search does); a chat agent has them among its SDK tools. A build's new clone is seeded from the mirror's default branch head (`build.Pool.Seed`), so its fetch from GitHub transfers only what the mirror lacked.
 
 ## Mail
 

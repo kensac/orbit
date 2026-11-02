@@ -82,11 +82,22 @@ type GitHub struct {
 	APIURL string `yaml:"api_url,omitempty" json:"api_url,omitempty"`
 	// Repositories ("owner/name") tickets and github:merge may target.
 	Repositories []string `yaml:"repositories" json:"repositories"`
+	// ReadRepositories ("owner/name") are the repositories an agent's
+	// repos may name: orbit mirrors them and mints contents:read tokens
+	// (and pull request, check and status reads for the repository tools)
+	// for them. Reading a repository never permits a ticket or a merge
+	// there; that is Repositories alone.
+	ReadRepositories []string `yaml:"read_repositories,omitempty" json:"read_repositories,omitempty"`
 }
 
 // AllowsRepo reports whether repo is one orbit may act on.
 func (d Deployment) AllowsRepo(repo string) bool {
 	return d.GitHub != nil && slices.Contains(d.GitHub.Repositories, repo)
+}
+
+// AllowsRead reports whether repo is one an agent may read.
+func (d Deployment) AllowsRead(repo string) bool {
+	return d.GitHub != nil && slices.Contains(d.GitHub.ReadRepositories, repo)
 }
 
 // Defaults apply to every agent that does not override them.
@@ -202,6 +213,11 @@ type Agent struct {
 	// The delegate rule still decides whether it may (docs/ARCHITECTURE.md,
 	// Delegation).
 	Delegates []string `yaml:"delegates,omitempty" json:"delegates,omitempty"`
+	// Repos are git repositories every run reads: orbit fetches each into
+	// its mirror and gives the run the tree at Ref, without .git, under
+	// inputs/repos/<name>, with read-only history and GitHub tools
+	// (internal/repos). Each must be in github.read_repositories.
+	Repos []RepoRef `yaml:"repos,omitempty" json:"repos,omitempty"`
 
 	// delegateTargets is Delegates resolved against the configuration,
 	// sorted; set by Validate.
@@ -215,6 +231,31 @@ type Agent struct {
 	// Version is a database agent's definition version (agent_definitions).
 	Version int `yaml:"-" json:"-"`
 }
+
+// RepoRef is one repository an agent reads, at a branch, tag or commit.
+type RepoRef struct {
+	Repo string `yaml:"repo" json:"repo"`
+	// Ref is a branch, a tag or a full commit sha; empty is the default
+	// branch.
+	Ref string `yaml:"ref,omitempty" json:"ref,omitempty"`
+}
+
+// Name is the directory the repository's tree is given under
+// (inputs/repos/<name>): the repository's name without its owner.
+func (r RepoRef) Name() string {
+	_, name, _ := strings.Cut(r.Repo, "/")
+	return name
+}
+
+// RepoRefRE is a ref an agent may name: a branch or tag in git's own
+// spelling without anything git would read as an option or a revision
+// expression, or a full commit sha.
+var RepoRefRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}$`)
+
+// NeedsGitHub is the capability of a host holding the GitHub App's key: an
+// agent with repos must need it, so a worker without the key never claims
+// its runs.
+const NeedsGitHub = "github"
 
 // Where an agent is defined.
 const (
@@ -749,6 +790,11 @@ func (c *Config) Validate() error {
 				errs = append(errs, fmt.Errorf("github: repository %q is not owner/name", r))
 			}
 		}
+		for _, r := range g.ReadRepositories {
+			if !RepoRE.MatchString(r) || strings.Contains(r, "..") {
+				errs = append(errs, fmt.Errorf("github: read_repositories: %q is not owner/name", r))
+			}
+		}
 	}
 	for _, ch := range d.Defaults.Channels {
 		if _, ok := d.Channels[ch]; !ok {
@@ -973,6 +1019,30 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("needs: %q is listed twice", n)
 		}
 		seenNeed[n] = true
+	}
+	seenRepo := map[string]bool{}
+	for i, r := range a.Repos {
+		switch {
+		case !RepoRE.MatchString(r.Repo) || strings.Contains(r.Repo, ".."):
+			at("repos %d: %q is not owner/name", i, r.Repo)
+		case !c.Deployment.AllowsRead(r.Repo):
+			at("repos %d: %s is not in github.read_repositories", i, r.Repo)
+		}
+		if r.Ref != "" && (!RepoRefRE.MatchString(r.Ref) || strings.Contains(r.Ref, "..") || strings.HasSuffix(r.Ref, ".lock") || strings.HasSuffix(r.Ref, "/")) {
+			at("repos %d: ref %q is not a branch, tag or commit sha", i, r.Ref)
+		}
+		if seenRepo[r.Name()] {
+			at("repos %d: a second repository named %q (each is given as inputs/repos/<name>)", i, r.Name())
+		}
+		seenRepo[r.Name()] = true
+	}
+	if len(a.Repos) > 0 {
+		if !slices.Contains(a.Needs, NeedsGitHub) {
+			at("repos: needs %q in needs, so only a host holding the GitHub App's key claims its runs", NeedsGitHub)
+		}
+		if k := c.Deployment.Runners[a.Runner].Kind; k == "anthropic" {
+			at("repos: an anthropic runner reads no files; give the agent a claude-code or codex runner")
+		}
 	}
 	if a.Chat && c.Deployment.Runners[a.Runner].Kind != "claude-code" {
 		at("chat: needs a claude-code runner (runner %q is %q)", a.Runner, c.Deployment.Runners[a.Runner].Kind)
