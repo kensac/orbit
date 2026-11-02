@@ -10,6 +10,8 @@ import (
 const (
 	// UploadURL keys signed upload URLs (internal/api uploads.go).
 	UploadURL = "orbit upload url"
+	// WorkspaceUploadURL keys signed workspace upload URLs (internal/api workspace_write.go).
+	WorkspaceUploadURL = "orbit workspace upload url"
 	// MCPOAuth keys the MCP OAuth proxy's sealed state and codes (internal/api oauth.go).
 	MCPOAuth = "orbit mcp oauth"
 )

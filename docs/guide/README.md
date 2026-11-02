@@ -52,7 +52,7 @@ Coding work has a separate [ticket workflow](../tickets.md): discuss a request, 
 
 ## Talk by email
 
-Email is available only when the operator configures both outbound SMTP and orbit's inbound mailbox. The mailbox needs IMAP access, allowed senders and delivery of plus-addressed replies. Replies to orbit's signed reply address continue the same conversation. To start a conversation with a new email, the operator must also set `mail.agent`; without it, mail that is not a reply is recorded and ignored.
+Email is available only when the operator configures both outbound SMTP and orbit's inbound mailbox. The mailbox needs IMAP access, allowed senders and delivery of plus-addressed replies. Replies to orbit's signed reply address continue the same conversation, and orbit answers every mail by mail, as a reply to the sender. To start a conversation with a new email, the operator must also set `mail.agent`; without it, mail that is not a reply is recorded and ignored.
 
 Use the configured orbit address, and reply to the address supplied by its message rather than constructing one. New mail starts a conversation with the configured agent, not an agent chosen from the subject. Incoming automatic mail and failed sender-authentication results can be ignored. The mailbox is dedicated to orbit because polling marks unseen mail as seen. See [mail configuration](../agents/configuration.md#mail) for prerequisites and sender restrictions.
 

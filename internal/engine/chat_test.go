@@ -218,8 +218,49 @@ session: {resume: true, idle: 1h, live: 5m}
 	if kept, err := os.ReadFile(filepath.Join(e.DataDir, "conversations", conv, "box-home", ".kept")); profile == spec.SandboxWorkstation && (err != nil || string(kept) != "1\n2\n") {
 		t.Fatalf("a workstation's home is kept: %q %v", kept, err)
 	}
+
+	// The person changes the workspace between turns: the next turn is
+	// told by code, and runs in a new sandbox made from the person's version
+	// (the live one's copy is stale), resuming the session.
+	tree, err := s.ConversationWorkspace(ctx, conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, _ := s.LatestWorkspace(ctx, conv)
+	snapNow, err := workspace.Open(base.Archive, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ed := snapNow.Edit(time.Now())
+	_ = ed.PutFile("uploads/person.txt", []byte("gamma\n"))
+	_ = ed.Remove("made-1.txt")
+	archive, n, err := ed.Archive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutPersonWrite(ctx, store.PersonWrite{WorkspaceID: tree.ID, ConversationID: conv, BaseID: base.ID,
+		Archive: archive, Files: n, Person: "kanishk"}); err != nil {
+		t.Fatal(err)
+	}
+	r3 := send("third", "delta\n")
+	if got := deref(r3.Report); r3.Status != "succeeded" || got != "reply 1 saw beta delta alpha gamma token tok-1" {
+		t.Fatalf("run 3 = %s %q %q: a new sandbox from the person's version", r3.Status, got, deref(r3.Error))
+	}
+	if fs.created != 2 {
+		t.Fatalf("sandboxes created = %d, want a new one after the person's change", fs.created)
+	}
+	var prompt string
+	if err := s.Pool.QueryRow(ctx, `SELECT convert_from(content, 'UTF8') FROM artifacts WHERE run_id = $1 AND name = 'prompt.md'`, r3.ID).Scan(&prompt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "- added uploads/person.txt\n") || !strings.Contains(prompt, "- removed made-1.txt (it is in the workspace's trash)\n") {
+		t.Fatalf("prompt = %q", prompt)
+	}
+	if latest, _, _ := s.PersonChanges(ctx, conv); latest != nil {
+		t.Fatal("after the turn, the agent has seen the person's version")
+	}
 	e.Live.Close()
-	if fs.gone != 1 {
+	if fs.gone != 2 {
 		t.Fatalf("sandboxes destroyed = %d", fs.gone)
 	}
 }
@@ -263,5 +304,85 @@ func TestStoppingARunningRun(t *testing.T) {
 	}
 	if _, err := s.CancelRun(ctx, c.ID, "kanishk"); err == nil {
 		t.Fatal("a finished run cancelled again")
+	}
+}
+
+// actRunner is a chat backend that calls orbit's act tool once and replies
+// with what the tool said.
+type actRunner struct{ args string }
+
+func (actRunner) Kind() string  { return "claude-code" }
+func (actRunner) Model() string { return "fake" }
+func (f actRunner) Run(ctx context.Context, req runner.Request, _ func(runner.Event)) (*runner.Result, error) {
+	if req.Chat == nil {
+		return nil, errors.New("not a chat run")
+	}
+	text, isErr := req.Chat.Call(ctx, "act", []byte(f.args))
+	if isErr {
+		text = "error: " + text
+	}
+	return &runner.Result{Reply: text, SessionID: "s1"}, nil
+}
+
+func TestThePersonsMessageIsTheInstruction(t *testing.T) {
+	s := testdb.New(t)
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "agents"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "orbit.yaml"), []byte("defaults: {runner: cc, channels: [log]}\nrunners: {cc: {kind: claude-code}}\nchannels: {log: {kind: log}}\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "agents", "helper.yaml"), []byte("name: helper\ncharter: Help.\nchat: true\nwake_on_message: true\nactions: {agent:define: approve}\n"), 0o644)
+	args := `{"type": "agent:define", "reason": "asked", "params": {"spec": {"name": "news", "charter": "News."}}}`
+	e := &engine.Engine{Store: s, DataDir: t.TempDir(), ConfigDir: dir, Env: func(string) (string, bool) { return "", false },
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		NewRunner: func(string, spec.RunnerSpec, func(string) (string, bool)) (runner.Runner, error) {
+			return actRunner{args}, nil
+		}}
+	if err := e.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	a := e.Current().Config.Agents["helper"]
+	run := func(wake func() string) *store.ThreadRun {
+		t.Helper()
+		id := wake()
+		c, err := s.ClaimRun(ctx, "test")
+		if err != nil || c == nil {
+			t.Fatalf("claim: %v %v", c, err)
+		}
+		if err := e.Execute(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		r, err := s.ThreadRunByID(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	// Unattended: the approve rule holds.
+	manual := run(func() string {
+		id, err := s.EnqueueRun(ctx, store.NewRun{Agent: "helper", SpecSHA: a.SHA, Trigger: "manual"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	})
+	if !strings.Contains(deref(manual.Report), "waits for the person's approval") || len(manual.Actions) != 1 || manual.Actions[0].Status != "pending" {
+		t.Fatalf("manual = %q %+v", deref(manual.Report), manual.Actions)
+	}
+	// The person asked: it executes in the turn, approved by them.
+	asked := run(func() string {
+		r, _, err := s.PostMessageOnce(ctx, store.PostMessage{Agent: "helper", SpecSHA: a.SHA, Body: "make a news agent", Author: "kanishk", Wake: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.RunID
+	})
+	if !strings.Contains(deref(asked.Report), "agent:define executed") || len(asked.Actions) != 1 || asked.Actions[0].Status != "executed" {
+		t.Fatalf("asked = %q %+v", deref(asked.Report), asked.Actions)
+	}
+	act, err := s.GetAction(ctx, asked.Actions[0].ID)
+	if err != nil || act.DecidedBy == nil || *act.DecidedBy != "kanishk" || act.InstructedBy == nil || *act.InstructedBy != "kanishk" {
+		t.Fatalf("action = %+v %v", act, err)
+	}
+	if e.Current().Config.Agents["news"] == nil {
+		t.Fatal("the defined agent is not in force")
 	}
 }
