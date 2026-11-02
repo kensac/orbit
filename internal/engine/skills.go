@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/runner"
@@ -191,6 +192,20 @@ func (e *Engine) prepareSkills(ctx context.Context, c *store.ClaimedRun, a *spec
 		return nil, "", nil, err
 	}
 	return skills, "", append(inputs, runner.Input{Name: "skills", Path: rel, MediaType: "text/markdown", Content: b}), nil
+}
+
+// agentHooks are the agent's spec hooks as the runner installs them.
+func agentHooks(a *spec.Agent) []runner.AgentHook {
+	var out []runner.AgentHook
+	for _, h := range a.Hooks {
+		timeout := time.Duration(h.Timeout)
+		if len(h.Run) > 0 && timeout == 0 {
+			timeout = spec.DefaultHookTimeout
+		}
+		out = append(out, runner.AgentHook{Event: h.Event, Matcher: h.Matcher,
+			Def: harness.AgentHookDef{Event: h.Event, Say: h.Say, Deny: h.Deny, Run: h.Run, Timeout: timeout}})
+	}
+	return out
 }
 
 // OutputSkill is one skill write in a run's output.
