@@ -743,7 +743,7 @@ func TestStreamAgentStatus(t *testing.T) {
 	expect(t, ch, "status", `{"attempt":0,"status":"queued"}`)
 	agentStatus("queued///run")
 	_, a1 := claim(t, v, "claude-code")
-	expect(t, ch, "status", `{"attempt":1,"status":"running"}`)
+	expect(t, ch, "status", `{"attempt":1,"epoch":1,"status":"running"}`)
 	agentStatus("working///run")
 	snap := `{"state":"waiting","kind":"permission","detail":"Write","event":"PermissionRequest","at":"2026-11-01T12:00:00Z","attempt":1}`
 	if err := v.s.SetHookStatus(ctx, run, a1, json.RawMessage(snap)); err != nil {
@@ -754,7 +754,7 @@ func TestStreamAgentStatus(t *testing.T) {
 		store.Outcome{Questions: []string{"q?"}}); err != nil {
 		t.Fatal(err)
 	}
-	expect(t, ch, "status", `{"attempt":1,"status":"succeeded"}`)
+	expect(t, ch, "status", `{"attempt":1,"epoch":1,"status":"succeeded"}`)
 	agentStatus("waiting/question//run")
 	done := expect(t, ch, "done", "")
 	if !strings.Contains(done.Data, `"agent_status":{"state":"waiting","kind":"question"`) {
