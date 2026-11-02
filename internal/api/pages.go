@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +44,7 @@ button{font:inherit;padding:10px 18px;border-radius:6px;border:1px solid var(--l
 {{if .Error}}<p class="muted">Error: {{.Error}}</p>{{end}}
 </div>
 {{end}}
+{{if .Preview}}<div class="card"><div class="muted">What it will do</div><pre>{{.Preview}}</pre></div>{{end}}
 {{if eq .Action.Status "pending"}}
 <form method="post"><input type="hidden" name="sig" value="{{.Sig}}">
 <button class="approve" name="decision" value="approve">Approve</button>
@@ -64,8 +66,10 @@ button{font:inherit;padding:10px 18px;border-radius:6px;border:1px solid var(--l
 </main></body></html>`))
 
 type page struct {
-	Title    string
-	Action   *store.Action
+	Title  string
+	Action *store.Action
+	// Preview is what the pending action would do (engine.PreviewAction), indented.
+	Preview  string
 	Run      *store.Run
 	Sig      string
 	Message  string
@@ -99,7 +103,23 @@ func (s *Server) approvalPage(w http.ResponseWriter, r *http.Request) {
 		render(w, http.StatusNotFound, page{Title: "Action not found"})
 		return
 	}
-	render(w, http.StatusOK, page{Title: "Review action", Action: a, Sig: sig})
+	render(w, http.StatusOK, page{Title: "Review action", Action: a, Sig: sig, Preview: s.preview(r, a)})
+}
+
+// preview is the pending action's preview as the page shows it: indented JSON, or why it cannot be computed.
+func (s *Server) preview(r *http.Request, a *store.Action) string {
+	p, err := s.Engine.PreviewAction(r.Context(), a)
+	if err != nil {
+		return "It would fail now: " + err.Error()
+	}
+	if p == nil {
+		return ""
+	}
+	var b bytes.Buffer
+	if json.Indent(&b, p, "", "  ") != nil {
+		return string(p)
+	}
+	return b.String()
 }
 
 // approvalSubmit takes the decision. It is a POST from the page, never the

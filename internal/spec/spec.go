@@ -314,6 +314,39 @@ type Trigger struct {
 	Start string `yaml:"start,omitempty" json:"start,omitempty"`
 	// Prompt is the reason for this wake, appended to the charter.
 	Prompt string `yaml:"prompt,omitempty" json:"prompt,omitempty"`
+	// Paused stops the trigger firing; PausedUntil, a local time in the agent's timezone as Start is, ends the pause there (fires before it are skipped, never caught up). The schedule:pause and schedule:resume actions write them.
+	Paused      bool   `yaml:"paused,omitempty" json:"paused,omitempty"`
+	PausedUntil string `yaml:"paused_until,omitempty" json:"paused_until,omitempty"`
+}
+
+// paused is a schedule with a pause: no fire before until, and none at all when until is zero.
+type paused struct {
+	Schedule
+	until time.Time
+}
+
+// Next is the inner schedule's first fire strictly after t that is not before until.
+func (p paused) Next(t time.Time) time.Time {
+	if p.until.IsZero() {
+		return time.Time{}
+	}
+	if from := p.until.Add(-time.Second); t.Before(from) {
+		// Fires are whole seconds (rrule.Rule.Start is truncated, cron has none), so a fire at until itself is after from.
+		t = from
+	}
+	return p.Schedule.Next(t)
+}
+
+// ParseLocal reads a local time in loc in the forms Trigger.Start is written in.
+func ParseLocal(s string, loc *time.Location) (time.Time, error) {
+	var err error
+	for _, l := range startLayouts {
+		var t time.Time
+		if t, err = time.ParseInLocation(l, s, loc); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, err
 }
 
 // Schedule is when a trigger fires: the first fire strictly after a time,
@@ -327,8 +360,28 @@ type Schedule interface {
 var startLayouts = []string{"2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-02 15:04"}
 
 // TriggerSchedule is a trigger's schedule, read in loc (the agent's
-// timezone).
+// timezone), its pause applied.
 func TriggerSchedule(t Trigger, loc *time.Location) (Schedule, error) {
+	sched, err := triggerSchedule(t, loc)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case t.PausedUntil != "" && !t.Paused:
+		return nil, errors.New("paused_until needs paused")
+	case t.PausedUntil != "":
+		until, err := ParseLocal(t.PausedUntil, loc)
+		if err != nil {
+			return nil, fmt.Errorf("paused_until %q: want local time as 2026-11-09T00:00", t.PausedUntil)
+		}
+		return paused{sched, until}, nil
+	case t.Paused:
+		return paused{Schedule: sched}, nil
+	}
+	return sched, nil
+}
+
+func triggerSchedule(t Trigger, loc *time.Location) (Schedule, error) {
 	switch {
 	case t.Schedule != "" && t.RRule != "":
 		return nil, errors.New("schedule and rrule cannot both be set")
@@ -341,13 +394,7 @@ func TriggerSchedule(t Trigger, loc *time.Location) (Schedule, error) {
 		if t.Start == "" {
 			return nil, errors.New("an rrule needs a start (local time, 2026-11-02T09:00)")
 		}
-		var start time.Time
-		var err error
-		for _, l := range startLayouts {
-			if start, err = time.ParseInLocation(l, t.Start, loc); err == nil {
-				break
-			}
-		}
+		start, err := ParseLocal(t.Start, loc)
 		if err != nil {
 			return nil, fmt.Errorf("start %q: want local time as 2026-11-02T09:00", t.Start)
 		}
@@ -918,7 +965,8 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("action %q: rule must be auto, approve or deny", typ)
 		}
 		switch {
-		case typ == "notify", typ == "continue", typ == "agent:define":
+		case typ == "notify", typ == "continue", typ == "agent:define",
+			typ == "schedule:add", typ == "schedule:pause", typ == "schedule:resume", typ == "schedule:remove", typ == "run:now":
 		case typ == "delegate", typ == "task:message", typ == "task:cancel":
 			if len(a.Delegates) == 0 {
 				at("action %q: needs delegates, the agents this one may hand tasks to", typ)
@@ -932,7 +980,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 				at("action %q: needs a github block in orbit.yaml", typ)
 			}
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, delegate, task:message, task:cancel, webhook:<endpoint> or github:merge)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, webhook:<endpoint> or github:merge)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {

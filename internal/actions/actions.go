@@ -66,6 +66,11 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 	if a.RuleFor(DefineType) != spec.RuleDeny {
 		out = append(out, defineType(a))
 	}
+	for _, t := range ScheduleTypes {
+		if a.RuleFor(t) != spec.RuleDeny {
+			out = append(out, scheduleType(t, a))
+		}
+	}
 	return out
 }
 
@@ -317,6 +322,8 @@ type Executor struct {
 	Continue func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (id string, queued bool, err error)
 	// Define applies an agent:define for the call's run.
 	Define func(ctx context.Context, c Call, spec json.RawMessage) (json.RawMessage, error)
+	// Schedule applies a schedule action or run:now for the call's run.
+	Schedule func(ctx context.Context, c Call, p ScheduleParams) (json.RawMessage, error)
 }
 
 // Call is one action to execute: its type and parameters, and the agent
@@ -428,6 +435,15 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 			return nil, fmt.Errorf("agent:define: not available in this process")
 		}
 		return e.Define(ctx, c, sp)
+	case IsScheduleType(typ):
+		p, err := DecodeSchedule(typ, params)
+		if err != nil {
+			return nil, err
+		}
+		if e.Schedule == nil {
+			return nil, fmt.Errorf("%s: not available in this process", typ)
+		}
+		return e.Schedule(ctx, c, p)
 	}
 	return nil, fmt.Errorf("unknown action type %q", typ)
 }

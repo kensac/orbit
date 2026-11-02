@@ -215,3 +215,40 @@ func TestLimitsAreClampedNotReset(t *testing.T) {
 		t.Fatalf("runs = %d, want all 60", len(v["runs"].([]any)))
 	}
 }
+
+// TestAPendingScheduleChangeShowsWhatItWillDo: the person deciding sees the rule code parsed and the next fires, in the API and on the approval page.
+func TestAPendingScheduleChangeShowsWhatItWillDo(t *testing.T) {
+	v := newEnv(t, nil)
+	srv, s, e := v.internal, v.s, v.e
+	if _, err := e.DefineAgent(ctx, engine.DefineRequest{Spec: json.RawMessage(`{"name": "news", "charter": "x", "actions": {"schedule:add": "approve"}}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnqueueRun(ctx, store.NewRun{Agent: "news", SpecSHA: e.Current().Config.Agents["news"].SHA, Trigger: "manual"}); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := s.ClaimRun(ctx, "w")
+	ids, err := s.RecordOutcome(ctx, c.ID, "news", store.RunResult{Attempt: 1, Status: "succeeded"}, store.Outcome{
+		Actions: []store.ProposedAction{{Type: "schedule:add", Params: json.RawMessage(`{"when": "daily at 7:15"}`), Reason: "asked", Rule: "approve"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, got := call(t, "GET", srv.URL+"/api/v1/actions/"+ids[0], token, "")
+	p, _ := got["preview"].(map[string]any)
+	if code != 200 || p["rule"] != "FREQ=DAILY;BYHOUR=7;BYMINUTE=15;BYSECOND=0" || p["timezone"] != "UTC" || len(p["next_fires"].([]any)) != 3 {
+		t.Fatalf("action = %d %v", code, got)
+	}
+	resp, _ := http.Get(strings.Replace(e.ApprovalLink(e.Current(), ids[0]), "http://orbit.test", v.srv.URL, 1))
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(b), "What it will do") || !strings.Contains(string(b), "BYMINUTE=15") {
+		t.Fatalf("page = %s", b)
+	}
+	// Decided, there is nothing to preview: the result says what it did.
+	if err := s.DecideAction(ctx, ids[0], false, "kanishk"); err != nil {
+		t.Fatal(err)
+	}
+	if _, got = call(t, "GET", srv.URL+"/api/v1/actions/"+ids[0], token, ""); got["preview"] != nil {
+		t.Fatalf("decided = %v", got)
+	}
+}

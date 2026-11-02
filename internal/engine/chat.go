@@ -244,7 +244,7 @@ type chatAction struct {
 }
 
 // chatTools are orbit's tools for a chat run.
-func (e *Engine) chatTools(a *spec.Agent, types []actions.Type, memoryMax int, st *chatState) *runner.Chat {
+func (e *Engine) chatTools(a *spec.Agent, trigger string, types []actions.Type, memoryMax int, st *chatState) *runner.Chat {
 	byName := map[string]actions.Type{}
 	var names []string
 	for _, t := range types {
@@ -266,7 +266,7 @@ func (e *Engine) chatTools(a *spec.Agent, types []actions.Type, memoryMax int, s
 				"type": map[string]any{"type": "string", "enum": names}, "params": map[string]any{"type": "object"},
 				"reason": map[string]any{"type": "string"}}, "required": []string{"type", "params", "reason"}}})
 	}
-	call := func(_ context.Context, name string, args json.RawMessage) (string, bool) {
+	call := func(ctx context.Context, name string, args json.RawMessage) (string, bool) {
 		st.mu.Lock()
 		defer st.mu.Unlock()
 		switch name {
@@ -312,11 +312,21 @@ func (e *Engine) chatTools(a *spec.Agent, types []actions.Type, memoryMax int, s
 			if len(st.actions) >= maxActions {
 				return fmt.Sprintf("at most %d actions per reply", maxActions), true
 			}
-			st.actions = append(st.actions, v)
-			if a.RuleFor(v.Type) == spec.RuleAuto {
-				return "Recorded: it runs when your reply is sent.", false
+			// A schedule change is parsed by code now, and what it would do goes back to the model to confirm with the person.
+			preview := ""
+			if actions.IsScheduleType(v.Type) && v.Type != actions.RunNowType {
+				res, err := e.PreviewSchedule(ctx, a.Name, v.Type, v.Params)
+				if err != nil {
+					return err.Error(), true
+				}
+				b, _ := json.Marshal(res)
+				preview = " It will do this; tell the person the rule and the next fires: " + string(b)
 			}
-			return "Recorded: it waits for the person's approval.", false
+			st.actions = append(st.actions, v)
+			if ruleFor(a, v.Type, trigger) == spec.RuleAuto {
+				return "Recorded: it runs when your reply is sent." + preview, false
+			}
+			return "Recorded: it waits for the person's approval." + preview, false
 		}
 		return "unknown tool " + name, true
 	}
@@ -403,7 +413,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 		}
 	}
 	st := &chatState{}
-	chat := e.chatTools(a, t.types, d.Defaults.MemoryMaxBytes, st)
+	chat := e.chatTools(a, c.Trigger, t.types, d.Defaults.MemoryMaxBytes, st)
 	chat.Interrupt = t.cancel
 	if a.Sandbox != "" {
 		sb, err := e.sandboxPlan(d, a.Sandbox, c, t.workdir, t.home, t.plugin, t.emit)

@@ -167,6 +167,8 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `rrule` | RFC 5545 rule | | A recurrence cron cannot say (configuration.md, Triggers). |
 | `start` | local time `2026-11-03T09:00` | required with `rrule` | The rule's first period and its time of day; not allowed with `schedule`. |
 | `prompt` | string | none | The reason for this wake, appended to the charter. |
+| `paused` | bool | `false` | The trigger does not fire (`schedule:pause` writes it). |
+| `paused_until` | local time `2026-11-09T00:00` | none | Needs `paused`: the pause ends there; fires before it are skipped, never caught up. |
 
 ### `sources[]`
 
@@ -247,6 +249,8 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint; never a URL or header of the model's. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
 | `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |
+| `schedule:add`, `schedule:pause`, `schedule:resume`, `schedule:remove` | Changes one trigger (or, pausing and resuming, every trigger) of this agent or one in `delegates`, as a new revertible version; times are the person's words, parsed by code (configuration.md, Changing schedules by talking). `approve` applies directly in a run answering the person's message. | a database or built-in target |
+| `run:now` | Starts a manual run of this agent or one in `delegates`; a run no message woke cannot start its own agent. `approve` applies directly in a run answering the person's message. | |
 
 ### `notify`
 

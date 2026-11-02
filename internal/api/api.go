@@ -508,7 +508,17 @@ func (s *Server) listActions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getAction(w http.ResponseWriter, r *http.Request) {
 	a, err := s.Store.GetAction(r.Context(), r.PathValue("id"))
-	respond(w, map[string]any{"action": a}, err)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	out := map[string]any{"action": a}
+	if p, perr := s.Engine.PreviewAction(r.Context(), a); perr != nil {
+		out["preview_error"] = perr.Error()
+	} else if p != nil {
+		out["preview"] = p
+	}
+	respond(w, out, nil)
 }
 
 func (s *Server) decide(approve bool) http.HandlerFunc {

@@ -75,7 +75,7 @@ A skill is instructions a run follows, and agents write their own, so a run stee
 
 Only actions its spec enables, through executors here, to destinations in
 configuration. `continue` can make an agent run again on its own, so it is
-bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body, never a URL or a header. `agent:define` lets a model rewrite an agent defined in the database or built in, itself included: its charter, tools, sources and rules. What such an agent may hold is limited below (What a model can define), and a change that widens one waits for a person. Never a file agent's. Every change is a version with its run, so it is seen and reverted through the API.
+bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body, never a URL or a header. `agent:define` lets a model rewrite an agent defined in the database or built in, itself included: its charter, tools, sources and rules. What such an agent may hold is limited below (What a model can define), and a change that widens one waits for a person. Never a file agent's. Every change is a version with its run, so it is seen and reverted through the API. The schedule actions are narrower forms of it: they change only triggers (within reach, so no person is needed beyond the rule), only of the agent itself or one it delegates to, with times parsed by code. `run:now` starts a run, but a run no message woke cannot start its own agent, so it is no unbounded loop; `continue` is the bounded way.
 `deny` is the default for every type an agent does not name, and denied
 types are not even offered.
 
