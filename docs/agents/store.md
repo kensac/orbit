@@ -46,7 +46,9 @@ an agent's beliefs changed.
 - task (`tasks`, `tasks.go`): `waiting | blocked -> working -> needs_input | done | failed | cancelled`, `needs_input -> working`, `done -> working` (a parent's message reopens it), and `cancelled` from any open state. `Delegate` creates a batch; `ReconcileTasks` (one instance at a time, by advisory lock) makes every other move but `MessageTask` and `CancelTask`, each in one transaction. `report` is kept when a task reopens.
 
 - outbox (`outbox`, written by a worker's engine): unsent, claimed by one control instance (`ClaimOutbox`, reclaimed after `OutboxReclaimAfter`), then `sent_at` set once its deliveries are recorded. Rows are kept.
-- workspaces (`workspaces`): a chat conversation's snapshot after each run that changed it, never updated; the newest is the workspace.
+- workspaces (`workspaces`): a chat conversation's snapshot after each run that changed it, never updated; the newest is the workspace's content.
+- workspace identity (`workspace_trees`): one row per conversation of a chat agent (`scope = 'conversation'`, made on first ask or with the first snapshot, `PutWorkspace`) or per agent (`scope = 'agent'`, a box, one per agent by `workspace_trees_one_per_agent`); never updated. Its id is the API's `workspace_id`.
+- workspace audit (`workspace_events`): one row per workspace operation, append-only.
 - session transcripts (`session_transcripts`): written once per session id (`ON CONFLICT DO NOTHING`; a resume forks to a new id), never updated.
 - deployment (`deployment_specs`, `deployment_current`): every version kept, as `agent_specs`; `SyncDeployment` moves the pointer before `SyncAgents` records the agents loaded with it.
 

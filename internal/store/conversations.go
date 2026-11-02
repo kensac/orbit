@@ -66,6 +66,9 @@ type Conversation struct {
 	// questions are to the delegating agent, so they do not count as
 	// waiting on the person.
 	TaskID *string `json:"task_id"`
+	// WorkspaceID is its workspace's id (docs/api.md, Workspace), null
+	// until it has one.
+	WorkspaceID *string `json:"workspace_id"`
 }
 
 const conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived, c.created_at, c.last_activity_at,
@@ -74,7 +77,8 @@ const conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived
 	OR EXISTS (SELECT 1 FROM actions x JOIN runs xr ON xr.id = x.run_id
 	           WHERE xr.conversation_id = c.id AND x.status = 'pending'),
 	(SELECT t.id::text FROM tickets t WHERE t.conversation_id = c.id), c.purpose,
-	(SELECT k.id::text FROM tasks k WHERE k.conversation_id = c.id)`
+	(SELECT k.id::text FROM tasks k WHERE k.conversation_id = c.id),
+	(SELECT wt.id::text FROM workspace_trees wt WHERE wt.conversation_id = c.id)`
 
 // GetConversation returns one conversation.
 func (s *Store) GetConversation(ctx context.Context, id string) (*Conversation, error) {

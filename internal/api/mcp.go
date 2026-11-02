@@ -150,6 +150,9 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "list_conversations", Description: "List one agent's conversations, newest activity first."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in mcpListConversationsIn) (*mcp.CallToolResult, any, error) {
 			page, err := s.Store.ListConversations(ctx, in.Agent, in.Archived, nil, in.Limit)
+			if err == nil {
+				err = s.withWorkspaceIDs(ctx, page.Conversations)
+			}
 			if err != nil {
 				return nil, nil, mcpErr(err)
 			}

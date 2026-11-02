@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
@@ -28,6 +29,9 @@ func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page, err := s.Store.ListConversations(r.Context(), r.PathValue("name"), archived, before, limit)
+	if err == nil {
+		err = s.withWorkspaceIDs(r.Context(), page.Conversations)
+	}
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -82,8 +86,22 @@ func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getConversation(w http.ResponseWriter, r *http.Request) {
-	c, err := s.Store.GetConversation(r.Context(), r.PathValue("id"))
+	c, err := s.conversationShape(r.Context(), r.PathValue("id"))
 	respond(w, map[string]any{"conversation": c}, err)
+}
+
+// conversationShape is one conversation as the API shows it, its
+// workspace_id filled.
+func (s *Server) conversationShape(ctx context.Context, id string) (*store.Conversation, error) {
+	c, err := s.Store.GetConversation(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	list := []store.Conversation{*c}
+	if err := s.withWorkspaceIDs(ctx, list); err != nil {
+		return nil, err
+	}
+	return &list[0], nil
 }
 
 func (s *Server) updateConversation(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +118,7 @@ func (s *Server) updateConversation(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	c, err := s.Store.GetConversation(r.Context(), id)
+	c, err := s.conversationShape(r.Context(), id)
 	respond(w, map[string]any{"conversation": c}, err)
 }
 

@@ -36,7 +36,7 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 | Hook-driven live agent status | #37 agent-status | |
 | Worktrees, review comments on PR diffs, stacked PRs, check reruns, RRULE schedules with a precheck | #32 #43 | |
 | Migration fix (duplicate version 14) | #50 | |
-| Workspace: an IDE in the portfolio chat (explorer, editor, terminals with Claude Code (direct), diffs with line comments), one shell with the chat | #78 docs/workspace-contract (design); items below | design [docs/workspace.md](workspace.md), contract docs/api.md, Workspace (planned) |
+| Workspace: an IDE in the portfolio chat (explorer, editor, terminals with Claude Code (direct), diffs with line comments), one shell with the chat | #78 (design, merged); items below | design [docs/workspace.md](workspace.md), contract docs/api.md, Workspace (each unbuilt part marked planned) |
 
 ### Workspace: implementation items, in order
 
@@ -44,9 +44,9 @@ Each is one PR. A portfolio item (kensac/personal-portfolio, `app/orbit`) meets 
 
 | # | Repo | Item | Needs |
 |---|---|---|---|
-| W1 | orbit | Workspace resolver and snapshot reads: `GET /conversations/{id}/workspace`, `/agents/{name}/workspace`, `workspace_id` on conversations, tree, stat, files (2 MiB, binary detection), download; `workspace_events`; the workspace group and the rate and size limits | #59 (workspaces) |
+| W1 | orbit | Workspace resolver and snapshot reads: `GET /conversations/{id}/workspace`, `/agents/{name}/workspace`, `workspace_id` on conversations, tree, stat, files (2 MiB, binary detection), download; `workspace_events`; the workspace group and the rate and size limits. Built on branch `workspace-reads` (claude-workspace-files) | #59 (merged) |
 | W2 | portfolio | The shell: layout, rail and tabs, one command palette, tokens for every panel, the shared store and `open(ref)` with deep links | |
-| W3 | orbit | Snapshot writes: `PUT` with `If-Match`, mkdir, rename, trash and restore, upload and signed upload, `busy`, pushing into a live sandbox, the next turn told what the person changed | W1 |
+| W3 | orbit | Snapshot writes: `PUT` with `If-Match`, mkdir, rename, trash and restore, upload and signed upload, `busy`, pushing into a live sandbox, the next turn told what the person changed. claude-workspace-files, after W1 | W1 |
 | W4 | portfolio | Explorer: lazy tree, create, rename, trash and restore, upload by drop, download | W2, W1 (W3 for writes) |
 | W5 | portfolio | Editor on CodeMirror 6 (below): tabs, save with `If-Match` and a merge on `412`, binary and too-large states, image preview | W2, W3 |
 | W6 | orbit | Change stream (snapshot backend), history, `changes` on run items and `GET /runs/{id}/changes` | W3 |

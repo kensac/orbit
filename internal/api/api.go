@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -57,6 +58,13 @@ type Server struct {
 	Push *push.Sender
 	// OAuth, when set, serves the authorization server MCP clients sign in through (oauth.go) on the public listener. Without it /mcp still takes an authentik token from a client that has one.
 	OAuth *OAuthProxy
+	// WorkspaceGroup is ORBIT_WORKSPACE_GROUP: the group a person must be
+	// in to change a workspace. Empty is ORBIT_OIDC_GROUP's, which every
+	// verified person is in.
+	WorkspaceGroup string
+
+	wsOnce sync.Once
+	ws     *workspaceState
 }
 
 // Handler returns the public listener's routes, the ones traefik serves.
@@ -145,6 +153,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/comments/{comment}/withdraw", s.withdrawComment)
 	api("POST /api/v1/tickets/{id}/review", s.submitReview)
 	s.memoryRoutes(api)
+	s.workspaceRoutes(api)
 	s.skillsRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
