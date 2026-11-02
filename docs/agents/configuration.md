@@ -41,16 +41,7 @@ sandbox receives. `orbit validate` lists both variables.
 
 ## Capabilities
 
-`needs: [<capability>, ...]` on an agent says what a host must have to run
-it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated;
-`*` alone is every agent, control's default when unset; a worker's default
-is none). A capability is `name` or `name:qualifier`, lower case
-(`spec.CapabilityRE`). An agent with no needs runs on any host. Give an
-agent a need for anything only some hosts have: a network its sources are
-on (`docker-network:hetzner`), a source credential that lives only on some
-hosts (`sure`), a tool (`browser`). The table of capabilities and the
-hosts that have them is docs/agents/deployment.md, Worker fleet. A run
-whose agent needs what no host has waits queued; nothing fails it.
+`needs: [<capability>, ...]` on an agent says what a host must have to run it; a host advertises its own in `ORBIT_CAPABILITIES` (comma-separated; `*` alone is every agent, control's default when unset; a worker's default is none). A capability is `name` or `name:qualifier`, lower case (`spec.CapabilityRE`). An agent with no needs runs on any host. Give an agent a need for anything only some hosts have: a network its sources are on (`docker-network:hetzner`), a source credential that lives only on some hosts (`sure`), a tool (`browser`). The table of capabilities and the hosts that have them is docs/agents/deployment.md, Worker fleet. A run whose agent needs what no host has waits queued; nothing fails it.
 
 ## Templates in sources
 

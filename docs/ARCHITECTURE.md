@@ -65,11 +65,7 @@ session between runs. Claude Code stores a session's transcript at
 `$CLAUDE_CONFIG_DIR/projects/<cwd, non-alphanumerics as ->/<id>.jsonl`
 (`runner.SessionFile`); orbit pins `CLAUDE_CONFIG_DIR` to
 `<data>/agents/<name>/home/.claude` and the cwd to `<data>/agents/<name>/work`,
-so `ORBIT_DATA_DIR` must be a persistent volume for resume to survive a restart. The
-transcript is also stored centrally (`session_transcripts`, Worker fleet
-below) and written back on whichever host claims the next run, as the
-Agent SDK's SessionStore does; a run claimed where it is on neither starts
-fresh rather than failing.
+so `ORBIT_DATA_DIR` must be a persistent volume for resume to survive a restart. The transcript is also stored centrally (`session_transcripts`, Worker fleet below) and written back on whichever host claims the next run, as the Agent SDK's SessionStore does; a run claimed where it is on neither starts fresh rather than failing.
 
 - **Resume.** A run continues the session of its conversation's latest finished run
   when that run succeeded on Claude Code under the same spec within `idle`,
@@ -221,8 +217,7 @@ cost sums, the queue, running runs and next fires. Contract: docs/api.md.
 
 ## Worker fleet
 
-orbit runs on several hosts, as jobtracker's workers do: one binary, two
-roles, one database.
+orbit runs on several hosts, as jobtracker's workers do: one binary, two roles, one database.
 
 ```
 orbit serve (hetzner, control)            orbit worker (oci, transmission, ...)
@@ -234,43 +229,11 @@ orbit serve (hetzner, control)            orbit worker (oci, transmission, ...)
                   orbit-db (Postgres, over the tailnet with TLS)
 ```
 
-- **Capabilities.** An agent's spec names what a host must have
-  (`needs: [docker-network:hetzner, sure]`); a host advertises what it has
-  (`ORBIT_CAPABILITIES`, a list; `*` is everything, control's default).
-  `Store.ClaimRunFor` claims a run only when its agent's current spec
-  needs a subset of the host's, reading `needs` from the spec JSON in
-  `agent_specs`, so an agent defined by any writer of that table is covered.
-  An agent with no needs runs anywhere. Build runs (they need the GitHub
-  App and sandboxd) are claimed only by control.
-- **Specs from the database.** control records every loaded `orbit.yaml`
-  (`deployment_specs`, the one in force in `deployment_current`) beside
-  the agent specs it already recorded. A worker reads no file: before each
-  run it rebuilds the configuration from those rows (`spec.FromStored`),
-  so it runs the spec the claim's needs were checked against, with the SHA
-  control computed. A worker waits until the schema is current (control
-  migrates) and a deployment is recorded.
-- **Delivery and actions stay on control.** A worker holds no channel
-  credential and no approval secret, so a worker's engine (`Outbox`)
-  records each notification in `outbox` instead of sending it; control
-  sends it every `outboxEvery` (5 s), adding the run link or the signed
-  approval link, and records each attempt in `deliveries` as for its own
-  runs. Actions a worker's run proposed are rows like any other; control's
-  action loop executes them. Each row is sent once; one a dead control
-  claimed is reclaimed after `store.OutboxReclaimAfter`.
-- **Sessions across hosts.** After a session agent's run, before the run is
-  recorded as succeeded, and after any hand-back, the transcript
-  (`<id>.jsonl` and `<id>/` from the CLI's projects directory, as a gzipped
-  tar) goes to `session_transcripts`; before a resume or a recovery, a
-  host without it writes it back under its own workdir's key
-  (`engine/sessionstore.go`). Postgres rather than Garage: every host that
-  runs agents already holds the database credential and needs nothing
-  more, the write is ordered before the run's outcome so the next claim
-  anywhere finds it, and it is backed up with every other row. A session
-  id is stored once (every resume forks); an archive over
-  `MaxSessionArchive` (64 MiB) stays on its host. A lost attempt (a crash)
-  saved nothing, so its run starts over elsewhere, saying why.
-- **One subscription is shared**, so the fleet adds reach (a source only
-  one host can see, a browser, a residential IP), not capacity.
+- **Capabilities.** An agent's spec names what a host must have (`needs: [docker-network:hetzner, sure]`); a host advertises what it has (`ORBIT_CAPABILITIES`, a list; `*` is everything, control's default). `Store.ClaimRunFor` claims a run only when its agent's current spec needs a subset of the host's, reading `needs` from the spec JSON in `agent_specs`, so an agent defined by any writer of that table is covered. An agent with no needs runs anywhere. Build runs (they need the GitHub App and sandboxd) are claimed only by control.
+- **Specs from the database.** control records every loaded `orbit.yaml` (`deployment_specs`, the one in force in `deployment_current`) beside the agent specs it already recorded. A worker reads no file: before each run it rebuilds the configuration from those rows (`spec.FromStored`), so it runs the spec the claim's needs were checked against, with the SHA control computed. A worker waits until the schema is current (control migrates) and a deployment is recorded.
+- **Delivery and actions stay on control.** A worker holds no channel credential and no approval secret, so a worker's engine (`Outbox`) records each notification in `outbox` instead of sending it; control sends it every `outboxEvery` (5 s), adding the run link or the signed approval link, and records each attempt in `deliveries` as for its own runs. Actions a worker's run proposed are rows like any other; control's action loop executes them. Each row is sent once; one a dead control claimed is reclaimed after `store.OutboxReclaimAfter`.
+- **Sessions across hosts.** After a session agent's run, before the run is recorded as succeeded, and after any hand-back, the transcript (`<id>.jsonl` and `<id>/` from the CLI's projects directory, as a gzipped tar) goes to `session_transcripts`; before a resume or a recovery, a host without it writes it back under its own workdir's key (`engine/sessionstore.go`). Postgres rather than Garage: every host that runs agents already holds the database credential and needs nothing more, the write is ordered before the run's outcome so the next claim anywhere finds it, and it is backed up with every other row. A session id is stored once (every resume forks); an archive over `MaxSessionArchive` (64 MiB) stays on its host. A lost attempt (a crash) saved nothing, so its run starts over elsewhere, saying why.
+- **One subscription is shared**, so the fleet adds reach (a source only one host can see, a browser, a residential IP), not capacity.
 
 ## Upgrades
 

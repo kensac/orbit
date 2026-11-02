@@ -9,9 +9,7 @@ import (
 	"strings"
 )
 
-// DeploymentJSON is the deployment as control records it for workers
-// (after defaults), and its hash. It names secrets only by variable, so it
-// is safe in the database.
+// DeploymentJSON is the deployment as control records it for workers (after defaults), and its hash. It names secrets only by variable, so it is safe in the database.
 func (c *Config) DeploymentJSON() (sha string, doc []byte, err error) {
 	doc, err = json.Marshal(c.Deployment)
 	if err != nil {
@@ -21,17 +19,14 @@ func (c *Config) DeploymentJSON() (sha string, doc []byte, err error) {
 	return hex.EncodeToString(sum[:]), doc, nil
 }
 
-// StoredAgent is one agent as the database holds it: its current spec's
-// hash and canonical JSON.
+// StoredAgent is one agent as the database holds it: its current spec's hash and canonical JSON.
 type StoredAgent struct {
 	Name string
 	SHA  string
 	JSON []byte
 }
 
-// FromStored rebuilds a configuration from what control recorded, so a
-// worker runs exactly the specs control loaded without reading any file.
-// Each agent keeps its recorded SHA (runs and sessions compare it).
+// FromStored rebuilds a configuration from what control recorded, so a worker runs exactly the specs control loaded without reading any file. Each agent keeps its recorded SHA (runs and sessions compare it).
 func FromStored(deployment []byte, agents []StoredAgent) (*Config, error) {
 	cfg := &Config{Agents: map[string]*Agent{}}
 	if err := json.Unmarshal(deployment, &cfg.Deployment); err != nil {
@@ -51,15 +46,13 @@ func FromStored(deployment []byte, agents []StoredAgent) (*Config, error) {
 	return cfg, nil
 }
 
-// Capabilities is what a host advertises (ORBIT_CAPABILITIES). Any is the
-// wildcard "*": every agent, whatever it needs.
+// Capabilities is what a host advertises (ORBIT_CAPABILITIES). Any is the wildcard "*": every agent, whatever it needs.
 type Capabilities struct {
 	Any  bool
 	List []string
 }
 
-// ParseCapabilities reads a comma- or space-separated list; "*" alone is
-// Any. An empty string is no capabilities: only agents that need nothing.
+// ParseCapabilities reads a comma- or space-separated list; "*" alone is Any. An empty string is no capabilities: only agents that need nothing.
 func ParseCapabilities(s string) (Capabilities, error) {
 	fields := strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' })
 	if len(fields) == 1 && fields[0] == "*" {

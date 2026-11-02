@@ -25,9 +25,7 @@ import (
 	"github.com/kensac/orbit/internal/store"
 )
 
-// outboxEvery is how often control sends workers' notifications and
-// executes the actions their runs proposed: the latency a worker's run
-// adds over one executed on control, which wakes both at once.
+// outboxEvery is how often control sends workers' notifications and executes the actions their runs proposed: the latency a worker's run adds over one executed on control, which wakes both at once.
 const outboxEvery = 5 * time.Second
 
 // pool is a host's executors: N goroutines claiming what Claim allows.
@@ -39,15 +37,12 @@ type pool struct {
 	Name   string
 	Wake   <-chan struct{}
 	Claim  store.Claim
-	// Before runs after a claim and before the run (a worker refreshes its
-	// configuration from the database); After runs once the run ends.
+	// Before runs after a claim and before the run (a worker refreshes its configuration from the database); After runs once the run ends.
 	Before func(context.Context)
 	After  func()
 }
 
-// start runs the executors until claimCtx ends; runs get runCtx, cancelled
-// only at a drain's cap. The returned group is done when every executor
-// has stopped.
+// start runs the executors until claimCtx ends; runs get runCtx, cancelled only at a drain's cap. The returned group is done when every executor has stopped.
 func (p *pool) start(claimCtx, runCtx context.Context) *sync.WaitGroup {
 	var wg sync.WaitGroup
 	for i := 0; i < p.N; i++ {
@@ -84,8 +79,7 @@ func (p *pool) start(claimCtx, runCtx context.Context) *sync.WaitGroup {
 	return &wg
 }
 
-// awaitDrain waits for the executors to finish the runs they hold, up to
-// capAfter, or a second signal, and hands the rest back.
+// awaitDrain waits for the executors to finish the runs they hold, up to capAfter, or a second signal, and hands the rest back.
 func awaitDrain(executors *sync.WaitGroup, capAfter time.Duration, cancelRuns context.CancelFunc, log *slog.Logger) {
 	log.Info("draining: waiting for the runs held here", "cap", capAfter.String())
 	// A second signal is an operator who will not wait: hand back now.
@@ -134,9 +128,7 @@ func storedConfig(ctx context.Context, s *store.Store) (*spec.Config, error) {
 	return spec.FromStored(dep, agents)
 }
 
-// missingEnv lists the variables the agents this host may run reference
-// and its environment lacks: a source credential for a capability it
-// advertises, or the backend's.
+// missingEnv lists the variables the agents this host may run reference and its environment lacks: a source credential for a capability it advertises, or the backend's.
 func missingEnv(cfg *spec.Config, caps spec.Capabilities, lookup func(string) (string, bool)) []string {
 	want := map[string]bool{}
 	for _, a := range cfg.Agents {
@@ -175,13 +167,7 @@ func missingEnv(cfg *spec.Config, caps spec.Capabilities, lookup func(string) (s
 	return out
 }
 
-// worker is `orbit worker`: executors only. It claims the runs whose
-// agents this host's capabilities cover, runs them from the specs control
-// recorded in the database, and writes everything to the database: no
-// API, no scheduler, no delivery, no actions, no builds, no migrations.
-// It holds the database URL, its backend credential, and the source
-// credentials of its capabilities, nothing else (docs/agents/deployment.md,
-// Worker fleet).
+// worker is `orbit worker`: executors only. It claims the runs whose agents this host's capabilities cover, runs them from the specs control recorded in the database, and writes everything to the database: no API, no scheduler, no delivery, no actions, no builds, no migrations. It holds the database URL, its backend credential, and the source credentials of its capabilities, nothing else (docs/agents/deployment.md, Worker fleet).
 func worker(ctx context.Context, log *slog.Logger) error {
 	workers, err := strconv.Atoi(env("ORBIT_WORKERS", "2"))
 	if err != nil || workers < 1 {
@@ -196,8 +182,7 @@ func worker(ctx context.Context, log *slog.Logger) error {
 	log = log.With("worker", name)
 
 	return withStore(ctx, func(s *store.Store) error {
-		// Control migrates; a worker on a newer image waits for it rather
-		// than run against a schema older than its code.
+		// Control migrates; a worker on a newer image waits for it rather than run against a schema older than its code.
 		cfg, err := waitForControl(ctx, s, log)
 		if err != nil {
 			return err
@@ -289,8 +274,7 @@ func worker(ctx context.Context, log *slog.Logger) error {
 		executors := (&pool{
 			Store: s, Engine: eng, Log: log, N: workers, Name: name, Wake: nil,
 			Claim: store.Claim{Any: caps.Any, Capabilities: caps.List},
-			// The run executes the agent's spec as control recorded it at
-			// this moment, the one the claim's needs were checked against.
+			// The run executes the agent's spec as control recorded it at this moment, the one the claim's needs were checked against.
 			Before: func(ctx context.Context) { mu.Lock(); defer mu.Unlock(); refresh(ctx) },
 		}).start(claimCtx, runCtx)
 
@@ -306,8 +290,7 @@ func worker(ctx context.Context, log *slog.Logger) error {
 	})
 }
 
-// waitForControl returns the stored configuration once the schema is
-// current and control has recorded a deployment.
+// waitForControl returns the stored configuration once the schema is current and control has recorded a deployment.
 func waitForControl(ctx context.Context, s *store.Store, log *slog.Logger) (*spec.Config, error) {
 	for {
 		ok, err := s.SchemaCurrent(ctx)

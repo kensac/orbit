@@ -11,9 +11,7 @@ import (
 	"github.com/kensac/orbit/internal/store"
 )
 
-// remote is an orbit worker on another host: the same database, a data
-// volume of its own, its configuration read from the database as control
-// recorded it, and no channel credential or approval secret.
+// remote is an orbit worker on another host: the same database, a data volume of its own, its configuration read from the database as control recorded it, and no channel credential or approval secret.
 func remote(t *testing.T, control *engine.Engine, name string) *engine.Engine {
 	t.Helper()
 	s := control.Store

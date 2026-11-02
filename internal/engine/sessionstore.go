@@ -18,25 +18,15 @@ import (
 	"github.com/kensac/orbit/internal/store"
 )
 
-// A session's transcript is stored in Postgres (session_transcripts), not
-// in Garage: every host that runs agents already holds the database
-// credential and nothing else is needed, a transcript is saved before its
-// run is recorded as succeeded so the next claim anywhere finds it, and it
-// is backed up with every other row by the nightly dump. A transcript is
-// a few hundred KB to a few MB of JSONL and compresses about tenfold.
+// A session's transcript is stored in Postgres (session_transcripts), not in Garage: every host that runs agents already holds the database credential and nothing else is needed, a transcript is saved before its run is recorded as succeeded so the next claim anywhere finds it, and it is backed up with every other row by the nightly dump. A transcript is a few hundred KB to a few MB of JSONL and compresses about tenfold.
 
-// MaxSessionArchive bounds one stored transcript, compressed. Past it the
-// session stays on its own host only, and a run claimed elsewhere starts
-// fresh (saying why); a session that large is near maxSessionDepth anyway.
+// MaxSessionArchive bounds one stored transcript, compressed. Past it the session stays on its own host only, and a run claimed elsewhere starts fresh (saying why); a session that large is near maxSessionDepth anyway.
 const MaxSessionArchive = 64 << 20
 
-// maxSessionBytes bounds what a restore writes, uncompressed: the archive
-// is orbit's own, but a bound keeps a corrupt row from filling the volume.
+// maxSessionBytes bounds what a restore writes, uncompressed: the archive is orbit's own, but a bound keeps a corrupt row from filling the volume.
 const maxSessionBytes = 1 << 30
 
-// sessionFiles is what Claude Code keeps of one session in its projects
-// directory: <id>.jsonl, and <id>/ (subagent transcripts, large tool
-// results) when there is one. Paths are relative to the directory.
+// sessionFiles is what Claude Code keeps of one session in its projects directory: <id>.jsonl, and <id>/ (subagent transcripts, large tool results) when there is one. Paths are relative to the directory.
 func sessionFiles(dir, id string) ([]string, error) {
 	files := []string{id + ".jsonl"}
 	if _, err := os.Stat(filepath.Join(dir, files[0])); err != nil {
@@ -59,8 +49,7 @@ func sessionFiles(dir, id string) ([]string, error) {
 	return files, err
 }
 
-// archiveSession packs a session's files, or returns ok false when the
-// transcript is not on this host.
+// archiveSession packs a session's files, or returns ok false when the transcript is not on this host.
 func archiveSession(home, workdir, id string) (archive []byte, size int64, ok bool, err error) {
 	p, found := runner.SessionFile(home, workdir, id)
 	if !found {
@@ -99,8 +88,7 @@ func archiveSession(home, workdir, id string) (archive []byte, size int64, ok bo
 	return buf.Bytes(), size, true, nil
 }
 
-// unpackSession writes an archive back under dir. Only regular files named
-// for the session are accepted.
+// unpackSession writes an archive back under dir. Only regular files named for the session are accepted.
 func unpackSession(archive []byte, dir, id string) error {
 	zr, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
@@ -139,9 +127,7 @@ func unpackSession(archive []byte, dir, id string) error {
 	}
 }
 
-// saveSession stores a session's transcript centrally, when the engine
-// keeps a session store. A failure is logged, not fatal: the session is
-// still on this host, and a run claimed elsewhere starts fresh.
+// saveSession stores a session's transcript centrally, when the engine keeps a session store. A failure is logged, not fatal: the session is still on this host, and a run claimed elsewhere starts fresh.
 func (e *Engine) saveSession(ctx context.Context, c *store.ClaimedRun, home, workdir, id string) {
 	if !e.SessionStore || id == "" {
 		return
@@ -164,9 +150,7 @@ func (e *Engine) saveSession(ctx context.Context, c *store.ClaimedRun, home, wor
 	}
 }
 
-// ensureSession makes a session's transcript present on this host:
-// already here, or written back from the session store. It reports
-// whether the transcript is now on disk.
+// ensureSession makes a session's transcript present on this host: already here, or written back from the session store. It reports whether the transcript is now on disk.
 func (e *Engine) ensureSession(ctx context.Context, home, workdir, id string) (bool, error) {
 	p, ok := runner.SessionFile(home, workdir, id)
 	if !ok {

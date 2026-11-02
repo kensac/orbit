@@ -27,8 +27,7 @@ func TestAWorkerNamesTheCredentialsItLacks(t *testing.T) {
 		}
 	}
 	bare, _ := spec.ParseCapabilities("")
-	// finance needs sure: a bare worker never claims it, so its key is
-	// not this worker's concern.
+	// finance needs sure: a bare worker never claims it, so its key is not this worker's concern.
 	if got := missingEnv(cfg, bare, lookup("CLAUDE_CODE_OAUTH_TOKEN")); len(got) != 0 {
 		t.Fatalf("bare worker misses %v", got)
 	}

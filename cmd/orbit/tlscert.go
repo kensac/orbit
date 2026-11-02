@@ -19,20 +19,14 @@ import (
 	"time"
 )
 
-// tlsCertValidity is long because nothing verifies the certificate:
-// workers connect with sslmode=require, which encrypts without checking
-// it, as jobtracker's do. The tailnet authenticates the peer.
+// tlsCertValidity is long because nothing verifies the certificate: workers connect with sslmode=require, which encrypts without checking it, as jobtracker's do. The tailnet authenticates the peer.
 const tlsCertValidity = 10 * 365 * 24 * time.Hour
 
-// tlsCertCmd is `orbit tls-cert --dir <d> [--owner uid:gid] [--name cn]`:
-// a self-signed server certificate for orbit-db's TLS, written once
-// (server.crt, server.key) and kept on later runs. It exists because the
-// postgres alpine image has no openssl; a one-shot service runs it before
-// the database starts (docs/agents/deployment.md, Worker fleet).
+// tlsCertCmd is `orbit tls-cert --dir <d> [--owner uid:gid] [--name cn]`: a self-signed server certificate for orbit-db's TLS, written once (server.crt, server.key) and kept on later runs. It exists because the postgres alpine image has no openssl; a one-shot service runs it before the database starts (docs/agents/deployment.md, Worker fleet).
 func tlsCertCmd(args []string) error {
 	fset := flag.NewFlagSet("tls-cert", flag.ContinueOnError)
 	dir := fset.String("dir", "", "where to write server.crt and server.key")
-	owner := fset.String("owner", "", "uid:gid to own both files (postgres refuses a key it does not own)")
+	owner := fset.String("owner", "", "uid:gid to own the directory and both files (postgres refuses a key it does not own)")
 	name := fset.String("name", "orbit-db", "the certificate's common name")
 	if err := fset.Parse(args); err != nil {
 		return err
@@ -43,7 +37,7 @@ func tlsCertCmd(args []string) error {
 	crt, key := filepath.Join(*dir, "server.crt"), filepath.Join(*dir, "server.key")
 	if _, err := os.Stat(key); err == nil {
 		fmt.Println("tls-cert: kept the existing certificate")
-		return chownBoth(*owner, crt, key)
+		return chownBoth(*owner, *dir, crt, key)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
@@ -69,7 +63,7 @@ func tlsCertCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(*dir, 0o755); err != nil {
+	if err := os.MkdirAll(*dir, 0o750); err != nil {
 		return err
 	}
 	if err := os.WriteFile(crt, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil { //nolint:gosec // a public certificate
@@ -79,7 +73,7 @@ func tlsCertCmd(args []string) error {
 		return err
 	}
 	fmt.Println("tls-cert: wrote", crt, "and", key)
-	return chownBoth(*owner, crt, key)
+	return chownBoth(*owner, *dir, crt, key)
 }
 
 func chownBoth(owner string, paths ...string) error {

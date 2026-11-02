@@ -19,20 +19,13 @@ type Claim struct {
 	Worker string
 	// Any claims a run whatever its agent needs (a host advertising "*").
 	Any bool
-	// Capabilities are the host's: a run is claimed only when its agent's
-	// current spec needs a subset of them.
+	// Capabilities are the host's: a run is claimed only when its agent's current spec needs a subset of them.
 	Capabilities []string
-	// Builds lets the executor claim build runs, which need the GitHub App
-	// and sandboxd: control instances only.
+	// Builds lets the executor claim build runs, which need the GitHub App and sandboxd: control instances only.
 	Builds bool
 }
 
-// ClaimRunFor is ClaimRun limited to what one executor may run: the
-// oldest queued run whose agent has nothing running, whose agent's current
-// spec needs only capabilities in c, and, unless c.Builds, that is not a
-// build. Needs are read from the spec JSON (`needs`), so an agent defined
-// by any writer of agent_specs is covered, and an agent with no needs is
-// claimed anywhere.
+// ClaimRunFor is ClaimRun limited to what one executor may run: the oldest queued run whose agent has nothing running, whose agent's current spec needs only capabilities in c, and, unless c.Builds, that is not a build. Needs are read from the spec JSON (`needs`), so an agent defined by any writer of agent_specs is covered, and an agent with no needs is claimed anywhere.
 func (s *Store) ClaimRunFor(ctx context.Context, c Claim) (*ClaimedRun, error) {
 	caps := c.Capabilities
 	if caps == nil {
@@ -51,8 +44,7 @@ func (s *Store) ClaimRunFor(ctx context.Context, c Claim) (*ClaimedRun, error) {
 
 // ---------------------------------------------------------------- config
 
-// SyncDeployment records the deployment control loaded and makes it the
-// one in force. Every version is kept.
+// SyncDeployment records the deployment control loaded and makes it the one in force. Every version is kept.
 func (s *Store) SyncDeployment(ctx context.Context, sha string, doc []byte) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO deployment_specs (sha, spec) VALUES ($1, $2)
@@ -73,9 +65,7 @@ type StoredAgent struct {
 	JSON []byte
 }
 
-// StoredConfig returns the deployment in force and every present agent's
-// current spec, what a worker builds its configuration from.
-// ErrNotFound means control has not recorded a deployment yet.
+// StoredConfig returns the deployment in force and every present agent's current spec, what a worker builds its configuration from. ErrNotFound means control has not recorded a deployment yet.
 func (s *Store) StoredConfig(ctx context.Context) (deployment []byte, agents []StoredAgent, err error) {
 	err = pgx.BeginTxFunc(ctx, s.Pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `SELECT d.spec FROM deployment_current c JOIN deployment_specs d ON d.sha = c.sha`).
@@ -96,9 +86,7 @@ func (s *Store) StoredConfig(ctx context.Context) (deployment []byte, agents []S
 	return deployment, agents, err
 }
 
-// SchemaCurrent reports whether every migration this binary embeds is
-// applied. A worker never migrates (control does, at start); it waits
-// rather than run against a schema older than its code.
+// SchemaCurrent reports whether every migration this binary embeds is applied. A worker never migrates (control does, at start); it waits rather than run against a schema older than its code.
 func (s *Store) SchemaCurrent(ctx context.Context) (bool, error) {
 	db := stdlib.OpenDBFromPool(s.Pool)
 	defer db.Close()
@@ -129,10 +117,7 @@ func (s *Store) Enqueue(ctx context.Context, worker string, it OutboxItem) error
 	return err
 }
 
-// OutboxReclaimAfter is how long a claimed, unsent notification waits
-// before another control instance may take it: the claimer died mid-send.
-// Above a send's one-minute timeout per channel (engine.deliver) for a
-// few channels.
+// OutboxReclaimAfter is how long a claimed, unsent notification waits before another control instance may take it: the claimer died mid-send. Above a send's one-minute timeout per channel (engine.deliver) for a few channels.
 const OutboxReclaimAfter = 5 * time.Minute
 
 // ClaimOutbox takes the oldest unsent notification, or returns nil.
@@ -154,8 +139,7 @@ func (s *Store) ClaimOutbox(ctx context.Context) (*OutboxItem, error) {
 	return &it, nil
 }
 
-// OutboxSent marks a notification handled; its deliveries rows say how
-// each channel fared.
+// OutboxSent marks a notification handled; its deliveries rows say how each channel fared.
 func (s *Store) OutboxSent(ctx context.Context, id int64) error {
 	_, err := s.Pool.Exec(ctx, `UPDATE outbox SET sent_at = now() WHERE id = $1 AND sent_at IS NULL`, id)
 	return err
@@ -170,15 +154,12 @@ type SessionTranscript struct {
 	RunID     string
 	Attempt   int
 	Worker    string
-	// Archive is the gzipped tar (engine/sessionstore.go); Bytes is its
-	// uncompressed size.
+	// Archive is the gzipped tar (engine/sessionstore.go); Bytes is its uncompressed size.
 	Archive []byte
 	Bytes   int64
 }
 
-// PutSessionTranscript stores a session's transcript. A session id is
-// stored once: a resume forks to a new id, so a later write of the same
-// id carries nothing new.
+// PutSessionTranscript stores a session's transcript. A session id is stored once: a resume forks to a new id, so a later write of the same id carries nothing new.
 func (s *Store) PutSessionTranscript(ctx context.Context, t SessionTranscript) error {
 	_, err := s.Pool.Exec(ctx, `INSERT INTO session_transcripts (session_id, agent, run_id, attempt, worker, archive, bytes)
 		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7) ON CONFLICT (session_id) DO NOTHING`,

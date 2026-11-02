@@ -93,20 +93,7 @@ types are not even offered.
 
 ## Workers
 
-A worker (`orbit worker`) holds the database URL, its backend credential
-and the source credentials of the capabilities it advertises; no API
-token, approval secret, channel credential, GitHub key or sandbox token
-(docs/agents/deployment.md, Environment per role). So a compromised worker
-host reaches what its own agents could read, plus the database: every
-run's inputs and transcripts, which is why workers run on fleet hosts
-only and reach orbit-db over the tailnet with TLS, never publicly. It
-cannot send a notification (control does, from `outbox`, with the links
-it signs) or execute an action (control's action loop executes only
-actions recorded under each agent's rules). Stored session transcripts
-(`session_transcripts`) are the same model-written state as the files
-above, now readable from the database too; a restore writes only regular
-files named for the session, under the claiming host's own projects
-directory.
+A worker (`orbit worker`) holds the database URL, its backend credential and the source credentials of the capabilities it advertises; no API token, approval secret, channel credential, GitHub key or sandbox token (docs/agents/deployment.md, Environment per role). So a compromised worker host reaches what its own agents could read, plus the database: every run's inputs and transcripts, which is why workers run on fleet hosts only and reach orbit-db over the tailnet with TLS, never publicly. It cannot send a notification (control does, from `outbox`, with the links it signs) or execute an action (control's action loop executes only actions recorded under each agent's rules). Stored session transcripts (`session_transcripts`) are the same model-written state as the files above, now readable from the database too; a restore writes only regular files named for the session, under the claiming host's own projects directory.
 
 ## GitHub
 

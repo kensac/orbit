@@ -32,8 +32,7 @@ func TestClaimsFollowCapabilities(t *testing.T) {
 		}
 		return got.ID
 	}
-	// A worker with no capabilities passes over the older runs it cannot
-	// do and takes the one that needs nothing.
+	// A worker with no capabilities passes over the older runs it cannot do and takes the one that needs nothing.
 	if got := claim(store.Claim{Worker: "bare"}); got != anywhere {
 		t.Fatalf("bare worker claimed %q, want the needs-free run", got)
 	}
@@ -51,8 +50,7 @@ func TestClaimsFollowCapabilities(t *testing.T) {
 		t.Fatalf("hetzner claimed %q, want finance", got)
 	}
 
-	// The current spec decides: an agent that gains a need no longer runs
-	// on a host without it.
+	// The current spec decides: an agent that gains a need no longer runs on a host without it.
 	if err := s.FinishRun(ctx, anywhere, store.RunResult{Attempt: 1, Status: "succeeded"}); err != nil {
 		t.Fatal(err)
 	}

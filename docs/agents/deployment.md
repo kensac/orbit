@@ -1,11 +1,6 @@
 # Deployment
 
-orbit's control instance runs on hetzner, from
-`hetzner-vps-config/compose.orbit.yml`: the `orbit` service (`orbit serve`)
-and its own `orbit-db` (Postgres). Its configuration is
-`hetzner-vps-config/orbit/`, mounted read-only at `/config`, so changing an
-agent is a commit there, not here. Workers (`orbit worker`) on other hosts
-read that configuration from the database (Worker fleet, below).
+orbit's control instance runs on hetzner, from `hetzner-vps-config/compose.orbit.yml`: the `orbit` service (`orbit serve`) and its own `orbit-db` (Postgres). Its configuration is `hetzner-vps-config/orbit/`, mounted read-only at `/config`, so changing an agent is a commit there, not here. Workers (`orbit worker`) on other hosts read that configuration from the database (Worker fleet, below).
 
 ## Image
 
@@ -194,9 +189,7 @@ build in a real sandbox is unverified.
 
 ## Worker fleet
 
-Design: docs/ARCHITECTURE.md, Worker fleet. One control instance (hetzner)
-and workers on oci and transmission, all on the same image digest (a
-worker on a newer image than control waits for control to migrate).
+Design: docs/ARCHITECTURE.md, Worker fleet. One control instance (hetzner) and workers on oci and transmission, all on the same image digest (a worker on a newer image than control waits for control to migrate).
 
 ### Environment per role
 
@@ -214,9 +207,7 @@ worker on a newer image than control waits for control to migrate).
 | `ORBIT_GITHUB_APP_PRIVATE_KEY`, `ORBIT_SANDBOX_TOKEN` | yes | no (builds and actions are control's) |
 | `ORBIT_LISTEN` | public listener | `/healthz`, `/readyz`, `/metrics` only; publish it on the tailnet address |
 
-A worker logs `agents this worker may claim reference unset variables`
-with the names when a covered agent's source needs a variable it lacks;
-such a run fails on that worker with the source's error.
+A worker logs `agents this worker may claim reference unset variables` with the names when a covered agent's source needs a variable it lacks; such a run fails on that worker with the source's error.
 
 ### Capabilities, per host
 
@@ -227,21 +218,11 @@ such a run fails on that worker with the source's error.
 | `sandbox` | holds `ORBIT_SANDBOX_TOKEN` and reaches sandboxd | hetzner |
 | `browser` | has a browser for an agent to drive | none yet (the image has none) |
 
-So today: hetzner `ORBIT_CAPABILITIES=docker-network:hetzner,sure,sandbox`;
-oci and transmission none (they run agents that need nothing). The finance
-agent needs `[docker-network:hetzner, sure]` and stays on hetzner. A new
-capability is a name agreed here, a host advertising it, and the
-credentials it implies on exactly those hosts.
+So today: hetzner `ORBIT_CAPABILITIES=docker-network:hetzner,sure,sandbox`; oci and transmission none (they run agents that need nothing). The finance agent needs `[docker-network:hetzner, sure]` and stays on hetzner. A new capability is a name agreed here, a host advertising it, and the credentials it implies on exactly those hosts.
 
 ### orbit-db on the tailnet, with TLS
 
-The postgres alpine image has no openssl, so a one-shot service from
-orbit's image writes a self-signed certificate once into a volume
-(`orbit tls-cert`, kept on later runs), and `orbit-db` serves TLS with it
-and publishes on hetzner's tailnet address only. 5432 is jobtracker-db's
-and 5433 housing-watch-db's, so orbit-db takes 5434. Workers connect with
-`sslmode=require` (encrypted, certificate not verified; the tailnet
-authenticates the host), as jobtracker's do. In `compose.orbit.yml`:
+The postgres alpine image has no openssl, so a one-shot service from orbit's image writes a self-signed certificate once into a volume (`orbit tls-cert`, kept on later runs), and `orbit-db` serves TLS with it and publishes on hetzner's tailnet address only. 5432 is jobtracker-db's and 5433 housing-watch-db's, so orbit-db takes 5434. Workers connect with `sslmode=require` (encrypted, certificate not verified; the tailnet authenticates the host), as jobtracker's do. In `compose.orbit.yml`:
 
 ```yaml
   orbit-db-tls:
@@ -273,15 +254,11 @@ volumes:
   orbit-db-tls:
 ```
 
-The control `orbit` service keeps `sslmode=disable` over the docker
-network and gains `ORBIT_CAPABILITIES=docker-network:hetzner,sure,sandbox`.
-Check: from oci, `psql "postgres://orbit:...@100.79.4.41:5434/orbit?sslmode=require" -c 'select ssl from pg_stat_ssl where pid = pg_backend_pid()'` is `t`; `ss -lntp | grep 5434` on hetzner shows only `100.79.4.41`.
+The control `orbit` service keeps `sslmode=disable` over the docker network and gains `ORBIT_CAPABILITIES=docker-network:hetzner,sure,sandbox`. Check: from oci, `psql "postgres://orbit:...@100.79.4.41:5434/orbit?sslmode=require" -c 'select ssl from pg_stat_ssl where pid = pg_backend_pid()'` is `t`; `ss -lntp | grep 5434` on hetzner shows only `100.79.4.41`.
 
 ### Worker compose (oci, transmission)
 
-The same service on both, in `compose.orbit-worker.yml` (oci: included from
-`docker-compose.yml`; transmission: under `transmission/`), whitelisted in
-`.gitignore`:
+The same service on both, in `compose.orbit-worker.yml` (oci: included from `docker-compose.yml`; transmission: under `transmission/`), whitelisted in `.gitignore`:
 
 ```yaml
 services:
@@ -311,17 +288,11 @@ volumes:
   orbit-worker-data:
 ```
 
-- transmission's worker does not join gluetun (`network_mode: service:gluetun`):
-  model traffic and the database go out directly.
-- The image's HEALTHCHECK runs `orbit healthcheck`, which reads
-  `ORBIT_LISTEN`, so it works unchanged.
-- Prometheus: add `100.123.116.85:9095` and `100.109.24.102:9095` to
-  orbit's scrape job (metrics are per instance).
-- `/data` holds the worker's sessions and scratch; a lost volume costs
-  nothing (sessions come back from the database).
-- Draining a worker: `docker stop` (SIGTERM drains, within
-  `stop_grace_period`); `docker kill -s TERM` twice hands runs back at once.
-  There is no `orbit drain` on a worker (no internal listener).
+- transmission's worker does not join gluetun (`network_mode: service:gluetun`): model traffic and the database go out directly.
+- The image's HEALTHCHECK runs `orbit healthcheck`, which reads `ORBIT_LISTEN`, so it works unchanged.
+- Prometheus: add `100.123.116.85:9095` and `100.109.24.102:9095` to orbit's scrape job (metrics are per instance).
+- `/data` holds the worker's sessions and scratch; a lost volume costs nothing (sessions come back from the database).
+- Draining a worker: `docker stop` (SIGTERM drains, within `stop_grace_period`); `docker kill -s TERM` twice hands runs back at once. There is no `orbit drain` on a worker (no internal listener).
 
 ### Infisical
 
@@ -331,28 +302,12 @@ volumes:
 | `OCI_ORBIT_CLAUDE_CODE_OAUTH_TOKEN`, `TRANSMISSION_ORBIT_CLAUDE_CODE_OAUTH_TOKEN` | copies of `HETZNER_ORBIT_CLAUDE_CODE_OAUTH_TOKEN` (one subscription; rotate together) |
 | `TRANSMISSION_GHCR_TOKEN` | a copy of `HETZNER_GHCR_TOKEN`, plus `ghcr_username: kensac` in transmission's host_vars (the image is private; oci already logs in) |
 
-No worker gets `ORBIT_API_TOKEN`, a channel credential, the GitHub App key,
-the sandbox token, or `ORBIT_SURE_API_KEY`.
+No worker gets `ORBIT_API_TOKEN`, a channel credential, the GitHub App key, the sandbox token, or `ORBIT_SURE_API_KEY`.
 
 ### Rolling out
 
-**Before the first worker starts**, every agent that can run only on
-hetzner says so: in `hetzner-vps-config/orbit/agents/`, finance gets
-`needs: [docker-network:hetzner, sure]` (its sources are
-`http://plaid:3000` on the proxy network and `ORBIT_SURE_API_KEY`). An
-agent without `needs` is claimed by any worker. Then hetzner's `orbit`
-gains its `ORBIT_CAPABILITIES`, then orbit-db's TLS and port, then the
-workers.
+**Before the first worker starts**, every agent that can run only on hetzner says so: in `hetzner-vps-config/orbit/agents/`, finance gets `needs: [docker-network:hetzner, sure]` (its sources are `http://plaid:3000` on the proxy network and `ORBIT_SURE_API_KEY`). An agent without `needs` is claimed by any worker. Then hetzner's `orbit` gains its `ORBIT_CAPABILITIES`, then orbit-db's TLS and port, then the workers.
 
-All hosts pin one digest; Renovate's PRs for the orbit image land in
-hetzner-vps-config, oci-vps-config and transmission-vps-config together
-(lockstep, as jobtracker's). Order: control first (it migrates; workers on
-the new image wait for that with `worker waiting`), then workers. A worker
-on the old image keeps running against the new schema (migrations are
-additive).
+All hosts pin one digest; Renovate's PRs for the orbit image land in hetzner-vps-config, oci-vps-config and transmission-vps-config together (lockstep, as jobtracker's). Order: control first (it migrates; workers on the new image wait for that with `worker waiting`), then workers. A worker on the old image keeps running against the new schema (migrations are additive).
 
-**Claiming it is deployed:** `docker logs orbit-worker` shows `orbit
-worker` with its capabilities, `docker exec orbit-worker orbit version`
-is the commit, and a run of a needs-free agent has `worker` `oci/0` (its
-`run_attempts` row) with its report delivered by control (a `deliveries`
-row, its `outbox` row `sent_at` set).
+**Claiming it is deployed:** `docker logs orbit-worker` shows `orbit worker` with its capabilities, `docker exec orbit-worker orbit version` is the commit, and a run of a needs-free agent has `worker` `oci/0` (its `run_attempts` row) with its report delivered by control (a `deliveries` row, its `outbox` row `sent_at` set).
