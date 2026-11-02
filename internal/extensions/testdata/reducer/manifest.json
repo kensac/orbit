@@ -1,0 +1,16 @@
+{
+  "protocol": "orbit.extension.v1",
+  "id": "daily-total",
+  "version": "1.0.0",
+  "runtime": "native",
+  "entrypoint": "reducer",
+  "operations": [{
+    "name": "sum",
+    "kind": "source",
+    "description": "Sum the supplied transaction amounts exactly.",
+    "inputs": ["transactions"],
+    "input_schema": {"type":"object","properties":{},"additionalProperties":false},
+    "output_schema": {"type":"object","properties":{"total":{"type":"string","maxLength":128}},"required":["total"],"additionalProperties":false},
+    "limits": {"timeout_ms":1000,"memory_bytes":16777216,"input_bytes":1048576,"output_bytes":1048576}
+  }]
+}
