@@ -381,10 +381,12 @@ func (s *Store) HandBack(ctx context.Context, runID string, attempt int, cost, s
 		if err := requeue(ctx, tx, runID, attempt); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `UPDATE run_attempts SET outcome = 'handed_back', ended_at = now(),
+		if _, err := tx.Exec(ctx, `UPDATE run_attempts SET outcome = 'handed_back', ended_at = now(),
 			cost_usd = $3, session_cost_usd = $4
-			WHERE run_id = $1 AND attempt = $2`, runID, attempt, cost, sessionCost)
-		return err
+			WHERE run_id = $1 AND attempt = $2`, runID, attempt, cost, sessionCost); err != nil {
+			return err
+		}
+		return syncInTx(ctx, tx, runID, attempt)
 	})
 }
 
@@ -402,10 +404,12 @@ func requeue(ctx context.Context, tx pgx.Tx, runID string, attempt int) error {
 
 // endAttempt records how an attempt ended. An attempt claimed before
 // run_attempts existed has no row, which is not an error.
-func endAttempt(ctx context.Context, db execer, runID string, attempt int, outcome string) error {
-	_, err := db.Exec(ctx, `UPDATE run_attempts SET outcome = $3, ended_at = now()
-		WHERE run_id = $1 AND attempt = $2 AND outcome IS NULL`, runID, attempt, outcome)
-	return err
+func endAttempt(ctx context.Context, tx pgx.Tx, runID string, attempt int, outcome string) error {
+	if _, err := tx.Exec(ctx, `UPDATE run_attempts SET outcome = $3, ended_at = now()
+		WHERE run_id = $1 AND attempt = $2 AND outcome IS NULL`, runID, attempt, outcome); err != nil {
+		return err
+	}
+	return syncInTx(ctx, tx, runID, attempt)
 }
 
 // releaseMessages hands a run's consumed messages back to the inbox, so the
@@ -490,8 +494,8 @@ type execer interface {
 // failed stays failed, and an attempt that lost its claim to a newer one
 // writes nothing. The run's cost is every attempt's: this one's (r.CostUSD)
 // plus what earlier, interrupted attempts were recorded to have spent.
-func finishRun(ctx context.Context, db execer, runID string, r RunResult) error {
-	tag, err := db.Exec(ctx, `
+func finishRun(ctx context.Context, tx pgx.Tx, runID string, r RunResult) error {
+	tag, err := tx.Exec(ctx, `
 		UPDATE runs SET status = $2, finished_at = now(), error = NULLIF($3, ''),
 		       summary = NULLIF($4, ''), report = NULLIF($5, ''), output = $6, usage = $7,
 		       cost_usd = CASE WHEN $8::numeric IS NULL THEN NULL ELSE $8::numeric + COALESCE(
@@ -506,11 +510,16 @@ func finishRun(ctx context.Context, db execer, runID string, r RunResult) error 
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("finish run %s attempt %d: %w (not its running claim)", runID, r.Attempt, ErrConflict)
 	}
-	_, err = db.Exec(ctx, `UPDATE run_attempts SET outcome = $3, ended_at = now(), cost_usd = $4, session_cost_usd = $5,
+	if _, err = tx.Exec(ctx, `UPDATE run_attempts SET outcome = $3, ended_at = now(), cost_usd = $4, session_cost_usd = $5,
 		session_id = COALESCE(NULLIF($6, ''), session_id)
 		WHERE run_id = $1 AND attempt = $2 AND outcome IS NULL`,
-		runID, r.Attempt, r.Status, r.CostUSD, r.SessionCostUSD, r.SessionID)
-	return err
+		runID, r.Attempt, r.Status, r.CostUSD, r.SessionCostUSD, r.SessionID); err != nil {
+		return err
+	}
+	if r.Attempt < 1 {
+		return nil
+	}
+	return syncInTx(ctx, tx, runID, r.Attempt)
 }
 
 // Run is a run as the API reports it.
@@ -629,15 +638,30 @@ type Event struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-// AppendEvent stores the next transcript entry. Payloads that are not valid
-// JSON are stored as a JSON string, so a malformed line from a runner is
-// kept rather than dropped.
+// AppendEvent stores the next transcript entry and projects it into the
+// run's journal. Payloads that are not valid JSON are stored as a JSON
+// string, so a malformed line from a runner is kept rather than dropped.
+// An error wrapping ErrJournal means the event was stored and only its
+// journal rows wait for a sync.
 func (s *Store) AppendEvent(ctx context.Context, runID string, attempt, seq int, kind string, payload []byte) error {
 	if !json.Valid(payload) {
 		payload, _ = json.Marshal(string(payload))
 	}
-	_, err := s.Pool.Exec(ctx, `INSERT INTO run_events (run_id, attempt, seq, kind, payload) VALUES ($1, $2, $3, $4, $5)`,
-		runID, attempt, seq, kind, payload)
+	var projectErr error
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO run_events (run_id, attempt, seq, kind, payload) VALUES ($1, $2, $3, $4, $5)`,
+			runID, attempt, seq, kind, payload); err != nil {
+			return err
+		}
+		// The journal row commits with its event. A projection that fails
+		// keeps the event (the transcript is the record) and is retried
+		// by the next sync.
+		projectErr = pgx.BeginFunc(ctx, tx, func(sp pgx.Tx) error { return syncInTx(ctx, sp, runID, attempt) })
+		return nil
+	})
+	if err == nil && projectErr != nil {
+		err = fmt.Errorf("%w: run %s attempt %d event %d: %w", ErrJournal, runID, attempt, seq, projectErr)
+	}
 	return err
 }
 
