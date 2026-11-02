@@ -28,6 +28,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `timeout` | duration | `15m` | An agent's run timeout when it names none. |
 | `channels` | list of channel names | none | An agent's `notify.channels` when it names none. Each must exist. |
 | `memory_max_bytes` | int | `16384` | The largest memory document a run or the API may write. |
+| `decision_stall` | duration | `24h` | How long a delegated task's decision may wait for a person before, with nothing else in its batch able to move, its parent is woken (docs/ARCHITECTURE.md, Delegation). |
 
 ### `channels.<name>`
 

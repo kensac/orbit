@@ -134,6 +134,9 @@ type Defaults struct {
 	Channels []string `yaml:"channels" json:"channels"`
 	// MemoryMaxBytes bounds the memory document an agent may write back.
 	MemoryMaxBytes int `yaml:"memory_max_bytes" json:"memory_max_bytes"`
+	// DecisionStall is how long a delegated task's decision may wait for a
+	// person before its batch counts as stalled and its parent is woken.
+	DecisionStall Duration `yaml:"decision_stall" json:"decision_stall"`
 }
 
 // Channel is a notification destination. Kind selects the adapter; the
@@ -766,6 +769,10 @@ func (c *Config) applyDefaults() {
 		d.Defaults.Timeout = Duration(15 * time.Minute)
 	}
 	c.applyMailDefaults()
+	if d.Defaults.DecisionStall == 0 {
+		// A person answers within a day, or the parent should hear about it.
+		d.Defaults.DecisionStall = Duration(24 * time.Hour)
+	}
 	c.applyUsageDefaults()
 	if d.Defaults.MemoryMaxBytes == 0 {
 		// About 4k tokens: memory rides in every prompt, so it must stay a

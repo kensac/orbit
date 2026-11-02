@@ -818,3 +818,66 @@ func TestARunLostWithItsWorkerDoesNotCountTowardTheBreaker(t *testing.T) {
 		t.Fatalf("a task whose worker was lost = %+v", ts[0])
 	}
 }
+
+func TestABatchNothingCanMoveWakesItsParentOnce(t *testing.T) {
+	fr := &scriptRunner{scripts: map[string]func(runner.Request) string{
+		"planner": func(req runner.Request) string {
+			if strings.Contains(req.Prompt, "Trigger: delegation") {
+				return output("Integrated", "ok", nil)
+			}
+			return output("Delegated", "on it", nil, delegateAction(`[
+				{"key": "spend", "agent": "researcher", "brief": "Buy the data.", "decision": "Spend $20 on the dataset?"},
+				{"key": "facts", "agent": "researcher", "brief": "Find the facts."},
+				{"key": "write", "agent": "writer", "brief": "Write.", "after": ["facts"]}]`))
+		},
+		"researcher": func(runner.Request) string { return outcome("No facts", "R", "failed", "the source is gone") },
+		"writer":     func(runner.Request) string { return output("Written", "W", nil) },
+	}}
+	d := newDelegation(t, fr)
+	first := d.message(t, "go")
+	ran := d.step(t)
+	// facts failed: the parent hears at once. write waits on it, but spend's
+	// decision is fresh, so the batch can still move: not stalled.
+	if len(ran["planner"]) != 2 {
+		t.Fatalf("parent runs = %+v", ran["planner"])
+	}
+	ts := d.tasks(t, first)
+	if ts[2].Status != store.TaskWaiting || ts[0].Status != store.TaskBlocked || ts[2].StalledAt != nil {
+		t.Fatalf("before the decision is stale: %+v", ts)
+	}
+	if strings.Contains(fr.last("planner").Prompt, "stalled:") {
+		t.Fatal("a batch that can move was called stalled")
+	}
+	// The decision waits past decision_stall (24h by default): nothing in
+	// the batch can move without the parent or a person.
+	if _, err := d.s.Pool.Exec(ctx, `UPDATE actions SET created_at = now() - interval '25 hours' WHERE id = $1`, ts[0].Decision.ActionID); err != nil {
+		t.Fatal(err)
+	}
+	ran = d.step(t)
+	if len(ran["planner"]) != 1 || ran["planner"][0].Trigger != store.TriggerDelegation {
+		t.Fatalf("stall wakes = %+v", ran)
+	}
+	p := fr.last("planner").Prompt
+	for _, want := range []string{"none of the rest can move without you", "## spend: blocked", "## write: waiting", "stalled: nothing in its batch can move"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("parent prompt lacks %q:\n%s", want, p)
+		}
+	}
+	// Once per stall.
+	if ran := d.step(t); len(ran) != 0 {
+		t.Fatalf("woken again: %+v", ran)
+	}
+	// A person approves: the batch moves, and is no longer stalled.
+	ts = d.tasks(t, first)
+	if err := d.s.DecideAction(ctx, ts[0].Decision.ActionID, true, "kanishk"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.e.ReconcileTasks(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range d.tasks(t, first) {
+		if task.StalledAt != nil {
+			t.Fatalf("a moving task is still stalled: %+v", task)
+		}
+	}
+}

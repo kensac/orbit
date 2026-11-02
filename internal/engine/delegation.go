@@ -23,7 +23,7 @@ import (
 // Control calls it after each run, after delegation actions, and on every
 // outbox tick, so a decision a person resolves is picked up within one.
 func (e *Engine) ReconcileTasks(ctx context.Context) error {
-	res, err := e.Store.ReconcileTasks(ctx)
+	res, err := e.Store.ReconcileTasks(ctx, time.Duration(e.Current().Config.Deployment.Defaults.DecisionStall))
 	if err != nil {
 		return err
 	}
@@ -210,6 +210,9 @@ func tasksSection(tasks []store.Task, loc *time.Location) string {
 		}
 		if t.Attempt > 1 || t.Failures > 0 {
 			fmt.Fprintf(&b, "attempt: %d, failed %d of at most %d times\n", t.Attempt, t.Failures, store.MaxTaskFailures)
+		}
+		if t.StalledAt != nil {
+			b.WriteString("stalled: nothing in its batch can move without you; retry or cancel what it waits for, or ask your person about its decision\n")
 		}
 		if t.Status == store.TaskFailed && t.Failures >= store.MaxTaskFailures {
 			b.WriteString("retry: only a person's approval reopens it now\n")
