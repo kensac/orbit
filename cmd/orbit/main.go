@@ -417,9 +417,11 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			return nil
 		}
 
+		eng.Reloader = reloadNow
+
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
-			ConfigState: configState, Drain: drain, Reload: reloadNow, OAuth: oauth}
+			ConfigState: configState, Drain: drain, OAuth: oauth}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		// Bind before any executor starts: an instance that cannot serve

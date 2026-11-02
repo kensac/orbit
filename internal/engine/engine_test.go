@@ -172,7 +172,7 @@ actions:
 		return "", false
 	}
 	e := &engine.Engine{
-		Store: s, DataDir: t.TempDir(), Env: env, Client: srv.Client(), Secret: []byte("secret"),
+		Store: s, DataDir: t.TempDir(), ConfigDir: dir, Env: env, Client: srv.Client(), Secret: []byte("secret"),
 		NewRunner: func(string, spec.RunnerSpec, func(string) (string, bool)) (runner.Runner, error) { return fr, nil },
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
