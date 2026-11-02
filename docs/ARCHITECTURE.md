@@ -104,7 +104,7 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
 - **Tools** (`orbit mcp`, an MCP stdio server from `--mcp-config` under
   `--strict-mcp-config`): `mcp__orbit__query` filters, groups and
   counts or sums the records of a JSON input, exactly (numbers are read as the
-  decimal literals they are); `mcp__orbit__calc` is exact rational arithmetic.
+  decimal literals they are); `mcp__orbit__calc` is exact rational arithmetic; `mcp__orbit__skill`, listed only when the run has skills, serves their text (Skills, below).
   The system prompt tells the model to compute every figure with them. Both
   read only under the workdir, and append each result to a ledger in the run's
   state directory.
@@ -153,7 +153,7 @@ Every backend returns the same JSON (`internal/engine/contract.go`):
 `summary`, `report` (Markdown), `notify` (send, priority, title), `memory`
 (update, the complete new document), `questions`, `actions`, and, only for a
 run in a request ticket's conversation that is still being discussed,
-`plan` ([tickets.md](tickets.md)), and `entries`, the memory entry writes the run makes (below). The backend is
+`plan` ([tickets.md](tickets.md)), `entries`, the memory entry writes the run makes, and `skills`, the skill writes (both below). The backend is
 given a strict schema in which each action type's parameters are spelled out;
 the engine validates against a looser envelope and then judges each action on
 its own, so one malformed proposal is denied without losing the report.
@@ -207,6 +207,15 @@ A run that starts fresh (not a recovery) reads every active entry in its scopes 
 **Learning runs** (`internal/engine/learn.go`) turn a quiet conversation into entries. Every serving instance, every `LearnEvery` (a minute), asks the store which conversations of agents that learn (`learn`, on unless disabled) have a message from the person after the last succeeded learning run's point and have been quiet for `learn.idle` (default 30 minutes): no message or run start, no run finished, nothing queued or running (`Store.LearningDue`). Each gets one learning run (trigger `learn`), unique per conversation and point (`runs_one_learning`), so instances never double it and a failed one is not retried until the person says something new: the cost is bounded by what the person writes, and a run whose window holds no message from them is `skipped` (`learn:nothing-new`) without a backend call. The run reads the window (the person's messages up to the point, the agent's questions and reports after the previous point; `learnBudget`, 32 KB, newest kept), the agent's charter and its entries (index and file, as a run gets them), and returns only `summary` and `entries`, applied as above with the conversation it read as their source. It is a one-shot backend call (no session, no tools, no sources) on the agent's runner or `learn.runner`, within `learnTimeoutMax` (5 minutes). It lives in the agent's learning conversation (`conversations.purpose`, archived), so the conversation it read keeps its thread, prompt and session exactly as they were. A learning run never notifies; its failure is on the run.
 
 `orbit import claude-memory` maps a Claude Code memory directory (one file per fact, frontmatter `name`/`description`/`type`, `**Why:**` and `**How to apply:**` paragraphs, the `MEMORY.md` index for titles) onto entries by key, through `POST /memory/import`, so a repeated import changes only what changed (docs/agents/deployment.md).
+
+## Skills
+
+orbit keeps Claude Code skills in a library (`skills`, `skill_versions`, `skill_files`; every version kept, `internal/store/skills.go`) and gives each agent the ones its spec names (`skills`) or the API attached, at their current versions (`internal/engine/skills.go`):
+
+- **Claude Code** loads them as real skills from a plugin, `<HOME>/.claude/orbit-skills-<digest>/`, passed with `--plugin-dir` (with `--setting-sources ""` Claude Code reads no skills directory of its own; verified on 2.1.316), with `Skill` added to the run's tools. The plugin holds a stub per skill: its name and description, which is what the CLI decides by, and an instruction to read the rest with `mcp__orbit__skill`. orbit's tool server serves each skill's `SKILL.md` and files from the run's own copy under its state directory, confined to the skill's directory after symlinks, so what the model follows is exactly the version the run was given, and a skill's files are readable without a path outside the workdir. The directory's name carries a digest of the skills' contents: an unchanged set is reused, a changed one replaces it, and because the digest is in the CLI's arguments, a live process holding the old set is closed rather than fed a turn. Without orbit's tools (no harness binary) the plugin holds each full `SKILL.md` instead, and its files are not reachable.
+- **Other backends** get every `SKILL.md` as one input file, `inputs/_skills.md`.
+
+A run records the versions it had (`skills.json`). Its output may write or retire skills (`skills`, at most `maxSkillWrites`, 3): applied in `RecordOutcome`, each in a savepoint like entry writes, against the version the run had, and a written skill is attached to the agent. `orbit import skills` seeds the library from a Claude Code skills directory.
 
 ## Actions and rules
 

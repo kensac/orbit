@@ -172,6 +172,8 @@ type Agent struct {
 	// every run of this agent is shown, beside the profile's and its own.
 	// The API can attach more (docs/api.md, Memory entries).
 	Topics []string `yaml:"topics,omitempty" json:"topics,omitempty"`
+	// Skills are skills from orbit's library (docs/api.md, Skills) this agent runs with; the API can attach more.
+	Skills []string `yaml:"skills,omitempty" json:"skills,omitempty"`
 	// Learn is how orbit learns from this agent's conversations once they go quiet (engine/learn.go). Absent is on, with the defaults.
 	Learn *LearnSpec `yaml:"learn,omitempty" json:"learn,omitempty"`
 	// Needs names the capabilities a host must have to run this agent
@@ -789,6 +791,16 @@ func (c *Config) validateAgent(a *Agent) []error {
 		if !slices.Contains(verifyChecks, v) {
 			at("verify: unknown check %q (want one of %v)", v, verifyChecks)
 		}
+	}
+	seenSkill := map[string]bool{}
+	for _, k := range a.Skills {
+		if !nameRE.MatchString(k) {
+			at("skills: %q must match %s", k, nameRE)
+		}
+		if seenSkill[k] {
+			at("skills: %q is listed twice", k)
+		}
+		seenSkill[k] = true
 	}
 	seenTopic := map[string]bool{}
 	for _, t := range a.Topics {
