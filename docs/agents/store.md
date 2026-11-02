@@ -41,6 +41,8 @@ an agent's beliefs changed.
   rows are written only by the attempt holding the run's claim.
 - review comment: `draft -> submitted -> delivered`, or `withdrawn` (a draft) or `superseded` (an edit, a new row). The status is derived (`commentSelect`): `message_id` says submitted, a succeeded or skipped run in `ticket_build_comments` says delivered. `StartBuild` gives a build every comment still waiting, in its transaction.
 
+- attention (`attention`): written with its thing (`newAttention`: `finishRun` for a failure, `insertAction` for a pending approval, `RecordOutcome` for a question, `proposePlan` for a plan, `Delegate` for a task's decision), one row per `key`; open is computed from the thing (`attentionOpen`), never stored, so no decision path has to remember to close it. `pushed_at` is set once by `ClaimPush`; `dismissed_at` once by a person.
+- push subscriptions (`push_subscriptions`): revoked, never deleted; the same endpoint subscribing again revives its row.
 - task (`tasks`, `tasks.go`): `waiting | blocked -> working -> needs_input | done | failed | cancelled`, `needs_input -> working`, `done -> working` (a parent's message reopens it), and `cancelled` from any open state. `Delegate` creates a batch; `ReconcileTasks` (one instance at a time, by advisory lock) makes every other move but `MessageTask` and `CancelTask`, each in one transaction. `report` is kept when a task reopens.
 
 - outbox (`outbox`, written by a worker's engine): unsent, claimed by one control instance (`ClaimOutbox`, reclaimed after `OutboxReclaimAfter`), then `sent_at` set once its deliveries are recorded. Rows are kept.
