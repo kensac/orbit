@@ -722,7 +722,10 @@ func TestStreamAgentStatus(t *testing.T) {
 	agentStatus := func(want string) {
 		t.Helper()
 		e := expect(t, ch, "agent_status", "")
-		var st struct{ State, Kind, Detail, Source, RunID string }
+		var st struct {
+			State, Kind, Detail, Source string
+			RunID                       string `json:"run_id"`
+		}
 		_ = json.Unmarshal([]byte(e.Data), &st)
 		if st.RunID != run {
 			t.Fatalf("agent_status run_id = %q", st.RunID)
