@@ -56,6 +56,9 @@ type ThreadMessage struct {
 	RunID *string `json:"run_id"`
 	// Open is set on a question: true until answered (openQuestion).
 	Open *bool `json:"open,omitempty"`
+	// Attachments are the files a person's message carries; always an
+	// array.
+	Attachments []Upload `json:"attachments"`
 }
 
 // ThreadRun is a run with what it said: its report, its questions and the
@@ -309,6 +312,18 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 			rows.Close()
 			if err := rows.Err(); err != nil {
 				return err
+			}
+			att, err := messageUploads(ctx, tx, msgIDs)
+			if err != nil {
+				return err
+			}
+			for _, it := range page.Items {
+				if m := it.Message; m != nil {
+					m.Attachments = att[m.ID]
+					if m.Attachments == nil {
+						m.Attachments = []Upload{}
+					}
+				}
 			}
 		}
 		if len(runIDs) > 0 {
