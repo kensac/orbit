@@ -8,7 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/kensac/orbit/internal/status"
 )
 
 const tx = `{"transactions":[
@@ -128,7 +131,7 @@ func TestMCPServer(t *testing.T) {
 		`{"jsonrpc":"2.0","id":5,"method":"nope"}`,
 	}, "\n")
 	var out bytes.Buffer
-	if err := ServeMCP(strings.NewReader(in), &out, root, state, "", "test"); err != nil {
+	if err := ServeMCP(strings.NewReader(in), &out, root, state, "", "", "test"); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
@@ -263,6 +266,62 @@ func TestOrbitToolResultsReadsTheStream(t *testing.T) {
 	}
 }
 
+// Every event is posted to the run's status listener after the decision,
+// which the report never changes; with the listener gone, it is spooled.
+func TestHookReportsEveryEvent(t *testing.T) {
+	root := workdir(t)
+	state := t.TempDir()
+	dir, err := os.MkdirTemp("/tmp", "ohk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s.sock")
+	var mu sync.Mutex
+	var got []status.Event
+	l, err := status.Listen(sock, status.SpoolPath(state), func(e status.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, e)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := HookOptions{Root: root, State: state, Status: sock}
+	if v := hook(t, o, `{"hook_event_name":"UserPromptSubmit","prompt_id":"p","prompt":"hi"}`); len(v) != 0 {
+		t.Fatalf("UserPromptSubmit decision = %v, want {}", v)
+	}
+	if denied(hook(t, o, pre("Read", `{"file_path":"/etc/passwd"}`))) == "" {
+		t.Fatal("reporting must not open the guard")
+	}
+	if v := hook(t, o, `{"hook_event_name":"PermissionRequest","tool_name":"Write","agent_id":"a1"}`); len(v) != 0 {
+		t.Fatalf("PermissionRequest decision = %v, want none: the CLI's own permission flow decides", v)
+	}
+	l.Close()
+	// No listener: the event lands in the spool, the decision as before.
+	if v := hook(t, o, `{"hook_event_name":"Stop","prompt_id":"p"}`); len(v) != 0 {
+		t.Fatalf("Stop decision = %v", v)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 3 || got[0].Name != "UserPromptSubmit" || got[0].PromptID != "p" ||
+		got[1].Name != "PreToolUse" || got[1].Tool != "Read" ||
+		got[2].Name != "PermissionRequest" || got[2].AgentID != "a1" || got[2].Tool != "Write" {
+		t.Fatalf("posted = %+v", got)
+	}
+	if b, _ := os.ReadFile(status.SpoolPath(state)); !strings.Contains(string(b), `"event":"Stop"`) {
+		t.Fatalf("spool = %s", b)
+	}
+	// Nowhere to report (a state directory that cannot be made): the
+	// decision is still written, and the hook still succeeds.
+	blocked := filepath.Join(t.TempDir(), "file")
+	_ = os.WriteFile(blocked, nil, 0o600)
+	o.State = filepath.Join(blocked, "state")
+	if v := hook(t, o, `{"hook_event_name":"Stop"}`); len(v) != 0 {
+		t.Fatalf("decision = %v", v)
+	}
+}
+
 func TestMCPSearchAsksTheEngineSocket(t *testing.T) {
 	sock := filepath.Join(os.TempDir(), fmt.Sprintf("orbit-test-%d.sock", os.Getpid()))
 	_ = os.Remove(sock)
@@ -294,7 +353,7 @@ func TestMCPSearchAsksTheEngineSocket(t *testing.T) {
 		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"q":"x","agent":"other"}}}`,
 	}, "\n")
 	var out bytes.Buffer
-	if err := ServeMCP(strings.NewReader(in), &out, root, state, sock, "test"); err != nil {
+	if err := ServeMCP(strings.NewReader(in), &out, root, state, sock, "", "test"); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
@@ -312,10 +371,63 @@ func TestMCPSearchAsksTheEngineSocket(t *testing.T) {
 	}
 
 	out.Reset()
-	if err := ServeMCP(strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), &out, root, state, "", "test"); err != nil {
+	if err := ServeMCP(strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), &out, root, state, "", "", "test"); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out.String(), `"name":"search"`) {
 		t.Fatal("search listed without a socket")
+	}
+}
+
+func TestMCPRepositoryToolsAskTheEngineSocket(t *testing.T) {
+	sock := filepath.Join(os.TempDir(), fmt.Sprintf("orbit-test-repos-%d.sock", os.Getpid()))
+	_ = os.Remove(sock)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(sock) })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			req, err := ReadRepoRequest(conn)
+			resp := RepoResponse{Text: req.Tool + " " + string(req.Args)}
+			if err != nil {
+				resp = RepoResponse{Error: err.Error()}
+			}
+			b, _ := json.Marshal(resp)
+			_, _ = conn.Write(append(b, '\n'))
+			_ = conn.Close()
+		}
+	}()
+	root, state := workdir(t), t.TempDir()
+	in := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"git_log","arguments":{"max":3}}}`,
+	}, "\n")
+	var out bytes.Buffer
+	if err := ServeMCP(strings.NewReader(in), &out, root, state, "", sock, "test"); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	for _, name := range []string{"git_log", "git_show", "git_diff", "git_blame", "pr_list", "pr_view"} {
+		if !strings.Contains(lines[0], `"name":"`+name+`"`) {
+			t.Fatalf("tools/list lacks %s: %s", name, lines[0])
+		}
+	}
+	if !strings.Contains(lines[1], `git_log {\"max\":3}`) || strings.Contains(lines[1], "isError") {
+		t.Fatalf("git_log = %s", lines[1])
+	}
+	if ledger, _ := os.ReadFile(LedgerPath(state)); len(ledger) != 0 {
+		t.Fatalf("a repository answer backs no figure, but the ledger has %s", ledger)
+	}
+	if _, err := Repo(sock, RepoRequest{Tool: "exec", Args: json.RawMessage(`{}`)}); err == nil || !strings.Contains(err.Error(), "unknown repository tool") {
+		t.Fatalf("an unknown tool = %v", err)
+	}
+	if got := RepoToolNames(); got[0] != "mcp__orbit__git_log" || len(got) != len(RepoTools) {
+		t.Fatalf("names = %v", got)
 	}
 }

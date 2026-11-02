@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/kensac/orbit/internal/credproxy"
 	"github.com/kensac/orbit/internal/egress"
 	"github.com/kensac/orbit/internal/sandboxd"
 )
@@ -19,12 +20,20 @@ func sandboxdCmd(ctx context.Context, log *slog.Logger) error {
 	return sandboxd.New(cfg, log).Run(ctx)
 }
 
-// egressCmd is `orbit egress`: the allowlisting proxy that is a sandbox's
-// only route out (internal/egress).
+// egressCmd is `orbit egress`: the proxy that is a sandbox's only route out, with a build's allowlist or a workstation's open web (internal/egress).
 func egressCmd(ctx context.Context, log *slog.Logger) error {
-	allow, err := egress.ParseAllowlist(os.Getenv("ORBIT_EGRESS_ALLOW"))
+	pol, err := egress.PolicyFromEnv(os.Getenv)
 	if err != nil {
 		return err
 	}
-	return egress.New(allow, log).Serve(ctx, env("ORBIT_EGRESS_LISTEN", ":3128"))
+	return egress.NewPolicy(pol, log).Serve(ctx, env("ORBIT_EGRESS_LISTEN", ":3128"))
+}
+
+// credproxyCmd is `orbit credproxy`: the sandboxes' route to their backend, adding the credential their token seals (internal/credproxy).
+func credproxyCmd(ctx context.Context, log *slog.Logger) error {
+	sealer, err := credproxy.NewSealer(os.Getenv("ORBIT_CREDPROXY_KEY"))
+	if err != nil {
+		return err
+	}
+	return credproxy.New(sealer, log).Serve(ctx, env("ORBIT_CREDPROXY_LISTEN", ":3129"))
 }

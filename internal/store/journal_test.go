@@ -130,8 +130,8 @@ func TestBackfillWritesWhatTheLiveWriterWould(t *testing.T) {
 		SELECT $2, $3, seq, at, kind, payload FROM run_events WHERE run_id = $1`, live, old, oc.Attempt); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := s.BackfillJournal(ctx, true); err != nil || n != 1 {
-		t.Fatalf("backfill = %d %v", n, err)
+	if n, failed, err := s.BackfillJournal(ctx, true); err != nil || n != 1 || failed != nil {
+		t.Fatalf("backfill = %d %v %v", n, failed, err)
 	}
 	strip := func(items []journal.Item) string {
 		for i := range items {
@@ -144,8 +144,8 @@ func TestBackfillWritesWhatTheLiveWriterWould(t *testing.T) {
 		t.Fatalf("backfill differs from live:\n%s\n%s", a, b)
 	}
 	// Caught up, a second pass writes nothing.
-	if n, err := s.BackfillJournal(ctx, true); err != nil || n != 0 {
-		t.Fatalf("second backfill = %d %v", n, err)
+	if n, failed, err := s.BackfillJournal(ctx, true); err != nil || n != 0 || failed != nil {
+		t.Fatalf("second backfill = %d %v %v", n, failed, err)
 	}
 	// A reader's sync catches up a run that kept being written.
 	if _, err := s.Pool.Exec(ctx, `INSERT INTO run_events (run_id, attempt, seq, kind, payload)
@@ -157,6 +157,118 @@ func TestBackfillWritesWhatTheLiveWriterWould(t *testing.T) {
 	}
 	if tb := body[journal.Turn](t, *latest(readAll(t, s, old, 1), "turn:1.2")); tb.State != journal.TurnCompleted {
 		t.Fatalf("turn after sync = %+v", tb)
+	}
+}
+
+// journalWrites is a fingerprint of every journal write of a run: its rows
+// and the transaction that last wrote each attempt's source row.
+func journalWrites(t *testing.T, s *store.Store, run string) string {
+	t.Helper()
+	var w string
+	if err := s.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM journal_items WHERE run_id = $1)::text || ':' ||
+		COALESCE((SELECT string_agg(attempt || '@' || xmin::text || '/' || through, ',' ORDER BY attempt) FROM journal_sources WHERE run_id = $1), '')`,
+		run).Scan(&w); err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+// rawEvent stores an event the way an instance that predates the journal
+// did: without projecting it.
+func rawEvent(t *testing.T, s *store.Store, run string, attempt, seq int, line string) {
+	t.Helper()
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO run_events (run_id, attempt, seq, kind, payload) VALUES ($1, $2, $3, 'assistant', $4)`,
+		run, attempt, seq, line); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAReaderOfAnUpToDateJournalWritesNothing(t *testing.T) {
+	s := testdb.New(t)
+	seed(t, s, "a")
+	run := manual(t, s, "a")
+	c, _ := s.ClaimRun(ctx, "w")
+	appendLines(t, s, run, c.Attempt, `{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}`)
+
+	// Running, with every event projected as it was stored.
+	before := journalWrites(t, s, run)
+	for range 3 {
+		if err := s.SyncJournal(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if after := journalWrites(t, s, run); after != before {
+		t.Fatalf("a sync of a running run wrote: %s then %s", before, after)
+	}
+
+	// Finished: the attempt closed in FinishRun's transaction.
+	if err := s.FinishRun(ctx, run, store.RunResult{Attempt: c.Attempt, Status: "succeeded"}); err != nil {
+		t.Fatal(err)
+	}
+	before = journalWrites(t, s, run)
+	for range 3 {
+		if err := s.SyncJournal(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if after := journalWrites(t, s, run); after != before {
+		t.Fatalf("a sync of a finished run wrote: %s then %s", before, after)
+	}
+	if n, failed, err := s.BackfillJournal(ctx, true); err != nil || n != 0 || failed != nil {
+		t.Fatalf("backfill = %d %v %v", n, failed, err)
+	}
+}
+
+func TestAReaderCatchesUpAJournalThatIsBehind(t *testing.T) {
+	s := testdb.New(t)
+	seed(t, s, "a")
+	run := manual(t, s, "a")
+	c, _ := s.ClaimRun(ctx, "w")
+	appendLines(t, s, run, c.Attempt, `{"type":"assistant","message":{"content":[{"type":"text","text":"one"}]}}`)
+	rawEvent(t, s, run, c.Attempt, 2, `{"type":"assistant","message":{"content":[{"type":"text","text":"two"}]}}`)
+	if latest(readAll(t, s, run, 1), "message:1.2.0") != nil {
+		t.Fatal("the raw event was projected before a sync")
+	}
+	if err := s.SyncJournal(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if latest(readAll(t, s, run, 1), "message:1.2.0") == nil {
+		t.Fatalf("after sync = %+v", readAll(t, s, run, 1))
+	}
+	var through int
+	if err := s.Pool.QueryRow(ctx, `SELECT through FROM journal_sources WHERE run_id = $1 AND attempt = $2`, run, c.Attempt).Scan(&through); err != nil || through != 2 {
+		t.Fatalf("through = %d %v", through, err)
+	}
+}
+
+func TestAFailingRunDoesNotHoldBackTheBackfill(t *testing.T) {
+	s := testdb.New(t)
+	seed(t, s, "a", "b")
+	bad := manual(t, s, "a")
+	bc, _ := s.ClaimRun(ctx, "w")
+	good := manual(t, s, "b")
+	gc, _ := s.ClaimRun(ctx, "w")
+	line := `{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}`
+	rawEvent(t, s, bad, bc.Attempt, 1, line)
+	rawEvent(t, s, good, gc.Attempt, 1, line)
+	// The earlier run's projection state cannot be read, so its sync fails.
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO journal_sources (run_id, attempt, epoch, state) VALUES ($1, $2, 1, '"unreadable"')`,
+		bad, bc.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	for _, all := range []bool{true, false} {
+		n, failed, err := s.BackfillJournal(ctx, all)
+		if err != nil || n != 1 || len(failed) != 1 || !strings.Contains(failed[0].Error(), bad) {
+			t.Fatalf("backfill all=%v = %d %v %v", all, n, failed, err)
+		}
+		if latest(readAll(t, s, good, 1), "message:1.1.0") == nil {
+			t.Fatalf("all=%v: the later run was not synced", all)
+		}
+		// Synced now, the later run is not selected again.
+		if _, err := s.Pool.Exec(ctx, `INSERT INTO run_events (run_id, attempt, seq, kind, payload) VALUES ($1, $2, $3, 'assistant', $4)`,
+			good, gc.Attempt, map[bool]int{true: 2, false: 3}[all], line); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
