@@ -87,6 +87,8 @@ types are not even offered.
   outstanding link.
 - `/ui/runs/{id}` is read-only and relies on forward-auth. Reports can hold
   personal data; never route `/ui/` around authentik.
+- **`/mcp`** is the API as tools, with the same check: an authentik token (the person decides and authors), the operator token only on the internal listener. Its tools can do what `/api/v1` can (post, approve, reject); nothing more.
+- **The MCP OAuth proxy** (`oauth.go`) lets anyone register a client, so the redirect host list (`ORBIT_MCP_REDIRECT_HOSTS`, default the Claude apps) is what stops a link that would send a signed-in person's code to a stranger's host; the code is useless without the PKCE verifier its client holds. A code is single-use per instance only (a replay to the other instance of a rollout within its 2 minutes is the gap), and every sealed value is keyed from `ORBIT_API_TOKEN`. The client receives the person's authentik access token for the `orbit-mcp` provider, which orbit accepts like the portfolio's; the refresh token it receives is sealed and works only through orbit, which holds the client secret.
 - `GET /runs/{id}/stream` shows the agent's narration and tool summaries
   (file paths, commands, URLs): the same data `/events` already serves to
   the same callers.

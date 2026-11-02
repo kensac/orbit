@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -318,6 +319,10 @@ func serve(ctx context.Context, log *slog.Logger) error {
 	if verifier == nil {
 		log.Warn("ORBIT_OIDC_ISSUER is not set: the public /api/v1 refuses every request")
 	}
+	oauth, err := mcpOAuth(token)
+	if err != nil {
+		return err
+	}
 	dir := configDir(nil)
 	cfg, err := spec.Load(dir)
 	if err != nil {
@@ -396,7 +401,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
-			ConfigState: configState, Drain: drain}
+			ConfigState: configState, Drain: drain, OAuth: oauth}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		// Bind before any executor starts: an instance that cannot serve
@@ -616,6 +621,15 @@ func oidcVerifier() (*auth.Verifier, error) {
 	issuers := auth.SplitList(os.Getenv("ORBIT_OIDC_ISSUER"))
 	clients := auth.SplitList(os.Getenv("ORBIT_OIDC_CLIENT_IDS"))
 	group := strings.TrimSpace(os.Getenv("ORBIT_OIDC_GROUP"))
+	// The MCP sign-in's provider issues the tokens /mcp is called with, so they are accepted wherever an authentik token is.
+	if is, id := mcpOAuthEnv(); is != "" && id != "" {
+		if !slices.Contains(issuers, is) {
+			issuers = append(issuers, is)
+		}
+		if !slices.Contains(clients, id) {
+			clients = append(clients, id)
+		}
+	}
 	if len(issuers) == 0 {
 		if len(clients) > 0 || group != "" {
 			return nil, errors.New("ORBIT_OIDC_CLIENT_IDS or ORBIT_OIDC_GROUP is set without ORBIT_OIDC_ISSUER")
@@ -626,6 +640,36 @@ func oidcVerifier() (*auth.Verifier, error) {
 		return nil, errors.New("ORBIT_OIDC_ISSUER needs ORBIT_OIDC_CLIENT_IDS and ORBIT_OIDC_GROUP")
 	}
 	return auth.New(auth.Config{Issuers: issuers, ClientIDs: clients, Group: group})
+}
+
+func mcpOAuthEnv() (issuer, clientID string) {
+	issuer = strings.TrimSpace(os.Getenv("ORBIT_MCP_OAUTH_ISSUER"))
+	if issuer != "" && !strings.HasSuffix(issuer, "/") {
+		issuer += "/"
+	}
+	return issuer, strings.TrimSpace(os.Getenv("ORBIT_MCP_OAUTH_CLIENT_ID"))
+}
+
+// mcpOAuth builds the MCP sign-in proxy from the environment, or nil when ORBIT_MCP_OAUTH_ISSUER is unset.
+func mcpOAuth(token string) (*api.OAuthProxy, error) {
+	issuer, id := mcpOAuthEnv()
+	secret := os.Getenv("ORBIT_MCP_OAUTH_CLIENT_SECRET")
+	if issuer == "" {
+		if id != "" || secret != "" {
+			return nil, errors.New("ORBIT_MCP_OAUTH_CLIENT_ID or _SECRET is set without ORBIT_MCP_OAUTH_ISSUER")
+		}
+		return nil, nil
+	}
+	if id == "" || secret == "" {
+		return nil, errors.New("ORBIT_MCP_OAUTH_ISSUER needs ORBIT_MCP_OAUTH_CLIENT_ID and ORBIT_MCP_OAUTH_CLIENT_SECRET")
+	}
+	if os.Getenv("ORBIT_OIDC_GROUP") == "" {
+		return nil, errors.New("ORBIT_MCP_OAUTH_ISSUER needs ORBIT_OIDC_GROUP, the group a person must be in")
+	}
+	o := &api.OAuthProxy{Issuer: issuer, ClientID: id, ClientSecret: secret,
+		RedirectHosts: auth.SplitList(os.Getenv("ORBIT_MCP_REDIRECT_HOSTS")), Client: &http.Client{Timeout: 30 * time.Second}}
+	o.SetKey([]byte(token))
+	return o, nil
 }
 
 func reloadConfig(ctx context.Context, s *store.Store, eng *engine.Engine, dir string) error {

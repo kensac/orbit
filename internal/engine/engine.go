@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -138,6 +139,10 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		cost, total := st.spent()
 		log.Info("handed back", "attempt", c.Attempt, "session", st.sessionID)
 		return e.Store.HandBack(context.WithoutCancel(ctx), c.ID, c.Attempt, cost, total)
+	}
+	var sk *gateSkip
+	if errors.As(err, &sk) {
+		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
 	}
 	if err != nil {
 		return e.fail(ctx, snap, a, c, start, err, res)
@@ -339,6 +344,20 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if rec == nil {
 		if inputs, err = e.transform(ctx, a, c, workdir, inputsDir, raw, inputs, emit); err != nil {
 			return nil, nil, err
+		}
+	}
+	if gated(a, c, rc, rec != nil) {
+		docs := maps.Clone(raw)
+		for _, in := range inputs {
+			docs[in.Name] = in.Content
+		}
+		sk, err := e.gate(ctx, a, inputs, docs)
+		if err != nil {
+			return nil, nil, err
+		}
+		if sk != nil {
+			emit("orbit.gate", map[string]any{"gate": sk.gate, "skipped": true, "reason": sk.summary})
+			return nil, nil, sk
 		}
 	}
 

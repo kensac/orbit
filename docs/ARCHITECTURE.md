@@ -7,14 +7,7 @@ alone, what waits for approval, what it may not do at all).
 
 ## Code first, model last
 
-The model is the expensive, slow, non-deterministic part, so it gets only the
-part of a job that needs judgment. Everything else is code that runs before
-it: the harness fetches and paginates sources, and runs an agent's
-transforms (`internal/transforms`: coded reducers over a source, such as
-per-category totals with transfers removed, each output an input of its
-own); the next piece is gates (skip the model when inputs are unchanged or
-a check passes, so a quiet day costs no tokens). A report's numbers should
-come from code, with the model explaining them.
+The model is the expensive, slow, non-deterministic part, so it gets only the part of a job that needs judgment. Everything else is code that runs before it: the harness fetches and paginates sources, and runs an agent's transforms (`internal/transforms`: coded reducers over a source, such as per-category totals with transfers removed, each output an input of its own), and then its gates (`unchanged`, `items_above`: a scheduled run whose inputs are what the last review judged, or that has nothing to review, ends `skipped`, naming the gate, without a backend call, so a quiet day costs no tokens). A report's numbers should come from code, with the model explaining them.
 
 ## One run
 
@@ -28,6 +21,7 @@ trigger (schedule | manual | message | continue)
   -> a fresh session: the recent thread, packed into a byte budget, as conversation.md
   -> sources fetched by the harness, written to <workdir>/inputs/, stored as artifacts
   -> transforms run over sources, each output an input (a source only transforms read is withheld)
+  -> gates (scheduled runs, no message waiting): one that finds nothing to judge ends the run skipped
   -> runner called with: system contract, prompt, workdir, tools, output schema
   -> output validated against the contract
   -> RecordOutcome, one transaction: run succeeded, memory version, questions, actions
@@ -220,7 +214,7 @@ signalling between writers and readers. `GET /usage` and `GET /health` are
 the admin read side, computed from stored rows and the configuration in
 force: subscription windows from the newest `rate_limit_event` Claude Code
 wrote into a run's stream (what it last reported, not a live query), exact
-cost sums, the queue, running runs and next fires. Contract: docs/api.md.
+cost sums, the queue, running runs and next fires. `/mcp` serves the same reads and writes as MCP tools (`internal/api/mcp.go`, stateless Streamable HTTP), with an OAuth proxy in front of authentik for clients that need dynamic registration (`oauth.go`). Contract: docs/api.md.
 
 ## Reliability
 
@@ -372,12 +366,6 @@ ticket loop, every 30 s: checks green -> github:merge proposed (approve for orbi
 ## Not built yet
 
 The direction, so changes now do not close it off:
-
-- **Gates** (above). A gate is a predicate over inputs and memory that ends the run
-  without a backend call, recorded as its own status (`skipped`, naming the
-  gate in `runs.gate`) so a run that judged nothing is distinguishable from
-  one that did. The status exists; today only a build that redelivers an
-  earlier attempt's pushed commit records it.
 
 - **Tickets, what is left**: review comments on a PR's diff, and webhook
   events in place of the loop's polling ([tickets.md](tickets.md)).

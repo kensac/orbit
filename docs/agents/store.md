@@ -21,12 +21,7 @@ an agent's beliefs changed.
 - run: `queued -> running -> succeeded | failed | skipped`, `queued -> cancelled`,
   `running -> queued` (a hand-back, a lost worker under `MaxAttempts`).
   Every write by a running attempt also guards `attempt = <its own>`, so an
-  attempt superseded by a newer claim writes nothing. `skipped` is a run
-  that ended without a backend call, and names what ended it in `gate`
-  (`runs_skipped_names_gate`): a build that delivered an earlier attempt's
-  pushed commit (`pushed`). It counts as a success for staleness
-  (`orbit_agent_last_success_timestamp_seconds`, `/health`'s
-  `last_success`); `orbit_runs_skipped_total` counts them by gate.
+  attempt superseded by a newer claim writes nothing. `skipped` is a run that ended without a backend call, and names what ended it in `gate` (`runs_skipped_names_gate`): an agent's gate (`unchanged`, `items_above`; configuration.md) or a build that delivered an earlier attempt's pushed commit (`pushed`). It counts as a success for staleness (`orbit_agent_last_success_timestamp_seconds`, `/health`'s `last_success`); `orbit_runs_skipped_total` counts them by gate.
 - attempt (`run_attempts`, one per claim, written in `ClaimRun`'s
   transaction): open, then `succeeded | failed | skipped` with its run, `handed_back`
   (`HandBack`) or `lost` (`ReapStale`).
