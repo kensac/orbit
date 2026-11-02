@@ -42,7 +42,7 @@ var SearchSchema = map[string]any{
 	"required":             []string{"q"},
 	"properties": map[string]any{
 		"q": map[string]any{"type": "string",
-			"description": `what to find: words, "a quoted phrase", "or" between alternatives, -word to exclude`},
+			"description": `what to find: words or identifiers (parseConfig, parse_config and "parse config" find each other; a/b.go), "a quoted phrase", "or" between alternatives, -word to exclude; and the operators kind:<kinds>, repo:<owner/name or name> and path:<part of a file path> (tool calls only). A query that matches nothing is retried once with misspelt words corrected, and the answer's repaired says so`},
 		"kind": map[string]any{"type": "string",
 			"description": "comma list of message (your person's), question (yours), report, error, narration (what you wrote while working), tool_call (a tool's input), memory (your memory document), memory_entry (a fact you keep)"},
 		"conversation_id": map[string]any{"type": "string", "description": "only this conversation's"},

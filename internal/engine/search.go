@@ -156,7 +156,15 @@ func (e *Engine) searchFor(ctx context.Context, agent string, req harness.Search
 		if r.Tool != nil {
 			m["tool"] = *r.Tool
 		}
+		if r.Path != nil {
+			m["path"] = *r.Path
+		}
 		results[i] = m
 	}
-	return map[string]any{"total": page.Total, "results": results}, nil
+	out := map[string]any{"total": page.Total, "results": results}
+	if page.Repaired != nil {
+		// The model reads that these are not the results of what it asked.
+		out["repaired"] = page.Repaired
+	}
+	return out, nil
 }
