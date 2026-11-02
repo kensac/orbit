@@ -26,6 +26,13 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `usage_poll` | map: `every` (default 5m, at least 1m), `token_env` (default `CLAUDE_CODE_OAUTH_TOKEN`) | absent | Poll the subscription's usage windows (configuration.md, Subscription usage and low-priority agents). |
 | `defer_low_priority` | bool | `false` | Hold `priority: low` agents' scheduled runs while a usage window is above `usage.DeferLowAbove`. |
 | `board` | map | absent | Tunes `GET /board` (below). |
+| `titles` | map | absent | How a conversation is titled once its first message names it (below). Without it the title is that message's first line. |
+
+### `titles`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `runner` | runner name | required | The runner (a cheap model) that titles each new conversation once from its first message, unless a person named or renamed it; the first line stays when it fails. One call per conversation, ever. |
 
 ### `defaults`
 
