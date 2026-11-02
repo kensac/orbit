@@ -43,11 +43,14 @@ docker network create --internal "$id" >/dev/null
 pw=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
 docker run -d --name "$id-db" --network "$id" -e POSTGRES_USER=orbit -e "POSTGRES_PASSWORD=$pw" -e POSTGRES_DB=orbit \
   -v "$dump:/drill/orbit.dump:ro" "$PG_IMAGE" >/dev/null
+# Over TCP: the image's first-start init runs a temporary server on the unix
+# socket only, which answers pg_isready and then restarts.
+ready=
 for _ in $(seq 60); do
-  docker exec "$id-db" pg_isready -U orbit -d orbit >/dev/null 2>&1 && break
+  if docker exec "$id-db" pg_isready -h 127.0.0.1 -U orbit -d orbit >/dev/null 2>&1; then ready=1; break; fi
   sleep 1
 done
-docker exec "$id-db" pg_isready -U orbit -d orbit >/dev/null || fail "postgres never became ready"
+[ -n "$ready" ] || fail "postgres never became ready"
 psql() { docker exec -i "$id-db" psql -U orbit -d orbit -v ON_ERROR_STOP=1 -qAt "$@"; }
 
 # The dump's own row counts: each table's COPY block, one line per row
