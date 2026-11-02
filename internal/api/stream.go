@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/journal"
+	"github.com/kensac/orbit/internal/status"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -25,6 +26,15 @@ const streamPoll = 500 * time.Millisecond
 // the idle timeouts of the proxies between orbit and a client (Cloudflare
 // closes an idle origin response at 100 s).
 const streamPing = 15 * time.Second
+
+// agentStatus is an agent_status event's data; the name keeps the status
+// package reachable inside streamRun, whose run status is a local status.
+type agentStatus = status.Status
+
+// sameStatus reports whether a client showing a would show b the same.
+func sameStatus(a, b agentStatus) bool {
+	return a.State == b.State && a.Kind == b.Kind && a.Detail == b.Detail && a.Source == b.Source
+}
 
 // streamRun serves GET /runs/{id}/stream: Server-Sent Events replaying the
 // journal of the run's latest timeline (epoch) from its start, then
@@ -77,6 +87,18 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 	// its epoch are read but not sent, so chunk separators come out
 	// exactly as in a full replay.
 	resume, resuming := journal.ParseCursor(r.Header.Get("Last-Event-ID"))
+
+	// sent is the last agent_status sent: one follows every status, and
+	// one is sent on its own whenever it changes.
+	var sent *agentStatus
+	sendAgentStatus := func(p *store.RunProgress, force bool) {
+		if !force && sent != nil && sameStatus(*sent, p.AgentStatus) {
+			return
+		}
+		st := p.AgentStatus
+		sent = &st
+		add("agent_status", "", st)
+	}
 
 	var (
 		started   bool
@@ -154,6 +176,7 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 		}
 		if started && e == epoch {
 			sendStatus()
+			sendAgentStatus(p, true)
 			return true, nil
 		}
 		after = 0
@@ -168,6 +191,7 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 		}
 		started, epoch, seq, wrote = true, e, 0, false
 		sendStatus()
+		sendAgentStatus(p, true)
 		return true, nil
 	}
 	finish := func() {
@@ -211,6 +235,9 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 		if p.Status != status {
 			status = p.Status
 			sendStatus()
+			sendAgentStatus(p, true)
+		} else {
+			sendAgentStatus(p, false)
 		}
 		if flush() != nil {
 			return true

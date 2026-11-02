@@ -70,7 +70,9 @@ A rejected token is `401` with `{"error": "<check>: <reason>", "check":
                "created_at": "...", "finished_at": "...", "summary": "..."},
   "unread_messages": 1,
   "pending_actions": 0,
-  "needs_input": true
+  "needs_input": true,
+  "agent_status": {"state": "waiting", "kind": "question", "since": "...",
+                   "source": "run", "run_id": "uuid"}
 }]}
 ```
 
@@ -78,12 +80,28 @@ A rejected token is `401` with `{"error": "<check>: <reason>", "check":
 conversations. `needs_input` is true
 while the agent waits on its person: an open question or a pending action.
 `spec` is the agent's spec as loaded (the canonical JSON stored for
-`spec_sha`, defaults applied). `first_seen` is when orbit first stored the agent, `updated_at` when its stored spec, `enabled` or `present` last changed. `origin` and `version` are as in Defining agents (below); both are omitted for an agent no longer configured, and `version` for one not defined in the database. `last_run` is omitted before an agent's first run.
+`spec_sha`, defaults applied). `first_seen` is when orbit first stored the agent, `updated_at` when its stored spec, `enabled` or `present` last changed. `origin` and `version` are as in Defining agents (below); both are omitted for an agent no longer configured, and `version` for one not defined in the database. `last_run` is omitted before an agent's first run. `agent_status` is what the agent is doing (below).
 
 `GET /agents/{name}` is `{"agent": <as in the list>, "memory": "<markdown>",
 "next_fires": [...]}`. `next_fires` is as in `GET /health` (below); `[]` for
 an agent with no schedule, a disabled one, or one no longer configured.
 Earlier memory is `GET /agents/{name}/memory` (below).
+
+## Agent status
+
+`agent_status` says what an agent is doing, for a person deciding whether to look. It is on every agent, conversation, run, thread run item and running run in `GET /health`, in a stream, and in the MCP `list_agents`:
+
+```json
+{"state": "waiting", "kind": "permission", "detail": "Write",
+ "since": "...", "source": "hooks", "run_id": "uuid"}
+```
+
+- `state` is `idle` (no run yet, or the latest was cancelled before it ran), `queued`, `working`, `waiting` (on the agent's person), `done` or `errored`.
+- `kind`, only while `waiting`: `permission` (a tool call held for permission), `question` (the agent asked mid-turn, or a finished run's question is open), `elicitation` (an MCP server asked the person for input) or `approval` (an action is pending).
+- `detail`, when there is one: the tool held for permission, what an elicitation asks, or why it errored (a Claude Code error code such as `rate_limit`, or the run's error, at most 300 bytes).
+- `since` is when the state began, as far as orbit knows; `run_id` is the run it describes (absent with no run).
+- `source` is who decided it. While a Claude Code run runs, its hooks (`hooks`) report its turn: prompt and tool events are `working`, a permission request, an elicitation or a question is `waiting`, a failed turn is `errored`; a turn that ended stays `working` until orbit has recorded its output. Everything else is the run's row (`run`): another backend, the time before the first hook, and every finished run (failed is `errored`; an open question or a pending action is `waiting`; otherwise `done`). The hooks report only for the attempt they ran in.
+- An agent's or a conversation's status is that of its current run (the running one, else the newest), except that a finished current run gives way to an open question or a pending action anywhere in it, however old: `waiting`, with `kind` `approval` before `question`.
 
 ## Defining agents
 
@@ -130,6 +148,7 @@ returns `201`:
 
 - `dry_run: true` validates and stores nothing: `200 {"valid": true,
   "spec": ..., "next_fires": [...]}` (no `definition`, no `agent`).
+- A change stored whose reload then failed on this instance is still a success, with `pending_reload`: the reason. The change is stored and valid; the config sync retries the reload until it is in force, so retrying the request would only store another version. `spec` is then the agent as validated (absent after an archive). An `agent:define` action's result carries the same `pending_reload`.
 - `spec.enabled` (default `true`) sets whether its schedules fire; it is
   stored on the definition, not in `spec`.
 - A name already defined in the database (and not archived) is `409`; an
@@ -177,6 +196,7 @@ conversation is never deleted, only archived.
   "id": "uuid", "agent": "finance", "title": "How much on Uber Eats in October?",
   "is_default": false, "archived": false,
   "created_at": "...", "last_activity_at": "...", "needs_input": true,
+  "agent_status": {"state": "done", "since": "...", "source": "run", "run_id": "uuid"},
   "ticket_id": null, "workspace_id": null}],
  "has_more": false, "next_before": null}
 ```
@@ -255,7 +275,11 @@ A message carries uploads with `attachments` (below): ids of uploads of the same
 
 ## Chat agents
 
-An agent with `chat: true` (the built-in `orbit` is one) is a Claude Code session rather than a report writer: its run's `report` is the session's final message, as written, and `summary` that reply's first line. It changes its memory, asks questions and proposes actions with orbit's tools during the turn instead of in a schema, so its runs carry `questions` and `actions` as any run does. Each conversation has its own workspace (`GET /conversations/{id}/files`): files the agent writes, and the person's uploads, stay between messages. With `sandbox: workstation` (the built-in's, when sandboxd is configured) the session runs in a sandbox container with Claude Code's full tool set and the open internet; `sandbox: build` with the tools it names.
+An agent with `chat: true` (the built-in `orbit` is one) is a Claude Code session rather than a report writer: its run's `report` is the session's final message, as written, and `summary` that reply's first line. It changes its memory, asks questions and proposes actions with orbit's tools during the turn instead of in a schema, so its runs carry `questions` and `actions` as any run does. Each conversation has its own workspace (`GET /conversations/{id}/files`): files the agent writes, and the person's uploads, stay between messages. **Instructions.** In a run that answers its person's message, a chat agent's actions are that person's instructions, as typing into Claude Code is: an action whose rule is `auto`, or `approve` (the person asked for it), executes during the turn and the agent reads its result; the row records `instructed_by` and, for `approve`, `decided_by` as that person. A run nobody's message woke (a schedule, a manual run, a continuation) keeps its rules: `approve` waits. `deny` is never offered. On a worker, which holds no executor credentials, every action waits for control.
+
+**GitHub** (the built-in has `github:clone` auto, `github:pr` and `github:merge` approve): `github:clone {repo, dir}` puts a repository's default branch into the workspace; `github:pr {repo, dir, branch, title, body, push_only}` takes the working tree at `dir` (never its `.git`), commits it as the App's bot user on top of the default branch, holds it to the build's diff policy (no `.github/`, no credential in an added line), pushes `orbit/chat/<branch>` and opens or updates its PR; `github:merge` merges it once every required check passed. Tokens stay in orbit; the repositories are `github.repositories`.
+
+With `sandbox: workstation` (the built-in's, when sandboxd is configured) the session runs in a sandbox container with Claude Code's full tool set and the open internet; `sandbox: build` with the tools it names.
 
 ## A conversation's thread
 
@@ -281,12 +305,14 @@ conversation:
    "turn": {"state": "completed", "outcome": "success", "started_at": "...", "completed_at": "..."},
    "summary": "...", "report": "<markdown>",
    "questions": [{"id": "uuid-of-the-question-message", "body": "...", "open": true}],
-   "error": null, "cost_usd": 0.03, "gate": null,
+   "error": null, "cost_usd": 0.03, "tokens": {"input": 12, "output": 840, "cache_read": 41200, "cache_creation": 3100, "cache_hit_ratio": 0.929773, "num_turns": 3, "model": "claude-opus-5-5"},
+   "gate": null,
    "actions": [{"id": "uuid", "type": "notify", "status": "pending", "reason": "...", "params": {}}],
    "tasks": [{"id": "uuid", "key": "facts", "agent": "researcher", "status": "working",
               "conversation_id": "uuid", "depends_on": [], "summary": null, "error": null,
               "decision_action_id": null}],
-   "needs_input": true, "changes": {"files": 3, "additions": 40, "deletions": 2}},
+   "needs_input": true, "changes": {"files": 3, "additions": 40, "deletions": 2},
+   "agent_status": {"state": "waiting", "kind": "approval", "since": "...", "source": "run", "run_id": "uuid"}},
   {"kind": "message", "id": "uuid-of-the-question-message", "at": "...", "from": "agent",
    "body": "<a question>", "run_id": "uuid", "open": true}
  ],
@@ -306,7 +332,7 @@ conversation:
   `reply_to`, when set, is the message it answers. `attachments` are the uploads it carries (Uploads, above), in order; always an array. `run_id` is the run that
   holds a person's message (`null` while it waits for a run: none has read it, or every attempt that did handed it back) or the run that asked a
   question. `reads` (a person's message, once a run has read it) is every attempt that read it, oldest first: `{"run_id", "attempt", "read_at", "released_at"}`, where `released_at` is when a failed or interrupted attempt handed it back, `null` for the one holding it.
-- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again), `build` (a ticket's build run, docs/tickets.md), `learn` (a learning run, below; only in an agent's learning conversation), `task` (in a delegated task's conversation: the task starting, or its parent writing to it) or `delegation` (the agent woken because tasks it delegated settled; below). `status` is
+- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again), `build` (a ticket's build run, docs/tickets.md), `learn` (a learning run, below; only in an agent's learning conversation), `task` (in a delegated task's conversation: the task starting, or its parent writing to it) or `delegation` (the agent woken because tasks it delegated settled, one failed or one asks it something; below). `status` is
   `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
   ended without a backend call because a gate, code, found nothing to judge;
   `gate` names it, and is `null` for every other status). `attempt` counts
@@ -318,7 +344,7 @@ conversation:
   turn (`state`, `outcome`, ...; as in The journal), `null` before the
   backend was called. `summary`,
   `report`, `error` and `cost_usd` are `null` when absent. `questions` and
-  `actions` are always arrays.
+  `actions` are always arrays. `tokens` is the run's tokens, as on a run (Runs, below), `null` when no attempt reported any.
 - **Questions** appear twice by design: in their run's `questions`, and as
   `from: "agent"` message items with the same `id`. A client dedupes by
   `id`, and replies by sending a message with `reply_to` set to it, in the
@@ -374,6 +400,7 @@ message, in the default conversation: `202 {"run_id": "uuid"}`.
 | `item` | the row's cursor | a journal row, exactly as `GET /runs/{id}/journal` returns it | the timeline grew by one revision |
 | `text` | the row's cursor | `{"text": "..."}` | a new chunk of the agent's prose, to append to what came before |
 | `tool` | the row's cursor | `{"name": "Read", "summary": "inputs/transactions.json"}` | the agent called a tool |
+| `agent_status` | none | an [agent status](#agent-status) | after every `status`, and on its own when it changes (the run's hooks report a wait, say) |
 | `done` | none | the run, identical to a thread run item (`kind: "run"`) | final; the stream ends |
 
 - **`item`** is the stream to render from: one per journal row, revisions included, so a client keeps the highest `revision` per `item_id` (a tool call's result, a plan's update and a turn's end arrive as new revisions of items it already has).
@@ -402,17 +429,26 @@ The final answer is `done.report`, not the concatenated `text`: `text` is what t
  "output": {}, "usage": {}, "cost_usd": 0.03, "session_id": "...",
  "session_mode": "fresh", "session_parent": "uuid", "session_depth": 1,
  "run_after": "...", "continues": "uuid", "chain": 1,
- "gate": "unchanged", "steps": 4, "changes": null}
+ "gate": "unchanged", "steps": 4, "changes": null,
+ "tokens": {"input": 12, "output": 840, "cache_read": 41200, "cache_creation": 3100,
+            "cache_hit_ratio": 0.929773, "num_turns": 3, "model": "claude-opus-5-5"},
+ "prefix": {"sha": "hex", "parts": {"model": "hex16", "tools": "hex16", "mcp": "hex16", "schema": "hex16",
+                                    "skills": "hex16", "system": "hex16", "workdir": "hex16", "charter": "hex16"},
+            "previous_run": "uuid", "previous_sha": "hex", "changed": ["system"]},
+ "agent_status": {"state": "done", "since": "...", "source": "run", "run_id": "uuid"}}
 ```
 
-- Always present: `id`, `attempt`, `agent`, `spec_sha`, `trigger`, `prompt` (`""` when none), `status`, `created_at`, `steps` and `changes` (Workspace, A reply's changes; `null` when it has none). Every other field is omitted when it has no value (not `null`).
+- Always present: `id`, `attempt`, `agent`, `spec_sha`, `trigger`, `prompt` (`""` when none), `status`, `created_at`, `steps`, `changes` (Workspace, A reply's changes; `null` when it has none) and `agent_status`. Every other field is omitted when it has no value (not `null`).
 - `trigger` and `status` are as in a thread run item. `trigger_index` and `scheduled_for` are set on a `schedule` run: which of the agent's triggers fired, and the fire time.
 - `runner_kind`, `model` and `worker` are the latest attempt's backend, its model (absent when the runner names none) and the instance that claimed it. `spec_sha` is the spec the latest attempt ran under.
 - `output` is the backend's raw structured output and `usage` its token usage, as it reported them. `cost_usd` is every attempt's cost together.
+- `report` is the submitted `report`, except when the attempt's final assistant prose (its last run of top-level `message` items, as in The journal) holds more: the submitted one was empty, one line where the prose has several, or shorter. Then `report` is that prose, `summary` stays the submitted one, and `output` keeps what was submitted. A chat agent's `report` is its final message.
 - `session_id` is the backend session the run ended in. `session_mode` (`fresh`, `resumed`, `live`), `session_parent` (the run whose session it continued) and `session_depth` are set for an agent with a session.
 - `run_after`, `continues` (the run that asked) and `chain` (its place in the chain, from 1) are set on a `continue` run.
 - `gate` names what ended a `skipped` run.
 - `steps` is the number of tool calls in the latest attempt's timeline, counted as a thread's run item counts it.
+- `tokens` is every attempt's tokens together (absent when none reported any): `input` is the prompt sent uncached, `cache_read` what was read from the prompt cache, `cache_creation` what was written to it, `output` what the model generated. `cache_hit_ratio` is `cache_read / (cache_read + input + cache_creation)`, six places, `null` with no prompt tokens: every turn sends the whole conversation again, so this is what decides a turn's cost. `num_turns` is the backend's own count (Claude Code's `num_turns`; 1 per call for Codex and the API). `model` is the latest reporting attempt's model, the one that did most of the work (by cost when Claude Code ran subagents on others). Claude Code's counts are its result line's per-turn `usage`, split by model from `model_usage_since_last_result` when present (subagents included); Codex counts cached tokens inside `input_tokens`, so its `input` is the difference and `cache_creation` 0. A build records tokens; a run finished before orbit recorded them got its latest attempt's counts from `usage`.
+- `prefix` is the stable prefix the latest attempt sent, absent before one was recorded (a skipped run, a build): what comes before the conversation in every request, which the prompt cache reuses only when it is byte for byte the same. `parts` are 16-hex-digit digests of each piece: `model` (the backend and model), `tools` (the built-in tools named), `mcp` (orbit's tool names; a chat run's tools with their descriptions and schemas), `schema` (the output schema), `skills` (the skills plugin's digest), `system` (orbit's system contract), `workdir` (the CLI's working directory, which Claude Code writes into its own system prompt) and `charter` (which leads a fresh session's first message). `sha` covers every part but `charter`, which a resumed session sends after its transcript. `previous_run` is the newest earlier run of the same conversation that recorded a prefix, `previous_sha` its digest, and `changed` the parts that differ from it (`[]` when none did; `null`, with the other two absent, when there is no such run). A `sha` unlike `previous_sha` is a cache miss for everything after the changed part, the whole transcript on a resume.
 
 An attempt (`store.Attempt`), oldest first:
 
@@ -420,10 +456,15 @@ An attempt (`store.Attempt`), oldest first:
 {"attempt": 2, "worker": "orbit/0", "runner_kind": "claude-code", "spec_sha": "hex",
  "started_at": "...", "ended_at": "...", "outcome": "succeeded",
  "session_id": "...", "recovered_from": 1, "recover_skipped": "...",
- "cost_usd": 0.01, "session_cost_usd": 0.04}
+ "cost_usd": 0.01, "session_cost_usd": 0.04,
+ "tokens": {"input": 12, "output": 840, "cache_read": 41200, "cache_creation": 3100, "cache_hit_ratio": 0.929773,
+            "num_turns": 3, "model": "claude-opus-5-5",
+            "by_model": {"claude-opus-5-5": {"input": 10, "output": 800, "cache_read": 41000, "cache_creation": 3000},
+                         "claude-haiku-5-5": {"input": 2, "output": 40, "cache_read": 200, "cache_creation": 100}}},
+ "prefix": {"sha": "hex", "parts": {"model": "hex16", "...": "hex16"}}}
 ```
 
-`attempt`, `worker` and `started_at` are always present; the rest is omitted when unset. `outcome` is `succeeded`, `failed`, `skipped`, `handed_back` (stopped by its instance) or `lost` (reaped without a heartbeat), absent while the attempt runs. `recovered_from` is the attempt whose session it continued, `recover_skipped` why it started over instead. `cost_usd` is the attempt's share, absent when unknown (a killed process saved none); `session_cost_usd` is the backend's running total for the session after it.
+`attempt`, `worker` and `started_at` are always present; the rest is omitted when unset. `outcome` is `succeeded`, `failed`, `skipped`, `handed_back` (stopped by its instance) or `lost` (reaped without a heartbeat), absent while the attempt runs. `recovered_from` is the attempt whose session it continued, `recover_skipped` why it started over instead. `cost_usd` is the attempt's share, absent when unknown (a killed process saved none); `session_cost_usd` is the backend's running total for the session after it. `tokens` is the attempt's, shaped as a run's with `by_model`, its counts per model when the backend named one (absent when it reported none: a killed process, a skip); `prefix` is its `sha` and `parts` (absent before it sent one).
 
 `POST /runs/{id}/cancel` stops a run. A queued run is cancelled at once: `200 {"cancelled": true, "status": "cancelled"}`. A running run is asked to stop: `202 {"cancelled": false, "status": "cancelling"}`; its attempt sees the request within 2 s (`engine.cancelPoll`), interrupts the backend (a chat agent's turn through Claude Code's control channel, which ends the turn with what it has; any other run's backend is stopped), and ends the run `cancelled`, with the reply so far as its `report` and `error` `"stopped by its person"`. A stopped run notifies nothing. Any other state is 409.
 
@@ -527,7 +568,7 @@ A row:
  "purpose": "approval", "status": "failed", "error": "...", "attempted_at": "..."}
 ```
 
-`purpose` is `report`, `failure`, `approval` (an action waiting for a person; `action_id` names it) or `action` (an approved action whose execution failed; `action_id` names it). `status` is `sent` or `failed`, with the channel's `error`. `run_id`, `action_id` and `error` are omitted when unset.
+`purpose` is `report`, `failure`, `mail_reply` (the answer to a mail, to its sender), `mail_failure` (the short note that a run answering a mail failed), `approval` (an action waiting for a person; `action_id` names it) or `action` (an approved action whose execution failed; `action_id` names it). `status` is `sent` or `failed`, with the channel's `error`. `run_id`, `action_id` and `error` are omitted when unset.
 
 ## Actions
 
@@ -537,10 +578,10 @@ A row:
 {"id": "uuid", "run_id": "uuid", "agent": "finance", "type": "webhook:home-assistant",
  "params": {}, "reason": "...", "rule": "approve", "status": "executed",
  "decided_by": "kanishk", "decided_at": "...", "executed_at": "...",
- "result": {}, "error": "...", "created_at": "..."}
+ "result": {}, "error": "...", "created_at": "...", "instructed_by": "kanishk"}
 ```
 
-`rule` is the agent's rule for the type when it was proposed (`auto`, `approve`, `deny`). `decided_by` is the person, or `rule` for an action its rule approved or denied. `result` is what the executor returned; `error` is why it was denied (an unknown type, invalid params, a limit) or why it failed. `decided_by`, `decided_at`, `executed_at`, `result` and `error` are omitted when unset.
+`rule` is the agent's rule for the type when it was proposed (`auto`, `approve`, `deny`). `decided_by` is the person, or `rule` for an action its rule approved or denied. `instructed_by` is the person whose message a chat agent was answering when it proposed the action: their message is the instruction (Chat agents, above), so an `approve` action they asked for is approved by them (`decided_by` is that person) without a second approval. `result` is what the executor returned; `error` is why it was denied (an unknown type, invalid params, a limit) or why it failed. `decided_by`, `decided_at`, `executed_at`, `result` and `error` are omitted when unset.
 
 - `POST /actions/{id}/approve`, `POST /actions/{id}/reject`: `200 {"ok":
   true}`; 404 for an unknown action; 409 when it was already decided. With
@@ -623,12 +664,23 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
  "decision": {"action_id": "uuid", "question": "Spend $20?", "status": "executed", "decided_by": "kanishk"},
  "report": {"run_id": "uuid", "summary": "...", "report": "<markdown>"},
  "error": null, "run_id": "uuid", "run_status": "succeeded",
+ "outcome": "succeeded", "outcome_reason": null,
+ "attempt": 2, "failures": 1, "stalled_at": null,
+ "attempts": [{"attempt": 1, "agent": "researcher", "conversation_id": "uuid", "brief": "Find the facts.",
+               "error": "the agent could not do the work: ...", "finished_at": "...", "retry_action_id": "uuid"}],
+ "attempt": 2, "failures": 1,
+ "attempts": [{"attempt": 1, "agent": "researcher", "conversation_id": "uuid", "brief": "Find the facts.",
+               "error": "the agent could not do the work: ...", "finished_at": "...", "retry_action_id": "uuid"}],
  "questions": [{"id": "uuid", "body": "Which year?", "open": true}],
  "created_at": "...", "updated_at": "...", "finished_at": "..."}
 ```
 
-- `status`: `waiting` (a dependency is not done), `blocked` (its decision is pending), `working` (a run in its conversation is queued or running), `needs_input` (its agent asked the delegating agent something; `questions`), `done` (`report` is the reply of the run that finished it), `failed` or `cancelled` (`error` says why). A message from the delegating agent moves a `done` task back to `working`; `report` keeps the previous reply until the next.
-- `depends_on` is the keys of tasks in the same batch (`action_id`) it waits for. `decision` is `null` without one; otherwise approve or reject its `action_id` like any action (`POST /actions/{id}/approve`), and the task starts or is cancelled within seconds.
+- `status`: `waiting` (a dependency is not done; a failed dependency holds it until that one is retried or this one cancelled), `blocked` (its decision is pending), `working` (a run in its conversation is queued or running), `needs_input` (its agent asked the delegating agent something, `questions`, or said it is blocked, `outcome`), `done` (`report` is the reply of the run that finished it), `failed` or `cancelled` (`error` says why; a task whose run said it could not do the work keeps that run's reply in `report`). A message from the delegating agent moves a `done` task back to `working`; `report` keeps the previous reply until the next.
+- `depends_on` is the keys of the tasks it waits for: of its batch (`action_id`), or of an earlier task its conversation delegated (the newest of that key when the task was created). `decision` is `null` without one; otherwise approve or reject its `action_id` like any action (`POST /actions/{id}/approve`), and the task starts or is cancelled within seconds.
+- `outcome` and `outcome_reason` are what the newest run in its conversation said of its work: `outcome` is `succeeded`, `failed` (it could not do the work; the task fails) or `blocked` (it cannot go on until something outside its reach changes; the task needs input), `outcome_reason` why, or `null` when it gave none. Both are `null` while that run has not finished, and for a run that gave no outcome (a chat turn, which counts as succeeded).
+- `attempt` is its current attempt: 1, and one more for each `task:retry` of the delegating agent, which reopens a failed task on the same row, with a new brief or another agent (`agent` and `conversation_id` are then the current attempt's). `attempts` are the attempts a retry ended, oldest first, as they were then. `failures` counts attempts that failed by the agent's work (not a run lost with its worker); from 3 a retry waits for a person's approval, which shows as a pending `task:retry` action.
+- `stalled_at` is set while the task is open in a batch none of whose open tasks can move (each waits only on a failed dependency, or on a decision pending longer than `defaults.decision_stall`) and the delegating agent was woken for it, once; `null` otherwise.
+- `attempt` is its current attempt: 1, and one more for each `task:retry` of the delegating agent, which reopens a failed task on the same row, with a new brief or another agent (`agent` and `conversation_id` are then the current attempt's). `attempts` are the attempts a retry ended, oldest first, as they were then. `failures` counts attempts that failed by the agent's work (not a run lost with its worker); from 3 a retry waits for a person's approval, which shows as a pending `task:retry` action.
 - `run_id` and `run_status` are the newest run in its conversation; stream it with `/runs/{id}/stream` to show the task's work as it happens. `fresh` is a worker started from its agent's spec without its memory. `depth` is 1 for a task a top-level conversation delegated.
 
 `POST /tasks/{id}/cancel` `{"reason": "optional"}`: `200 {"cancelled": true}`, `409` when the task is already over. Its queued runs are cancelled (a running one finishes, unheeded) and its dependents with it. The canceller is the token's person (with the operator token, `"by"` names it).
@@ -637,7 +689,7 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
 
 ## Workspace
 
-The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). **Built:** finding a workspace, the file reads (tree, stat, files, download, search), the writes (write, mkdir, rename, trash and restore, upload and signed upload), history, the change stream, a reply's changes, review comments and the audit, on the snapshot backend. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
+**Partly built.** The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). Built: finding a workspace on both backends, the file reads (tree, stat, files, download, search), the writes (write, mkdir, rename, trash and restore, upload and signed upload), history, the change stream, a reply's changes, review comments and the audit on the snapshot backend, and Terminals (below) in a box. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
 
 A workspace is a file tree a person and an agent share. Routes take the authentik token as above; writes, trash, uploads, terminals and git writes also require membership of `ORBIT_WORKSPACE_GROUP` (default `ORBIT_OIDC_GROUP`; `403`, `check: "group"`). Errors carry a `check` beside `error`, as authentication errors do:
 
@@ -661,7 +713,7 @@ A workspace is a file tree a person and an agent share. Routes take the authenti
 
 ### Finding a workspace
 
-`GET /conversations/{id}/workspace` and `GET /agents/{name}/workspace` return `{"workspace": <workspace>}`:
+`GET /conversations/{id}/workspace` and `GET /agents/{name}/workspace` return `{"workspace": <workspace>}`, one shape over both backends. `GET /agents/{name}/workspace` is the agent's box for an agent with one (Terminals, below), and otherwise its snapshot workspace. `GET /conversations/{id}/workspace` is the conversation's snapshot workspace, also for an agent with a box until its chat turns run in the box (W10).
 
 ```json
 {"id": "uuid", "scope": "conversation", "conversation_id": "uuid", "agent": "orbit",
@@ -672,11 +724,11 @@ A workspace is a file tree a person and an agent share. Routes take the authenti
  "box": null, "created_at": "..."}
 ```
 
-- A conversation of a chat agent (`chat: true`) has a workspace; it is made the first time it is asked for, or with the conversation's first snapshot. On the snapshot backend, `GET /agents/{name}/workspace` is the agent's default conversation's workspace, where its agent-level routes speak.
+- A conversation of a chat agent (`chat: true`) has a workspace; it is made the first time it is asked for, or with the conversation's first snapshot. For an agent without a box, `GET /agents/{name}/workspace` is the agent's default conversation's workspace, where its agent-level routes speak.
 - `scope` is `conversation` (the snapshot backend: one per conversation) or `agent` (a box: one per agent, shared by its conversations). From a conversation, `cwd` is that conversation's directory in the tree (`""` on the snapshot backend, `conversations/<id>` in a box); a client opens there and lets the person go up. From an agent, `cwd` is `""`.
-- `backend` is informative; a client decides from `capabilities`. `presets` lists the terminal presets (`shell`, `claude`). `capabilities` is the backend's, narrowed for the person asking: `write` is false for a person outside `ORBIT_WORKSPACE_GROUP`. On the snapshot backend it is `{"read": true, "write": true, "terminals": false, "git": false, "watch": true, "presets": []}`.
+- `backend` is informative; a client decides from `capabilities`. `presets` lists the terminal presets (`shell`, `claude`). `capabilities` is the backend's, narrowed for the person asking: `write` is false for a person outside `ORBIT_WORKSPACE_GROUP`. On the snapshot backend it is `{"read": true, "write": true, "terminals": false, "git": false, "watch": true, "presets": []}`. In a box today it is `{"read": false, "write": false, "terminals": true, "git": false, "watch": false, "presets": ["shell", "claude"]}`, until the box serves files, git and its watcher (W10, W13).
 - `as_of` is the snapshot read (snapshot backend), `null` before the first one and in a box. Its `run_id` is `null` when a person's write stored it.
-- *(planned)* `box` is `{"host": "oci", "arch": "arm64", "state": "running", "image": "sha256:..."}` in a box, `state` one of `starting`, `running`, `stopped`. A request to a stopped box starts it, waits up to 30 s, then answers `box_starting`.
+- `box` is `{"host": "oci", "arch": "arm64", "state": "running", "image": "sha256:..."}` in a box (`null` on the snapshot backend), `state` one of `starting`, `running`, `stopped`. A request to a stopped box starts it, waits up to 30 s, then answers `box_starting`. Built: `host` and `arch` are sandboxd's docker host's, `image` the reference the container runs (`ghcr.io/kensac/orbit-workstation@sha256:...`), `state` `running` or `stopped` (also before the box's first start); reading the workspace does not start the box, creating or attaching a terminal does, and `box_starting` is not used yet.
 - A conversation of an agent without chat workspaces returns `{"workspace": null}`.
 - Every conversation shape above carries `workspace_id` (the same id): set for each conversation of a chat agent and any conversation with a snapshot, `null` otherwise.
 
@@ -789,39 +841,50 @@ A diff file, here and in git diffs:
 
 Unattended agents push through the action `workspace:push`, `{"repo", "branch", "base_sha", "head_sha", "reason"}`, denied unless the agent's spec names it: orbit reads the commits from the box as a bundle, applies the build diff policy, and pushes with an App token for the repository (`github.repositories`) to `branch`, which may not be the default or a protected branch. `result` is `{"pushed": "sha", "branch"}`.
 
-### Terminals (box only)
+### Terminals (box only): built
 
-*(planned)* `capabilities.terminals` false answers `no_shell`. A terminal:
+**Built.** What is still planned is said where it applies; a planned route answers `404`.
+
+`capabilities.terminals` false answers `no_shell`. An agent has a box, and its workspace terminals, when its chats run in a workstation sandbox (`sandbox: workstation`) and orbit reaches sandboxd. A terminal:
 
 ```json
 {"id": "uuid", "workspace_id": "uuid", "preset": "claude", "title": "Claude Code (direct)",
- "cwd": "conversations/uuid", "state": "running", "exit_code": null, "end_reason": null,
+ "cwd": "", "state": "running", "exit_code": null, "end_reason": null,
  "cols": 120, "rows": 32, "clients": 2, "created_by": "kanishk",
- "created_at": "...", "last_output_at": "...", "ended_at": null}
+ "created_at": "...", "last_attached_at": "...", "last_output_at": null, "ended_at": null}
 ```
 
-`state` is `running` or `exited`; `end_reason` is `exit`, `killed` or `box_restarted`. An exited terminal's record and final scrollback are kept.
+`state` is `running` or `exited`; `end_reason` is `exit` (its session ended), `killed` or `box_restarted` (reserved: not yet written). `exit_code` is set with `exit`. Rows are never deleted: an exited terminal keeps its record. `clients` counts the sockets attached on the instance answering. `last_attached_at` is the newest attach; `last_output_at` is not recorded yet (always `null`). `cols` and `rows` are the size last asked for.
 
-- `POST /workspaces/{id}/terminals` `{"preset": "shell", "cwd"?, "cols", "rows", "title"?, "claude"?: {"resume"?: "session id", "continue"?: false, "model"?}}`: `201 {"terminal"}`. `cwd` defaults to the workspace's `cwd`. `claude` options are only for the `claude` preset. At most 8 running per workspace (`limit`).
-- `GET /workspaces/{id}/terminals?state=running|exited|all`: `{"terminals": [...]}`, newest first. `GET /terminals/{tid}`: `{"terminal"}`. `PATCH /terminals/{tid}` `{"title"}`.
-- `POST /terminals/{tid}/resize` `{"cols", "rows"}` (an attached client resizes in band instead). `POST /terminals/{tid}/kill` `{"signal": "HUP"}` (`HUP`, `INT`, `TERM`, `KILL`): `200 {"terminal"}`.
-- `GET /terminals/{tid}/scrollback?lines=` is the scrollback as text with escapes (`text/plain; charset=utf-8`), at most 10,000 lines.
-- `GET /workspaces/{id}/claude-sessions?cwd=`: the box's Claude Code sessions for a directory, for the `resume` picker: `{"sessions": [{"id", "started_at", "last_at", "first_prompt"}]}`.
+- `POST /workspaces/{id}/terminals` `{"preset": "shell", "cwd"?, "cols", "rows", "title"?}`: `201 {"terminal"}`. `preset` is `shell` or `claude`; `cols` 1 to 1000, `rows` 1 to 500; `cwd` is a clean path relative to `/work` (default `""`, `/work` itself; `path` otherwise); `title` defaults to `Shell` or `Claude Code (direct)`. The box is created or started here (a failure is `502` naming sandboxd's reason). At most 8 running per workspace (`limit`). `claude` options (`{"resume"?, "continue"?, "model"?}`) are planned and answer `400`.
+- `GET /workspaces/{id}/terminals?state=running|exited|all`: `{"terminals": [...]}`, newest first, at most 500. `GET /terminals/{tid}`: `{"terminal"}`.
+- `POST /terminals/{tid}/kill` `{"signal"?: "HUP"}` (`HUP`, `INT`, `TERM`, `KILL`; each ends the tmux session the same way): `200 {"terminal"}`, `exited` with `end_reason` `killed`. A terminal already ended is returned as it is.
+- Planned: `PATCH /terminals/{tid}` `{"title"}`, `POST /terminals/{tid}/resize` (an attached client resizes in band), `GET /terminals/{tid}/scrollback?lines=`, and `GET /workspaces/{id}/claude-sessions?cwd=` (`{"sessions": [{"id", "started_at", "last_at", "first_prompt"}]}`, for a `resume` picker).
 
-**Attaching.** `POST /terminals/{tid}/attach` returns `{"url": "wss://orbit.kanishksachdev.com/api/v1/terminals/{tid}/socket?ticket=...", "protocol": "orbit.terminal.v1", "expires_at": "..."}`. The ticket names the terminal and the person, is single-use and expires in 30 s; it is the socket's only credential besides a bearer token. `GET /terminals/{tid}/socket` is the WebSocket (subprotocol `orbit.terminal.v1`), authenticated by `ticket` or `Authorization: Bearer`; an `Origin` outside `ORBIT_WORKSPACE_ORIGINS` (default `https://kanishksachdev.com`) is refused. At most 8 clients per terminal.
+**Attaching.** `POST /terminals/{tid}/attach` `{"origin"?}` mints a ticket for the token's person and returns:
+
+```json
+{"url": "wss://orbit.kanishksachdev.com/api/v1/terminals/{tid}/ws?ticket=<ticket>", "protocol": "orbit.terminal.v1",
+ "ticket": "<43 chars>", "protocols": ["orbit.terminal.v1", "orbit.ticket.<ticket>"], "expires_at": "..."}
+```
+
+The ticket is single-use, expires in 30 s, and is bound to the terminal, the person and an Origin: the body's `origin`, else the request's `Origin` header, else (a mint from a server-side proxy, which has neither) any of `ORBIT_WORKSPACE_ORIGINS` (comma list, default `https://kanishksachdev.com,https://www.kanishksachdev.com`); a named origin outside that list is `400` (`check: "origin"`). The ticket is both the `ticket` field and the `url`'s query. An ended terminal is `409` (`exited`). At most 10 tickets a minute per person (`429`, `rate`, `Retry-After`).
+
+`GET /terminals/{tid}/ws` is the WebSocket. The browser opens it with `new WebSocket(url, protocols)`: the ticket travels in `Sec-WebSocket-Protocol` as `orbit.ticket.<ticket>` beside `orbit.terminal.v1`, which the server selects. A client that cannot set a second subprotocol may send the ticket as `?ticket=` instead (then it can reach access logs; it is still single-use and expires in 30 s); `orbit.terminal.v1` must be offered either way. Before upgrading, an `Origin` outside `ORBIT_WORKSPACE_ORIGINS` is `403` (`origin`), and a missing, unknown, used, expired or mismatched ticket is `401` (`ticket`). After the upgrade a terminal that cannot attach sends an `error` frame and closes. At most 8 clients per terminal on one instance (`limit`). Bearer tokens on the socket are planned.
 
 | frame | direction | content |
 |---|---|---|
 | binary | both | terminal bytes: input to the terminal, output from it |
-| `{"type": "ready", "terminal": {...}, "replay_bytes": n}` | server | first; the next `n` bytes of binary frames are the scrollback replay, then live output |
-| `{"type": "resize", "cols", "rows"}` | client | this client's size |
-| `{"type": "ping"}` / `{"type": "pong"}` | both | every 30 s (Cloudflare closes a socket idle for 100 s) |
-| `{"type": "exit", "code": 0, "reason": "exit"}` | server | the terminal ended; the socket closes |
-| `{"type": "error", "check": "...", "error": "..."}` | server | then the socket closes |
+| `{"type": "ready", "terminal": {...}, "replay_bytes": 0}` | server | first. tmux redraws the screen on attach; replaying scrollback first (`replay_bytes` above 0: the next that many binary bytes are the replay) is planned |
+| `{"type": "resize", "cols", "rows"}` | client | this client's size; send one after `ready` and on every change |
+| `{"type": "ping"}` / `{"type": "pong"}` | both | the client pings every 10 s and may treat 25 s without a frame as a dead socket; the server answers each ping with a pong at once and sends its own ping every 15 s (Cloudflare closes a socket idle for 100 s) |
+| `{"type": "exit", "code": 0, "reason": "exit"}` | server | the session ended; the terminal is `exited`; the socket closes (1000) |
+| `{"type": "detached"}` | server | this client left tmux (its detach key) while the session lives; the socket closes (1000) and the terminal stays `running` |
+| `{"type": "error", "check": "...", "error": "..."}` | server | then the socket closes (1008) |
 
-A client with 4 MiB of output queued is closed (code 4008) and reattaches with a replay.
+Close codes: `4001` when the instance drains or shuts down: reconnect with a new ticket and the ready instance takes the terminal, which kept running. `4008` when the client took no output for 30 s: reattach. A socket closing for any reason detaches only its own tmux client; the session lives on.
 
-**Without a WebSocket** (a proxy that cannot carry one): `GET /terminals/{tid}/output` is SSE, `ready` then `data` events (`{"b64": "..."}`, id an output offset), resumable with `Last-Event-ID` (a lost offset replays the scrollback after a `ready`); `POST /terminals/{tid}/input` `{"b64": "...", "cols"?, "rows"?}` writes input, `204`.
+**Without a WebSocket** (planned, for a proxy that cannot carry one): `GET /terminals/{tid}/output` is SSE, `ready` then `data` events (`{"b64": "..."}`, id an output offset), resumable with `Last-Event-ID` (a lost offset replays the scrollback after a `ready`); `POST /terminals/{tid}/input` `{"b64": "...", "cols"?, "rows"?}` writes input, `204`.
 
 ### Review comments
 
@@ -914,7 +977,7 @@ After a conversation goes quiet, orbit runs a short learning pass over it (trigg
 
 | tool | arguments | returns |
 |---|---|---|
-| `list_agents` | none | each configured agent: `name`, `description`, `enabled`, `needs_input`, `open_questions`, `pending_actions`, `last_run` |
+| `list_agents` | none | each configured agent: `name`, `description`, `enabled`, `needs_input`, `open_questions`, `pending_actions`, `last_run`, `agent_status` |
 | `list_conversations` | `agent`, `archived`, `limit`, `before` | as `GET /agents/{name}/conversations`: `conversations`, `has_more`, `next_before` |
 | `create_conversation` | `agent`, `title`, `message`, `wait_seconds` | `conversation_id`, `message_id`, `run_id`, and `reply` as `send_message` |
 | `send_message` | `body`, and `agent` (its default conversation) or `conversation_id`; `reply_to`, `wait_seconds` | `message_id`, `run_id`, `reply`: the run as a thread run item (`report`, `questions`, `actions`, `status`) |
@@ -1043,27 +1106,39 @@ A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main
  "from": "2026-10-03", "to": "2026-11-01",
  "subscription": {
    "windows": [
+     {"window": "five_hour", "status": null, "utilization": 0.42,
+      "resets_at": "2026-11-01T19:00:00Z", "expired": false,
+      "observed_at": "...", "source": "poll", "run_id": null},
      {"window": "seven_day", "status": "allowed", "utilization": 0.14,
       "resets_at": "2026-11-08T12:00:00Z", "expired": false,
-      "observed_at": "...", "run_id": "uuid"}],
+      "observed_at": "...", "source": "stream", "run_id": "uuid"}],
    "overage": {"status": "rejected", "resets_at": null,
                "disabled_reason": "org_level_disabled", "in_use": false,
-               "observed_at": "...", "run_id": "uuid"}},
+               "observed_at": "...", "run_id": "uuid"},
+   "poll": {"enabled": true, "every": "5m0s", "last_at": "...", "last_ok_at": "...", "last_error": null}},
+ "deferral": {"enabled": true, "threshold": 0.8,
+              "held": [{"run_id": "uuid", "agent": "digest", "first_at": "...", "last_at": "...", "times": 3,
+                        "window": "five_hour", "utilization": 0.86, "threshold": 0.8, "source": "poll",
+                        "observed_at": "...", "held_until": "..."}]},
  "cost": {
    "total": {"api_equivalent_usd": 1.234567, "runs": 42, "runs_with_cost": 40,
              "by_status": {"queued": 0, "running": 1, "succeeded": 38, "failed": 3, "cancelled": 0, "skipped": 0}},
    "by_agent": [{"agent": "finance", "api_equivalent_usd": 0.811000, "runs": 30,
                  "runs_with_cost": 29, "by_status": {"...": 0}}],
-   "by_day": [{"date": "2026-10-03", "api_equivalent_usd": 0.000000, "runs": 0}]}}
+   "by_day": [{"date": "2026-10-03", "api_equivalent_usd": 0.000000, "runs": 0}]},
+ "tokens": {
+   "total": {"input": 1200, "output": 52000, "cache_read": 4100000, "cache_creation": 310000,
+             "cache_hit_ratio": 0.929515, "attempts": 40, "runs": 39},
+   "by_agent": [{"agent": "finance", "input": 800, "...": 0, "attempts": 29, "runs": 29}],
+   "by_model": [{"model": "claude-opus-5-5", "input": 1000, "...": 0, "attempts": 38, "runs": 37}],
+   "by_day": [{"date": "2026-10-03", "input": 0, "output": 0, "cache_read": 0, "cache_creation": 0,
+               "cache_hit_ratio": null, "attempts": 0, "runs": 0}]},
+ "skills": [{"skill": "tidy-ledger", "runs": 4, "last_used_at": "...", "versions": [2, 3]}]}
 ```
 
-- **Subscription windows are what Claude Code last reported, not a live
-  query.** The CLI writes a `rate_limit_event` into a run's stream when its
-  rate-limit information changes; orbit stores it in the run's events
-  (`GET /runs/{id}/events`), and this reads the newest one per window from
-  runs created in the last 8 days (`store.RateLimitLookback`: the longest
-  window, `seven_day`, and a day). No Claude Code run, no observation: a
-  window absent from the list was not reported in that time.
+- **Each window is the freshest of two readings, and says which.** `source: "stream"`: the CLI writes a `rate_limit_event` into a run's stream when its rate-limit information changes; orbit stores it in the run's events (`GET /runs/{id}/events`), and this reads the newest one per window from runs created in the last 8 days (`store.RateLimitLookback`: the longest window, `seven_day`, and a day); `run_id` is that run. `source: "poll"`: with `usage_poll` configured, control asks the endpoint Claude Code's own `/usage` reads every few minutes and keeps each answer; this reads the newest successful one from the same 8 days (`run_id` and `status` are `null`: the endpoint reports neither). **The poll is best effort**: the endpoint is undocumented, its shape is the one Claude Code caches from it, and a poll that fails is recorded (`poll.last_error`) while the windows keep the last good reading. Of the two, the one observed later wins (`observed_at`); a tie goes to the stream. A window absent from the list was reported by neither in that time.
+- `poll` is the poller's state: `enabled` (and `every`) as configured, `last_at` the newest poll of any outcome, `last_ok_at` the newest successful one, `last_error` the newest poll's error when it failed, else `null`.
+- `deferral` is low-priority holding (`defer_low_priority`; docs/agents/configuration.md): `enabled`, `threshold` (`usage.DeferLowAbove`, a fraction like `utilization`) and `held`, the scheduled runs held now, oldest hold first: when first and last held, how many times, and the window, reading and source behind the latest hold, and `held_until`, when it is judged again.
 - `window` is the CLI's name for it (`five_hour`, `seven_day`,
   `seven_day_opus`, `seven_day_sonnet`, ...). `status` is `allowed`,
   `allowed_warning` or `rejected`. `utilization` is the fraction of the
@@ -1071,7 +1146,7 @@ A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main
   `resets_at` is when the window resets, `null` when not reported.
   `expired` is true once `resets_at` has passed: the window has reset since
   the observation, so its `utilization` is out of date. `observed_at` is when
-  orbit stored the event and `run_id` the run whose stream carried it.
+  orbit stored the event or made the poll. The endpoint reports percent; it is divided by 100, so both sources are fractions.
 - The CLI's line names one window at top level (`rateLimitType`) and lists
   windows in `unifiedWindows`; each window is taken from the newest event
   that mentions it, and within one event the `unifiedWindows` entry wins.
@@ -1092,6 +1167,8 @@ A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main
   that is not `YYYY-MM-DD` is `400`. `by_day` lists every day of the range,
   oldest first, zero or not. `by_agent` lists agents with a run in the range,
   by name. `by_status` always has all six statuses.
+- **Tokens** are run attempts' token counts (Runs, above) over the same range, by their run's `created_at`. Each entry has `input`, `output`, `cache_read`, `cache_creation`, `cache_hit_ratio` (`cache_read / (cache_read + input + cache_creation)` over the entry, six places, `null` with no prompt tokens), `attempts` (attempts that reported tokens) and `runs` (their runs). `by_agent` lists agents with a reporting attempt in the range, by name; `by_model` models, by name, from each attempt's per-model split (all of an attempt under its `model` when the backend did not split; `""` when it named none); `by_day` every day of the range, oldest first, zero or not.
+- **Skills** are the skills runs created in the range read through orbit's skill tool (`mcp__orbit__skill`, from the journal's tool calls, each call counted whether or not it succeeded), by name: `runs` that called it for the skill, `last_used_at` the newest call, and `versions` the versions those runs were given (their `skills.json`), ascending. A run that only loaded a skill's stub, or read it without orbit's tools (the whole `SKILL.md` in the plugin), is not counted. Always an array.
 
 ## Readiness and drain
 
@@ -1113,12 +1190,13 @@ A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main
 {"checked_at": "...",
  "config": {"valid": true, "loaded_at": "...",
             "last_error": null, "last_error_at": null},
- "queue": {"due": 0, "waiting_continuations": 1, "oldest_due_at": null},
+ "queue": {"due": 0, "waiting_continuations": 1, "deferred": 0, "oldest_due_at": null},
  "running": [{"run_id": "uuid", "agent": "finance", "worker": "orbit/0",
               "attempt": 1, "started_at": "...", "heartbeat_at": "...",
-              "heartbeat_age_seconds": 12.4}],
+              "heartbeat_age_seconds": 12.4,
+              "agent_status": {"state": "working", "since": "...", "source": "hooks", "run_id": "uuid"}}],
  "pending_actions": 2,
- "agents": [{"name": "finance", "enabled": true, "timezone": "America/New_York",
+ "agents": [{"name": "finance", "enabled": true, "priority": "normal", "timezone": "America/New_York",
              "last_success": {"run_id": "uuid", "finished_at": "..."},
              "next_fires": [{"trigger_index": 0, "schedule": "0 8 * * *",
                              "at": "2026-11-02T13:00:00Z"}]}]}
@@ -1132,12 +1210,12 @@ A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main
   `loaded_at`); `null` when none failed.
 - `queue.due` counts queued runs an executor may claim now (behind a running
   run of the same agent, too); `waiting_continuations` counts `continue` runs
-  whose `run_after` is still ahead. `oldest_due_at` is the oldest due run's
+  whose `run_after` is still ahead, and `deferred` scheduled runs held back while the subscription is nearly spent (`/usage` `deferral.held` lists them). `oldest_due_at` is the oldest due run's
   `created_at`.
 - `running` lists running runs, oldest first. `heartbeat_age_seconds` is
   measured by the database clock (`checked_at`); a run is requeued past
   `engine.StaleAfter` (300 s).
-- `agents` is every agent in the configuration in force, by name.
+- `agents` is every agent in the configuration in force, by name, with its `priority` (`normal` or `low`).
   `last_success` is its newest succeeded or skipped run (a gate finding
   nothing to judge is not a stale agent), `null` if none.
   `next_fires` is each schedule trigger's next fire after now, read in the
