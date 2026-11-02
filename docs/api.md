@@ -173,8 +173,7 @@ conversation:
   `reply_to`, when set, is the message it answers. `run_id` is the run that
   read a person's message (`null` until one starts) or the run that asked a
   question.
-- **Runs.** `trigger` is `schedule`, `manual`, `message` or `continue` (the
-  agent asked to be woken again). `status` is
+- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again) or `build` (a ticket's build run, docs/tickets.md). `status` is
   `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
   ended without a backend call because a gate, code, found nothing to judge;
   `gate` names it, and is `null` for every other status). `attempt` counts
@@ -276,37 +275,91 @@ the concatenated `text`: `text` is what the agent narrated while working.
 
 ## Runs, events, artifacts
 
-- `GET /runs?agent=&status=&before=&limit=`: `{"runs": [...]}`, newest
-  first; `before` is an RFC 3339 time (a run's `created_at`). Each run, and
-  `GET /runs/{id}`'s, carries `steps`, counted as a thread's run item counts
-  it.
-- `GET /runs/{id}`: `{"run": {...}, "attempts": [...]}`. Each attempt
-  (oldest first) is `{"attempt", "worker", "runner_kind", "spec_sha",
-  "started_at", "ended_at", "outcome", "session_id", "recovered_from",
-  "recover_skipped", "cost_usd", "session_cost_usd"}`: `outcome` is
-  `succeeded`, `failed`, `handed_back` (stopped by its instance) or `lost`
-  (reaped without a heartbeat), absent while running; `recovered_from` is the
-  attempt whose session it continued, `recover_skipped` why it started over
-  instead. `cost_usd` is the attempt's share, absent when unknown (a killed
-  process saved none); the run's `cost_usd` is every attempt's. The run has
-  also `session_mode` (`fresh`, `resumed`, `live`),
-  `session_parent` and `session_depth` for an agent with a session, and
-  `run_after`, `chain` and `continues` for a `continue` run.
-- `POST /runs/{id}/cancel`: `200 {"cancelled": true}`; queued runs only, 409
-  otherwise
-- `GET /runs/{id}/events?attempt=&after=&limit=`: the backend's raw stream
-- `GET /runs/{id}/artifacts`, `GET /artifacts/{id}`: what the run read and wrote
-- `GET /runs/{id}/deliveries`
+### A run
+
+`GET /runs?agent=&status=&before=&limit=` is `{"runs": [<run>]}`, newest first. `before` is an RFC 3339 time (a run's `created_at`); `limit` defaults to 50, at most 500. `GET /runs/{id}` is `{"run": <run>, "attempts": [<attempt>]}`. A run (`store.Run`):
+
+```json
+{"id": "uuid", "attempt": 1, "agent": "finance", "spec_sha": "hex",
+ "trigger": "schedule", "trigger_index": 0, "scheduled_for": "...",
+ "prompt": "", "status": "succeeded",
+ "runner_kind": "claude-code", "model": "...", "worker": "orbit/0",
+ "created_at": "...", "started_at": "...", "finished_at": "...",
+ "error": "...", "summary": "...", "report": "<markdown>",
+ "output": {}, "usage": {}, "cost_usd": 0.03, "session_id": "...",
+ "session_mode": "fresh", "session_parent": "uuid", "session_depth": 1,
+ "run_after": "...", "continues": "uuid", "chain": 1,
+ "gate": "unchanged", "steps": 4}
+```
+
+- Always present: `id`, `attempt`, `agent`, `spec_sha`, `trigger`, `prompt` (`""` when none), `status`, `created_at` and `steps`. Every other field is omitted when it has no value (not `null`).
+- `trigger` and `status` are as in a thread run item. `trigger_index` and `scheduled_for` are set on a `schedule` run: which of the agent's triggers fired, and the fire time.
+- `runner_kind`, `model` and `worker` are the latest attempt's backend, its model (absent when the runner names none) and the instance that claimed it. `spec_sha` is the spec the latest attempt ran under.
+- `output` is the backend's raw structured output and `usage` its token usage, as it reported them. `cost_usd` is every attempt's cost together.
+- `session_id` is the backend session the run ended in. `session_mode` (`fresh`, `resumed`, `live`), `session_parent` (the run whose session it continued) and `session_depth` are set for an agent with a session.
+- `run_after`, `continues` (the run that asked) and `chain` (its place in the chain, from 1) are set on a `continue` run.
+- `gate` names what ended a `skipped` run.
+- `steps` is the number of tool calls in the latest attempt, counted as a thread's run item counts it.
+
+An attempt (`store.Attempt`), oldest first:
+
+```json
+{"attempt": 2, "worker": "orbit/0", "runner_kind": "claude-code", "spec_sha": "hex",
+ "started_at": "...", "ended_at": "...", "outcome": "succeeded",
+ "session_id": "...", "recovered_from": 1, "recover_skipped": "...",
+ "cost_usd": 0.01, "session_cost_usd": 0.04}
+```
+
+`attempt`, `worker` and `started_at` are always present; the rest is omitted when unset. `outcome` is `succeeded`, `failed`, `skipped`, `handed_back` (stopped by its instance) or `lost` (reaped without a heartbeat), absent while the attempt runs. `recovered_from` is the attempt whose session it continued, `recover_skipped` why it started over instead. `cost_usd` is the attempt's share, absent when unknown (a killed process saved none); `session_cost_usd` is the backend's running total for the session after it.
+
+`POST /runs/{id}/cancel` is `200 {"cancelled": true}` for a queued run, 409 otherwise.
+
+### Events
+
+`GET /runs/{id}/events?attempt=&after=&limit=` is `{"events": [<event>]}`, one attempt's transcript in order: `attempt` (default: the run's latest), the events with `seq` above `after` (default 0), at most `limit` (default 1000, at most 5000). Page by passing the last `seq` as `after`.
+
+```json
+{"attempt": 1, "seq": 12, "at": "...", "kind": "assistant", "payload": {}}
+```
+
+`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.figures_unverified`, and a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`.
+
+### Artifacts
+
+`GET /runs/{id}/artifacts` is `{"artifacts": [<artifact>]}`, by attempt, direction and name, without content:
+
+```json
+{"id": "uuid", "run_id": "uuid", "attempt": 1, "direction": "in",
+ "name": "inputs/transactions.json", "media_type": "application/json",
+ "sha256": "hex", "bytes": 48213, "created_at": "..."}
+```
+
+`direction` is `in` (what the run read) or `out` (`output.json`, what the backend returned). The inputs the model was shown are under `inputs/` (`inputs/<run>-<attempt>/` for an agent with a session); a source only transforms read is under `sources/`; `memory.md`, `messages.json`, `conversation.md`, `system.md`, `prompt.md` and `schema.json` are the rest of what the run was given. `GET /artifacts/{id}` is the content itself, with its `media_type` as `Content-Type` (served with `nosniff` and a `default-src 'none'` CSP).
+
+### Deliveries
+
+`GET /runs/{id}/deliveries` is `{"deliveries": [<delivery>]}`, every notification attempt of the run, oldest first:
+
+```json
+{"id": 7, "run_id": "uuid", "action_id": "uuid", "channel": "phone",
+ "purpose": "approval", "status": "failed", "error": "...", "attempted_at": "..."}
+```
+
+`purpose` is `report`, `failure`, `approval` (an action waiting for a person; `action_id` names it) or `action` (an approved action whose execution failed; `action_id` names it). `status` is `sent` or `failed`, with the channel's `error`. `run_id`, `action_id` and `error` are omitted when unset.
 
 ## Actions
 
-- `GET /actions?agent=&status=pending&run_id=&before=<cursor>&limit=<n>`:
-  `{"actions": [...], "has_more": false, "next_before": null}`, newest
-  first. `status` is as in a thread action, `run_id` narrows to one run's
-  proposals (400 when it is not a UUID). Paging is as for a thread:
-  `next_before` is an opaque cursor, `null` exactly when `has_more` is
-  false; `limit` defaults to 100, at most 500.
-- `GET /actions/{id}`
+`GET /actions?agent=&status=&run_id=&before=<cursor>&limit=<n>` is `{"actions": [<action>], "has_more": false, "next_before": null}`, newest first. `status` is as in a thread action; `run_id` narrows to one run's proposals (400 when it is not a UUID). Paging is as for a thread: `next_before` is an opaque cursor, `null` exactly when `has_more` is false; `limit` defaults to 100, at most 500. `GET /actions/{id}` is `{"action": <action>}`:
+
+```json
+{"id": "uuid", "run_id": "uuid", "agent": "finance", "type": "webhook:home-assistant",
+ "params": {}, "reason": "...", "rule": "approve", "status": "executed",
+ "decided_by": "kanishk", "decided_at": "...", "executed_at": "...",
+ "result": {}, "error": "...", "created_at": "..."}
+```
+
+`rule` is the agent's rule for the type when it was proposed (`auto`, `approve`, `deny`). `decided_by` is the person, or `rule` for an action its rule approved or denied. `result` is what the executor returned; `error` is why it was denied (an unknown type, invalid params, a limit) or why it failed. `decided_by`, `decided_at`, `executed_at`, `result` and `error` are omitted when unset.
+
 - `POST /actions/{id}/approve`, `POST /actions/{id}/reject`: `200 {"ok":
   true}`; 404 for an unknown action; 409 when it was already decided. With
   `{"client_request_id": "..."}` (same rules as `client_message_id`), a retry
@@ -381,6 +434,49 @@ Nothing is deleted. Every change is a new version, kept:
 
 - `GET /agents/{name}/context`: `{"agent", "topics": [{"name", "from": ["spec"|"api"]}], "entries": <count>, "index": "<markdown>"}`. `index` is exactly what a run's prompt carries (with `inputs/_memory.md` for the run's own inputs path), `""` when the agent reads no entries.
 - `PUT /agents/{name}/topics/{topic}`: attach a topic, `{"attached": true, "created": bool}` (`created` false when it was attached already). `DELETE /agents/{name}/topics/{topic}`: detach, `{"detached": true}`, 404 when not attached through the API (a topic the spec names stays until the spec changes). The agent must be configured (404).
+
+## MCP
+
+`/mcp` is an MCP server (Streamable HTTP, stateless) on both listeners, so the Claude apps and Claude Code can talk to orbit's agents. It takes what `/api/v1` takes on the same listener: an authentik access token (verified as above; the person is the author and decider), and on the internal listener the operator token. Without a valid token it answers `401` with `WWW-Authenticate: Bearer resource_metadata="<public_url>/.well-known/oauth-protected-resource/mcp"`. Every request stands alone (no `Mcp-Session-Id`), so a call may land on either instance of a rollout.
+
+| tool | arguments | returns |
+|---|---|---|
+| `list_agents` | none | each configured agent: `name`, `description`, `enabled`, `needs_input`, `open_questions`, `pending_actions`, `last_run` |
+| `list_conversations` | `agent`, `archived`, `limit` | as `GET /agents/{name}/conversations` |
+| `create_conversation` | `agent`, `title`, `message`, `wait_seconds` | `conversation_id`, `message_id`, `run_id`, and `reply` as `send_message` |
+| `send_message` | `body`, and `agent` (its default conversation) or `conversation_id`; `reply_to`, `wait_seconds` | `message_id`, `run_id`, `reply`: the run as a thread run item (`report`, `questions`, `actions`, `status`) |
+| `wait_for_reply` | `run_id`, `wait_seconds` | `reply`, the run as a thread run item |
+| `read_thread` | `agent` or `conversation_id`, `limit` (default 20), `before` | `items`, `has_more`, `next_before`, as a thread page |
+| `list_actions` | `agent`, `status` (default `pending`; `all`) | `actions` |
+| `approve_action`, `reject_action` | `action_id` | the decided `action`; a decided one is an error |
+
+- **Waiting.** `send_message` and `create_conversation` wait for the run they woke up to `wait_seconds` (default 45, at most 300; `-1` returns at once). A run still going when the wait ends is returned with its status and a `note` to call `wait_for_reply`. A message that woke no run (`wake_on_message` off) says so in `note`.
+- **Streaming.** When the call carries a `progressToken`, the wait sends the run's narration (the stream's `text` and `tool` events, a tool as `<name> <summary>`) as progress notifications on the call's response.
+- Results are one text content block of indented JSON. A tool error (an unknown agent, a missing field, a store conflict) is a tool result with `isError`.
+
+### Signing in: orbit's OAuth proxy
+
+authentik has no dynamic client registration, which the Claude apps require, so orbit is the authorization server an MCP client sees, and authentik signs the person in under orbit's own client. Nothing is stored: client ids, the state sent through authentik, codes and refresh tokens are sealed (AES-GCM) under a key derived from `ORBIT_API_TOKEN`, so either instance can finish a flow and rotating that token ends every registration and refresh token (a connector is then re-added).
+
+| path | |
+|---|---|
+| `GET /.well-known/oauth-protected-resource`, `.../oauth-protected-resource/mcp` | RFC 9728: `resource` `<public_url>/mcp`, `authorization_servers` `[<public_url>]` |
+| `GET /.well-known/oauth-authorization-server` (and `.../mcp`) | RFC 8414: issuer `<public_url>`, the endpoints below, `S256` only, `token_endpoint_auth_methods_supported: ["none"]` |
+| `POST /oauth/register` | RFC 7591: any number of `redirect_uris`, each `https` on an allowed host or `http(s)` on a loopback address; `201` with a `client_id` (public client, no secret) |
+| `GET /oauth/authorize` | `response_type=code`, `client_id`, a registered `redirect_uri`, `code_challenge` with `S256` (required), `state`; redirects to authentik with orbit's client, scope `openid profile email offline_access` |
+| `GET /oauth/callback` | authentik's redirect: exchanges its code, checks the access token as `/mcp` would (so a person outside the group fails here, with the reason), and redirects to the client with a code (valid 2 minutes, once) and `iss` |
+| `POST /oauth/token` | `authorization_code` (with `code_verifier`, the same `client_id` and `redirect_uri`) or `refresh_token`; returns authentik's access token and orbit's sealed refresh token, which refreshes through authentik |
+
+The access token is authentik's own (the `orbit-mcp` provider), so its issuer and client id are accepted wherever an authentik token is.
+
+| variable | meaning |
+|---|---|
+| `ORBIT_MCP_OAUTH_ISSUER` | the authentik provider's issuer, `https://auth.kanishksachdev.com/application/o/orbit-mcp/`. Unset: no OAuth endpoints, and `/mcp` takes only a token a client already has. Added to `ORBIT_OIDC_ISSUER`'s list. |
+| `ORBIT_MCP_OAUTH_CLIENT_ID` | that provider's client id; added to `ORBIT_OIDC_CLIENT_IDS`. |
+| `ORBIT_MCP_OAUTH_CLIENT_SECRET` | that provider's client secret (a confidential client). |
+| `ORBIT_MCP_REDIRECT_HOSTS` | comma list of hosts a client may redirect to (the host or a subdomain of it), default `claude.ai,claude.com`. Loopback is always allowed. |
+
+`ORBIT_OIDC_GROUP` is required with the issuer. The authentik provider needs the redirect URI `<public_url>/oauth/callback` (strict), the `openid`, `email`, `profile` and `offline_access` scope mappings (profile carries `preferred_username` and `groups`), the `authorization_code` and `refresh_token` grants, and the application bound to the group. traefik must route `/mcp`, `/.well-known/oauth-` and `/oauth/` past forward-auth, as it does `/api/`.
 
 ## Usage
 

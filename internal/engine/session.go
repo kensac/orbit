@@ -2,9 +2,7 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"math"
-	"os"
 	"time"
 
 	"github.com/kensac/orbit/internal/runner"
@@ -52,12 +50,13 @@ func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.Claime
 	case prior.Depth >= maxSessionDepth:
 		reason = "the session holds the most runs it may"
 	default:
-		path, ok := runner.SessionFile(home, workdir, prior.SessionID)
-		if ok {
-			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-				reason = "the session's transcript is gone (is " + e.DataDir + " a persistent volume?)"
-			} else if err != nil {
+		if _, ok := runner.SessionFile(home, workdir, prior.SessionID); ok {
+			present, err := e.ensureSession(ctx, home, workdir, prior.SessionID)
+			if err != nil {
 				return nil, false, err
+			}
+			if !present {
+				reason = "the session's transcript is gone (is " + e.DataDir + " a persistent volume?" + e.storeHint() + ")"
 			}
 		}
 	}
@@ -98,4 +97,12 @@ func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.Claime
 		return e.Store.SetSession(ctx, c.ID, c.Attempt, mode, parent, depth)
 	}
 	return sess, reason == "", nil
+}
+
+// storeHint adds where else a missing transcript was looked for.
+func (e *Engine) storeHint() string {
+	if e.SessionStore {
+		return " It is not in the session store either"
+	}
+	return ""
 }

@@ -60,6 +60,17 @@ type Engine struct {
 	// Drain is this instance's drain; a draining instance starts no build
 	// sandbox (build.go).
 	Drain *Drain
+	// Outbox makes this a worker's engine (orbit worker): it holds no
+	// channel credential and no Secret, so SetConfig builds no channels
+	// and every notification is recorded for control to send
+	// (DeliverOutbox), with the links only control can sign.
+	Outbox bool
+	// Worker names this instance in the outbox and session rows it writes.
+	Worker string
+	// SessionStore keeps Claude Code transcripts in the database as well
+	// as on this host's volume, so a session continues on whichever host
+	// claims its next run (sessionstore.go).
+	SessionStore bool
 
 	mu  sync.RWMutex
 	cfg *Snapshot
@@ -84,6 +95,9 @@ const StaleAfter = 10 * heartbeatEvery
 func (e *Engine) SetConfig(cfg *spec.Config) error {
 	chans := map[string]notify.Channel{}
 	for name, c := range cfg.Deployment.Channels {
+		if e.Outbox {
+			break
+		}
 		ch, err := notify.New(name, c, e.Env, e.Client)
 		if err != nil {
 			return err
@@ -137,6 +151,8 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		// another instance, continues its session (planRecovery).
 		cost, total := st.spent()
 		log.Info("handed back", "attempt", c.Attempt, "session", st.sessionID)
+		// The next attempt may be claimed on another host.
+		e.saveSession(ctx, c, st.home, st.workdir, st.sessionID)
 		return e.Store.HandBack(context.WithoutCancel(ctx), c.ID, c.Attempt, cost, total)
 	}
 	var sk *gateSkip
@@ -145,6 +161,11 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 	}
 	if err != nil {
 		return e.fail(ctx, snap, a, c, start, err, res)
+	}
+	if st.keeps && res != nil {
+		// Stored before the run is recorded as succeeded, so the
+		// conversation's next run, claimed on any host, finds it.
+		e.saveSession(ctx, c, st.home, st.workdir, res.SessionID)
 	}
 	return e.succeed(ctx, snap, a, c, start, out, res)
 }
@@ -242,7 +263,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			}
 		}()
 	}
-	st.home, st.workdir = home, workdir
+	st.home, st.workdir, st.keeps = home, workdir, withSession
 	if err := os.MkdirAll(filepath.Join(workdir, inputsDir), 0o700); err != nil {
 		return nil, nil, err
 	}
@@ -689,6 +710,19 @@ func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, run
 		return
 	}
 	ctx = context.WithoutCancel(ctx)
+	if e.Outbox {
+		// Control adds the link (an approval link is signed with a secret
+		// a worker does not hold) when it sends.
+		m.Link, m.Buttons = "", nil
+		b, err := json.Marshal(m)
+		if err == nil {
+			err = e.Store.Enqueue(ctx, e.Worker, store.OutboxItem{Agent: a.Name, RunID: runID, ActionID: actionID, Purpose: purpose, Message: b})
+		}
+		if err != nil {
+			e.Log.Error("record notification for control", "purpose", purpose, "err", err)
+		}
+		return
+	}
 	for _, name := range a.Notify.Channels {
 		ch := snap.Channels[name]
 		sendCtx, cancel := context.WithTimeout(ctx, time.Minute)
@@ -732,6 +766,37 @@ func (e *Engine) ApprovalSig(actionID string) string {
 func (e *Engine) CheckApprovalSig(actionID, sig string) bool {
 	want := e.ApprovalSig(actionID)
 	return hmac.Equal([]byte(want), []byte(sig))
+}
+
+// DeliverOutbox sends every notification workers recorded, through this
+// instance's channels, with the links it signs, and records each attempt
+// as deliver does. Control instances only.
+func (e *Engine) DeliverOutbox(ctx context.Context) error {
+	for {
+		it, err := e.Store.ClaimOutbox(ctx)
+		if err != nil || it == nil {
+			return err
+		}
+		snap := e.Current()
+		var m notify.Message
+		if err := json.Unmarshal(it.Message, &m); err != nil {
+			e.Log.Error("outbox: unreadable notification", "id", it.ID, "err", err)
+		} else if a, ok := snap.Config.Agents[it.Agent]; !ok {
+			e.Log.Warn("outbox: agent no longer configured; not sent", "id", it.ID, "agent", it.Agent)
+		} else {
+			switch {
+			case it.Purpose == "approval" && it.ActionID != nil:
+				m.Link = e.ApprovalLink(snap, *it.ActionID)
+				m.Buttons = []notify.Button{{Label: "Review", URL: m.Link}}
+			case it.RunID != nil:
+				m.Link = e.runLink(snap, *it.RunID)
+			}
+			e.deliver(ctx, snap, a, it.RunID, it.ActionID, it.Purpose, m)
+		}
+		if err := e.Store.OutboxSent(context.WithoutCancel(ctx), it.ID); err != nil {
+			return err
+		}
+	}
 }
 
 // ExecuteActions runs every approved action, one at a time, until none is
