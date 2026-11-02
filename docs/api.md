@@ -253,7 +253,11 @@ A message carries uploads with `attachments` (below): ids of uploads of the same
 
 ## Chat agents
 
-An agent with `chat: true` (the built-in `orbit` is one) is a Claude Code session rather than a report writer: its run's `report` is the session's final message, as written, and `summary` that reply's first line. It changes its memory, asks questions and proposes actions with orbit's tools during the turn instead of in a schema, so its runs carry `questions` and `actions` as any run does. Each conversation has its own workspace (`GET /conversations/{id}/files`): files the agent writes, and the person's uploads, stay between messages. With `sandbox: workstation` (the built-in's, when sandboxd is configured) the session runs in a sandbox container with Claude Code's full tool set and the open internet; `sandbox: build` with the tools it names.
+An agent with `chat: true` (the built-in `orbit` is one) is a Claude Code session rather than a report writer: its run's `report` is the session's final message, as written, and `summary` that reply's first line. It changes its memory, asks questions and proposes actions with orbit's tools during the turn instead of in a schema, so its runs carry `questions` and `actions` as any run does. Each conversation has its own workspace (`GET /conversations/{id}/files`): files the agent writes, and the person's uploads, stay between messages. **Instructions.** In a run that answers its person's message, a chat agent's actions are that person's instructions, as typing into Claude Code is: an action whose rule is `auto`, or `approve` (the person asked for it), executes during the turn and the agent reads its result; the row records `instructed_by` and, for `approve`, `decided_by` as that person. A run nobody's message woke (a schedule, a manual run, a continuation) keeps its rules: `approve` waits. `deny` is never offered. On a worker, which holds no executor credentials, every action waits for control.
+
+**GitHub** (the built-in has `github:clone` auto, `github:pr` and `github:merge` approve): `github:clone {repo, dir}` puts a repository's default branch into the workspace; `github:pr {repo, dir, branch, title, body, push_only}` takes the working tree at `dir` (never its `.git`), commits it as the App's bot user on top of the default branch, holds it to the build's diff policy (no `.github/`, no credential in an added line), pushes `orbit/chat/<branch>` and opens or updates its PR; `github:merge` merges it once every required check passed. Tokens stay in orbit; the repositories are `github.repositories`.
+
+With `sandbox: workstation` (the built-in's, when sandboxd is configured) the session runs in a sandbox container with Claude Code's full tool set and the open internet; `sandbox: build` with the tools it names.
 
 ## A conversation's thread
 
@@ -526,7 +530,7 @@ A row:
  "purpose": "approval", "status": "failed", "error": "...", "attempted_at": "..."}
 ```
 
-`purpose` is `report`, `failure`, `approval` (an action waiting for a person; `action_id` names it) or `action` (an approved action whose execution failed; `action_id` names it). `status` is `sent` or `failed`, with the channel's `error`. `run_id`, `action_id` and `error` are omitted when unset.
+`purpose` is `report`, `failure`, `mail_reply` (the answer to a mail, to its sender), `mail_failure` (the short note that a run answering a mail failed), `approval` (an action waiting for a person; `action_id` names it) or `action` (an approved action whose execution failed; `action_id` names it). `status` is `sent` or `failed`, with the channel's `error`. `run_id`, `action_id` and `error` are omitted when unset.
 
 ## Actions
 
@@ -536,10 +540,10 @@ A row:
 {"id": "uuid", "run_id": "uuid", "agent": "finance", "type": "webhook:home-assistant",
  "params": {}, "reason": "...", "rule": "approve", "status": "executed",
  "decided_by": "kanishk", "decided_at": "...", "executed_at": "...",
- "result": {}, "error": "...", "created_at": "..."}
+ "result": {}, "error": "...", "created_at": "...", "instructed_by": "kanishk"}
 ```
 
-`rule` is the agent's rule for the type when it was proposed (`auto`, `approve`, `deny`). `decided_by` is the person, or `rule` for an action its rule approved or denied. `result` is what the executor returned; `error` is why it was denied (an unknown type, invalid params, a limit) or why it failed. `decided_by`, `decided_at`, `executed_at`, `result` and `error` are omitted when unset.
+`rule` is the agent's rule for the type when it was proposed (`auto`, `approve`, `deny`). `decided_by` is the person, or `rule` for an action its rule approved or denied. `instructed_by` is the person whose message a chat agent was answering when it proposed the action: their message is the instruction (Chat agents, above), so an `approve` action they asked for is approved by them (`decided_by` is that person) without a second approval. `result` is what the executor returned; `error` is why it was denied (an unknown type, invalid params, a limit) or why it failed. `decided_by`, `decided_at`, `executed_at`, `result` and `error` are omitted when unset.
 
 - `POST /actions/{id}/approve`, `POST /actions/{id}/reject`: `200 {"ok":
   true}`; 404 for an unknown action; 409 when it was already decided. With
@@ -1008,12 +1012,20 @@ A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main
  "from": "2026-10-03", "to": "2026-11-01",
  "subscription": {
    "windows": [
+     {"window": "five_hour", "status": null, "utilization": 0.42,
+      "resets_at": "2026-11-01T19:00:00Z", "expired": false,
+      "observed_at": "...", "source": "poll", "run_id": null},
      {"window": "seven_day", "status": "allowed", "utilization": 0.14,
       "resets_at": "2026-11-08T12:00:00Z", "expired": false,
-      "observed_at": "...", "run_id": "uuid"}],
+      "observed_at": "...", "source": "stream", "run_id": "uuid"}],
    "overage": {"status": "rejected", "resets_at": null,
                "disabled_reason": "org_level_disabled", "in_use": false,
-               "observed_at": "...", "run_id": "uuid"}},
+               "observed_at": "...", "run_id": "uuid"},
+   "poll": {"enabled": true, "every": "5m0s", "last_at": "...", "last_ok_at": "...", "last_error": null}},
+ "deferral": {"enabled": true, "threshold": 0.8,
+              "held": [{"run_id": "uuid", "agent": "digest", "first_at": "...", "last_at": "...", "times": 3,
+                        "window": "five_hour", "utilization": 0.86, "threshold": 0.8, "source": "poll",
+                        "observed_at": "...", "held_until": "..."}]},
  "cost": {
    "total": {"api_equivalent_usd": 1.234567, "runs": 42, "runs_with_cost": 40,
              "by_status": {"queued": 0, "running": 1, "succeeded": 38, "failed": 3, "cancelled": 0, "skipped": 0}},
@@ -1022,13 +1034,9 @@ A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main
    "by_day": [{"date": "2026-10-03", "api_equivalent_usd": 0.000000, "runs": 0}]}}
 ```
 
-- **Subscription windows are what Claude Code last reported, not a live
-  query.** The CLI writes a `rate_limit_event` into a run's stream when its
-  rate-limit information changes; orbit stores it in the run's events
-  (`GET /runs/{id}/events`), and this reads the newest one per window from
-  runs created in the last 8 days (`store.RateLimitLookback`: the longest
-  window, `seven_day`, and a day). No Claude Code run, no observation: a
-  window absent from the list was not reported in that time.
+- **Each window is the freshest of two readings, and says which.** `source: "stream"`: the CLI writes a `rate_limit_event` into a run's stream when its rate-limit information changes; orbit stores it in the run's events (`GET /runs/{id}/events`), and this reads the newest one per window from runs created in the last 8 days (`store.RateLimitLookback`: the longest window, `seven_day`, and a day); `run_id` is that run. `source: "poll"`: with `usage_poll` configured, control asks the endpoint Claude Code's own `/usage` reads every few minutes and keeps each answer; this reads the newest successful one from the same 8 days (`run_id` and `status` are `null`: the endpoint reports neither). **The poll is best effort**: the endpoint is undocumented, its shape is the one Claude Code caches from it, and a poll that fails is recorded (`poll.last_error`) while the windows keep the last good reading. Of the two, the one observed later wins (`observed_at`); a tie goes to the stream. A window absent from the list was reported by neither in that time.
+- `poll` is the poller's state: `enabled` (and `every`) as configured, `last_at` the newest poll of any outcome, `last_ok_at` the newest successful one, `last_error` the newest poll's error when it failed, else `null`.
+- `deferral` is low-priority holding (`defer_low_priority`; docs/agents/configuration.md): `enabled`, `threshold` (`usage.DeferLowAbove`, a fraction like `utilization`) and `held`, the scheduled runs held now, oldest hold first: when first and last held, how many times, and the window, reading and source behind the latest hold, and `held_until`, when it is judged again.
 - `window` is the CLI's name for it (`five_hour`, `seven_day`,
   `seven_day_opus`, `seven_day_sonnet`, ...). `status` is `allowed`,
   `allowed_warning` or `rejected`. `utilization` is the fraction of the
@@ -1036,7 +1044,7 @@ A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main
   `resets_at` is when the window resets, `null` when not reported.
   `expired` is true once `resets_at` has passed: the window has reset since
   the observation, so its `utilization` is out of date. `observed_at` is when
-  orbit stored the event and `run_id` the run whose stream carried it.
+  orbit stored the event or made the poll. The endpoint reports percent; it is divided by 100, so both sources are fractions.
 - The CLI's line names one window at top level (`rateLimitType`) and lists
   windows in `unifiedWindows`; each window is taken from the newest event
   that mentions it, and within one event the `unifiedWindows` entry wins.
@@ -1078,12 +1086,12 @@ A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main
 {"checked_at": "...",
  "config": {"valid": true, "loaded_at": "...",
             "last_error": null, "last_error_at": null},
- "queue": {"due": 0, "waiting_continuations": 1, "oldest_due_at": null},
+ "queue": {"due": 0, "waiting_continuations": 1, "deferred": 0, "oldest_due_at": null},
  "running": [{"run_id": "uuid", "agent": "finance", "worker": "orbit/0",
               "attempt": 1, "started_at": "...", "heartbeat_at": "...",
               "heartbeat_age_seconds": 12.4}],
  "pending_actions": 2,
- "agents": [{"name": "finance", "enabled": true, "timezone": "America/New_York",
+ "agents": [{"name": "finance", "enabled": true, "priority": "normal", "timezone": "America/New_York",
              "last_success": {"run_id": "uuid", "finished_at": "..."},
              "next_fires": [{"trigger_index": 0, "schedule": "0 8 * * *",
                              "at": "2026-11-02T13:00:00Z"}]}]}
@@ -1097,12 +1105,12 @@ A revision is anything git resolves in the mirror: a branch, a tag, a sha, `main
   `loaded_at`); `null` when none failed.
 - `queue.due` counts queued runs an executor may claim now (behind a running
   run of the same agent, too); `waiting_continuations` counts `continue` runs
-  whose `run_after` is still ahead. `oldest_due_at` is the oldest due run's
+  whose `run_after` is still ahead, and `deferred` scheduled runs held back while the subscription is nearly spent (`/usage` `deferral.held` lists them). `oldest_due_at` is the oldest due run's
   `created_at`.
 - `running` lists running runs, oldest first. `heartbeat_age_seconds` is
   measured by the database clock (`checked_at`); a run is requeued past
   `engine.StaleAfter` (300 s).
-- `agents` is every agent in the configuration in force, by name.
+- `agents` is every agent in the configuration in force, by name, with its `priority` (`normal` or `low`).
   `last_success` is its newest succeeded or skipped run (a gate finding
   nothing to judge is not a stale agent), `null` if none.
   `next_fires` is each schedule trigger's next fire after now, read in the

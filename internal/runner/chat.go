@@ -18,6 +18,7 @@ import (
 	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/workspace"
 )
 
 // A chat run is a plain Claude Code session (docs/ARCHITECTURE.md, Chat
@@ -215,35 +216,73 @@ type chatProc interface {
 	Exited() <-chan struct{}
 }
 
-// chatTools routes a process's MCP and permission requests to the turn in
-// progress: a live process serves many runs, each with its own tools,
-// level and person.
+// chatTools routes a process's MCP requests to the turn in progress: a
+// live process serves many runs, each with its own tools.
 type chatTools struct {
 	mu   sync.Mutex
 	chat *Chat
+	ws   Workspace
+	// emit records the turn's events: a permission decision is one.
 	emit func(Event)
 }
 
-func (t *chatTools) set(c *Chat, emit func(Event)) {
+func (t *chatTools) set(c *Chat, ws Workspace, emit func(Event)) {
 	t.mu.Lock()
-	t.chat, t.emit = c, emit
+	t.chat, t.ws, t.emit = c, ws, emit
 	t.mu.Unlock()
 }
 
-func (t *chatTools) current() (*Chat, func(Event)) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.chat, t.emit
+// Workspace is the turn's workspace as orbit's tools reach it while the CLI
+// runs: the sandbox's /work, or the workdir on this host.
+type Workspace interface {
+	// Put unpacks a tar under dir (relative to the workspace).
+	Put(ctx context.Context, dir string, tar []byte) error
+	// Get packs dir as a tar, entries relative to it.
+	Get(ctx context.Context, dir string) ([]byte, error)
+}
+
+type workspaceKey struct{}
+
+// WorkspaceOf is the workspace of the turn a chat tool call came from.
+func WorkspaceOf(ctx context.Context) Workspace {
+	ws, _ := ctx.Value(workspaceKey{}).(Workspace)
+	return ws
+}
+
+// LocalWorkspace is a workspace directory on this host.
+type LocalWorkspace string
+
+// Put unpacks tar under dir.
+func (l LocalWorkspace) Put(_ context.Context, dir string, tar []byte) error {
+	_, err := workspace.Unpack(strings.NewReader(string(tar)), workspace.Into(filepath.Join(string(l), filepath.FromSlash(dir))))
+	return err
+}
+
+// Get packs dir.
+func (l LocalWorkspace) Get(_ context.Context, dir string) ([]byte, error) {
+	p := filepath.Join(string(l), filepath.FromSlash(dir))
+	if _, err := os.Stat(p); err != nil {
+		return nil, err
+	}
+	tree, _, err := workspace.Pack(workspace.Tree{Dir: p})
+	return tree, err
 }
 
 func (t *chatTools) handler() claudeproto.Handler {
 	return claudeproto.Handler{Name: "orbit",
 		MCP: func(ctx context.Context, req claudeproto.MCPMessage) (json.RawMessage, error) {
-			c, _ := t.current()
+			t.mu.Lock()
+			c, ws := t.chat, t.ws
+			t.mu.Unlock()
+			if ws != nil {
+				ctx = context.WithValue(ctx, workspaceKey{}, ws)
+			}
 			return serveMCP(ctx, c, req)
 		},
 		CanUseTool: func(ctx context.Context, req claudeproto.PermissionRequest) (claudeproto.Permission, error) {
-			c, emit := t.current()
+			t.mu.Lock()
+			c, emit := t.chat, t.emit
+			t.mu.Unlock()
 			decide := noPrompt
 			if c != nil && c.Prompt != nil {
 				decide = c.Prompt
@@ -385,8 +424,12 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			return nil, err
 		}
 	}
-	p.tools.set(req.Chat, emit)
-	defer p.tools.set(nil, nil)
+	var ws Workspace = LocalWorkspace(req.Workdir)
+	if sb, ok := p.proc.(*sandboxProc); ok {
+		ws = sb
+	}
+	p.tools.set(req.Chat, ws, emit)
+	defer p.tools.set(nil, nil, nil)
 	if started && req.Chat.Level == spec.LevelAuto {
 		if _, err := applyLevel(ctx, p.proc, req.Chat.Level, emit); err != nil {
 			dropOrKill(sess, p)
@@ -566,6 +609,29 @@ func (p *sandboxProc) push(ctx context.Context, paths []string) error {
 		err = fmt.Errorf("tar exited %d: %s", code, claudeproto.LastLines(stderr.String(), 2))
 	}
 	return err
+}
+
+// Put unpacks a tar under dir in the running sandbox, with tar inside it.
+func (p *sandboxProc) Put(ctx context.Context, dir string, tree []byte) error {
+	var stderr claudeproto.Tail
+	code, err := p.sb.Client.Attach(ctx, p.id, sandbox.AttachRequest{Argv: []string{"sh", "-c", `mkdir -p "$1" && tar -xf - -C "$1"`, "sh", sandbox.WorkDir + "/" + dir}},
+		strings.NewReader(string(tree)), io.Discard, &stderr)
+	if err == nil && code != 0 {
+		err = fmt.Errorf("tar exited %d: %s", code, claudeproto.LastLines(stderr.String(), 2))
+	}
+	return err
+}
+
+// Get packs dir of the running sandbox.
+func (p *sandboxProc) Get(ctx context.Context, dir string) ([]byte, error) {
+	var out strings.Builder
+	var stderr claudeproto.Tail
+	code, err := p.sb.Client.Attach(ctx, p.id, sandbox.AttachRequest{Argv: []string{"tar", "-cf", "-", "-C", sandbox.WorkDir + "/" + dir, "."}},
+		nil, &out, &stderr)
+	if err == nil && code != 0 {
+		err = fmt.Errorf("tar exited %d: %s", code, claudeproto.LastLines(stderr.String(), 2))
+	}
+	return []byte(out.String()), err
 }
 
 // Close ends the CLI (stdin closed, it exits after its turn), then removes

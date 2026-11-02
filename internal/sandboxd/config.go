@@ -34,6 +34,8 @@ type Config struct {
 	// (ORBIT_SANDBOX_WORKSTATION_PROXY): one that allows any public host.
 	// Unset refuses that profile.
 	WorkstationProxy string
+	// WorkstationNetwork is the internal network a workstation profile's sandboxes join instead of Network (ORBIT_SANDBOX_WORKSTATION_NETWORK), with WorkstationProxy on it. Required with WorkstationProxy and never Network: a build on the same network as the open proxy could name that proxy and leave its allowlist behind.
+	WorkstationNetwork string
 	// Runtime is "" (runc) or "runsc" (gVisor, when the host has it)
 	// (ORBIT_SANDBOX_RUNTIME).
 	Runtime string
@@ -74,10 +76,11 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		Proxy:   def("ORBIT_SANDBOX_PROXY", "orbit-egress:3128"),
 		Runtime: getenv("ORBIT_SANDBOX_RUNTIME"),
 
-		WorkstationProxy: getenv("ORBIT_SANDBOX_WORKSTATION_PROXY"),
-		Docker:           def("ORBIT_SANDBOX_DOCKER_SOCKET", "/var/run/docker.sock"),
-		BoxImage:         getenv("ORBIT_SANDBOX_BOX_IMAGE"),
-		BoxRuntime:       getenv("ORBIT_SANDBOX_BOX_RUNTIME"),
+		WorkstationProxy:   getenv("ORBIT_SANDBOX_WORKSTATION_PROXY"),
+		WorkstationNetwork: getenv("ORBIT_SANDBOX_WORKSTATION_NETWORK"),
+		Docker:             def("ORBIT_SANDBOX_DOCKER_SOCKET", "/var/run/docker.sock"),
+		BoxImage:           getenv("ORBIT_SANDBOX_BOX_IMAGE"),
+		BoxRuntime:         getenv("ORBIT_SANDBOX_BOX_RUNTIME"),
 	}
 	return c, c.Validate()
 }
@@ -94,8 +97,17 @@ func (c Config) Validate() error {
 	if !imageRE.MatchString(c.Image) {
 		errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_IMAGE %q must be pinned by digest (name@sha256:...)", c.Image))
 	}
-	if !networkRE.MatchString(c.Network) || c.Network == "host" || c.Network == "bridge" || c.Network == "none" {
+	if !userNetwork(c.Network) {
 		errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_NETWORK %q must name a user-defined network", c.Network))
+	}
+	switch {
+	case c.WorkstationProxy == "" && c.WorkstationNetwork != "":
+		errs = append(errs, errors.New("ORBIT_SANDBOX_WORKSTATION_NETWORK is set without ORBIT_SANDBOX_WORKSTATION_PROXY"))
+	case c.WorkstationProxy == "":
+	case !userNetwork(c.WorkstationNetwork):
+		errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_WORKSTATION_NETWORK %q must name a user-defined network (the workstation profile needs its own)", c.WorkstationNetwork))
+	case c.WorkstationNetwork == c.Network:
+		errs = append(errs, errors.New("ORBIT_SANDBOX_WORKSTATION_NETWORK must differ from ORBIT_SANDBOX_NETWORK: a build beside the open proxy could use it"))
 	}
 	if host, port, err := net.SplitHostPort(c.Proxy); err != nil || host == "" || port == "" || strings.ContainsAny(host, "/@ ") {
 		errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_PROXY %q must be host:port", c.Proxy))
@@ -123,6 +135,10 @@ func (c Config) Validate() error {
 		errs = append(errs, fmt.Errorf("ORBIT_SANDBOX_DOCKER_SOCKET %q must be an absolute path", c.Docker))
 	}
 	return errors.Join(errs...)
+}
+
+func userNetwork(n string) bool {
+	return networkRE.MatchString(n) && n != "host" && n != "bridge" && n != "none"
 }
 
 // validListen refuses an address that would listen on every interface: on a
