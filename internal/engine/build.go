@@ -154,13 +154,7 @@ func (e *Engine) build(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 		return nil, err
 	}
 
-	seq := 0
-	emit := func(kind string, payload []byte) {
-		seq++
-		if err := e.Store.AppendEvent(context.WithoutCancel(ctx), c.ID, c.Attempt, seq, kind, payload); err != nil {
-			log.Warn("append event", "err", err)
-		}
-	}
+	emit := e.events(ctx, c, log, false).emit
 	job := build.Job{
 		RunID: c.ID, Attempt: c.Attempt, TicketID: t.ID, Title: t.Title, Repo: *t.Repo,
 		Plan: b.Plan, PlanVersion: b.PlanVersion, Ticket: ticket, Purpose: b.Purpose, Failure: b.Failure, Review: review,

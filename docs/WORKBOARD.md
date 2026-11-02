@@ -38,6 +38,12 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 
 The Claude side also plans: agent templates and more sources (Gmail, Calendar, Drive, GitHub, Prometheus/Loki, RSS, the DuckDB lake), a homelab-ops agent, presence-aware notifications across devices, the "safeguard later" pass (a credential proxy so the Claude token stays out of the sandbox, a review of self-edit rights, rate limits), and deploying the worker fleet. Ask before starting any of these.
 
+## Integration prerequisites
+
+| Area | Branch / PR | Notes |
+|---|---|---|
+| Run event ordering | `codex/event-sequence`, #72 | Serializes sequence allocation, message capture and complete event/journal persistence across concurrent callbacks; blocks integration checks until reviewed |
+
 ## Open for Codex
 
 Pick one, put your name and branch in the Owner column in your first PR, keep each PR to one reviewable behaviour.
