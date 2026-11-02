@@ -233,8 +233,10 @@ type Agent struct {
 	Transforms []Transform `yaml:"transforms,omitempty" json:"transforms,omitempty"`
 	// Gates end a scheduled run without a backend call when code finds
 	// nothing to judge; the run is skipped, naming the gate.
-	Gates   []Gate     `yaml:"gates,omitempty" json:"gates,omitempty"`
-	Tools   []string   `yaml:"tools,omitempty" json:"tools,omitempty"`
+	Gates []Gate   `yaml:"gates,omitempty" json:"gates,omitempty"`
+	Tools []string `yaml:"tools,omitempty" json:"tools,omitempty"`
+	// Web limits WebFetch to named domains on orbit's host (web.go).
+	Web     *WebSpec   `yaml:"web,omitempty" json:"web,omitempty"`
 	Actions ActionSet  `yaml:"actions,omitempty" json:"actions,omitempty"`
 	Notify  NotifySpec `yaml:"notify,omitempty" json:"notify,omitempty"`
 	// MessagesTrigger starts a run when a person sends the agent a message.
@@ -1344,6 +1346,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("sandbox: needs sandboxd in orbit.yaml (a sandbox: or build: section)")
 		}
 	}
+	errs = append(errs, a.validateWeb()...)
 	errs = append(errs, c.validateTrust(a)...)
 	errs = append(errs, c.validateAgentConnectors(a)...)
 	if ss := a.Session; ss != nil {
