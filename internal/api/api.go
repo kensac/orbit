@@ -147,6 +147,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/review", s.submitReview)
 	s.memoryRoutes(api)
 	s.skillsRoutes(api)
+	s.sessionRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
 
