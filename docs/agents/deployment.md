@@ -8,6 +8,15 @@ orbit's control instance runs on hetzner, from `hetzner-vps-config/compose.orbit
 every push to main, for amd64 and arm64. hetzner pins a digest; a release
 reaches it when that pin moves.
 
+### The workstation image
+
+`ghcr.io/kensac/orbit-workstation:{sha-<commit>,latest}` (`deploy/workstation.Dockerfile`, workflow `workstation.yml`) is an agent's persistent box: a container sandboxd keeps per agent under gVisor (`runsc`), where a person gets Claude Code in a browser terminal as on a laptop and the agent's own turns run beside it. It runs on hetzner (amd64) and oci (arm64), so it is built for both; a pull request that touches it builds it natively on each architecture and runs every tool's `--version` as its user, and main pushes it. Like the build image it is pinned by digest where it runs, so a push reaches a box only when that pin moves.
+
+- **Tools:** Debian trixie with git, jq, ripgrep, fd, fzf, curl, wget, make, build-essential, tmux, neovim, nano, sqlite3, psql, ssh, less, procps, iproute2, unzip and sudo; Go (go.mod's toolchain), Node 24 with npm and pnpm (corepack, `deploy/workstation/package.json`), python3 with uv, yq, gh, and Docker (engine, CLI, containerd, buildx, compose) for a dockerd inside the box; Claude Code at deploy/cli's lockfile with its auto-updater off.
+- **User:** `agent`, uid 10001 (sandboxd's uid), `HOME=/home/agent`, passwordless sudo (which needs a container without `no-new-privileges`), in the `docker` group. `/work` is its own. Locale `en_US.UTF-8`, `TERM=xterm-256color`; `/etc/tmux.conf` sets `set-clipboard on`, `window-size latest`, `mouse on` and 10,000 lines of history.
+- **GitHub:** the image holds no credential. When orbit writes a token to `/run/orbit/gh-token`, the `gh` wrapper (`/usr/local/bin/gh`) exports it as `GH_TOKEN` and the system git credential helper (`git-credential-orbit`) answers `https://github.com` with it; without the file both step aside, so `gh auth login` and `gh auth setup-git` work as usual.
+- **Pins:** images by digest, yq by each architecture's sha256 (renovate.json's custom manager recomputes it for a new release), pnpm by its `packageManager` hash, the GitHub CLI and Docker apt keys by sha256. The apt packages themselves are whatever Debian's, GitHub's and Docker's repositories serve at build time.
+
 ## Rolling out a new image
 
 Never recreate the container in place: traefik routes nothing until the new
