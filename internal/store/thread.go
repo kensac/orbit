@@ -61,21 +61,24 @@ type ThreadMessage struct {
 // ThreadRun is a run with what it said: its report, its questions and the
 // actions it proposed. A stream's done event is this, too.
 type ThreadRun struct {
-	Kind       string           `json:"kind"`
-	ID         string           `json:"id"`
-	At         time.Time        `json:"at"`
-	Trigger    string           `json:"trigger"`
-	Status     string           `json:"status"`
-	Attempt    int              `json:"attempt"`
-	StartedAt  *time.Time       `json:"started_at"`
-	FinishedAt *time.Time       `json:"finished_at"`
-	Steps      int              `json:"steps"`
-	Summary    *string          `json:"summary"`
-	Report     *string          `json:"report"`
-	Questions  []ThreadQuestion `json:"questions"`
-	Error      *string          `json:"error"`
-	CostUSD    *float64         `json:"cost_usd"`
-	Actions    []ThreadAction   `json:"actions"`
+	Kind       string     `json:"kind"`
+	ID         string     `json:"id"`
+	At         time.Time  `json:"at"`
+	Trigger    string     `json:"trigger"`
+	Status     string     `json:"status"`
+	Attempt    int        `json:"attempt"`
+	StartedAt  *time.Time `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+	Steps      int        `json:"steps"`
+	// Turn is the latest journal turn of the run's latest timeline (a
+	// journal.Turn), null before the backend was called.
+	Turn      json.RawMessage  `json:"turn"`
+	Summary   *string          `json:"summary"`
+	Report    *string          `json:"report"`
+	Questions []ThreadQuestion `json:"questions"`
+	Error     *string          `json:"error"`
+	CostUSD   *float64         `json:"cost_usd"`
+	Actions   []ThreadAction   `json:"actions"`
 	// Gate names what ended a skipped run; null otherwise.
 	Gate *string `json:"gate"`
 	// NeedsInput is true when the run is waiting on its person: one of its
@@ -106,31 +109,32 @@ const (
 	MaxThreadLimit     = 200
 )
 
-// stepsCount counts the tool calls in a run's latest attempt: exactly the
-// events runner.Narrate turns into a tool (TestStepsMatchTheStream holds
-// the two together). Assistant lines are small next to the tool results
-// beside them, and the kind filter keeps those unread.
-const stepsCount = `(
-	SELECT count(*) FROM run_events e
-	LEFT JOIN LATERAL jsonb_array_elements(
-	    CASE WHEN e.kind = 'assistant' AND jsonb_typeof(e.payload->'message'->'content') = 'array'
-	         THEN e.payload->'message'->'content' ELSE '[]' END) b ON true
-	WHERE e.run_id = r.id AND e.attempt = r.attempt
-	  AND (
-	    (r.runner_kind = 'claude-code' AND e.kind = 'assistant' AND b->>'type' = 'tool_use'
-	     AND b->>'name' NOT IN ('StructuredOutput', 'submit'))
-	    OR (r.runner_kind = 'codex' AND (
-	        (e.kind = 'item.started' AND e.payload->'item'->>'type' IN ('command_execution', 'web_search', 'mcp_tool_call'))
-	        OR (e.kind = 'item.completed' AND e.payload->'item'->>'type' = 'file_change')))
-	  ))`
+// runEpoch is the journal epoch of a run's latest attempt (aliased r):
+// the timeline its stream shows.
+const runEpoch = `orbit_attempt_epoch(r.id, r.attempt)`
 
-// threadRunSelect reads runs with their questions, actions and steps in one
-// round trip; the correlated aggregates use messages_run, actions_run and
-// run_events' key, so a page costs the same queries however many runs it
-// holds.
+// stepsCount counts the tool calls in the timeline of a run's latest
+// attempt: exactly the tool events its stream shows (each call's first
+// journal revision; TestStepsMatchTheStream holds the two together).
+const stepsCount = `(
+	SELECT count(*) FROM journal_items j
+	WHERE r.attempt > 0 AND j.run_id = r.id AND j.epoch = ` + runEpoch + `
+	  AND j.kind = 'tool_call' AND j.revision = 1)`
+
+// latestTurn is the newest revision of the latest turn in that timeline:
+// how the backend exchange stands now.
+const latestTurn = `(
+	SELECT j.body FROM journal_items j
+	WHERE r.attempt > 0 AND j.run_id = r.id AND j.epoch = ` + runEpoch + ` AND j.kind = 'turn'
+	ORDER BY j.seq DESC LIMIT 1)`
+
+// threadRunSelect reads runs with their questions, actions, steps and turn
+// in one round trip; the correlated aggregates use messages_run,
+// actions_run and journal_items' key, so a page costs the same queries
+// however many runs it holds.
 const threadRunSelect = `
 	SELECT r.id::text, r.created_at, r.trigger, r.status, r.attempt, r.started_at, r.finished_at,
-	       ` + stepsCount + `, r.summary, r.report, r.error, r.cost_usd::float8, r.gate,
+	       ` + stepsCount + `, ` + latestTurn + `, r.summary, r.report, r.error, r.cost_usd::float8, r.gate,
 	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', (` + openQuestion + `)) ORDER BY m.created_at, m.id)
 	                 FROM messages m WHERE m.run_id = r.id AND m.direction = 'from_agent'), '[]'),
 	       COALESCE((SELECT json_agg(json_build_object('id', a.id, 'type', a.type, 'status', a.status,
@@ -143,7 +147,7 @@ func scanThreadRun(row pgx.Row) (*ThreadRun, error) {
 	r := ThreadRun{Kind: "run"}
 	var questions, actions []byte
 	if err := row.Scan(&r.ID, &r.At, &r.Trigger, &r.Status, &r.Attempt, &r.StartedAt, &r.FinishedAt, &r.Steps,
-		&r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions); err != nil {
+		&r.Turn, &r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
