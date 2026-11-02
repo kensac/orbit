@@ -176,7 +176,7 @@ Newest activity first (a message or a run in it is activity). `archived`
 thread: `next_before` is an opaque cursor, `null` exactly when `has_more`
 is false; `limit` defaults to 50, at most 200. `needs_input` is true while
 one of its questions is open or one of its runs' actions is pending.
-`ticket_id` is set when the conversation is a ticket's (below).
+`ticket_id` is set when the conversation is a ticket's (below), `task_id` when it is a delegated task's own (Delegation, below); a task conversation's open questions are to the delegating agent, so they do not set `needs_input`.
 
 `POST /agents/{name}/conversations`
 
@@ -255,6 +255,9 @@ conversation:
    "questions": [{"id": "uuid-of-the-question-message", "body": "...", "open": true}],
    "error": null, "cost_usd": 0.03, "gate": null,
    "actions": [{"id": "uuid", "type": "notify", "status": "pending", "reason": "...", "params": {}}],
+   "tasks": [{"id": "uuid", "key": "facts", "agent": "researcher", "status": "working",
+              "conversation_id": "uuid", "depends_on": [], "summary": null, "error": null,
+              "decision_action_id": null}],
    "needs_input": true},
   {"kind": "message", "id": "uuid-of-the-question-message", "at": "...", "from": "agent",
    "body": "<a question>", "run_id": "uuid", "open": true}
@@ -275,7 +278,7 @@ conversation:
   `reply_to`, when set, is the message it answers. `attachments` are the uploads it carries (Uploads, above), in order; always an array. `run_id` is the run that
   read a person's message (`null` until one starts) or the run that asked a
   question.
-- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again) `build` (a ticket's build run, docs/tickets.md) or `learn` (a learning run, below; only in an agent's learning conversation). `status` is
+- **Runs.** `trigger` is `schedule`, `manual`, `message`, `continue` (the agent asked to be woken again), `build` (a ticket's build run, docs/tickets.md), `learn` (a learning run, below; only in an agent's learning conversation), `task` (in a delegated task's conversation: the task starting, or its parent writing to it) or `delegation` (the agent woken because tasks it delegated settled; below). `status` is
   `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
   ended without a backend call because a gate, code, found nothing to judge;
   `gate` names it, and is `null` for every other status). `attempt` counts
@@ -299,6 +302,7 @@ conversation:
   and the agent is waiting for an answer or an approval. It is a state
   distinct from `status`, which says only whether the run itself is done.
   The agents list carries the same flag per agent.
+- **Tasks** are the tasks the run delegated (its `delegate` actions), in the order it listed them; always an array. `summary` is the finished task's report summary. For the whole task, and live status, see Delegation below.
 - **Actions.** `status` is `pending` (waiting for a person), `approved`
   (by a person or by an `auto` rule, about to execute), `rejected` (by a
   person), `denied` (by rule or invalid; never executes), `executing`,
@@ -520,7 +524,7 @@ A row:
 
 ## Attention and push
 
-Something waiting on a person is an **attention** row, written in the same transaction as the thing itself, one per thing (`key`): a pending approval (`approval`, key `action:<id>`), a run's question (`question`, `question:<message id>`), a failed run (`failure`, `failure:<run id>`) and a ticket plan to approve (`decision`, `plan:<ticket id>:<version>`). Whether it is still open is read from the thing at query time: the action still `pending`, the question unanswered, the plan the ticket's newest while it is `planned`, a failure until a later run of its conversation succeeds or the person writes there. Dismissing closes any of them for the inbox only (a dismissed approval stays pending).
+Something waiting on a person is an **attention** row, written in the same transaction as the thing itself, one per thing (`key`): a pending approval (`approval`, key `action:<id>`), a run's question (`question`, `question:<message id>`), a failed run (`failure`, `failure:<run id>`) and a decision: a ticket plan to approve (`decision`, `plan:<ticket id>:<version>`) or a delegated task blocked on a person (`decision`, `action:<task:decision action id>`). Whether it is still open is read from the thing at query time: the action still `pending`, the question unanswered, the plan the ticket's newest while it is `planned`, a task's decision action still `pending`, a failure until a later run of its conversation succeeds or the person writes there. Dismissing closes any of them for the inbox only (a dismissed approval stays pending).
 
 `GET /attention?limit=<n>` is everything open, newest first (`limit` defaults to and is at most 500):
 
@@ -533,7 +537,7 @@ Something waiting on a person is an **attention** row, written in the same trans
   "push": true, "created_at": "...", "link": "/orbit/c/<conversation_id>#action-<action_id>"}]}
 ```
 
-`title` is the agent's name and a fixed phrase, never anything a run wrote. `detail` is the question, the action's reason, the run's error or the ticket's title, for a signed-in inbox only. `push` is false for a run a person's message woke (`engine.Attended`): listed, not pushed. `link` is where to act, under `ORBIT_PUSH_LINK_BASE`: the conversation, with `#action-<id>` or `#message-<id>` for an approval or a question. `POST /attention/{id}/dismiss` is `{"ok": true}` (repeating it is fine; 404 for an unknown id).
+`title` is the agent's name and a fixed phrase, never anything a run wrote. `detail` is the question, the action's reason, the run's error or the ticket's title, for a signed-in inbox only. `push` is false for a run a person's message woke (`engine.Attended`): listed, not pushed. `link` is where to act, under `ORBIT_PUSH_LINK_BASE`: the conversation, with `#action-<id>` for an approval or a task's decision, `#message-<id>` for a question. `POST /attention/{id}/dismiss` is `{"ok": true}` (repeating it is fine; 404 for an unknown id).
 
 **Web Push.** Control sends each attention row with `push` set to every registered device, straight to the browser's push service (RFC 8291 encryption, RFC 8292 VAPID; `internal/webpush`). The payload is only `{"title", "url", "tag", "kind", "count"}`: the title above and the link. Rows that arrive within 20 s of the previous push (`push.Gap`) wait and go out together as one summary (`"3 things need you: finance, ops"`, url `<base>/inbox`, tag `orbit-inbox`); a row that closed before its turn, or waited more than a day (`push.MaxAge`), is not sent. `tag` and the `Topic` header are the row's key, so a device and the push service each keep one notification per thing. A send that fails is not retried; the inbox still lists it.
 
@@ -552,6 +556,32 @@ Something waiting on a person is an **attention** row, written in the same trans
 ## Tickets
 
 A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /tickets` (opens its conversation; returns `ticket_id`, `conversation_id`, `message_id`, `run_id`), `GET /tickets`, `GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that reached merging carries `merge_action_id`, its `github:merge` action), `POST /tickets/{id}/plans/{version}/approve`, `POST /tickets/{id}/{abandon,retry,reopen}`, and `POST /tickets/{id}/checks/rerun` (`202`; the ticket loop reruns the PR's failed Actions jobs on its next tick, and a failed ticket goes back to review; `GET /tickets/{id}` lists every rerun in `reruns`). Its thread and messages are its conversation's (`/conversations/{conversation_id}/thread`, `/messages`); a message there reopens a `planned` ticket, and a `merged`, `done` or `abandoned` one refuses messages (409). A ticket's conversation carries `ticket_id` in the conversation list. Filing and approving take `client_request_id`; the author and approver are the token's person. A transition the ticket's state does not allow is 409.
+
+## Delegation
+
+An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each task has its own conversation of its agent, which is an ordinary conversation (thread, messages, runs) whose first message is the brief, written by the delegating agent: a message's `author` of `agent:<name>` is an agent, not a person. The delegating conversation's thread shows each run's `tasks`; these routes show the rest.
+
+`GET /conversations/{id}/tasks` is `{"tasks": [<task>]}`: the tasks delegated from that conversation, oldest first. `GET /tasks/{id}` is `{"task": <task>}`:
+
+```json
+{"id": "uuid", "key": "facts", "agent": "researcher", "conversation_id": "uuid",
+ "parent_agent": "planner", "parent_conversation_id": "uuid", "parent_run_id": "uuid",
+ "action_id": "uuid", "brief": "Find the facts.", "fresh": false, "depth": 1,
+ "status": "done", "depends_on": ["other-key"],
+ "decision": {"action_id": "uuid", "question": "Spend $20?", "status": "executed", "decided_by": "kanishk"},
+ "report": {"run_id": "uuid", "summary": "...", "report": "<markdown>"},
+ "error": null, "run_id": "uuid", "run_status": "succeeded",
+ "questions": [{"id": "uuid", "body": "Which year?", "open": true}],
+ "created_at": "...", "updated_at": "...", "finished_at": "..."}
+```
+
+- `status`: `waiting` (a dependency is not done), `blocked` (its decision is pending), `working` (a run in its conversation is queued or running), `needs_input` (its agent asked the delegating agent something; `questions`), `done` (`report` is the reply of the run that finished it), `failed` or `cancelled` (`error` says why). A message from the delegating agent moves a `done` task back to `working`; `report` keeps the previous reply until the next.
+- `depends_on` is the keys of tasks in the same batch (`action_id`) it waits for. `decision` is `null` without one; otherwise approve or reject its `action_id` like any action (`POST /actions/{id}/approve`), and the task starts or is cancelled within seconds.
+- `run_id` and `run_status` are the newest run in its conversation; stream it with `/runs/{id}/stream` to show the task's work as it happens. `fresh` is a worker started from its agent's spec without its memory. `depth` is 1 for a task a top-level conversation delegated.
+
+`POST /tasks/{id}/cancel` `{"reason": "optional"}`: `200 {"cancelled": true}`, `409` when the task is already over. Its queued runs are cancelled (a running one finishes, unheeded) and its dependents with it. The canceller is the token's person (with the operator token, `"by"` names it).
+
+`GET /conversations/{id}/tasks/stream` is Server-Sent Events: a `tasks` event (`{"tasks": [<task>]}`, as the list) on connect and again whenever any task of the conversation changes, and `: ping` every 15 s. It never ends on its own; reconnect after a deploy (there is no `Last-Event-ID`: the first event is the whole state). A chat UI shows the delegating run's tasks from its thread item, then keeps them live from this stream, and opens a task's `conversation_id` to show its work.
 
 ## Memory
 

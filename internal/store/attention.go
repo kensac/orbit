@@ -14,7 +14,7 @@ const (
 	AttentionApproval = "approval" // an action waits for approve or reject
 	AttentionQuestion = "question" // a run asked something
 	AttentionFailure  = "failure"  // a run failed
-	AttentionDecision = "decision" // a ticket's plan waits for approval
+	AttentionDecision = "decision" // a ticket's plan, or a delegated task's decision, waits for a person
 )
 
 // Attention is one thing waiting on a person (migration 20261102032140). Title is
@@ -54,14 +54,17 @@ func newAttention(ctx context.Context, db execer, kind, key, runID, suffix strin
 
 // attentionOpen is true of an attention row (alias a) whose thing still
 // waits: the action is pending, the question unanswered (openQuestion), the
-// plan the ticket's newest while it is planned, and a failure stands until a
+// plan the ticket's newest while it is planned (a delegated task's
+// decision: its task:decision action pending), and a failure stands until a
 // later run of its conversation succeeds or the person writes there. Any
 // row a person dismissed is closed.
 const attentionOpen = `a.dismissed_at IS NULL AND CASE a.kind
 	WHEN 'approval' THEN EXISTS (SELECT 1 FROM actions x WHERE x.id = a.action_id AND x.status = 'pending')
 	WHEN 'question' THEN EXISTS (SELECT 1 FROM messages m WHERE m.id = a.message_id AND ` + openQuestion + `)
-	WHEN 'decision' THEN EXISTS (SELECT 1 FROM tickets t WHERE t.id = a.ticket_id AND t.status = 'planned'
-	                             AND a.plan_version = (SELECT max(p.version) FROM ticket_plans p WHERE p.ticket_id = t.id))
+	WHEN 'decision' THEN CASE WHEN a.ticket_id IS NOT NULL
+	    THEN EXISTS (SELECT 1 FROM tickets t WHERE t.id = a.ticket_id AND t.status = 'planned'
+	                 AND a.plan_version = (SELECT max(p.version) FROM ticket_plans p WHERE p.ticket_id = t.id))
+	    ELSE EXISTS (SELECT 1 FROM actions x WHERE x.id = a.action_id AND x.status = 'pending') END
 	WHEN 'failure' THEN NOT EXISTS (SELECT 1 FROM runs l WHERE l.conversation_id = a.conversation_id AND l.agent = a.agent
 	                                AND l.status = 'succeeded' AND l.created_at > (SELECT f.created_at FROM runs f WHERE f.id = a.run_id))
 	                AND NOT EXISTS (SELECT 1 FROM messages p WHERE p.conversation_id = a.conversation_id AND p.direction = 'to_agent'
@@ -83,7 +86,8 @@ func (s *Store) ListAttention(ctx context.Context, limit int) ([]Attention, erro
 		           WHEN 'approval' THEN (SELECT x.reason FROM actions x WHERE x.id = a.action_id)
 		           WHEN 'question' THEN (SELECT m.body FROM messages m WHERE m.id = a.message_id)
 		           WHEN 'failure' THEN (SELECT r.error FROM runs r WHERE r.id = a.run_id)
-		           WHEN 'decision' THEN (SELECT t.title FROM tickets t WHERE t.id = a.ticket_id)
+		           WHEN 'decision' THEN COALESCE((SELECT t.title FROM tickets t WHERE t.id = a.ticket_id),
+		                                         (SELECT x.reason FROM actions x WHERE x.id = a.action_id))
 		       END, ''),
 		       a.push, a.created_at
 		FROM attention a

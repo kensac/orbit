@@ -373,6 +373,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			}
 		}
 		reload := make(chan struct{}, 1)
+		eng.Wake = nudge
 
 		// SIGTERM, or POST /api/v1/drain on the internal listener, drains:
 		// no new claims, not ready, the API and streams still served, the
@@ -523,6 +524,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 					if err := eng.ExecuteActions(claimCtx); err != nil && claimCtx.Err() == nil {
 						log.Error("actions", "err", err)
 					}
+					reconcileTasks(claimCtx, eng, log)
 					deliverOutbox(claimCtx, eng, log)
 					deliverPush(claimCtx, pusher, log)
 				}
@@ -551,6 +553,9 @@ func serve(ctx context.Context, log *slog.Logger) error {
 				if err := eng.ExecuteActions(claimCtx); err != nil && claimCtx.Err() == nil {
 					log.Error("actions", "err", err)
 				}
+				// Runs a worker finished, and decisions a person resolved,
+				// move their tasks here.
+				reconcileTasks(claimCtx, eng, log)
 			}
 		}()
 
@@ -621,6 +626,15 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		loops.Wait()
 		return nil
 	})
+}
+
+// reconcileTasks moves delegated tasks and wakes their parents
+// (engine.ReconcileTasks); control only, as it executes the actions that
+// create them.
+func reconcileTasks(ctx context.Context, eng *engine.Engine, log *slog.Logger) {
+	if err := eng.ReconcileTasks(ctx); err != nil && ctx.Err() == nil {
+		log.Error("delegation: reconcile", "err", err)
+	}
 }
 
 // drainMax is ORBIT_DRAIN_MAX, or engine.DrainMax of the configuration in

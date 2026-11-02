@@ -92,7 +92,7 @@ func FromEnv(s *store.Store, log *slog.Logger) (*Sender, error) {
 func Link(base string, a store.Attention) string {
 	l := base + "/c/" + a.ConversationID
 	switch {
-	case a.Kind == store.AttentionApproval && a.ActionID != nil:
+	case a.ActionID != nil: // an approval, or a delegated task's decision
 		l += "#action-" + *a.ActionID
 	case a.Kind == store.AttentionQuestion && a.MessageID != nil:
 		l += "#message-" + *a.MessageID

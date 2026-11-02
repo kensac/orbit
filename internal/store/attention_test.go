@@ -234,3 +234,30 @@ func TestAttentionForAPlanAwaitingApproval(t *testing.T) {
 		t.Fatalf("after approval: %+v", got)
 	}
 }
+
+func TestAttentionForADelegatedTasksDecision(t *testing.T) {
+	s := testdb.New(t)
+	seed(t, s, "a", "b")
+	manual(t, s, "a")
+	c, _ := s.ClaimRun(ctx, "w")
+	ids, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Attempt: 1, Status: "succeeded"}, store.Outcome{
+		Actions: []store.ProposedAction{{Type: "delegate", Params: json.RawMessage(`{}`), Rule: "auto"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.Delegate(ctx, store.Delegation{ActionID: ids[0], RunID: c.ID,
+		Tasks: []store.NewTask{{Key: "k", Agent: "b", Brief: "book it", Decision: "Spend $50 on the venue?"}}})
+	if err != nil || len(out) != 1 || out[0].DecisionID == nil {
+		t.Fatalf("delegate = %+v %v", out, err)
+	}
+	d := kinds(t, s)[store.AttentionDecision]
+	if d.ActionID == nil || *d.ActionID != *out[0].DecisionID || d.Title != "a needs a decision" || d.Detail != "Spend $50 on the venue?" {
+		t.Fatalf("decision = %+v", d)
+	}
+	if err := s.DecideAction(ctx, *out[0].DecisionID, true, "me"); err != nil {
+		t.Fatal(err)
+	}
+	if got := kinds(t, s); len(got) != 0 {
+		t.Fatalf("after deciding: %+v", got)
+	}
+}
