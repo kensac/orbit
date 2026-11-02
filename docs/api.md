@@ -62,7 +62,9 @@ A rejected token is `401` with `{"error": "<check>: <reason>", "check":
                "created_at": "...", "finished_at": "...", "summary": "..."},
   "unread_messages": 1,
   "pending_actions": 0,
-  "needs_input": true
+  "needs_input": true,
+  "agent_status": {"state": "waiting", "kind": "question", "since": "...",
+                   "source": "run", "run_id": "uuid"}
 }]}
 ```
 
@@ -70,12 +72,28 @@ A rejected token is `401` with `{"error": "<check>: <reason>", "check":
 conversations. `needs_input` is true
 while the agent waits on its person: an open question or a pending action.
 `spec` is the agent's spec as loaded (the canonical JSON stored for
-`spec_sha`, defaults applied).
+`spec_sha`, defaults applied). `agent_status` is what the agent is doing (below).
 
 `GET /agents/{name}` is `{"agent": <as in the list>, "memory": "<markdown>",
 "next_fires": [...]}`. `next_fires` is as in `GET /health` (below); `[]` for
 an agent with no schedule, a disabled one, or one no longer configured.
 Earlier memory is `GET /agents/{name}/memory` (below).
+
+## Agent status
+
+`agent_status` says what an agent is doing, for a person deciding whether to look. It is on every agent, conversation, run, thread run item and running run in `GET /health`, in a stream, and in the MCP `list_agents`:
+
+```json
+{"state": "waiting", "kind": "permission", "detail": "Write",
+ "since": "...", "source": "hooks", "run_id": "uuid"}
+```
+
+- `state` is `idle` (no run yet, or the latest was cancelled before it ran), `queued`, `working`, `waiting` (on the agent's person), `done` or `errored`.
+- `kind`, only while `waiting`: `permission` (a tool call held for permission), `question` (the agent asked mid-turn, or a finished run's question is open), `elicitation` (an MCP server asked the person for input) or `approval` (an action is pending).
+- `detail`, when there is one: the tool held for permission, what an elicitation asks, or why it errored (a Claude Code error code such as `rate_limit`, or the run's error, at most 300 bytes).
+- `since` is when the state began, as far as orbit knows; `run_id` is the run it describes (absent with no run).
+- `source` is who decided it. While a Claude Code run runs, its hooks (`hooks`) report its turn: prompt and tool events are `working`, a permission request, an elicitation or a question is `waiting`, a failed turn is `errored`; a turn that ended stays `working` until orbit has recorded its output. Everything else is the run's row (`run`): another backend, the time before the first hook, and every finished run (failed is `errored`; an open question or a pending action is `waiting`; otherwise `done`). The hooks report only for the attempt they ran in.
+- An agent's or a conversation's status is that of its current run (the running one, else the newest), except that a finished current run gives way to an open question or a pending action anywhere in it, however old: `waiting`, with `kind` `approval` before `question`.
 
 ## Conversations
 
@@ -95,6 +113,7 @@ conversation is never deleted, only archived.
   "id": "uuid", "agent": "finance", "title": "How much on Uber Eats in October?",
   "is_default": false, "archived": false,
   "created_at": "...", "last_activity_at": "...", "needs_input": true,
+  "agent_status": {"state": "done", "since": "...", "source": "run", "run_id": "uuid"},
   "ticket_id": null}],
  "has_more": false, "next_before": null}
 ```
@@ -153,7 +172,8 @@ conversation:
    "questions": [{"id": "uuid-of-the-question-message", "body": "...", "open": true}],
    "error": null, "cost_usd": 0.03, "gate": null,
    "actions": [{"id": "uuid", "type": "notify", "status": "pending", "reason": "...", "params": {}}],
-   "needs_input": true},
+   "needs_input": true,
+   "agent_status": {"state": "waiting", "kind": "approval", "since": "...", "source": "run", "run_id": "uuid"}},
   {"kind": "message", "id": "uuid-of-the-question-message", "at": "...", "from": "agent",
    "body": "<a question>", "run_id": "uuid", "open": true}
  ],
@@ -235,6 +255,7 @@ message, in the default conversation: `202 {"run_id": "uuid"}`.
 | `status` | `{"status": "queued", "attempt": 0}` | sent first, then on every change |
 | `text` | `{"text": "..."}` | a new chunk of the agent's prose, to append to what came before |
 | `tool` | `{"name": "Read", "summary": "inputs/transactions.json"}` | the agent used a tool |
+| `agent_status` | an [agent status](#agent-status) | after every `status`, and on its own when it changes (the run's hooks report a wait, say) |
 | `done` | the run, identical to a thread run item (`kind: "run"`) | final; the stream ends |
 
 - **`text`** chunks concatenate into the attempt's prose. Each is one block
@@ -289,10 +310,11 @@ the concatenated `text`: `text` is what the agent narrated while working.
  "output": {}, "usage": {}, "cost_usd": 0.03, "session_id": "...",
  "session_mode": "fresh", "session_parent": "uuid", "session_depth": 1,
  "run_after": "...", "continues": "uuid", "chain": 1,
- "gate": "unchanged", "steps": 4}
+ "gate": "unchanged", "steps": 4,
+ "agent_status": {"state": "done", "since": "...", "source": "run", "run_id": "uuid"}}
 ```
 
-- Always present: `id`, `attempt`, `agent`, `spec_sha`, `trigger`, `prompt` (`""` when none), `status`, `created_at` and `steps`. Every other field is omitted when it has no value (not `null`).
+- Always present: `id`, `attempt`, `agent`, `spec_sha`, `trigger`, `prompt` (`""` when none), `status`, `created_at`, `steps` and `agent_status`. Every other field is omitted when it has no value (not `null`).
 - `trigger` and `status` are as in a thread run item. `trigger_index` and `scheduled_for` are set on a `schedule` run: which of the agent's triggers fired, and the fire time.
 - `runner_kind`, `model` and `worker` are the latest attempt's backend, its model (absent when the runner names none) and the instance that claimed it. `spec_sha` is the spec the latest attempt ran under.
 - `output` is the backend's raw structured output and `usage` its token usage, as it reported them. `cost_usd` is every attempt's cost together.
@@ -396,7 +418,7 @@ first, `{"versions": [{"id": 12, "run_id": "uuid", "content": "<markdown>",
 
 | tool | arguments | returns |
 |---|---|---|
-| `list_agents` | none | each configured agent: `name`, `description`, `enabled`, `needs_input`, `open_questions`, `pending_actions`, `last_run` |
+| `list_agents` | none | each configured agent: `name`, `description`, `enabled`, `needs_input`, `open_questions`, `pending_actions`, `last_run`, `agent_status` |
 | `list_conversations` | `agent`, `archived`, `limit` | as `GET /agents/{name}/conversations` |
 | `create_conversation` | `agent`, `title`, `message`, `wait_seconds` | `conversation_id`, `message_id`, `run_id`, and `reply` as `send_message` |
 | `send_message` | `body`, and `agent` (its default conversation) or `conversation_id`; `reply_to`, `wait_seconds` | `message_id`, `run_id`, `reply`: the run as a thread run item (`report`, `questions`, `actions`, `status`) |
@@ -515,7 +537,8 @@ The access token is authentik's own (the `orbit-mcp` provider), so its issuer an
  "queue": {"due": 0, "waiting_continuations": 1, "oldest_due_at": null},
  "running": [{"run_id": "uuid", "agent": "finance", "worker": "orbit/0",
               "attempt": 1, "started_at": "...", "heartbeat_at": "...",
-              "heartbeat_age_seconds": 12.4}],
+              "heartbeat_age_seconds": 12.4,
+              "agent_status": {"state": "working", "since": "...", "source": "hooks", "run_id": "uuid"}}],
  "pending_actions": 2,
  "agents": [{"name": "finance", "enabled": true, "timezone": "America/New_York",
              "last_success": {"run_id": "uuid", "finished_at": "..."},
