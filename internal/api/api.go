@@ -23,6 +23,7 @@ import (
 
 	"github.com/kensac/orbit/internal/auth"
 	"github.com/kensac/orbit/internal/engine"
+	"github.com/kensac/orbit/internal/push"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -50,6 +51,9 @@ type Server struct {
 	// internal listener's POST /api/v1/drain starts it. Nil is never
 	// draining.
 	Drain *engine.Drain
+	// Push sends Web Push and holds its key; nil is push off (the inbox
+	// still works).
+	Push *push.Sender
 	// OAuth, when set, serves the authorization server MCP clients sign in through (oauth.go) on the public listener. Without it /mcp still takes an authentik token from a client that has one.
 	OAuth *OAuthProxy
 }
@@ -81,6 +85,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/agents/{name}/thread", s.thread)
 	api("GET /api/v1/agents/{name}/conversations", s.listConversations)
 	api("POST /api/v1/agents/{name}/conversations", s.createConversation)
+	api("POST /api/v1/conversations", s.createConversation)
 	api("GET /api/v1/conversations/{id}", s.getConversation)
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
@@ -92,6 +97,8 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/conversations/{id}/uploads", s.createUpload)
 	api("POST /api/v1/conversations/{id}/uploads/url", s.uploadURL)
 	api("GET /api/v1/conversations/{id}/uploads/{upload}", s.getUpload)
+	api("GET /api/v1/conversations/{id}/files", s.workspaceFiles)
+	api("GET /api/v1/conversations/{id}/files/{path...}", s.workspaceFile)
 	// The signature in the URL is the credential (uploads.go).
 	mux.HandleFunc("PUT /api/v1/uploads/signed", s.signedUpload)
 	api("GET /api/v1/agents/{name}/memory", s.memoryHistory)
@@ -116,6 +123,13 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/actions/{id}", s.getAction)
 	api("POST /api/v1/actions/{id}/approve", s.decide(true))
 	api("POST /api/v1/actions/{id}/reject", s.decide(false))
+	api("GET /api/v1/attention", s.listAttention)
+	api("POST /api/v1/attention/{id}/dismiss", s.dismissAttention)
+	api("GET /api/v1/push", s.pushInfo)
+	api("GET /api/v1/push/subscriptions", s.listPushSubscriptions)
+	api("POST /api/v1/push/subscriptions", s.savePushSubscription)
+	api("DELETE /api/v1/push/subscriptions", s.deletePushSubscription)
+	api("POST /api/v1/push/test", s.testPush)
 	api("POST /api/v1/tickets", s.createTicket)
 	api("GET /api/v1/tickets", s.listTickets)
 	api("GET /api/v1/tickets/{id}", s.getTicket)
@@ -409,8 +423,12 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {
-	err := s.Store.CancelRun(r.Context(), r.PathValue("id"))
-	respond(w, map[string]any{"cancelled": err == nil}, err)
+	st, err := s.Store.CancelRun(r.Context(), r.PathValue("id"), actor(r, ""))
+	code := http.StatusOK
+	if st == "cancelling" {
+		code = http.StatusAccepted
+	}
+	respondStatus(w, code, map[string]any{"cancelled": st == store.StatusCancelled, "status": st}, err)
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {

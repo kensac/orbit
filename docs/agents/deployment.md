@@ -70,6 +70,10 @@ Rendered from Infisical (`HETZNER_ORBIT_*`). The Claude Code subscription
 token comes from `claude setup-token` and lasts a year; when it expires every
 run fails with `Not logged in`, which pages through the failure notification.
 
+Web Push needs `ORBIT_VAPID_PUBLIC_KEY`, `ORBIT_VAPID_PRIVATE_KEY` (from
+`orbit vapid`) and `ORBIT_VAPID_SUBJECT` on control (docs/api.md, Attention
+and push); without them push is off and `serve` logs so.
+
 ## Seeding memory from Claude Code
 
 `orbit import claude-memory <dir> --scope <profile|topic:NAME|agent:NAME>` reads a Claude Code memory directory (`~/.claude/projects/<project>/memory`) and sends it to `POST /api/v1/memory/import`. Entries of the types in `--profile-types` (default `user`) go to the profile whatever `--scope` says. It is a dry run unless `--apply` is given: the server reports what it would create, update or leave alone. `--print` shows what was read from disk without calling a server. A file it cannot map (no frontmatter, an unknown type) is skipped with a warning. Repeating it is safe: it matches by key and changes only what changed.
@@ -90,10 +94,11 @@ The API is `--api` (default `ORBIT_API_URL`, else the internal listener) with `-
 
 `orbit import skills <dir>` reads each directory under `dir` that holds a `SKILL.md` (`~/.claude/skills`, a project's `.claude/skills`) with every file beside it, and sends them to `POST /api/v1/skills/import`: a dry run unless `--apply`, `--only a,b` to pick some, `--attach <agent>` to attach them (with `--apply`), `--print` to list what was read without a server. A directory without a `SKILL.md` (a plugin, a sync bucket) or with a symlink is skipped with a warning. The API and token are as for memory above; on hetzner, `docker cp` the directory into the container and run it there.
 
-## sandboxd and egress on oci
+## sandboxd and egress
 
-The build sandbox runs on oci (tailnet `100.123.116.85`), not hetzner: a
-container escape there reaches CI runners, not every secret in the fleet.
+sandboxd and egress run on hetzner today (`hetzner-vps-config/compose.orbit-sandbox.yml`; orbit reaches sandboxd at `10.250.250.2:8091` on the internal `orbit-sandboxd-api` network). The layout below was written for oci (tailnet `100.123.116.85`), where a container escape would reach CI runners rather than every secret in the fleet; the services and their options are the same either way.
+
+**Workstation profile** (sandboxed chats, `sandbox: workstation`): a second `orbit egress` with `ORBIT_EGRESS_ALLOW=*` (any public host on 443, never a private or tailnet address) on the `orbit-sandbox` and `orbit-egress` networks, named for example `orbit-egress-open`, and sandboxd's environment gains `ORBIT_SANDBOX_WORKSTATION_PROXY=orbit-egress-open:3128`. Without it sandboxd refuses that profile (400), and the built-in agent's runs fail naming the variable.
 Two services from orbit's own image, in `oci-vps-config` as
 `compose.orbit-sandbox.yml` (included from `docker-compose.yml`, whitelisted
 in `.gitignore`):

@@ -116,6 +116,18 @@ var (
 // ValidID reports whether s has the shape of a sandbox id (a container id).
 func ValidID(s string) bool { return idRE.MatchString(s) }
 
+// Profiles a create may name (POST /v1/sandboxes?profile=): "build" (the
+// default, the build egress allowlist) and "workstation" (a chat session's
+// own box: egress to any public host, through sandboxd's workstation
+// proxy). sandboxd decides what each means; a caller only names one.
+const (
+	ProfileBuild       = "build"
+	ProfileWorkstation = "workstation"
+)
+
+// ValidProfile reports whether p names a profile ("" is build).
+func ValidProfile(p string) bool { return p == "" || p == ProfileBuild || p == ProfileWorkstation }
+
 // ValidRunID reports whether s is an acceptable run id label.
 func ValidRunID(s string) bool { return runIDRE.MatchString(s) }
 

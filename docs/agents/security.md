@@ -75,6 +75,18 @@ bounded in delay and chain length and, like any type, denied unless named. A web
 `deny` is the default for every type an agent does not name, and denied
 types are not even offered.
 
+## Web Push
+
+- A push leaves orbit for a third party (the browser vendor's push
+  service, then the device's lock screen), so it carries only the
+  attention row's title (an agent name and a fixed phrase) and a link into
+  the app. Never a report, a question, an error or an action's parameters:
+  agents read finance data. The payload is encrypted to the device, so the
+  push service sees only its size.
+- A subscription's endpoint is a URL a browser chose, and orbit posts to it
+  from inside the network, so registration accepts only https URLs on the
+  known push services (`push.AllowedEndpoint`).
+
 ## The API
 
 - Deployed behind traefik at a public hostname. `/ui/` is behind authentik
@@ -197,6 +209,10 @@ without docker):
   does.
 - Tunnelled traffic is opaque: the proxy sees hostnames, not requests, so
   it cannot tell a download from an upload to an allowed host.
+
+## Sandboxed chats
+
+A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as a workstation when sandboxd is configured) runs Claude Code in a sandboxd container with `bypassPermissions`; a workstation has every tool. There is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the backend credential is in the container, readable by any command the model runs. A workstation's egress reaches any public host (`orbit egress` with `*`, still never a private, loopback, link-local or tailnet address), so the credential and anything the session read can leave the box, by design: it holds no GitHub token, no orbit secret, and nothing of the person's beyond what they gave the conversation. Pushing, merging, mail and spend stay orbit's actions, under the agent's rules. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
 
 ## Build runs
 
