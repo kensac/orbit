@@ -22,6 +22,7 @@ trigger (schedule: cron or RRULE | manual | message | continue | task | delegati
   -> a fresh session: the recent thread, packed into a byte budget, as conversation.md
   -> sources fetched by the harness, written to <workdir>/inputs/, stored as artifacts
   -> transforms run over sources, each output an input (a source only transforms read is withheld)
+  -> repositories (repos): each fetched into orbit's mirror, its tree at the ref's commit under inputs/repos/<name>, _repos.json an input
   -> gates (scheduled runs, no message waiting): one that finds nothing to judge ends the run skipped
   -> runner called with: system contract, prompt, workdir, tools, output schema
   -> output validated against the contract
@@ -122,6 +123,7 @@ happens in tested Go at the moment the model needs it (`internal/harness`):
   (below): the tool server asks the engine over a per-agent unix socket
   (`engine/search.go`), the engine fills in the agent, and its results are
   not ledgered, since an earlier run's words back no figure.
+  With `repos`, the repository tools (Repositories, below) are served the same way, over a socket of their own, and are not ledgered either.
 - **Hooks** (`orbit hook`, from `--settings`; with `--setting-sources ""` no
   other hook is loaded, so `disableAllHooks` is on whenever orbit has none):
   PreToolUse on Read, Glob and Grep denies a path that leaves the workdir after
@@ -145,6 +147,12 @@ An agent's `connectors` give its Claude Code runs the tools of MCP servers orbit
 - **Before the CLI starts**, the engine lists each connector's tools (MCP streamable HTTP, with the connector's credential: a header bound like a source's credential, or an OAuth token a person signed in for, sealed in `connector_tokens`, a version per sign-in and per refresh) and decides each tool's rule: the agent's `mcp:<connector>:<tool>`, else `approve` for one in `write_tools`, else `auto`; `deny` is not offered. A connector that cannot be listed is left out, and the system prompt says so beside each offered connector's description.
 - **In the CLI**, each connector is an SDK MCP server (`{"type": "sdk", "name": <connector>}` in `--mcp-config`), its tools `mcp__<connector>__<tool>`; `auto` tools are in `--allowedTools`, `approve` tools are ask rules in `--settings` with `--permission-prompt-tool stdio` (and the default permission mode: dontAsk denies an ask rule unasked). A report run with connectors talks stream-json too, since their traffic rides the control channel. Verified on 2.1.316: several SDK servers in one config, a dash in a name, the tool use id in `tools/call`'s `_meta` matching the prompt's, and an ask rule reaching the prompt in the default and bypassPermissions modes (`TestRealCLIConnectors` holds all but the sandbox's bypassPermissions).
 - **A call** arrives as an `mcp_message`; orbit forwards an `auto` one to the server and returns its result, or, over 32 KiB, writes it into the attempt's inputs as JSON, copies it into a live sandbox, and returns its path. An `approve` call first reaches orbit as a permission prompt: in a run answering its person's message, orbit records a pending `connector:<connector>/<tool>` action (in the thread and the inbox at once) and holds the prompt until the person decides; on approval it claims the action, makes the call, and allows the tool, whose `tools/call` then gets that result by its tool use id. In any other run orbit records the pending action, denies the prompt saying so, and the action loop executes it at most once after approval; its approval is notified like any other. Every call is an `orbit.connector` event with its bounded result.
+
+## Repositories
+
+An agent reads git repositories through orbit, not through the web (`internal/repos`, `engine/repos.go`; configuration.md, Repositories). orbit keeps a bare mirror of each repository in `github.read_repositories` that an agent names, under `<data>/mirrors/`: every branch, tag and pull request head (`refs/pull/<n>/head`), fetched before each run with a `contents: read` token that exists only for that fetch. The run gets the tree at the ref's commit, without `.git`, at `inputs/repos/<name>/`, and `_repos.json` (repo, ref, sha) as an input: the prompt names each path and commit, the `unchanged` gate sees a new commit as a change, and a recovered attempt extracts the same commits again. A tree is not stored as artifacts; its commit is the record, and the mirror can give it again.
+
+History and GitHub's state are tools orbit runs, never a credential or a `.git` in the model's reach: `git_log`, `git_show`, `git_diff` and `git_blame` over the mirror, and `pr_list` (every page up to its limit, `merged_at` set only for a merge) and `pr_view` (with the head commit's check runs and statuses) from GitHub with a read token minted per call. A Claude Code report agent reaches them through `orbit mcp`, which asks the engine over a per-agent unix socket (as search does); a chat agent has them among its SDK tools. A build's new clone is seeded from the mirror's default branch head (`build.Pool.Seed`), so its fetch from GitHub transfers only what the mirror lacked.
 
 ## Mail
 
@@ -229,7 +237,7 @@ carries a title and a link only; bursts fold into one summary push.
   questions are shown to the conversation's next run so it does not ask
   again.
 - **Messages** to an agent are consumed by the first run of their
-  conversation that starts after them. A run that fails or is interrupted hands them back.
+  conversation that starts after them. A run that fails or is interrupted hands them back. Each attempt's read is a `message_reads` row, kept when it hands the message back (`released_at`); a message waits while no attempt holds it (`store.waitingMessage`).
 
 ## Memory entries
 

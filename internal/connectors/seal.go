@@ -3,14 +3,14 @@ package connectors
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
+
+	orbitsecret "github.com/kensac/orbit/internal/secret"
 )
 
 // MinKeyLen is the shortest ORBIT_CONNECTOR_KEY accepted.
@@ -24,9 +24,7 @@ func NewSealer(secret string) (*Sealer, error) {
 	if len(secret) < MinKeyLen {
 		return nil, fmt.Errorf("the connector key must be at least %d characters", MinKeyLen)
 	}
-	m := hmac.New(sha256.New, []byte(secret))
-	m.Write([]byte("orbit connector tokens"))
-	b, err := aes.NewCipher(m.Sum(nil))
+	b, err := aes.NewCipher(orbitsecret.Key(secret).Derive(orbitsecret.ConnectorTokens))
 	if err != nil {
 		return nil, err
 	}
