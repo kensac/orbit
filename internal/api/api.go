@@ -159,6 +159,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/comments/{comment}/edit", s.editComment)
 	api("POST /api/v1/tickets/{id}/comments/{comment}/withdraw", s.withdrawComment)
 	api("POST /api/v1/tickets/{id}/review", s.submitReview)
+	api("GET /api/v1/tickets/{id}/diff", s.ticketDiff)
 	s.memoryRoutes(api)
 	s.workspaceRoutes(api)
 	s.workspaceWriteRoutes(api, mux)

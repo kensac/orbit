@@ -583,7 +583,7 @@ Something waiting on a person is an **attention** row, written in the same trans
 
 ## Tickets
 
-A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /tickets` (opens its conversation; returns `ticket_id`, `conversation_id`, `message_id`, `run_id`; `stack_on` files a request on top of another, tickets.md, Stacked tickets), `GET /tickets`, `GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that reached merging carries `merge_action_id`, its `github:merge` action), `POST /tickets/{id}/plans/{version}/approve`, `POST /tickets/{id}/{abandon,retry,reopen}`, and `POST /tickets/{id}/checks/rerun` (`202`; the ticket loop reruns the PR's failed Actions jobs on its next tick, and a failed ticket goes back to review; `GET /tickets/{id}` lists every rerun in `reruns`), and review comments on its PR: `GET`/`POST /tickets/{id}/comments`, `POST /tickets/{id}/comments/{comment}/{edit,withdraw}` and `POST /tickets/{id}/review`, which sends the drafts as one message (tickets.md, Review comments). Its thread and messages are its conversation's (`/conversations/{conversation_id}/thread`, `/messages`); a message there reopens a `planned` ticket, and a `merged`, `done` or `abandoned` one refuses messages (409). A ticket's conversation carries `ticket_id` in the conversation list. Filing and approving take `client_request_id`; the author and approver are the token's person. A transition the ticket's state does not allow is 409.
+A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /tickets` (opens its conversation; returns `ticket_id`, `conversation_id`, `message_id`, `run_id`; `stack_on` files a request on top of another, tickets.md, Stacked tickets), `GET /tickets`, `GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that reached merging carries `merge_action_id`, its `github:merge` action), `POST /tickets/{id}/plans/{version}/approve`, `POST /tickets/{id}/{abandon,retry,reopen}`, and `POST /tickets/{id}/checks/rerun` (`202`; the ticket loop reruns the PR's failed Actions jobs on its next tick, and a failed ticket goes back to review; `GET /tickets/{id}` lists every rerun in `reruns`), and review comments on its PR: `GET`/`POST /tickets/{id}/comments`, `POST /tickets/{id}/comments/{comment}/{edit,withdraw}` and `POST /tickets/{id}/review`, which sends the drafts as one message (tickets.md, Review comments); `GET /tickets/{id}/diff` is the PR's diff for those comments (below). Its thread and messages are its conversation's (`/conversations/{conversation_id}/thread`, `/messages`); a message there reopens a `planned` ticket, and a `merged`, `done` or `abandoned` one refuses messages (409). A ticket's conversation carries `ticket_id` in the conversation list. Filing and approving take `client_request_id`; the author and approver are the token's person. A transition the ticket's state does not allow is 409.
 
 `GET /tickets?status=&agent=&before=&limit=` is `{"tickets": [...]}`, newest first. `status` and `agent` match exactly; `before` is an RFC 3339 time and returns tickets created before it (400 if it does not parse), so the last ticket's `created_at` is the next page's cursor. `limit` defaults to 50, at most 500. Each ticket:
 
@@ -596,6 +596,18 @@ A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /t
 ```
 
 `repo`, `author`, `approved_plan`, `base_sha`, `branch`, `pr_number`, `head_sha`, `merge_sha`, `error`, `merge_action_id` and `stack_on` are omitted when unset; `error` is set only while the ticket is `failed`. `GET /tickets/{id}` is `{"ticket": <as above>, "plans": [...], "events": [...], "reruns": [...]}`.
+
+### A ticket's diff
+
+`GET /tickets/{id}/diff?path=` is the ticket's PR as diff files, the shape of a run's changes (Workspace, A reply's changes), so line comments anchor to real line numbers:
+
+```json
+{"ticket_id": "uuid", "repo": "kensac/orbit", "pr": 7,
+ "base": {"ref": "main", "sha": "..."}, "head": {"ref": "orbit/uuid", "sha": "..."},
+ "files": [<diff file>], "truncated": false}
+```
+
+orbit reads the PR and its files from GitHub on each request, with a token for the ticket's repository alone (`contents: read`, `pull_requests: read`), revoked after it (tickets.md, GitHub access). `head` is the PR's current head, which comments are written against (`head_sha`). Each file's hunks are GitHub's patch with line numbers on each side; `additions` and `deletions` are GitHub's counts for the whole file. GitHub's statuses map to `added` (also `copied`), `deleted` (`removed`), `modified`, `renamed` (with `old_path`) and `mode` (`changed`). A file GitHub sends no patch for is `binary` when it changed no lines, and `truncated` (too large for GitHub to show) when it did. Caps as for a run's changes: 300 files, 10 MiB, 5000 lines a file; `path` narrows to one file of the PR (`404` when the PR does not change it) without the per-file line cap. A ticket without a PR is `409`; GitHub unconfigured is `503`, unreachable or refusing `502`.
 
 ## Delegation
 
