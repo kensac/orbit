@@ -50,6 +50,8 @@ type Server struct {
 	// internal listener's POST /api/v1/drain starts it. Nil is never
 	// draining.
 	Drain *engine.Drain
+	// OAuth, when set, serves the authorization server MCP clients sign in through (oauth.go) on the public listener. Without it /mcp still takes an authentik token from a client that has one.
+	OAuth *OAuthProxy
 }
 
 // Handler returns the public listener's routes, the ones traefik serves.
@@ -108,6 +110,8 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/comments/{comment}/withdraw", s.withdrawComment)
 	api("POST /api/v1/tickets/{id}/review", s.submitReview)
 
+	mux.Handle("/mcp", s.mcpHandler(internal))
+
 	if internal {
 		// Only the host's rollout reaches this listener; a person cannot
 		// take an instance out of service from the public one.
@@ -116,6 +120,9 @@ func (s *Server) routes(internal bool) http.Handler {
 		mux.HandleFunc("GET /ui/actions/{id}", s.approvalPage)
 		mux.HandleFunc("POST /ui/actions/{id}", s.approvalSubmit)
 		mux.HandleFunc("GET /ui/runs/{id}", s.runPage)
+		if s.OAuth != nil {
+			s.oauthRoutes(mux)
+		}
 	}
 	return s.logRequests(mux)
 }
