@@ -250,3 +250,20 @@ func ctxErr(ctx context.Context, err error) error {
 	}
 	return err
 }
+
+// Ready asks sandboxd's /readyz. A not-ready answer (503) is a Readiness with Ready false, not an error; an error means sandboxd did not answer one.
+func (c *Client) Ready(ctx context.Context) (Readiness, error) {
+	var r Readiness
+	resp, err := c.do(ctx, http.MethodGet, PathReadyz, nil, "")
+	if err != nil {
+		return r, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusServiceUnavailable {
+		return r, readError(resp)
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&r); err != nil {
+		return r, fmt.Errorf("sandboxd: readyz: %w", err)
+	}
+	return r, nil
+}
