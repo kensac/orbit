@@ -231,7 +231,7 @@ without docker):
 - **`/work` has no disk quota**: a sandbox can fill the host's docker volume
   until its lifetime ends. The readback refuses more than 256 MiB.
 - **sandboxd holds the docker socket**, so a bug in it is root on its host. Its
-  surface is the four handlers and `docker.go`; it listens only on one address (on hetzner, an internal docker network only orbit shares)
+  surface is its handlers (`server.go`, `box.go`) and `docker.go`; it listens only on one address (on hetzner, an internal docker network only orbit shares)
   or a unix socket (`validListen` refuses every interface)
   and requires the token on every request.
 - **A dropped attach does not stop the process**; the lifetime or a destroy
@@ -260,6 +260,14 @@ A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as 
 - **A non-TLS tunnel, or TLS on another port, is not inspected.** Plain HTTP over a CONNECT tunnel, or TLS to port 8443, can name a denied host in its own `Host` or server name if the address it reaches serves that host (a CDN). Denied hosts behind a CDN still enforce their own authentication (orbit's API checks an authentik token, authentik and Infisical their logins), which is what stands between a box and them there.
 - **The deny lists are configuration.** A fleet host's public address missing from `ORBIT_EGRESS_DENY_NETS` is reachable, with every public port on it (hetzner has no firewall); deployment.md lists what each host's egress must carry; the planned nftables tables (deployment.md, Box isolation on a host) drop the same ranges in the kernel for traffic that does not go through a proxy.
 - **Abuse from the fleet's address.** Traffic leaves from the host's public IP, so what a box sends is attributed to it.
+
+## Boxes and terminals
+
+An agent's box (sandboxd's `box` profile, `internal/sandboxd/box.go`; docs/workspace.md) is a persistent container from the workstation image where a person drives a shell or Claude Code (direct) from the browser. It gives up three of a build sandbox's options, on purpose: the root filesystem is writable, the capabilities are docker's default set less `MKNOD` and `NET_RAW` (not `ALL`), and there is no `no-new-privileges`, so the image's passwordless sudo works: root inside the box is real container root. It keeps the rest: uid 10001 for every exec, no privileged mode, no added capability, no bind mount (only its two named volumes, `orbit-box-<agent>-home` and `orbit-box-<agent>-work`), no host namespace, the internal network with the workstation proxy as its only route out, memory, CPU and process limits. `verifyBox` checks each of these on every container it finds under the box's name, so a container of that name sandboxd did not make is refused, and a box never carries `orbit.sandbox`, so the sandbox API, the reaper and the sandbox count never touch it. The runtime is runc until `ORBIT_SANDBOX_BOX_RUNTIME=runsc`; under runc a kernel escape from root in the box is root on the host, which is the accepted cost of "build first".
+
+- **What runs**: a TTY's argv is fixed by sandboxd from a preset (`shell`, `claude`) and a tmux session name orbit derives from the terminal's id; the request has no field for an argv, a user or an option (`TestTTYExecSpec`). The other execs are `tmux has-session`, `tmux kill-session` and `kill -HUP <pid>` of the tmux client sandboxd started, with exact targets.
+- **Credentials**: a `claude` terminal's client carries `CLAUDE_CODE_OAUTH_TOKEN` (the subscription, as a chat sandbox's CLI does); tmux copies it into that session (`update-environment`), and a tmux server first started by a `claude` terminal holds it for every session after. Any process in the box can read it. No GitHub token reaches the box yet.
+- **The socket**: `GET /api/v1/terminals/{id}/ws` is on the public listener without a bearer token. Its credential is a ticket: 32 random bytes, stored only as a sha256, minted by a person's authentik token through `POST /terminals/{id}/attach`, valid 30 s, used once (a guarded UPDATE), and bound to that terminal and to the Origin it names, or, minted server side without one, to every Origin in `ORBIT_WORKSPACE_ORIGINS`. The socket refuses any Origin outside that list before reading the ticket, so a cross-site page cannot open one. The ticket travels in `Sec-WebSocket-Protocol`, so it stays out of access logs; the `?ticket=` fallback can reach them, which a single use and 30 s make worthless. Tickets are limited to 10 a minute per person. Terminal input is never logged or stored.
 
 ## Build runs
 
