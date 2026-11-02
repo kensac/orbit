@@ -14,6 +14,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `runners` | map of name to runner | none | Model backends an agent's `runner` names. |
 | `github` | map | absent | The GitHub App orbit acts as. Without it, tickets naming a repository and `github:merge` fail validation. |
 | `build` | map | absent | How approved tickets become PRs. Without it no ticket is built. |
+| `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 
 ### `defaults`
@@ -91,6 +92,13 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `protected` | list of globs | none | Paths a build may not change (`**` for any depth); `.github/**` always is. |
 | `max_diff_lines` | int | `2000` | Added plus deleted lines a build may produce, at most 20000. |
 
+### `sandbox` (orbit.yaml)
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `sandboxd` | `host:port` or `unix:/path` | `build.sandboxd` | The sandbox service for chat agents with `sandbox`. |
+| `token_env` | env var | `ORBIT_SANDBOX_TOKEN` | sandboxd's bearer token. |
+
 ### `mail`
 
 | Field | Type | Default | What it does |
@@ -137,6 +145,8 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `topics` | list of names | none | Shared memory topics every run reads, beside the profile's and its own. |
 | `skills` | list of names | none | Skills from orbit's library the agent runs with; an unknown one is skipped and shown as `missing`. |
 | `learn` | map | on | Learning runs over quiet conversations (below). |
+| `chat` | bool | `false` | A Claude Code session whose reply is its final message, with memory, questions and actions as orbit's tools; a workspace per conversation. claude-code only. |
+| `sandbox` | `workstation`, `build` | none | Needs `chat` and a sandboxd. Runs the CLI in a sandboxd container per conversation: `workstation` has every Claude Code tool and egress to any public host; `build` has its `tools` and the build allowlist (security.md, Sandboxed chats). |
 | `needs` | list of capabilities | none | What a host must have to run the agent (`docker-network:hetzner`); without any, every host. |
 | `delegates` | list of agent names, or `["*"]` | none | Agents this one may hand tasks to; the `delegate` action also needs a rule. |
 
@@ -205,7 +215,7 @@ Checked in order on scheduled runs with no message waiting (configuration.md, Ga
 
 ### `tools`
 
-Every claude-code run has `Read`, `Glob` and `Grep`, confined to the run's workdir; with orbit's harness, `mcp__orbit__query`, `mcp__orbit__calc` and `mcp__orbit__search` (the agent's own records); with skills, `Skill`. `tools` adds Claude Code tool names, passed as given to `--tools` and `--allowedTools` (not checked at load; codex and anthropic runners fail the run if it is set). A listed tool is allowed by name with no path rule, and orbit's path guard covers only Read, Glob and Grep.
+Every claude-code run has `Read`, `Glob` and `Grep`, confined to the run's workdir; with orbit's harness, `mcp__orbit__query`, `mcp__orbit__calc` and `mcp__orbit__search` (the agent's own records); with skills, `Skill`. `tools` adds Claude Code tool names, passed as given to `--tools` and `--allowedTools` (not checked at load; codex and anthropic runners fail the run if it is set). A listed tool is allowed by name with no path rule, and orbit's path guard covers only Read, Glob and Grep. The table is for runs on orbit's host; in a `sandbox` container the container is the boundary instead (a workstation has every tool and ignores `tools`).
 
 | Tool | Grants | Risk |
 |---|---|---|
