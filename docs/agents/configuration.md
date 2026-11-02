@@ -23,6 +23,8 @@ database agent of their name. Each instance reloads when the directory's
 content or the newest definition changes, so a definition written on one
 instance is in force on all within the 30 s poll.
 
+An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one.
+
 ## Secrets
 
 Never in YAML. Channels name variables with `*_env`; source headers, query
