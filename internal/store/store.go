@@ -265,8 +265,11 @@ const MaxAttempts = 3
 
 // ClaimRun moves the oldest queued run whose agent has nothing running to
 // running, owned by worker, and records the claim as a new attempt. It
-// returns nil when there is nothing to claim. FOR UPDATE SKIP LOCKED gives
-// one row to one claimer across processes; runs_one_running is what makes
+// returns nil when there is nothing to claim. FOR NO KEY UPDATE SKIP
+// LOCKED gives one row to one claimer across processes, and does not skip
+// a run another transaction only references (an event or journal row of a
+// superseded attempt being written holds a KEY SHARE lock on it, which FOR
+// UPDATE would skip); runs_one_running is what makes
 // "nothing running" true under concurrency: a second claimer for the same
 // agent fails the index and tries the next row.
 func (s *Store) ClaimRun(ctx context.Context, worker string) (*ClaimedRun, error) {
@@ -290,7 +293,7 @@ func (s *Store) claim(ctx context.Context, worker, filter string, args ...any) (
 				      `+filter+`
 				    ORDER BY q.created_at
 				    LIMIT 1
-				    FOR UPDATE SKIP LOCKED
+				    FOR NO KEY UPDATE SKIP LOCKED
 				)
 				RETURNING id::text, attempt, agent, spec_sha, trigger, prompt, chain, conversation_id::text`, append([]any{worker}, args...)...).
 				Scan(&c.ID, &c.Attempt, &c.Agent, &c.SpecSHA, &c.Trigger, &c.Prompt, &c.Chain, &c.ConversationID); err != nil {
