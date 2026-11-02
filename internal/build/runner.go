@@ -60,7 +60,7 @@ type Job struct {
 	StackBranch string
 	// StackPR is that ticket's PR, named in this one's body.
 	StackPR int
-	Policy spec.BuildRepo
+	Policy  spec.BuildRepo
 	// Model and MaxTurns are the build agent's runner's; Timeout its.
 	Model    string
 	MaxTurns int
