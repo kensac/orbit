@@ -57,7 +57,7 @@ func TestUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	cost := 0.017097
-	if err := v.s.FinishRun(ctx, id, store.RunResult{Status: "succeeded", CostUSD: &cost}); err != nil {
+	if err := v.s.FinishRun(ctx, id, store.RunResult{Attempt: 1, Status: "succeeded", CostUSD: &cost}); err != nil {
 		t.Fatal(err)
 	}
 

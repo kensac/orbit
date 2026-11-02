@@ -11,19 +11,61 @@ agent is a commit there, not here.
 every push to main, for amd64 and arm64. hetzner pins a digest; a release
 reaches it when that pin moves.
 
+## Rolling out a new image
+
+Never recreate the container in place: traefik routes nothing until the new
+one is healthy, and runs in progress are cut. Instead, two instances run
+side by side for the switch (docs/ARCHITECTURE.md, Upgrades):
+
+1. **Start the new container** beside the old one, same image config,
+   environment, networks, `/config` mount and **the same `/data` volume**
+   (sessions live there; a new instance on its own volume starts every
+   interrupted or continued session fresh). Give it its own container name
+   (compose: a second service or `--scale orbit=2 --no-recreate`).
+2. **Wait until it is ready:** `docker inspect -f
+   '{{.State.Health.Status}}'` is `healthy` (traefik's docker provider adds
+   a container only then; the image probes every 2 s while starting) and
+   `docker exec <new> orbit healthcheck --ready` exits 0. If it never gets
+   there, remove it and stop: the old one is untouched.
+3. **Drain the old one:** `docker exec <old> orbit drain`. It answers 503 on
+   `/readyz` from then on, claims nothing, keeps its streams and API, and
+   exits by itself once its runs finish.
+4. **Wait for it to exit** (`docker wait <old>`), up to `ORBIT_DRAIN_MAX`
+   plus a minute. Do not `docker stop` it: that sends SIGTERM (the same
+   drain) but then SIGKILLs after `stop_grace_period`, and a killed run's
+   spend since its last save is lost. If something must be cut short, a
+   second `docker kill -s TERM <old>` hands its runs back cleanly first.
+5. **Remove it** (`docker rm`).
+
+traefik must route by readiness: the service's
+`traefik.http.services.orbit.loadbalancer.healthcheck.path=/readyz` with a
+short `interval` (2 s), so the draining instance leaves the pool within
+seconds. Both containers carry the same router labels; nothing routes to
+the internal listener. Set compose `stop_grace_period` to at least
+`ORBIT_DRAIN_MAX` so a plain stop (a host reboot) also drains. Remove any
+`ORBIT_DRAIN` from the environment; `ORBIT_DRAIN_MAX` (a Go duration)
+overrides the drain's cap, which defaults to the longest agent timeout plus
+5 minutes.
+
+A request that reaches the old instance in the seconds before traefik drops
+it is still served (the API is DB-backed); a run it enqueues is claimed by
+the new one within its 5 s poll.
+
 ## Claiming it is deployed
 
 Check the running container's revision, not the pin:
-`docker exec orbit orbit version` must print the commit, and `/healthz` must
-answer. A config change is in force when the log says `config reloaded` and
+`docker exec orbit orbit version` must print the commit, `/healthz` and
+`/readyz` must answer, and exactly one orbit container must be running once
+the rollout is over. A config change is in force when the log says `config reloaded` and
 `orbit_config_valid` is 1.
 
 ## Data volume
 
 `ORBIT_DATA_DIR` (`/data`) holds run scratch and, for agents with `session`,
-their Claude Code sessions. It must be a named volume, owned by uid 10001, for
-sessions to survive a container restart; on the container's own layer every
-restart starts those agents fresh.
+their Claude Code sessions, and every run's session while it runs (so an
+interrupted run can be continued). It must be a named volume, owned by uid
+10001, shared by the old and new container during a rollout; on the
+container's own layer every restart starts those sessions fresh.
 
 ## Credentials
 

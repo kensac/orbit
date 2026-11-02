@@ -36,6 +36,12 @@ var (
 	ConfigValid = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "orbit_config_valid", Help: "1 if the configuration on disk loaded, 0 if orbit kept the previous one.",
 	})
+	// Draining is 1 once this instance drains (a deploy is replacing it).
+	// It and the run counters are per instance; Pending and Queued are
+	// read from the shared database, so every instance reports the same.
+	Draining = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "orbit_draining", Help: "1 while this instance drains: it claims nothing new and reports not ready.",
+	})
 	// Pending and Queued are refreshed from the database by the server.
 	Pending = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "orbit_actions_pending", Help: "Actions waiting for a person's decision.",

@@ -19,7 +19,12 @@ an agent's beliefs changed.
 ## State machines
 
 - run: `queued -> running -> succeeded | failed`, `queued -> cancelled`,
-  `running -> queued` (shutdown, lost worker under `MaxAttempts`).
+  `running -> queued` (a hand-back, a lost worker under `MaxAttempts`).
+  Every write by a running attempt also guards `attempt = <its own>`, so an
+  attempt superseded by a newer claim writes nothing.
+- attempt (`run_attempts`, one per claim, written in `ClaimRun`'s
+  transaction): open, then `succeeded | failed` with its run, `handed_back`
+  (`HandBack`) or `lost` (`ReapStale`).
 - action: `pending -> approved | rejected`, `approved -> executing ->
   executed | failed`; `denied` and rule-approved are set at creation.
 - ticket: `ticketEdges` in `tickets.go` is the table (diagram in

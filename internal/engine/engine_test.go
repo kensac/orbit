@@ -33,6 +33,9 @@ type fakeRunner struct {
 	// started is closed once Run begins, when block is set.
 	started chan struct{}
 	calls   int
+	// savedCost, when set, is the running total a blocked run's
+	// transcript saves when it is stopped.
+	savedCost float64
 }
 
 func (f *fakeRunner) Kind() string  { return "claude-code" }
@@ -55,11 +58,22 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 		path, _ := runner.SessionFile(req.Session.Home, req.Workdir, sid)
 		_ = os.MkdirAll(filepath.Dir(path), 0o700)
 		_ = os.WriteFile(path, []byte("{}\n"), 0o600)
+		if req.Session.Attached != nil {
+			req.Session.Attached(sid)
+		}
 	}
-	emit(runner.Event{Kind: "assistant", Payload: []byte(`{"type":"assistant"}`)})
+	emit(runner.Event{Kind: "assistant", Payload: []byte(`{"type":"assistant","session_id":"` + sid + `"}`)})
 	if f.block != nil {
 		close(f.started)
 		<-ctx.Done()
+		if req.Session != nil && f.savedCost > 0 {
+			// As the CLI does on SIGTERM: save the session's running cost.
+			path, _ := runner.SessionFile(req.Session.Home, req.Workdir, sid)
+			line := fmt.Sprintf(`{"type":"cost-state","sessionId":%q,"totalCostUSD":%v}`+"\n", sid, f.savedCost)
+			fh, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+			_, _ = fh.WriteString(line)
+			_ = fh.Close()
+		}
 		return nil, ctx.Err()
 	}
 	cost := 0.25

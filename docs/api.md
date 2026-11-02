@@ -34,6 +34,7 @@ JWT check is its gate (the portfolio on Vercel calls it server-side).
 | `ORBIT_OIDC_CLIENT_IDS` | comma list of accepted `aud` values (the providers' client ids). Required with the issuer. |
 | `ORBIT_OIDC_GROUP` | the group a person must be in (today `infra-admins`). Required with the issuer. |
 | `ORBIT_LISTEN` | the public listener, default `:8080`. traefik routes here. |
+| `ORBIT_DRAIN_MAX` | the longest a drain waits for the runs it holds before handing the rest back (a Go duration). Default: the longest agent `timeout` plus 5 minutes. |
 | `ORBIT_INTERNAL_LISTEN` | the internal listener, default `127.0.0.1:8081`: `/api/v1` (operator token or authentik token), `/healthz`, `/metrics`; no `/ui`. traefik never routes to it, so the operator token is told apart by the socket a request arrived on, not by a header anyone can forge. The default is reachable only inside the container (`docker exec orbit ...`); bind `:8081` to let other containers on the network reach it. |
 
 Keys are fetched on the first token, cached, and refetched when a token names
@@ -241,21 +242,29 @@ message, in the default conversation: `202 {"run_id": "uuid"}`.
 - **`tool`** is one tool call; `summary` is one line (a file path relative to
   the run's directory, a pattern, a command, a URL), at most 160 characters,
   possibly empty. The call that returns the final answer is not shown.
-- **Replay and resume.** Without `Last-Event-ID`, the stream replays from
-  the start of the run's latest attempt, then follows live, so a client that
+- **Replay and resume.** Without `Last-Event-ID`, the stream replays the
+  run's latest narration from its start (the latest attempt, preceded by
+  the attempts it continues; below), then follows live, so a client that
   connects late gets everything. Every `text` and `tool` event has an `id`
   (`<attempt>.<seq>.<index>`); a client that reconnects with `Last-Event-ID`
   set to the last one it received gets only what followed it (a browser
-  `EventSource` does this itself). An id from an earlier attempt, or one
-  that does not parse, means a full replay of the latest attempt. `status`
-  and `done` are sent again on every connection and carry no id.
-- **Requeue.** A run requeued by a deploy streams `status: queued`, then
-  `status: running` with the next `attempt`. When `attempt` changes, the
-  prose and tools shown so far belong to an abandoned attempt: a client
-  clears them, and the new attempt streams from its start.
+  `EventSource` does this itself), from any instance: the stream is read
+  from the database, so a reconnect that a deploy sends to the new instance
+  continues seamlessly. An id outside the latest narration, or one that
+  does not parse, means a full replay. `status` and `done` are sent again on
+  every connection and carry no id.
+- **Requeue.** A run handed back (a deploy's drain past its cap, a crash)
+  streams `status: queued`, then `status: running` with the next `attempt`.
+  When that status carries `"continues": <n>` and `n` is the attempt the
+  client was showing, the new attempt resumed that attempt's session: the
+  prose so far stands and the next `text` continues it (a chunk with its
+  `"\n\n"`). Without `continues`, the prose and tools shown so far belong to
+  an abandoned attempt: a client clears them, and the new attempt streams
+  from its start.
 - A heartbeat comment (`: ping`) is sent every 15 s. A finished run streams
   its status, its replay and `done` at once.
-- The stream also ends when orbit shuts down (a deploy); reconnect.
+- The stream ends when the instance serving it exits (the end of a deploy's
+  drain); reconnect with `Last-Event-ID`.
 
 Events come from the backend's stored transcript (`GET /runs/{id}/events`),
 turned into `text` and `tool` by code (`runner.Narrate`): Claude Code's text
@@ -266,7 +275,16 @@ the concatenated `text`: `text` is what the agent narrated while working.
 ## Runs, events, artifacts
 
 - `GET /runs?agent=&status=&before=&limit=`
-- `GET /runs/{id}`: also `session_mode` (`fresh`, `resumed`, `live`),
+- `GET /runs/{id}`: `{"run": {...}, "attempts": [...]}`. Each attempt
+  (oldest first) is `{"attempt", "worker", "runner_kind", "spec_sha",
+  "started_at", "ended_at", "outcome", "session_id", "recovered_from",
+  "recover_skipped", "cost_usd", "session_cost_usd"}`: `outcome` is
+  `succeeded`, `failed`, `handed_back` (stopped by its instance) or `lost`
+  (reaped without a heartbeat), absent while running; `recovered_from` is the
+  attempt whose session it continued, `recover_skipped` why it started over
+  instead. `cost_usd` is the attempt's share, absent when unknown (a killed
+  process saved none); the run's `cost_usd` is every attempt's. The run has
+  also `session_mode` (`fresh`, `resumed`, `live`),
   `session_parent` and `session_depth` for an agent with a session, and
   `run_after`, `chain` and `continues` for a `continue` run.
 - `POST /runs/{id}/cancel`: `200 {"cancelled": true}`; queued runs only, 409
@@ -366,6 +384,18 @@ first, `{"versions": [{"id": 12, "run_id": "uuid", "content": "<markdown>",
   that is not `YYYY-MM-DD` is `400`. `by_day` lists every day of the range,
   oldest first, zero or not. `by_agent` lists agents with a run in the range,
   by name. `by_status` always has all five statuses.
+
+## Readiness and drain
+
+- `GET /readyz` (both listeners, unauthenticated, like `/healthz`): `200
+  ready` while the instance takes new work; `503 draining` while it drains,
+  `503 database: ...` when it cannot reach Postgres. `/healthz` is liveness:
+  200 while the process serves, draining or not. traefik routes by
+  `/readyz`.
+- `POST /api/v1/drain` (internal listener only, operator token): start
+  draining, as SIGTERM does. `202 {"draining": true, "started": true,
+  "since": "..."}`; `started` is false when it was already draining. `orbit
+  drain` in the container calls it.
 
 ## Health
 

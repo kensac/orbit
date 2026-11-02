@@ -25,7 +25,11 @@ const maxSessionDepth = 20
 // window, no live turn on it failed, the chain is under maxSessionDepth,
 // and its transcript is still on disk. Anything else starts fresh. The
 // decision and its reason are an event of the run.
-func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, workdir, home string, emit func(string, any)) (*runner.Session, bool, error) {
+//
+// rec, when set, overrides that: the run is continuing its own
+// interrupted attempt, whose session (a fork of whatever that attempt
+// continued, plus its partial work) is the one to fork again.
+func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, workdir, home string, rec *recovery, emit func(string, any)) (*runner.Session, bool, error) {
 	idle := time.Duration(a.Session.Idle)
 	prior, err := e.Store.LatestSession(ctx, c.ConversationID)
 	if err != nil {
@@ -72,14 +76,26 @@ func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.Claime
 		}
 		depth = prior.Depth + 1
 	}
+	recovers := 0
+	if rec != nil {
+		recovers, reason = rec.from, ""
+		sess.Resume = rec.sessionID
+		if rec.baseKnown {
+			sess.BaseCostUSD = rec.base
+		}
+	}
 	if live := time.Duration(a.Session.Live); live > 0 && e.Live != nil {
 		// A live process opens for a person's message: they are likely to
 		// write again soon. Any run may use one that is already open.
 		sess.Live, sess.LiveIdle, sess.Open = e.Live, live, c.Trigger == "message"
 	}
 	sess.Started = func(mode, parent string) error {
-		emit("orbit.session", map[string]any{"mode": mode, "parent": parent, "depth": depth, "fresh_because": reason})
-		return e.Store.SetSession(ctx, c.ID, mode, parent, depth)
+		ev := map[string]any{"mode": mode, "parent": parent, "depth": depth, "fresh_because": reason}
+		if recovers > 0 {
+			ev["recovers_attempt"] = recovers
+		}
+		emit("orbit.session", ev)
+		return e.Store.SetSession(ctx, c.ID, c.Attempt, mode, parent, depth)
 	}
 	return sess, reason == "", nil
 }
