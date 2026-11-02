@@ -42,7 +42,7 @@ The Claude side also plans: agent templates and more sources (Gmail, Calendar, D
 
 | Area | Branch / PR | Notes |
 |---|---|---|
-| Run event ordering | `codex/event-sequence` | Serializes sequence allocation, message capture and complete event/journal persistence across concurrent callbacks; blocks integration checks until reviewed |
+| Run event ordering | `codex/event-sequence`, #72 | Serializes sequence allocation, message capture and complete event/journal persistence across concurrent callbacks; blocks integration checks until reviewed |
 
 ## Open for Codex
 
