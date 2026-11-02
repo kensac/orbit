@@ -20,7 +20,7 @@ func TestHookStatusRecorded(t *testing.T) {
 	e, s, _ := harness(t, fr)
 	e.Harness = "/opt/orbit"
 	var during *store.Run
-	fr.during = func(req runner.Request) {
+	fr.seen = func(req runner.Request) {
 		if req.Harness == nil || req.Harness.Status == "" {
 			t.Error("the hooks were configured without the status socket")
 			return
