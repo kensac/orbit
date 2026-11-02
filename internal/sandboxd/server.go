@@ -73,12 +73,18 @@ func (s *Server) Check(ctx context.Context) error {
 			return fmt.Errorf("docker has no runtime %q", rt)
 		}
 	}
-	n, err := s.d.network(ctx, s.cfg.Network)
-	if err != nil {
-		return fmt.Errorf("network %s: %w", s.cfg.Network, err)
+	nets := []string{s.cfg.Network}
+	if s.cfg.WorkstationNetwork != "" {
+		nets = append(nets, s.cfg.WorkstationNetwork)
 	}
-	if !n.Internal {
-		return fmt.Errorf("network %s is not internal: a build container on it could reach anything; create it with internal: true", s.cfg.Network)
+	for _, name := range nets {
+		n, err := s.d.network(ctx, name)
+		if err != nil {
+			return fmt.Errorf("network %s: %w", name, err)
+		}
+		if !n.Internal {
+			return fmt.Errorf("network %s is not internal: a sandbox on it could reach anything; create it with internal: true", name)
+		}
 	}
 	for _, img := range []string{s.cfg.Image, s.cfg.BoxImage} {
 		if img == "" {
@@ -177,7 +183,7 @@ func (s *Server) profile(name string) (Config, error) {
 		if cfg.WorkstationProxy == "" {
 			return cfg, errors.New("the workstation profile is not configured here (ORBIT_SANDBOX_WORKSTATION_PROXY)")
 		}
-		cfg.Proxy = cfg.WorkstationProxy
+		cfg.Proxy, cfg.Network = cfg.WorkstationProxy, cfg.WorkstationNetwork
 		if cfg.WorkstationCredProxy != "" {
 			cfg.CredProxy = cfg.WorkstationCredProxy
 		}
