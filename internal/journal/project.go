@@ -203,6 +203,15 @@ func (p *projector) event() {
 // ---------------------------------------------------------------- orbit
 
 func (p *projector) orbit() {
+	if p.ev.Kind == "orbit.steer" {
+		var st Steer
+		if json.Unmarshal(p.ev.Payload, &st) != nil || st.MessageID == "" {
+			p.status()
+			return
+		}
+		p.write("steer:"+st.MessageID, KindSteer, "", st)
+		return
+	}
 	if p.ev.Kind != "orbit.permission" {
 		p.status()
 		return

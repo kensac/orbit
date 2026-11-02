@@ -17,6 +17,7 @@ import (
 
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 // Input is one fetched source, already written to Workdir/Path.
@@ -63,12 +64,18 @@ type Harness struct {
 	// Figures sends an output back when its money amounts cannot be traced
 	// to the inputs or orbit's tool results (spec verify: [figures]).
 	Figures bool
+	// Status is the socket the engine's status listener serves for the
+	// run (status.SocketPath of the run's state directory); with it, every
+	// Claude Code hook event is configured and posted there.
+	Status string
 	// Search is the engine's search socket for the run's agent; empty
 	// offers no search tool.
 	Search string
 	// Repos is the engine's repository tools socket for the run's agent
 	// (engine/repos.go); empty offers none.
 	Repos string
+	// Prometheus is the engine's prometheus tool socket for the run's agent (engine/prometheus.go); empty offers no prometheus_query.
+	Prometheus string
 	// AgentHooks are the agent's own hooks (spec hooks), run by `orbit agent-hook` beside orbit's.
 	AgentHooks []AgentHook
 }
@@ -126,8 +133,10 @@ type Event struct {
 type Result struct {
 	// Output is the JSON the schema describes, unvalidated: the engine
 	// validates it, so every runner is held to the same check.
-	Output    json.RawMessage
-	Usage     json.RawMessage
+	Output json.RawMessage
+	Usage  json.RawMessage
+	// Tokens is Usage in orbit's shape, nil when the backend reported none.
+	Tokens    *tokens.Usage
 	CostUSD   *float64
 	SessionID string
 	Model     string

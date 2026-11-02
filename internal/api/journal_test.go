@@ -109,7 +109,7 @@ func TestTheStreamSendsJournalRows(t *testing.T) {
 		return
 	}
 	items, events, done := collect("")
-	want := "status item item item tool item item text item item done"
+	want := "status agent_status item item item tool item item text item item done"
 	if strings.Join(events, " ") != want {
 		t.Fatalf("events = %v", events)
 	}

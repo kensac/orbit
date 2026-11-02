@@ -39,6 +39,14 @@ type Output struct {
 	// planTicket is the ticket a non-empty Plan is for, set by the engine,
 	// never read from the output.
 	planTicket string
+	// Outcome and OutcomeReason are a task's run saying whether it did the
+	// work (delegation.go); only a run in a task's conversation is offered
+	// the fields.
+	Outcome       string `json:"outcome"`
+	OutcomeReason string `json:"outcome_reason"`
+	// instructedBy is the person the run answered, set by the engine: an
+	// approve-rule action they asked for is approved by them.
+	instructedBy string
 	// Entries are memory entry writes (entries.go).
 	Entries []OutputEntry `json:"entries"`
 	// known and topics are the entries the run was shown and the topics it reads, set by the engine to resolve Entries.
@@ -208,7 +216,7 @@ func systemPrompt(a *spec.Agent, types []actions.Type, inputs []runner.Input, cl
 
 How your result is used:
 - summary: one line naming the outcome. It is the notification title when notify.title is empty.
-- report: the full result in Markdown. Lead with the conclusion, then the evidence. Use real numbers from your inputs, never invented ones. Say what you could not determine.
+- report: the full result in Markdown, and the only part of this run the person reads: everything you would tell them goes here, in full (every item of a list, every finding), never a pointer to it such as "see above" or "listed in the chat". Text you write outside the result is a working note they do not see. Lead with the conclusion, then the evidence. Use real numbers from your inputs, never invented ones. Say what you could not determine.
 - notify.send: whether this run is worth interrupting the person for. `)
 	switch a.Notify.When {
 	case "always":
@@ -216,7 +224,7 @@ How your result is used:
 	case "agent":
 		b.WriteString("Reports are delivered only when you set this to true.")
 	case "never":
-		b.WriteString("This agent's reports are never pushed; they stay in orbit.")
+		b.WriteString("This agent's reports are never pushed; they stay in orbit, except that a reply to a mail is mailed to its sender.")
 	}
 	b.WriteString(`
 - memory: your only persistence between runs. You receive the current memory below. To change it, set update to true and content to the COMPLETE new document (it replaces the old one). Keep it short: facts you will need next time, preferences the person stated, baselines to compare against. Do not copy the report into it.
@@ -256,6 +264,20 @@ Rules:
 	return b.String()
 }
 
+// fullReport makes the run's final prose (journal.FinalProse) its report when the submitted report holds less: empty, a one-line pointer to the prose ("see the reply above"), or shorter than it. The person reads the report, so an answer left in the transcript is the answer. The model's summary stays the summary, and the report it submitted stays in output.json. It returns the prose it used, "" when the report stands.
+func fullReport(out *Output, prose string) string {
+	prose, report := strings.TrimSpace(prose), strings.TrimSpace(out.Report)
+	if prose == "" || prose == report {
+		return ""
+	}
+	stub := !strings.Contains(report, "\n") && strings.Contains(prose, "\n")
+	if !stub && len(report) >= len(prose) {
+		return ""
+	}
+	out.Report = prose
+	return prose
+}
+
 // promptRun is what the prompt says about this run itself.
 type promptRun struct {
 	Trigger string
@@ -274,6 +296,9 @@ type promptRun struct {
 	// Attached are the files the messages carry, by message id, as placed
 	// in the workdir.
 	Attached map[string][]placedUpload
+	// WorkspaceChanges is what the person changed in a chat's workspace
+	// since the agent's last turn (personChanges), "" when nothing.
+	WorkspaceChanges string
 }
 
 // userPrompt is the run's content: charter, why it woke, memory and inbox.
@@ -287,7 +312,7 @@ func userPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 		b.WriteString("Session: continued. Your earlier runs in this session are above; this message starts a new run. Inputs listed below are this run's, freshly fetched: read them rather than relying on earlier reads.\n")
 	}
 	if run.Trigger == store.TriggerDelegation {
-		b.WriteString("\nYou were woken because tasks you delegated settled: every one is over, or one asks you something. They are below.\n")
+		b.WriteString("\nYou were woken because tasks you delegated settled: every one is over, one failed, one asks you something, or none of the rest can move without you. They are below.\n")
 	}
 	if run.Trigger == "continue" {
 		fmt.Fprintf(&b, "\nYou asked to be woken again (continuation %d of at most %d). Your note to yourself:\n\n%s\n",
