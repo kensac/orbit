@@ -77,6 +77,71 @@ while the agent waits on its person: an open question or a pending action.
 an agent with no schedule, a disabled one, or one no longer configured.
 Earlier memory is `GET /agents/{name}/memory` (below).
 
+## Defining agents
+
+An agent is defined in one of three places, reported as `origin` on every
+agent row (`GET /agents`, `GET /agents/{name}`), with `version` for a
+database agent:
+
+- `file`: `agents/<name>.yaml` in the configuration directory. Read-only
+  here: every change below is `409`.
+- `database`: defined through this API (`agent_definitions`). Every change
+  is a new version; nothing is overwritten or deleted.
+- `builtin`: defined in code (`spec.Builtins`): `orbit`, the general agent.
+  A file or database agent of the same name replaces it; the first `PUT
+  /agents/orbit` defines it in the database.
+
+A spec is the agent as JSON, with exactly the fields of an agent file
+(docs/agents/configuration.md; durations as strings, `"15m"`), and is
+validated by loading the whole configuration with it, as it will run: an
+unknown field, a bad cross-reference or a name a file agent has is a `400`
+with every problem in `error`. A change is in force on this instance when
+the response returns, and on every other instance within 30 s.
+
+`POST /agents`
+
+```json
+{"spec": {"name": "news", "description": "Morning headlines.",
+          "charter": "Summarize the news I care about.",
+          "triggers": [{"schedule": "0 8 * * *"}], "wake_on_message": true},
+ "dry_run": false}
+```
+
+returns `201`:
+
+```json
+{"valid": true,
+ "spec": {"name": "news", "...": "the agent as loaded, defaults applied"},
+ "definition": {"id": 7, "name": "news", "version": 1, "spec": {"...": "as stored"},
+                "enabled": true, "archived": false, "change": "create",
+                "author": "kanishk", "created_at": "..."},
+ "next_fires": [{"trigger_index": 0, "schedule": "0 8 * * *", "at": "..."}],
+ "agent": {"name": "news", "origin": "database", "version": 1, "...": "as in GET /agents"}}
+```
+
+- `dry_run: true` validates and stores nothing: `200 {"valid": true,
+  "spec": ..., "next_fires": [...]}` (no `definition`, no `agent`).
+- `spec.enabled` (default `true`) sets whether its schedules fire; it is
+  stored on the definition, not in `spec`.
+- A name already defined in the database (and not archived) is `409`; an
+  archived name may be created again, as its next version.
+- `author` is the token's person (`null` with the operator token).
+
+`PUT /agents/{name}` `{"spec": {...}, "dry_run": false}` replaces the spec
+with a new version: `200`, the same shape (`change: "update"`). `spec.name`
+may be omitted; if present it must be `{name}`. Omitting `spec.enabled`
+keeps the current state.
+
+`POST /agents/{name}/enable`, `/disable`, `/archive`: a new version with
+the same spec, `200` in the same shape. An archived agent is no longer
+configured (`present: false` in the list); its runs and conversations stay
+readable. Changing an archived agent is `404`; a file or built-in agent is
+`409`.
+
+`GET /agents/{name}/definitions` is `{"name": "news", "origin":
+"database", "versions": [<definition>, ...]}`, newest first (empty for a
+file or built-in agent).
+
 ## Conversations
 
 An agent has as many conversations as its person opens ("New chat"), and

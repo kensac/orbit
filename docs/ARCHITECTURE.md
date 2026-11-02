@@ -39,6 +39,14 @@ delivery attempt. The workdir is scratch and is removed after the run, except
 for an agent with a session (below), whose workdir and HOME persist and whose
 inputs go in a per-attempt directory removed after the run.
 
+## Where agents come from
+
+An agent is a file (`agents/<name>.yaml`), a database definition written
+through the API (`agent_definitions`, every version kept), or built in
+(`spec.Builtins`: `orbit`, the general agent). `engine.LoadConfig` merges
+the three and validates them as one configuration; a reload follows any
+change to the files or the definitions.
+
 ## Conversations
 
 An agent has many conversations (`conversations`; the person opens them as

@@ -12,6 +12,17 @@ one of `spec.ReservedAgentNames`: the UI's own top-level routes under
 `/orbit/` (`admin`, `api`, `c`, `new`, `components`, `lib`) and
 `orbit-admin`. Such an agent fails the load, naming the reason.
 
+## Agents in the database
+
+Agents are also defined through the API (docs/api.md, Defining agents),
+stored as versions in `agent_definitions` and loaded with the files by
+`spec.LoadAll`: the same decoding (unknown fields fail), defaults and
+validation. A name defined both in a file and in the database fails the
+load. The built-in agents (`spec.Builtins`: `orbit`) yield to a file or
+database agent of their name. Each instance reloads when the directory's
+content or the newest definition changes, so a definition written on one
+instance is in force on all within the 30 s poll.
+
 ## Secrets
 
 Never in YAML. Channels name variables with `*_env`; source headers, query

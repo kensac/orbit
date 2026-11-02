@@ -55,7 +55,7 @@ github:
 build:
   sandboxd: sandbox.example.ts.net:8091
   token_env: ORBIT_SANDBOX_TOKEN
-  agent: orbit
+  agent: builder
   # The App's bot user: id from `gh api /users/orbit-kensac%5Bbot%5D --jq .id`.
   author: "orbit-kensac[bot] <351241810+orbit-kensac[bot]@users.noreply.github.com>"
   repositories:
