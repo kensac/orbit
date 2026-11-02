@@ -140,6 +140,9 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 	if c.Trigger == store.TriggerBuild {
 		return e.executeBuild(ctx, actx, snap, a, c, start, log)
 	}
+	if c.Trigger == store.TriggerLearn {
+		return e.executeLearn(ctx, actx, snap, a, c, start, log)
+	}
 
 	st := &attemptState{}
 	out, res, err := e.attempt(actx, snap, a, c, log, st)
@@ -297,6 +300,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "memory.md", "text/markdown", []byte(rc.Memory)); err != nil {
 		return nil, nil, err
 	}
+	attached, err := e.placeUploads(ctx, workdir, rc)
+	if err != nil {
+		return nil, nil, err
+	}
 	if len(rc.Messages) > 0 {
 		b, _ := json.Marshal(rc.Messages)
 		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "messages.json", "application/json", b); err != nil {
@@ -443,6 +450,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	types := actions.Catalog(a, snap.Config.Deployment)
 	schema := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, true)
 	envelope := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, false)
+	schema, envelope = withEntries(schema, true), withEntries(envelope, false)
 	tk, err := e.Store.TicketForConversation(ctx, c.ConversationID)
 	if err != nil {
 		return nil, nil, err
@@ -456,9 +464,18 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			return nil, nil, err
 		}
 	}
+	topics, err := e.agentTopics(ctx, a)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The entries a run reads are also the ones its entry writes may name (entries.go), so a recovered attempt reads them too.
+	knownEntries, err := e.Store.EntriesFor(ctx, a.Name, topics)
+	if err != nil {
+		return nil, nil, err
+	}
 	var known string
 	if rec == nil {
-		if known, inputs, err = e.knownInput(ctx, c, a, workdir, inputsDir, inputs); err != nil {
+		if known, inputs, err = e.knownInput(ctx, c, knownEntries, workdir, inputsDir, inputs); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -478,8 +495,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if known != "" {
 		system += knownContract
 	}
+	system += entriesContract(topics)
 	trigger := c.Trigger
-	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known},
+	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
 		rc, convo, inputs)
 	if rec != nil {
 		prompt = recoveryPrompt(rec, rc, now.Location())
@@ -516,6 +534,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if planning {
 		out.planTicket = tk.ID
 	}
+	out.known, out.topics = knownEntries, topics
 	if figures {
 		// The hook already sent the output back for these, up to
 		// MaxFigureDenials times (claude-code); this is the same check on
@@ -537,30 +556,38 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	return out, res, nil
 }
 
-// validate checks output against the schema the backend was given. Backends
-// enforce it too, but not all of them, and not identically.
-func validate(schema, output json.RawMessage) (*Output, error) {
+// validateAgainst checks output against a JSON Schema, naming every failing location.
+func validateAgainst(schema, output json.RawMessage) error {
 	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schema))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	c := jsonschema.NewCompiler()
 	if err := c.AddResource("contract.json", doc); err != nil {
-		return nil, err
+		return err
 	}
 	sch, err := c.Compile("contract.json")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(output))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if err := sch.Validate(inst); err != nil {
 		var ve *jsonschema.ValidationError
 		if errors.As(err, &ve) {
-			return nil, errors.New(leafErrors(ve.BasicOutput()))
+			return errors.New(leafErrors(ve.BasicOutput()))
 		}
+		return err
+	}
+	return nil
+}
+
+// validate checks output against the schema the backend was given. Backends
+// enforce it too, but not all of them, and not identically.
+func validate(schema, output json.RawMessage) (*Output, error) {
+	if err := validateAgainst(schema, output); err != nil {
 		return nil, err
 	}
 	var out Output
@@ -626,12 +653,15 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 		o.Actions = append(o.Actions, pa)
 	}
+	writes, refused := resolveEntryWrites(a.Name, out.topics, out.known, out.Entries)
+	o.Entries = writes
 	rr := store.RunResult{Attempt: c.Attempt, Status: "succeeded", Summary: out.Summary, Report: out.Report}
 	fillResult(&rr, res)
 	ids, err := e.Store.RecordOutcome(ctx, c.ID, a.Name, rr, o)
 	if err != nil {
 		return err
 	}
+	e.recordEntryWrites(ctx, c, out.Entries, writes, refused)
 	metrics.RunFinished(a.Name, "succeeded", runnerKind(snap, a), time.Since(start), rr.CostUSD)
 
 	// Delivery: the report, then each pending approval.

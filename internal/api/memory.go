@@ -18,9 +18,12 @@ func (s *Server) memoryRoutes(api func(string, http.HandlerFunc)) {
 	api("GET /api/v1/memory/entries/{id}", s.getEntry)
 	api("PATCH /api/v1/memory/entries/{id}", s.updateEntry)
 	api("POST /api/v1/memory/entries/{id}/retire", s.retireEntry)
+	api("POST /api/v1/memory/entries/{id}/restore", s.restoreEntry)
+	api("POST /api/v1/agents/{name}/memory", s.writeMemory)
 	api("POST /api/v1/memory/import", s.importEntries)
 	api("GET /api/v1/memory/topics", s.listTopics)
 	api("GET /api/v1/agents/{name}/context", s.agentContext)
+	api("POST /api/v1/conversations/{id}/learn", s.learnNow)
 	api("PUT /api/v1/agents/{name}/topics/{topic}", s.attach(store.AttachTopic, "topic"))
 	api("DELETE /api/v1/agents/{name}/topics/{topic}", s.detach(store.AttachTopic, "topic"))
 }
@@ -73,7 +76,11 @@ func decode(w http.ResponseWriter, r *http.Request, limit int64, into any) bool 
 
 func (s *Server) listEntries(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	f := store.EntryFilter{Scope: q.Get("scope"), Type: q.Get("type"), Status: q.Get("status"), Query: q.Get("q"), Limit: intParam(r, "limit")}
+	f := store.EntryFilter{Scope: q.Get("scope"), Type: q.Get("type"), Status: q.Get("status"), Query: q.Get("q"), RunID: q.Get("run_id"), Limit: intParam(r, "limit")}
+	if f.RunID != "" && !isUUID(f.RunID) {
+		writeErr(w, http.StatusBadRequest, "run_id is not a UUID")
+		return
+	}
 	switch {
 	case q.Get("topic") != "" && q.Get("agent") != "":
 		writeErr(w, http.StatusBadRequest, "name a topic or an agent, not both")
@@ -274,4 +281,70 @@ func (s *Server) detach(kind, param string) http.HandlerFunc {
 		err := s.Store.Detach(r.Context(), a.Name, kind, r.PathValue(param), actor(r, ""))
 		respond(w, map[string]any{"detached": err == nil}, err)
 	}
+}
+
+// learnNow queues a learning run of one conversation at once (store.LearnNow).
+func (s *Server) learnNow(w http.ResponseWriter, r *http.Request) {
+	c, err := s.Store.GetConversation(r.Context(), r.PathValue("id"))
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	a, ok := s.Engine.Current().Config.Agents[c.Agent]
+	if !ok {
+		respond(w, nil, store.ErrNotFound)
+		return
+	}
+	id, err := s.Store.LearnNow(r.Context(), c.ID, a.SHA)
+	if err == nil {
+		s.Wake()
+	}
+	respondStatus(w, http.StatusAccepted, map[string]any{"run_id": id}, err)
+}
+
+func (s *Server) restoreEntry(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Restore int    `json:"restore"`
+		Version int    `json:"version"`
+		Note    string `json:"note"`
+		Author  string `json:"author"`
+	}
+	if !decode(w, r, 16<<10, &body) {
+		return
+	}
+	e, err := s.Store.RestoreEntry(r.Context(), r.PathValue("id"), body.Restore, body.Version,
+		store.Provenance{Source: store.SourcePerson, Author: actor(r, body.Author), Note: body.Note})
+	respond(w, map[string]any{"entry": e}, err)
+}
+
+// writeMemory writes the next version of an agent's memory document, from content or from an earlier version.
+func (s *Server) writeMemory(w http.ResponseWriter, r *http.Request) {
+	snap := s.Engine.Current()
+	a, ok := snap.Config.Agents[r.PathValue("name")]
+	if !ok {
+		respond(w, nil, store.ErrNotFound)
+		return
+	}
+	var body struct {
+		Content *string `json:"content"`
+		Restore int64   `json:"restore"`
+		Author  string  `json:"author"`
+	}
+	if !decode(w, r, int64(snap.Config.Deployment.Defaults.MemoryMaxBytes)*2+4<<10, &body) {
+		return
+	}
+	switch {
+	case (body.Content == nil) == (body.Restore == 0):
+		writeErr(w, http.StatusBadRequest, "give content or restore, not both")
+		return
+	case body.Content != nil && len(*body.Content) > snap.Config.Deployment.Defaults.MemoryMaxBytes:
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("content is longer than memory_max_bytes (%d)", snap.Config.Deployment.Defaults.MemoryMaxBytes))
+		return
+	}
+	content := ""
+	if body.Content != nil {
+		content = *body.Content
+	}
+	v, err := s.Store.WriteMemory(r.Context(), a.Name, content, body.Restore, actor(r, body.Author))
+	respondStatus(w, http.StatusCreated, map[string]any{"version": v}, err)
 }
