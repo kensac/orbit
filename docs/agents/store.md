@@ -6,7 +6,7 @@ the engine never write SQL.
 ## Migrations
 
 `internal/store/migrations/` is the schema, applied by `orbit serve` at start
-(goose, embedded). A migration is additive and never edited once merged. A
+(goose, embedded). A migration is additive and never edited once merged. Name a new migration by UTC timestamp, `YYYYMMDDHHMMSS_name.sql` (`date -u +%Y%m%d%H%M%S`), never the next small number: agents merge in parallel and two of them picking the same number made every orbit start fail. Out-of-order apply is on, and `TestMigrationVersionsAreUnique` fails on a duplicate. A
 change that drops or renames is expand, then contract, across two releases,
 because the previous image may still be running during a deploy.
 
