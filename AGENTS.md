@@ -56,6 +56,7 @@ is the design; the topic documents below are the rules for changing it.
 - `internal/transforms/`: coded reducers over a source before the model sees it.
 - `internal/actions/`: action types, their parameter schemas and executors.
 - `internal/notify/`: channels (`ntfy`, `smtp`, `webhook`, `log`).
+- `internal/push/`: Web Push of attention rows to registered devices (title and link only, bursts folded); `internal/webpush/`: the RFC 8291 encryption and VAPID signing it sends with.
 - `internal/scheduler/`: schedule triggers to queued runs, one leader.
 - `internal/store/`: every database read and write; `migrations/` is the schema.
 - `internal/api/`: JSON API, the run and approval pages, `/healthz`, `/readyz`, `/metrics`.
@@ -73,6 +74,8 @@ is the design; the topic documents below are the rules for changing it.
 
 - `make testdb-up`, then `make check`: exactly CI's gates (format, vet,
   staticcheck, prose, the example config, the tests against Postgres).
+  Without `make testdb-up` (and no `ORBIT_TEST_DATABASE_URL`), database tests skip.
+- `make check-sandbox`: what a build sandbox can pass (no Postgres, no cgo): the same gates, tests without `-race`, database tests skipping.
 - `make vuln`: govulncheck.
 - `go run ./cmd/orbit validate <dir>`: check a configuration directory and
   list the environment it references.
