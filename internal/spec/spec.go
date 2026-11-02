@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -51,6 +52,8 @@ type Config struct {
 type Deployment struct {
 	// Timezone schedules are read in unless an agent names its own.
 	Timezone string `yaml:"timezone" json:"timezone"`
+	// loc is Timezone parsed; set by Validate, which rejects a zone that does not parse.
+	loc *time.Location
 	// PublicURL is where a person reaches the API (links in notifications).
 	PublicURL string                `yaml:"public_url" json:"public_url"`
 	Defaults  Defaults              `yaml:"defaults" json:"defaults"`
@@ -68,6 +71,8 @@ type Deployment struct {
 	Sandbox *SandboxService `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
 	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
+	// Credentials are the variables a source may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
+	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -82,11 +87,38 @@ type GitHub struct {
 	APIURL string `yaml:"api_url,omitempty" json:"api_url,omitempty"`
 	// Repositories ("owner/name") tickets and github:merge may target.
 	Repositories []string `yaml:"repositories" json:"repositories"`
+	// ReadRepositories ("owner/name") are the repositories an agent's
+	// repos may name: orbit mirrors them and mints contents:read tokens
+	// (and pull request, check and status reads for the repository tools)
+	// for them. Reading a repository never permits a ticket or a merge
+	// there; that is Repositories alone.
+	ReadRepositories []string `yaml:"read_repositories,omitempty" json:"read_repositories,omitempty"`
 }
 
 // AllowsRepo reports whether repo is one orbit may act on.
 func (d Deployment) AllowsRepo(repo string) bool {
 	return d.GitHub != nil && slices.Contains(d.GitHub.Repositories, repo)
+}
+
+// Location is the deployment's Timezone, parsed once when the configuration was validated; UTC before that.
+func (d Deployment) Location() *time.Location {
+	if d.loc == nil {
+		return time.UTC
+	}
+	return d.loc
+}
+
+// RunURL is a run's page under PublicURL, the link notifications and search results carry; "" when no public URL is configured, since a relative link is useless in a notification.
+func (d Deployment) RunURL(runID string) string {
+	if d.PublicURL == "" {
+		return ""
+	}
+	return strings.TrimRight(d.PublicURL, "/") + "/ui/runs/" + url.PathEscape(runID)
+}
+
+// AllowsRead reports whether repo is one an agent may read.
+func (d Deployment) AllowsRead(repo string) bool {
+	return d.GitHub != nil && slices.Contains(d.GitHub.ReadRepositories, repo)
 }
 
 // Defaults apply to every agent that does not override them.
@@ -204,10 +236,17 @@ type Agent struct {
 	// The delegate rule still decides whether it may (docs/ARCHITECTURE.md,
 	// Delegation).
 	Delegates []string `yaml:"delegates,omitempty" json:"delegates,omitempty"`
+	// Repos are git repositories every run reads: orbit fetches each into
+	// its mirror and gives the run the tree at Ref, without .git, under
+	// inputs/repos/<name>, with read-only history and GitHub tools
+	// (internal/repos). Each must be in github.read_repositories.
+	Repos []RepoRef `yaml:"repos,omitempty" json:"repos,omitempty"`
 
 	// delegateTargets is Delegates resolved against the configuration,
 	// sorted; set by Validate.
 	delegateTargets []string
+	// loc is Timezone parsed; set by Validate, which rejects a zone that does not parse.
+	loc *time.Location
 
 	// SHA is the hash of the agent's canonical JSON, set by Load.
 	SHA string `yaml:"-" json:"-"`
@@ -217,6 +256,31 @@ type Agent struct {
 	// Version is a database agent's definition version (agent_definitions).
 	Version int `yaml:"-" json:"-"`
 }
+
+// RepoRef is one repository an agent reads, at a branch, tag or commit.
+type RepoRef struct {
+	Repo string `yaml:"repo" json:"repo"`
+	// Ref is a branch, a tag or a full commit sha; empty is the default
+	// branch.
+	Ref string `yaml:"ref,omitempty" json:"ref,omitempty"`
+}
+
+// Name is the directory the repository's tree is given under
+// (inputs/repos/<name>): the repository's name without its owner.
+func (r RepoRef) Name() string {
+	_, name, _ := strings.Cut(r.Repo, "/")
+	return name
+}
+
+// RepoRefRE is a ref an agent may name: a branch or tag in git's own
+// spelling without anything git would read as an option or a revision
+// expression, or a full commit sha.
+var RepoRefRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}$`)
+
+// NeedsGitHub is the capability of a host holding the GitHub App's key: an
+// agent with repos must need it, so a worker without the key never claims
+// its runs.
+const NeedsGitHub = "github"
 
 // Where an agent is defined.
 const (
@@ -511,6 +575,24 @@ func (a *Agent) RuleFor(actionType string) Rule {
 	return RuleDeny
 }
 
+// Location is the agent's Timezone, parsed once when the configuration was validated. An agent that was never validated (built in code, not loaded) reads as UTC.
+func (a *Agent) Location() *time.Location {
+	if a.loc == nil {
+		return time.UTC
+	}
+	return a.loc
+}
+
+// SetTimezone sets Timezone and the Location it parses to, refusing a zone the system's tz database does not have.
+func (a *Agent) SetTimezone(name string) error {
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return err
+	}
+	a.Timezone, a.loc = name, loc
+	return nil
+}
+
 // DelegateTargets is the agents this one may delegate to, sorted: Delegates
 // with "*" resolved against the configuration it was validated in.
 func (a *Agent) DelegateTargets() []string { return a.delegateTargets }
@@ -712,10 +794,12 @@ func (c *Config) applyDefaults() {
 // schedules, timezones and action types.
 func (c *Config) Validate() error {
 	var errs []error
-	d := c.Deployment
-	if _, err := time.LoadLocation(d.Timezone); err != nil {
+	if loc, err := time.LoadLocation(c.Deployment.Timezone); err != nil {
 		errs = append(errs, fmt.Errorf("orbit.yaml timezone: %w", err))
+	} else {
+		c.Deployment.loc = loc
 	}
+	d := c.Deployment
 	for name, ch := range d.Channels {
 		if !nameRE.MatchString(name) {
 			errs = append(errs, fmt.Errorf("channel %q: invalid name", name))
@@ -775,6 +859,11 @@ func (c *Config) Validate() error {
 				errs = append(errs, fmt.Errorf("github: repository %q is not owner/name", r))
 			}
 		}
+		for _, r := range g.ReadRepositories {
+			if !RepoRE.MatchString(r) || strings.Contains(r, "..") {
+				errs = append(errs, fmt.Errorf("github: read_repositories: %q is not owner/name", r))
+			}
+		}
 	}
 	for _, ch := range d.Defaults.Channels {
 		if _, ok := d.Channels[ch]; !ok {
@@ -789,6 +878,7 @@ func (c *Config) Validate() error {
 	for _, n := range names {
 		errs = append(errs, c.validateAgent(c.Agents[n])...)
 	}
+	errs = append(errs, c.validateCredentials()...)
 	errs = append(errs, c.validateBuild()...)
 	if sb := c.Deployment.Sandbox; sb != nil && !strings.HasPrefix(sb.Sandboxd, "unix:/") && !strings.Contains(sb.Sandboxd, ":") {
 		errs = append(errs, fmt.Errorf("sandbox: sandboxd %q is neither host:port nor unix:/path", sb.Sandboxd))
@@ -811,18 +901,14 @@ func (c *Config) validateAgent(a *Agent) []error {
 	if strings.TrimSpace(a.Charter) == "" {
 		at("charter is required")
 	}
-	if _, err := time.LoadLocation(a.Timezone); err != nil {
+	if err := a.SetTimezone(a.Timezone); err != nil {
 		at("timezone: %v", err)
 	}
 	if _, ok := c.Deployment.Runners[a.Runner]; !ok {
 		at("unknown runner %q", a.Runner)
 	}
-	loc, err := time.LoadLocation(a.Timezone)
-	if err != nil {
-		loc = time.UTC
-	}
 	for i, t := range a.Triggers {
-		if _, err := TriggerSchedule(t, loc); err != nil {
+		if _, err := TriggerSchedule(t, a.Location()); err != nil {
 			at("trigger %d: %v", i, err)
 		}
 	}
@@ -882,7 +968,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 				at("gate %d: unchanged takes no input, items, n, command or timeout", i)
 			}
 		case "precheck":
-			if a.Origin != OriginFile {
+			if a.Restricted() {
 				// The API and agent:define write database agents; a
 				// command on orbit's host is for reviewed files only.
 				at("gate %d: a precheck runs a command on orbit's host, so only an agent in the configuration files may have one", i)
@@ -1035,6 +1121,30 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		seenNeed[n] = true
 	}
+	seenRepo := map[string]bool{}
+	for i, r := range a.Repos {
+		switch {
+		case !RepoRE.MatchString(r.Repo) || strings.Contains(r.Repo, ".."):
+			at("repos %d: %q is not owner/name", i, r.Repo)
+		case !c.Deployment.AllowsRead(r.Repo):
+			at("repos %d: %s is not in github.read_repositories", i, r.Repo)
+		}
+		if r.Ref != "" && (!RepoRefRE.MatchString(r.Ref) || strings.Contains(r.Ref, "..") || strings.HasSuffix(r.Ref, ".lock") || strings.HasSuffix(r.Ref, "/")) {
+			at("repos %d: ref %q is not a branch, tag or commit sha", i, r.Ref)
+		}
+		if seenRepo[r.Name()] {
+			at("repos %d: a second repository named %q (each is given as inputs/repos/<name>)", i, r.Name())
+		}
+		seenRepo[r.Name()] = true
+	}
+	if len(a.Repos) > 0 {
+		if !slices.Contains(a.Needs, NeedsGitHub) {
+			at("repos: needs %q in needs, so only a host holding the GitHub App's key claims its runs", NeedsGitHub)
+		}
+		if k := c.Deployment.Runners[a.Runner].Kind; k == "anthropic" {
+			at("repos: an anthropic runner reads no files; give the agent a claude-code or codex runner")
+		}
+	}
 	if a.Chat && c.Deployment.Runners[a.Runner].Kind != "claude-code" {
 		at("chat: needs a claude-code runner (runner %q is %q)", a.Runner, c.Deployment.Runners[a.Runner].Kind)
 	}
@@ -1049,6 +1159,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("sandbox: needs sandboxd in orbit.yaml (a sandbox: or build: section)")
 		}
 	}
+	errs = append(errs, c.validateTrust(a)...)
 	if ss := a.Session; ss != nil {
 		rs := c.Deployment.Runners[a.Runner]
 		if rs.Kind != "claude-code" {

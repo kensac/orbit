@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/actions"
+	"github.com/kensac/orbit/internal/build"
+	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/spec"
@@ -105,9 +107,9 @@ func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.Claimed
 	if err != nil {
 		return nil, fmt.Errorf("sandboxd: %w (%s)", err, tokenEnv)
 	}
-	cred, _ := e.Env(buildCredential)
-	if cred == "" {
-		return nil, errors.New("a sandboxed chat needs " + buildCredential + " for the CLI in the sandbox")
+	cred := build.SandboxEnv(e.Env)
+	if len(cred) == 0 {
+		return nil, fmt.Errorf("a sandboxed chat needs %s or %s for the CLI in the sandbox", claudeproto.OAuthToken, claudeproto.APIKey)
 	}
 	path, _ := runner.SessionFile(home, workdir, "x")
 	project := filepath.Dir(path)
@@ -115,7 +117,7 @@ func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.Claimed
 	// model's, unlike HOME, which holds orbit's session state).
 	boxHome := filepath.Join(filepath.Dir(workdir), "box-home")
 	return &runner.Sandbox{
-		Client: client, Label: c.ID, Credential: cred, Profile: profile,
+		Client: client, Label: c.ID, Env: cred, Profile: profile,
 		Pack: func() ([]byte, error) {
 			tree, _, err := workspace.Pack(
 				workspace.Tree{Dir: workdir, Skip: func(rel string) bool { return rel == ".orbit" || strings.HasPrefix(rel, ".orbit/") }},
@@ -158,7 +160,7 @@ func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.Claimed
 // orbit's tools do, nothing about the shape of its answer.
 func chatContract(a *spec.Agent, types []actions.Type, profile string) string {
 	var b strings.Builder
-	b.WriteString(`You are running in orbit, as a Claude Code session your person reaches from anywhere (a chat in their browser or phone). Their messages arrive as user turns; your final message in each turn is your reply, shown to them as written, in Markdown. Work as you would in a terminal session with them: do what they ask, and say what you did and found.
+	b.WriteString(`You are running in orbit, as a Claude Code session your person reaches from anywhere (a chat in their browser or phone). Their messages arrive as user turns; your final message in each turn is your reply, shown to them as written, in Markdown, and the only part of the turn they see at first: put the whole answer in it, not a reference to text earlier in the turn. Work as you would in a terminal session with them: do what they ask, and say what you did and found.
 
 `)
 	switch profile {
@@ -373,6 +375,8 @@ type chatTurn struct {
 	extra string
 	// plugin is the skills plugin directory, when the run has skills.
 	plugin string
+	// repos is what the agent's repositories add (repos.go), or nil.
+	repos *repoRun
 }
 
 // errCancelled is a run a person stopped; Execute records it cancelled.
@@ -394,6 +398,9 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	}
 	system += t.extra
 	prompt := chatPrompt(a, t.now, t.run, t.rc, t.convo)
+	if t.repos != nil {
+		prompt += t.repos.prompt
+	}
 	if t.rec != nil {
 		prompt = recoveryPrompt(t.rec, t.rc, t.now.Location())
 	}
@@ -404,6 +411,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	}
 	st := &chatState{}
 	chat := e.chatTools(a, t.types, d.Defaults.MemoryMaxBytes, st)
+	e.repoChatTools(a, chat)
 	chat.Interrupt = t.cancel
 	if a.Sandbox != "" {
 		sb, err := e.sandboxPlan(d, a.Sandbox, c, t.workdir, t.home, t.plugin, t.emit)
@@ -418,6 +426,9 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 		}
 		for _, in := range t.inputs {
 			chat.Push = append(chat.Push, in.Path)
+		}
+		if t.repos != nil {
+			chat.Push = append(chat.Push, t.repos.files...)
 		}
 	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))

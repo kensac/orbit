@@ -147,7 +147,7 @@ func systemPrompt(a *spec.Agent, types []actions.Type, inputs []runner.Input, cl
 
 How your result is used:
 - summary: one line naming the outcome. It is the notification title when notify.title is empty.
-- report: the full result in Markdown. Lead with the conclusion, then the evidence. Use real numbers from your inputs, never invented ones. Say what you could not determine.
+- report: the full result in Markdown, and the only part of this run the person reads: everything you would tell them goes here, in full (every item of a list, every finding), never a pointer to it such as "see above" or "listed in the chat". Text you write outside the result is a working note they do not see. Lead with the conclusion, then the evidence. Use real numbers from your inputs, never invented ones. Say what you could not determine.
 - notify.send: whether this run is worth interrupting the person for. `)
 	switch a.Notify.When {
 	case "always":
@@ -193,6 +193,20 @@ Rules:
 		}
 	}
 	return b.String()
+}
+
+// fullReport makes the run's final prose (journal.FinalProse) its report when the submitted report holds less: empty, a one-line pointer to the prose ("see the reply above"), or shorter than it. The person reads the report, so an answer left in the transcript is the answer. The model's summary stays the summary, and the report it submitted stays in output.json. It returns the prose it used, "" when the report stands.
+func fullReport(out *Output, prose string) string {
+	prose, report := strings.TrimSpace(prose), strings.TrimSpace(out.Report)
+	if prose == "" || prose == report {
+		return ""
+	}
+	stub := !strings.Contains(report, "\n") && strings.Contains(prose, "\n")
+	if !stub && len(report) >= len(prose) {
+		return ""
+	}
+	out.Report = prose
+	return prose
 }
 
 // promptRun is what the prompt says about this run itself.
