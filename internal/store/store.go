@@ -269,17 +269,26 @@ type ClaimedRun struct {
 // that kills its own worker (out of memory) would otherwise loop forever.
 const MaxAttempts = 3
 
-// ClaimRun moves the oldest queued run whose agent has nothing running to
+// ClaimRun moves the oldest queued run whose lane has nothing running (laneOf) to
 // running, owned by worker, and records the claim as a new attempt. It
 // returns nil when there is nothing to claim. FOR NO KEY UPDATE SKIP
 // LOCKED gives one row to one claimer across processes, and does not skip
 // a run another transaction only references (an event or journal row of a
 // superseded attempt being written holds a KEY SHARE lock on it, which FOR
-// UPDATE would skip); runs_one_running is what makes
+// UPDATE would skip); runs_one_running_lane is what makes
 // "nothing running" true under concurrency: a second claimer for the same
-// agent fails the index and tries the next row.
+// agent (or a chat agent's same conversation) fails the index and tries the
+// next row.
 func (s *Store) ClaimRun(ctx context.Context, worker string) (*ClaimedRun, error) {
 	return s.ClaimRunFor(ctx, Claim{Worker: worker, Any: true, Builds: true})
+}
+
+// laneOf is the lane a run of table alias t claims (runs_one_running_lane):
+// its conversation for a chat agent, whose conversations run side by side,
+// else ” (one run per agent). Chat is read from the agent's recorded spec.
+func laneOf(t string) string {
+	return `COALESCE((SELECT CASE WHEN (sp.spec->>'chat')::boolean THEN ` + t + `.conversation_id::text ELSE '' END
+	    FROM agents a JOIN agent_specs sp ON sp.sha = a.spec_sha WHERE a.name = ` + t + `.agent), '')`
 }
 
 // claim is ClaimRun with filter (SQL over the candidate q, using $2 to $4)
@@ -290,12 +299,13 @@ func (s *Store) claim(ctx context.Context, worker, filter string, args ...any) (
 		err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 			if err := tx.QueryRow(ctx, `
 				UPDATE runs SET status = 'running', worker = $1, started_at = now(), heartbeat_at = now(),
-				       attempt = attempt + 1
+				       attempt = attempt + 1, lane = `+laneOf("runs")+`
 				WHERE id = (
 				    SELECT q.id FROM runs q
 				    WHERE q.status = 'queued'
 				      AND (q.run_after IS NULL OR q.run_after <= now())
-				      AND NOT EXISTS (SELECT 1 FROM runs b WHERE b.agent = q.agent AND b.status = 'running')
+				      AND NOT EXISTS (SELECT 1 FROM runs b WHERE b.agent = q.agent AND b.status = 'running'
+				                      AND COALESCE(b.lane, '') = `+laneOf("q")+`)
 				      `+filter+`
 				    ORDER BY q.created_at
 				    LIMIT 1
