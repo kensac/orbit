@@ -9,7 +9,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 )
 
 // ---------------------------------------------------------------- claims
@@ -90,7 +89,7 @@ func (s *Store) StoredConfig(ctx context.Context) (deployment []byte, agents []S
 func (s *Store) SchemaCurrent(ctx context.Context) (bool, error) {
 	db := stdlib.OpenDBFromPool(s.Pool)
 	defer db.Close()
-	p, err := goose.NewProvider(goose.DialectPostgres, db, mustSub(migrations, "migrations"))
+	p, err := newProvider(db)
 	if err != nil {
 		return false, err
 	}
