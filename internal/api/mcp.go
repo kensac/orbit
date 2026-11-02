@@ -142,7 +142,7 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 					continue
 				}
 				m := map[string]any{"name": a.Name, "enabled": a.Enabled, "needs_input": a.NeedsInput,
-					"open_questions": a.Unread, "pending_actions": a.Pending, "last_run": a.LastRun}
+					"open_questions": a.Unread, "pending_actions": a.Pending, "last_run": a.LastRun, "agent_status": a.AgentStatus}
 				if sa, ok := cfg.Agents[a.Name]; ok {
 					m["description"] = sa.Description
 				}
