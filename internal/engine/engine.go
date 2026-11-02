@@ -791,7 +791,17 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		m := out.Memory.Content
 		o.Memory = &m
 	}
+	acts := make([]proposed, 0, len(out.Actions))
 	for _, act := range out.Actions {
+		acts = append(acts, proposed{act.Type, act.Params, act.Reason})
+	}
+	acts, asked := absorbSchedules(acts)
+	for _, act := range acts {
+		if _, ok := types[act.Type]; ok && act.Type == actions.SaveType {
+			// Drafted by code from the conversation, then held for a person as an agent:define.
+			o.Actions = append(o.Actions, e.saveProposal(ctx, a, c, act, asked[saveName(act.Params)]))
+			continue
+		}
 		pa := store.ProposedAction{Type: act.Type, Params: act.Params, Reason: act.Reason, Rule: string(ruleFor(a, act.Type, c.Trigger)),
 			InstructedBy: out.instructedBy}
 		if t, ok := types[act.Type]; !ok {

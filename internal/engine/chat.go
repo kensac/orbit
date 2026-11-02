@@ -573,6 +573,20 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		b, _ := json.Marshal(res)
 		preview = " It will do this; tell the person the rule and the next fires: " + string(b)
 	}
+	if v.Type == actions.SaveType {
+		// Never executed: drafted by code once the reply is sent, then held for a person (engine/save.go).
+		p, _ := actions.DecodeSave(v.Params)
+		if e.Current().Config.Agents[p.Name] != nil {
+			return fmt.Sprintf("an agent named %q exists; choose another name", p.Name), true
+		}
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if len(st.actions) >= maxActions {
+			return fmt.Sprintf("at most %d actions per reply", maxActions), true
+		}
+		st.actions = append(st.actions, v)
+		return "Recorded: when your reply is sent, orbit adds what this conversation did (tools, fetched pages, approved action types, schedules asked for) and the person reviews the whole agent before it exists. A schedule:add with agent \"" + p.Name + "\" in this reply becomes its schedule.", false
+	}
 	rule := ruleFor(a, v.Type, c.Trigger)
 	if !a.Chat {
 		instructor = ""

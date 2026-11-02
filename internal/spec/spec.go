@@ -192,7 +192,9 @@ type Agent struct {
 	Name        string `yaml:"name" json:"name"`
 	Description string `yaml:"description" json:"description"`
 	// Charter is the standing instruction every run starts from.
-	Charter  string    `yaml:"charter" json:"charter"`
+	Charter string `yaml:"charter" json:"charter"`
+	// Starters are prompts a client offers for a new conversation with the agent (at most MaxStarters, each MaxStarterLen bytes).
+	Starters []string  `yaml:"starters,omitempty" json:"starters,omitempty"`
 	Enabled  *bool     `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	Timezone string    `yaml:"timezone,omitempty" json:"timezone,omitempty"`
 	Runner   string    `yaml:"runner,omitempty" json:"runner,omitempty"`
@@ -341,6 +343,12 @@ const (
 	MaxHookText        = 2 << 10
 	DefaultHookTimeout = 10 * time.Second
 	MaxHookTimeout     = time.Minute
+)
+
+// Bounds on an agent's starters: a handful of buttons in a new chat, each a sentence or two.
+const (
+	MaxStarters   = 6
+	MaxStarterLen = 500
 )
 
 // LearnSpec configures an agent's learning runs.
@@ -1103,7 +1111,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("action %q: rule must be auto, approve or deny", typ)
 		}
 		switch {
-		case typ == "notify", typ == "continue", typ == "agent:define",
+		case typ == "notify", typ == "continue", typ == "agent:define", typ == "agent:save",
 			typ == "schedule:add", typ == "schedule:pause", typ == "schedule:resume", typ == "schedule:remove", typ == "run:now":
 		case typ == "delegate", typ == "task:message", typ == "task:cancel", typ == "task:retry":
 			if len(a.Delegates) == 0 {
@@ -1118,7 +1126,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 				at("action %q: needs a github block in orbit.yaml", typ)
 			}
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone or github:pr)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone or github:pr)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
@@ -1139,6 +1147,14 @@ func (c *Config) validateAgent(a *Agent) []error {
 	}
 	if len(a.Hooks) > MaxHooks {
 		at("hooks: at most %d", MaxHooks)
+	}
+	if len(a.Starters) > MaxStarters {
+		at("starters: at most %d", MaxStarters)
+	}
+	for i, st := range a.Starters {
+		if strings.TrimSpace(st) == "" || len(st) > MaxStarterLen {
+			at("starters[%d]: 1 to %d bytes", i, MaxStarterLen)
+		}
 	}
 	for i, h := range a.Hooks {
 		if !slices.Contains(HookEvents, h.Event) {

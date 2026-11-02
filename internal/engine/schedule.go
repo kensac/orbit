@@ -131,9 +131,15 @@ func (e *Engine) runNow(ctx context.Context, c actions.Call, a *spec.Agent, prom
 	return json.Marshal(map[string]any{"agent": a.Name, "run_id": id})
 }
 
-// PreviewAction is what a pending action would do if it executed now, computed by code for the person deciding it (GET /actions/{id}, the approval page): for a schedule action, its result as executing it would echo it. nil for a type with nothing to preview or an action already decided.
+// PreviewAction is what a pending action would do if it executed now, computed by code for the person deciding it (GET /actions/{id}, the approval page): for a schedule action, its result as executing it would echo it; for agent:define, a dry run with the spec's diff (previewDefine). nil for a type with nothing to preview or an action already decided.
 func (e *Engine) PreviewAction(ctx context.Context, act *store.Action) (json.RawMessage, error) {
-	if act.Status != "pending" || !actions.IsScheduleType(act.Type) || act.Type == actions.RunNowType {
+	if act.Status != "pending" {
+		return nil, nil
+	}
+	if act.Type == actions.DefineType {
+		return e.previewDefine(ctx, act.Params)
+	}
+	if !actions.IsScheduleType(act.Type) || act.Type == actions.RunNowType {
 		return nil, nil
 	}
 	res, err := e.PreviewSchedule(ctx, act.Agent, act.Type, act.Params)

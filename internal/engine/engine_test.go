@@ -41,6 +41,8 @@ type fakeRunner struct {
 	// seen, when set, is called with the request while the run's workdir
 	// exists.
 	seen func(runner.Request)
+	// events are emitted after the first, as the CLI's stream would (tool calls the journal records).
+	events []runner.Event
 	// said are assistant lines emitted before the output.
 	said []string
 }
@@ -75,6 +77,9 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 	emit(runner.Event{Kind: "assistant", Payload: []byte(`{"type":"assistant","session_id":"` + sid + `"}`)})
 	for _, l := range f.said {
 		emit(runner.Event{Kind: "assistant", Payload: []byte(l)})
+	}
+	for _, ev := range f.events {
+		emit(ev)
 	}
 	if f.block != nil {
 		close(f.started)
