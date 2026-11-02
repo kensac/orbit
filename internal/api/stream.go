@@ -1,13 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"slices"
 	"time"
 
-	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/journal"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -26,12 +26,9 @@ const streamPoll = 500 * time.Millisecond
 // closes an idle origin response at 100 s).
 const streamPing = 15 * time.Second
 
-// eventPage bounds one events read; a stream loops until it is caught up.
-const eventPage = 1000
-
 // streamRun serves GET /runs/{id}/stream: Server-Sent Events replaying the
-// run's latest attempt from its start, then following it live until the
-// run is final.
+// journal of the run's latest timeline (epoch) from its start, then
+// following it live until the run is final.
 func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	p, err := s.Store.GetRunProgress(r.Context(), id)
@@ -52,122 +49,125 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
-	// send writes one event. id is set on text and tool events only, so a
-	// client's Last-Event-ID is always the last narration it received.
-	send := func(event, id string, data any) error {
-		b, err := json.Marshal(data)
-		if err != nil {
-			return err
-		}
+	var buf bytes.Buffer
+	// add queues one event. id is set on the events of a journal row only,
+	// so a client's Last-Event-ID is always the last row it received.
+	add := func(event, id string, data any) {
+		b, _ := json.Marshal(data)
 		if id != "" {
-			if _, err := fmt.Fprintf(w, "id: %s\n", id); err != nil {
-				return err
-			}
+			fmt.Fprintf(&buf, "id: %s\n", id)
 		}
-		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b); err != nil {
+		fmt.Fprintf(&buf, "event: %s\ndata: %s\n\n", event, b)
+	}
+	// flush writes what is queued in one write, so a row's events reach a
+	// client together or not at all.
+	flush := func() error {
+		if buf.Len() == 0 {
+			return nil
+		}
+		_, err := w.Write(buf.Bytes())
+		buf.Reset()
+		if err != nil {
 			return err
 		}
 		return rc.Flush()
 	}
-	// continues is the earlier attempt the current one continues (it
-	// resumed that attempt's session), 0 for none; every status says it.
-	continues := 0
-	sendStatus := func(p *store.RunProgress) error {
-		m := map[string]any{"status": p.Status, "attempt": p.Attempt}
+
+	// A reconnecting client names the last row it has; rows up to it in
+	// its epoch are read but not sent, so chunk separators come out
+	// exactly as in a full replay.
+	resume, resuming := journal.ParseCursor(r.Header.Get("Last-Event-ID"))
+
+	var (
+		started   bool
+		epoch     int
+		attempt   int
+		continues int // the earlier attempt the current one continues, 0 for none
+		seq       int // the last row read
+		after     int // rows up to this one are not sent
+		status    string
+		// wrote is whether this timeline has sent prose yet: each text
+		// event is a chunk to append, and a block after an earlier one
+		// starts with a blank line, so the concatenation reads as
+		// paragraphs.
+		wrote bool
+	)
+	sendStatus := func() {
+		m := map[string]any{"status": status, "attempt": attempt}
+		if epoch > 0 {
+			m["epoch"] = epoch
+		}
 		if continues > 0 {
 			m["continues"] = continues
 		}
-		return send("status", "", m)
+		add("status", "", m)
 	}
-	// A reconnecting client names the last narration it has; everything up
-	// to it in the narration it belongs to is skipped. Skipped narration is
-	// still read, so chunk separators come out exactly as in a full replay.
-	resume, resuming := parseEventID(r.Header.Get("Last-Event-ID"))
-
-	started, attempt, seq, status := false, 0, 0, ""
-	// wrote is whether this narration has sent text yet: each text event is
-	// a chunk to append, and a new block of prose after an earlier one
-	// starts with a blank line, so the concatenation reads as paragraphs.
-	wrote := false
-	// drain sends every event of the current attempt after seq.
-	drain := func(kind string) error {
-		if attempt == 0 {
+	// drain queues every row of the epoch after seq.
+	drain := func() error {
+		if epoch == 0 {
 			return nil
 		}
 		for {
-			evs, err := s.Store.ListEvents(r.Context(), id, attempt, seq, eventPage)
+			items, more, err := s.Store.ReadJournal(r.Context(), id, epoch, seq, store.MaxJournalLimit)
 			if err != nil {
 				return err
 			}
-			for _, ev := range evs {
-				seq = ev.Seq
-				for i, n := range runner.Narrate(kind, ev.Kind, ev.Payload) {
-					at := eventID{attempt, ev.Seq, i}
-					skip := resuming && (attempt < resume.attempt || (attempt == resume.attempt && !resume.less(at)))
-					if n.Tool != nil {
-						if !skip {
-							err = send("tool", at.String(), n.Tool)
-						}
-					} else {
-						chunk := n.Text
-						if wrote {
-							chunk = "\n\n" + chunk
-						}
-						wrote = true
-						if !skip {
-							err = send("text", at.String(), map[string]string{"text": chunk})
-						}
+			for _, it := range items {
+				seq = it.Seq
+				ev, data := narration(it)
+				if ev == "text" {
+					if wrote {
+						data = map[string]string{"text": "\n\n" + data.(map[string]string)["text"]}
 					}
-					if err != nil {
-						return err
-					}
+					wrote = true
 				}
+				if it.Seq <= after {
+					continue
+				}
+				if ev != "" {
+					add(ev, it.Cursor, data)
+				}
+				add("item", it.Cursor, it)
 			}
-			if len(evs) < eventPage {
-				return nil
+			if err := flush(); err != nil || !more {
+				return err
 			}
 		}
 	}
-	// follow switches to the run's latest attempt. An attempt that resumed
-	// the session of the one this stream was narrating continues that
-	// narration: the client keeps what it has. Any other is narrated from
-	// the start of its chain (the attempts it continues, oldest first), and
-	// the client starts over. It waits (ok false) while a new attempt has
-	// not yet decided whether it continues the last one.
+	// follow moves to the run's latest attempt. One in the timeline the
+	// stream is on continues it, and the client keeps what it has; one in
+	// another starts that timeline from its first row, and the client
+	// clears. It waits (ok false) while a new attempt has not yet decided
+	// whether it continues the last one.
 	follow := func(p *store.RunProgress) (ok bool, err error) {
 		chain, settled, err := s.Store.AttemptChain(r.Context(), id, p.Attempt)
 		if err != nil || !settled {
 			return false, err
 		}
-		prev := 0
+		attempt, status, continues = p.Attempt, p.Status, 0
 		if len(chain) > 1 {
-			prev = chain[len(chain)-2]
+			continues = chain[len(chain)-2]
 		}
-		continues, status = prev, p.Status
-		if started && attempt != 0 && prev == attempt {
-			attempt, seq = p.Attempt, 0
-			return true, sendStatus(p)
+		e := 0
+		if len(chain) > 0 {
+			e = chain[0]
 		}
-		if started {
-			// Starting over mid-stream: the client clears, so nothing it
-			// has is skipped.
-			resuming = false
-		} else if resuming && !slices.Contains(chain, resume.attempt) {
-			resuming = false
+		if started && e == epoch {
+			sendStatus()
+			return true, nil
 		}
-		started, wrote = true, false
-		if err := sendStatus(p); err != nil {
-			return false, err
-		}
-		for _, a := range chain {
-			attempt, seq = a, 0
-			if a != p.Attempt {
-				if err := drain(p.RunnerKind); err != nil {
-					return false, err
-				}
+		after = 0
+		if !started && resuming && e > 0 {
+			jh, err := s.Store.GetJournalHead(r.Context(), id, e)
+			if err != nil {
+				return false, err
+			}
+			if a, reset := journal.Resume(resume, e, jh.Last); reset == "" {
+				after = a
 			}
 		}
-		attempt = p.Attempt
+		started, epoch, seq, wrote = true, e, 0, false
+		sendStatus()
 		return true, nil
 	}
 	finish := func() {
@@ -176,7 +176,8 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 			s.Log.Warn("stream done", "run", id, "err", err)
 			return
 		}
-		_ = send("done", "", run)
+		add("done", "", run)
+		_ = flush()
 	}
 	// step reads the run once and sends what changed; end is true when the
 	// stream is over.
@@ -187,20 +188,29 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 				return true
 			}
 			if !ok {
-				return false
+				return flush() != nil
 			}
 		}
-		// Events before status: a run's events are all written before its
-		// final state, so once the status read says final, this drain has
-		// everything.
-		if drain(p.RunnerKind) != nil {
+		// The journal before status: a run's rows are all written before
+		// its final state (an attempt's closing turn in the same
+		// transaction), so once the status read says final, this drain
+		// has everything. A sync first catches up rows an older instance
+		// left unprojected.
+		if err := s.Store.SyncJournal(r.Context(), id); err != nil {
+			if r.Context().Err() == nil {
+				s.Log.Warn("stream journal sync", "run", id, "err", err)
+			}
+			return true
+		}
+		if drain() != nil {
 			return true
 		}
 		if p.Status != status {
 			status = p.Status
-			if sendStatus(p) != nil {
-				return true
-			}
+			sendStatus()
+		}
+		if flush() != nil {
+			return true
 		}
 		if store.Terminal(status) {
 			finish()
@@ -243,31 +253,31 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// narration is the prose-only view of a journal row, for clients that show
+// a run as text and tool lines: a revision 1 of the agent's prose is a
+// text event, of a tool call a tool event; anything else is none.
+func narration(it journal.Item) (event string, data any) {
+	if it.Revision != 1 {
+		return "", nil
+	}
+	switch it.Kind {
+	case journal.KindMessage:
+		var m journal.Message
+		if json.Unmarshal(it.Body, &m) == nil && m.Role == "assistant" {
+			return "text", map[string]string{"text": m.Text}
+		}
+	case journal.KindToolCall:
+		var c journal.ToolCall
+		if json.Unmarshal(it.Body, &c) == nil {
+			return "tool", map[string]string{"name": c.Name, "summary": c.Summary}
+		}
+	}
+	return "", nil
+}
+
 func orDefault(d, def time.Duration) time.Duration {
 	if d > 0 {
 		return d
 	}
 	return def
-}
-
-// eventID names one narration: the attempt, the transcript event's seq,
-// and its index among that event's narrations. Sent as "attempt.seq.index".
-type eventID struct{ attempt, seq, index int }
-
-func (e eventID) String() string { return fmt.Sprintf("%d.%d.%d", e.attempt, e.seq, e.index) }
-
-func (e eventID) less(o eventID) bool {
-	if e.seq != o.seq {
-		return e.seq < o.seq
-	}
-	return e.index < o.index
-}
-
-// parseEventID reads a Last-Event-ID; anything else means a full replay.
-func parseEventID(s string) (eventID, bool) {
-	var e eventID
-	if _, err := fmt.Sscanf(s, "%d.%d.%d", &e.attempt, &e.seq, &e.index); err != nil || e.attempt < 1 {
-		return eventID{}, false
-	}
-	return e, true
 }
