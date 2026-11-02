@@ -445,7 +445,20 @@ type RunResult struct {
 	SessionID string
 	// SessionCostUSD is the backend's cumulative total for the session.
 	SessionCostUSD *float64
+	// Gate names what ended a skipped run without a backend call; set
+	// exactly when Status is skipped (runs_skipped_names_gate).
+	Gate string
 }
+
+// Run statuses that end a run.
+const (
+	StatusSucceeded = "succeeded"
+	StatusFailed    = "failed"
+	StatusCancelled = "cancelled"
+	// StatusSkipped is a run a gate ended without calling a backend: it
+	// finished well, and judged nothing.
+	StatusSkipped = "skipped"
+)
 
 // FinishRun records the outcome of a run that wrote nothing else (a failure,
 // or a success with no memory, questions or actions).
@@ -454,7 +467,7 @@ func (s *Store) FinishRun(ctx context.Context, runID string, r RunResult) error 
 		if err := finishRun(ctx, tx, runID, r); err != nil {
 			return err
 		}
-		if r.Status != "succeeded" {
+		if r.Status == StatusFailed {
 			return releaseMessages(ctx, tx, runID)
 		}
 		return nil
@@ -476,10 +489,10 @@ func finishRun(ctx context.Context, db execer, runID string, r RunResult) error 
 		       summary = NULLIF($4, ''), report = NULLIF($5, ''), output = $6, usage = $7,
 		       cost_usd = CASE WHEN $8::numeric IS NULL THEN NULL ELSE $8::numeric + COALESCE(
 		           (SELECT sum(a.cost_usd) FROM run_attempts a WHERE a.run_id = $1 AND a.attempt < $11), 0) END,
-		       session_id = NULLIF($9, ''), session_cost_usd = $10
+		       session_id = NULLIF($9, ''), session_cost_usd = $10, gate = NULLIF($12, '')
 		WHERE id = $1 AND status = 'running' AND attempt = $11`,
 		runID, r.Status, r.Error, r.Summary, r.Report, nullJSON(r.Output), nullJSON(r.Usage), r.CostUSD, r.SessionID,
-		r.SessionCostUSD, r.Attempt)
+		r.SessionCostUSD, r.Attempt, r.Gate)
 	if err != nil {
 		return err
 	}
@@ -527,20 +540,22 @@ type Run struct {
 	// Steps is the number of tool calls in the latest attempt, as a
 	// thread's run item counts them (stepsCount).
 	Steps int `json:"steps"`
+	// Gate names what ended a skipped run.
+	Gate *string `json:"gate,omitempty"`
 }
 
 // runCols reads a run aliased r: stepsCount names it.
 const runCols = `r.id::text, r.attempt, r.agent, r.spec_sha, r.trigger, r.trigger_index, r.scheduled_for, r.prompt, r.status,
 	r.runner_kind, r.model, r.worker, r.created_at, r.started_at, r.finished_at, r.error, r.summary, r.report,
 	r.output, r.usage, r.cost_usd::float8, r.session_id, r.session_mode, r.session_parent, r.session_depth,
-	r.run_after, r.continues::text, r.chain, ` + stepsCount
+	r.run_after, r.continues::text, r.chain, r.gate, ` + stepsCount
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.Attempt, &r.Agent, &r.SpecSHA, &r.Trigger, &r.TriggerIndex, &r.ScheduledFor, &r.Prompt,
 		&r.Status, &r.RunnerKind, &r.Model, &r.Worker, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.Error,
 		&r.Summary, &r.Report, &r.Output, &r.Usage, &r.CostUSD, &r.SessionID, &r.SessionMode, &r.SessionParent,
-		&r.SessionDepth, &r.RunAfter, &r.Continues, &r.Chain, &r.Steps)
+		&r.SessionDepth, &r.RunAfter, &r.Continues, &r.Chain, &r.Gate, &r.Steps)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

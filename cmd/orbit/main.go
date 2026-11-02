@@ -648,7 +648,7 @@ func configHash(dir string) string {
 }
 
 func seedMetrics(ctx context.Context, s *store.Store) error {
-	rows, err := s.Pool.Query(ctx, `SELECT agent, max(finished_at) FROM runs WHERE status = 'succeeded' GROUP BY agent`)
+	rows, err := s.Pool.Query(ctx, `SELECT agent, max(finished_at) FROM runs WHERE status IN ('succeeded', 'skipped') GROUP BY agent`)
 	if err != nil {
 		return err
 	}
