@@ -114,7 +114,7 @@ func login(ctx context.Context, hc *http.Client, issuer, clientID string, notice
 }
 
 // maxOAuthSeconds leaves room for RFC 8628 slow-down increments without duration overflow.
-const maxOAuthSeconds = int64((1<<63-1)/int64(time.Second)) / 2
+const maxOAuthSeconds = ((1<<63 - 1) / int64(time.Second)) / 2
 
 func form(ctx context.Context, hc *http.Client, endpoint string, values url.Values, out any, allowOAuthError bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
