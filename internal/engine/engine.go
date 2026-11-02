@@ -299,6 +299,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			}
 		}
 	}
+	raw := map[string][]byte{} // every source fetched, for its transforms
 	for _, s := range a.Sources {
 		if rec != nil {
 			break
@@ -315,6 +316,16 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		case "text/markdown":
 			ext = ".md"
 		}
+		raw[s.Name] = f.Content
+		if a.Withheld(s.Name) {
+			// Only its transforms read it: kept as the record of what was
+			// fetched, never written where the model can read it.
+			if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "sources/"+s.Name+ext, f.MediaType, f.Content); err != nil {
+				return nil, nil, err
+			}
+			emit("orbit.source_fetched", map[string]any{"source": s.Name, "bytes": len(f.Content), "meta": f.Meta, "withheld": true})
+			continue
+		}
 		rel := filepath.Join(inputsDir, s.Name+ext)
 		if err := os.WriteFile(filepath.Join(workdir, rel), f.Content, 0o600); err != nil {
 			return nil, nil, err
@@ -324,6 +335,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 		emit("orbit.source_fetched", map[string]any{"source": s.Name, "bytes": len(f.Content), "meta": f.Meta})
 		inputs = append(inputs, runner.Input{Name: s.Name, Path: rel, MediaType: f.MediaType, Content: f.Content})
+	}
+	if rec == nil {
+		if inputs, err = e.transform(ctx, a, c, workdir, inputsDir, raw, inputs, emit); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	var sess *runner.Session
@@ -557,6 +573,11 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if pr == "" {
 		pr = notify.Default
 	}
+	if Attended(c.Trigger) {
+		// The person is reading the conversation this run answered in:
+		// its reply, questions and approvals are there, not in a channel.
+		return nil
+	}
 	send := a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send)
 	// A person who wrote by mail is answered by mail, as a reply to theirs.
 	var inReplyTo, mailSubject string
@@ -621,7 +642,7 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 		return err
 	}
 	metrics.RunFinished(c.Agent, "failed", runnerKind(snap, a), time.Since(start), rr.CostUSD)
-	if a != nil {
+	if a != nil && !Attended(c.Trigger) {
 		e.deliver(ctx, snap, a, &c.ID, nil, "failure", notify.Message{
 			Title: a.Name + " run failed", Body: runErr.Error(), Priority: notify.High,
 			Tags: []string{"orbit", "warning"}, Link: e.runLink(snap, c.ID),
@@ -629,6 +650,12 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 	}
 	return nil
 }
+
+// Attended reports whether a run's trigger means its person is watching
+// the conversation: a message they sent. Such a run
+// notifies nothing (its reply, questions, approvals and failure are in the
+// thread); channels are for unattended runs (schedule, continue, build).
+func Attended(trigger string) bool { return trigger == "message" }
 
 func runnerKind(snap *Snapshot, a *spec.Agent) string {
 	if a == nil {

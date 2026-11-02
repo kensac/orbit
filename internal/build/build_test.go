@@ -241,7 +241,7 @@ func TestARetriedAttemptRedeliversWithoutTheModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Gate == "" || res.HeadSHA != w.remoteBranch() || res.PRNumber != 7 || res.Output.PRTitle != "Add the thing" {
+	if res.Gate == "" || res.GateName != "pushed" || res.HeadSHA != w.remoteBranch() || res.PRNumber != 7 || res.Output.PRTitle != "Add the thing" {
 		t.Fatalf("redelivery = %+v", res)
 	}
 	if c, _, _ := w.sb.Counts(); c != 1 {

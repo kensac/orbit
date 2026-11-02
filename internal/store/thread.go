@@ -76,6 +76,8 @@ type ThreadRun struct {
 	Error      *string          `json:"error"`
 	CostUSD    *float64         `json:"cost_usd"`
 	Actions    []ThreadAction   `json:"actions"`
+	// Gate names what ended a skipped run; null otherwise.
+	Gate *string `json:"gate"`
 	// NeedsInput is true when the run is waiting on its person: one of its
 	// questions is open or one of its actions awaits approval.
 	NeedsInput bool `json:"needs_input"`
@@ -128,7 +130,7 @@ const stepsCount = `(
 // holds.
 const threadRunSelect = `
 	SELECT r.id::text, r.created_at, r.trigger, r.status, r.attempt, r.started_at, r.finished_at,
-	       ` + stepsCount + `, r.summary, r.report, r.error, r.cost_usd::float8,
+	       ` + stepsCount + `, r.summary, r.report, r.error, r.cost_usd::float8, r.gate,
 	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', (` + openQuestion + `)) ORDER BY m.created_at, m.id)
 	                 FROM messages m WHERE m.run_id = r.id AND m.direction = 'from_agent'), '[]'),
 	       COALESCE((SELECT json_agg(json_build_object('id', a.id, 'type', a.type, 'status', a.status,
@@ -141,7 +143,7 @@ func scanThreadRun(row pgx.Row) (*ThreadRun, error) {
 	r := ThreadRun{Kind: "run"}
 	var questions, actions []byte
 	if err := row.Scan(&r.ID, &r.At, &r.Trigger, &r.Status, &r.Attempt, &r.StartedAt, &r.FinishedAt, &r.Steps,
-		&r.Summary, &r.Report, &r.Error, &r.CostUSD, &questions, &actions); err != nil {
+		&r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -365,5 +367,5 @@ func (s *Store) GetRunProgress(ctx context.Context, id string) (*RunProgress, er
 
 // Terminal reports whether a run status is final.
 func Terminal(status string) bool {
-	return status == "succeeded" || status == "failed" || status == "cancelled"
+	return status == StatusSucceeded || status == StatusFailed || status == StatusCancelled || status == StatusSkipped
 }

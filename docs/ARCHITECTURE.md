@@ -9,11 +9,12 @@ alone, what waits for approval, what it may not do at all).
 
 The model is the expensive, slow, non-deterministic part, so it gets only the
 part of a job that needs judgment. Everything else is code that runs before
-it: the harness fetches and paginates sources today; the next pieces are
-transforms (coded reducers over a source: per-category totals, transfers
-removed, a diff against last run) and gates (skip the model when inputs are
-unchanged or a check passes, so a quiet day costs no tokens). A report's
-numbers should come from code, with the model explaining them.
+it: the harness fetches and paginates sources, and runs an agent's
+transforms (`internal/transforms`: coded reducers over a source, such as
+per-category totals with transfers removed, each output an input of its
+own); the next piece is gates (skip the model when inputs are unchanged or
+a check passes, so a quiet day costs no tokens). A report's numbers should
+come from code, with the model explaining them.
 
 ## One run
 
@@ -26,10 +27,11 @@ trigger (schedule | manual | message | continue)
   -> session plan: continue the agent's Claude Code session, or start fresh
   -> a fresh session: the recent thread, packed into a byte budget, as conversation.md
   -> sources fetched by the harness, written to <workdir>/inputs/, stored as artifacts
+  -> transforms run over sources, each output an input (a source only transforms read is withheld)
   -> runner called with: system contract, prompt, workdir, tools, output schema
   -> output validated against the contract
   -> RecordOutcome, one transaction: run succeeded, memory version, questions, actions
-  -> notifications: the report, then one per action waiting for approval
+  -> notifications (unattended runs only): the report, then one per action waiting for approval
   -> action loop executes approved actions (auto ones arrive approved by rule)
 ```
 
@@ -166,6 +168,15 @@ to Codex or to a plain API call is one line in its spec.
 | `claude-code` | `claude -p --output-format stream-json --json-schema` | `CLAUDE_CODE_OAUTH_TOKEN` (subscription, `claude setup-token`) or `ANTHROPIC_API_KEY` | Read/Glob/Grep in the workdir, plus the agent's `tools` |
 | `codex` | `codex exec --json --output-schema -s read-only` | `CODEX_API_KEY` / `OPENAI_API_KEY` / `CODEX_HOME` | its read-only sandbox; agent `tools` refused |
 | `anthropic` | Messages API, schema as a forced tool | `api_key_env` | none; inputs inlined (bounded) |
+
+## Notifications
+
+Channels are for runs nobody is watching. A run a person's message woke
+(trigger `message`) notifies nothing: its reply, questions, pending
+approvals and failure are in the conversation they are reading
+(`engine.Attended`). Schedule, manual, continue and build runs deliver per
+the agent's `notify.when`, and always their failures and the approvals
+they wait on.
 
 ## Memory, questions, messages
 
@@ -362,11 +373,11 @@ ticket loop, every 30 s: checks green -> github:merge proposed (approve for orbi
 
 The direction, so changes now do not close it off:
 
-- **Transforms and gates** (above). A transform is a named, tested Go
-  function from a source's bytes to smaller bytes, stored as its own
-  artifact; a gate is a predicate over inputs and memory that ends the run
+- **Gates** (above). A gate is a predicate over inputs and memory that ends the run
   without a backend call, recorded as its own status (`skipped`, naming the
-  gate) so a run that judged nothing is distinguishable from one that did.
+  gate in `runs.gate`) so a run that judged nothing is distinguishable from
+  one that did. The status exists; today only a build that redelivers an
+  earlier attempt's pushed commit records it.
 
 - **Tickets, what is left**: review comments on a PR's diff, and webhook
   events in place of the loop's polling ([tickets.md](tickets.md)).
