@@ -30,6 +30,7 @@ import (
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/notify"
+	"github.com/kensac/orbit/internal/repos"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/sources"
 	"github.com/kensac/orbit/internal/spec"
@@ -68,6 +69,9 @@ type Engine struct {
 	NewSandbox func(addr, token string) (runner.SandboxClient, error)
 	// Builder runs build runs (internal/build); nil fails them.
 	Builder *build.Runner
+	// Repos is the mirrors of the repositories agents read (repos.go);
+	// nil fails a run whose agent names repos.
+	Repos *repos.Mirrors
 	// Drain is this instance's drain; a draining instance starts no build
 	// sandbox (build.go).
 	Drain *Drain
@@ -90,7 +94,7 @@ type Engine struct {
 	cfg *Snapshot
 
 	searchMu sync.Mutex
-	searchLn map[string]string // agent -> socket path being served
+	searchLn map[string]string // kind and agent -> the socket path being served (search.go)
 }
 
 // Snapshot is one loaded configuration with its built channels.
@@ -451,6 +455,13 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			return nil, nil, err
 		}
 	}
+	// Before the gates: _repos.json names the commits, so unchanged sees a
+	// new commit as a change.
+	withTools := claudeCode && (chat || e.Harness != "")
+	inputs, repoRun, err := e.repoInputs(ctx, snap.Config.Deployment, a, c.ID, c.Attempt, workdir, inputsDir, rec != nil, inputs, withTools, emit)
+	if err != nil {
+		return nil, nil, err
+	}
 	if gated(a, c, rc, rec != nil) {
 		docs := maps.Clone(raw)
 		for _, in := range inputs {
@@ -549,7 +560,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	var hr *runner.Harness
 	if e.Harness != "" && r.Kind() == "claude-code" {
-		hr = &runner.Harness{Bin: e.Harness, Figures: figures && !chat, Search: e.searchSocket(a.Name), AgentHooks: agentHooks(a)}
+		hr = &runner.Harness{Bin: e.Harness, Figures: figures && !chat, Search: e.searchSocket(a.Name), Repos: e.repoSocket(a), AgentHooks: agentHooks(a)}
 	} else if len(a.Hooks) > 0 {
 		emit("orbit.hooks_skipped", map[string]any{"reason": "the agent's hooks need claude-code with orbit's harness binary"})
 	}
@@ -561,7 +572,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
 			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec,
-			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin})
+			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun})
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
 	if tk != nil {
@@ -582,6 +593,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	trigger := c.Trigger
 	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached, Tasks: delegated},
 		rc, convo, inputs)
+	if repoRun != nil {
+		prompt += repoRun.prompt
+	}
 	if rec != nil {
 		prompt = recoveryPrompt(rec, rc, now.Location())
 	}
