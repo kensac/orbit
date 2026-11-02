@@ -283,11 +283,7 @@ force: subscription windows (the freshest per window of the newest
 `rate_limit_event` Claude Code wrote into a run's stream and, with
 `usage_poll`, the newest poll of the endpoint Claude Code's `/usage` reads;
 each says which and when), exact cost sums, the queue, held runs, running
-runs and next fires. `/mcp` serves the same reads and writes as MCP tools (`internal/api/mcp.go`, stateless Streamable HTTP), with an OAuth proxy in front of authentik for clients that need dynamic registration (`oauth.go`). Contract: docs/api.md.
-
-## Search
-
-Everything a person or an agent wrote is searchable (`Store.Search`, `GET /search`, the `search` MCP tool, and in a run `mcp__orbit__search`): people's messages, agents' questions, run reports and errors, the prose a backend narrated, each tool call's input, memory versions and memory entries (a run's in-run search covers its own agent's, without profile and topic entries, which its `_memory.md` input already holds in full). `search_docs` holds one document per piece with a stored `tsvector` (English, a GIN index), derived by triggers on the source tables (the `search` migration, which also backfills), so a worker or the previous release indexes what it writes without knowing search exists. Queries are `websearch_to_tsquery`, ranked by `ts_rank_cd` normalised by length, with `ts_headline` snippets whose matches are split out in code, never as markup in the text. Tool results are not indexed: they are inputs, already in artifacts, and would drown every query.
+runs and next fires. `/mcp` serves the same reads and writes as MCP tools (`internal/api/mcp.go`, stateless Streamable HTTP), with an OAuth proxy in front of authentik for clients that need dynamic registration (`oauth.go`). The chat UI is the portfolio's (kanishksachdev.com/orbit, its own repository), a client of `/api/v1` and the streams. Contract: docs/api.md.
 
 ## Search
 
@@ -399,7 +395,7 @@ container that holds nothing worth taking. Three pieces, all in this
 repository and all built; build runs use them (below, and tickets.md):
 
 ```
-orbit (hetzner) --tailnet, bearer token--> orbit sandboxd (oci, holds the docker socket)
+orbit (hetzner) --internal network, bearer token--> orbit sandboxd (hetzner, holds the docker socket)
                                               -> build container (deploy/build.Dockerfile)
                                                  on the internal network orbit-sandbox
                                                     -> orbit egress (CONNECT proxy) -> allowlisted hosts
@@ -472,4 +468,3 @@ The direction, so changes now do not close it off:
 
 - **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)).
 - **Event triggers** from webhooks (a ticket assigned, a comment).
-- **A UI** over `/api/v1` (the thread and the stream are its read side).
