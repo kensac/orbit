@@ -66,6 +66,9 @@ type Harness struct {
 	// Search is the engine's search socket for the run's agent; empty
 	// offers no search tool.
 	Search string
+	// Repos is the engine's repository tools socket for the run's agent
+	// (engine/repos.go); empty offers none.
+	Repos string
 	// AgentHooks are the agent's own hooks (spec hooks), run by `orbit agent-hook` beside orbit's.
 	AgentHooks []AgentHook
 }
