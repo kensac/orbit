@@ -69,6 +69,8 @@ type Harness struct {
 	// Repos is the engine's repository tools socket for the run's agent
 	// (engine/repos.go); empty offers none.
 	Repos string
+	// Prometheus is the engine's prometheus tool socket for the run's agent (engine/prometheus.go); empty offers no prometheus_query.
+	Prometheus string
 	// AgentHooks are the agent's own hooks (spec hooks), run by `orbit agent-hook` beside orbit's.
 	AgentHooks []AgentHook
 }
