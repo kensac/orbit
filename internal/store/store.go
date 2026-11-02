@@ -170,7 +170,8 @@ func (s *Store) ListAgents(ctx context.Context) ([]AgentRow, error) {
 		SELECT a.name, a.spec_sha, sp.spec, a.present, a.enabled, a.first_seen, a.updated_at,
 		       lr.id, lr.status, lr.trigger, lr.created_at, lr.finished_at, lr.summary,
 		       (SELECT count(*) FROM messages m
-		         WHERE m.agent = a.name AND `+openQuestion+`),
+		         WHERE m.agent = a.name AND `+openQuestion+`
+			           AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.conversation_id = m.conversation_id)),
 		       (SELECT count(*) FROM actions x WHERE x.agent = a.name AND x.status = 'pending')
 		FROM agents a
 		JOIN agent_specs sp ON sp.sha = a.spec_sha
@@ -528,6 +529,12 @@ func finishRun(ctx context.Context, tx pgx.Tx, runID string, r RunResult) error 
 		WHERE run_id = $1 AND attempt = $2 AND outcome IS NULL`,
 		runID, r.Attempt, r.Status, r.CostUSD, r.SessionCostUSD, r.SessionID); err != nil {
 		return err
+	}
+	if r.Status == "failed" {
+		// Every way a run fails ends here (the engine, a build, the reaper).
+		if err := newAttention(ctx, tx, AttentionFailure, "failure:"+runID, runID, " run failed", nil, nil, nil, nil); err != nil {
+			return err
+		}
 	}
 	if r.Attempt < 1 {
 		return nil
@@ -963,9 +970,13 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 		// orders them as the run listed them.
 		for _, q := range o.Questions {
 			// A question is asked in the asking run's conversation.
-			if _, err := tx.Exec(ctx, `INSERT INTO messages (agent, direction, body, run_id, conversation_id, created_at)
-				SELECT $1, 'from_agent', $2, $3, conversation_id, clock_timestamp() FROM runs WHERE id = $3`,
-				agent, q, runID); err != nil {
+			var id string
+			if err := tx.QueryRow(ctx, `INSERT INTO messages (agent, direction, body, run_id, conversation_id, created_at)
+				SELECT $1, 'from_agent', $2, $3, conversation_id, clock_timestamp() FROM runs WHERE id = $3
+				RETURNING id::text`, agent, q, runID).Scan(&id); err != nil {
+				return err
+			}
+			if err := newAttention(ctx, tx, AttentionQuestion, "question:"+id, runID, " has a question", nil, &id, nil, nil); err != nil {
 				return err
 			}
 		}
@@ -997,7 +1008,7 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 // insertAction stores one proposal with the state its rule gives it: auto
 // arrives approved by rule, approve waits for a person, deny is recorded
 // and never executed.
-func insertAction(ctx context.Context, tx execQuerier, runID, agent string, a ProposedAction) (string, error) {
+func insertAction(ctx context.Context, tx pgx.Tx, runID, agent string, a ProposedAction) (string, error) {
 	status := map[string]string{"auto": "approved", "approve": "pending", "deny": "denied"}[a.Rule]
 	decidedBy := "rule"
 	switch {
@@ -1014,11 +1025,10 @@ func insertAction(ctx context.Context, tx execQuerier, runID, agent string, a Pr
 		        NULLIF($9, ''), clock_timestamp(), NULLIF($10, ''))
 		RETURNING id::text`,
 		runID, agent, a.Type, []byte(a.Params), a.Reason, a.Rule, status, decidedBy, a.Error, a.InstructedBy).Scan(&id)
-	return id, err
-}
-
-type execQuerier interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	if err != nil || status != "pending" {
+		return id, err
+	}
+	return id, newAttention(ctx, tx, AttentionApproval, "action:"+id, runID, " wants to "+a.Type, &id, nil, nil, nil)
 }
 
 // StartActionNow records an action a running chat turn executes at once
@@ -1034,18 +1044,22 @@ func (s *Store) StartActionNow(ctx context.Context, runID string, attempt int, a
 	if !running {
 		return "", fmt.Errorf("run %s attempt %d: %w (not its running claim)", runID, attempt, ErrConflict)
 	}
-	id, err := insertAction(ctx, s.Pool, runID, agent, a)
-	if err != nil {
-		return "", err
-	}
-	tag, err := s.Pool.Exec(ctx, `UPDATE actions SET status = 'executing', executing_since = now() WHERE id = $1 AND status = 'approved'`, id)
-	if err != nil {
-		return "", err
-	}
-	if tag.RowsAffected() == 0 {
-		return id, fmt.Errorf("action %s was not approved: %w", id, ErrConflict)
-	}
-	return id, nil
+	var id string
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var err error
+		if id, err = insertAction(ctx, tx, runID, agent, a); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `UPDATE actions SET status = 'executing', executing_since = now() WHERE id = $1 AND status = 'approved'`, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("action %s was not approved: %w", id, ErrConflict)
+		}
+		return nil
+	})
+	return id, err
 }
 
 // ---------------------------------------------------------------- actions

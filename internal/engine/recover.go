@@ -35,6 +35,8 @@ type attemptState struct {
 	// cancel is closed when a person asks the run to stop.
 	cancel     chan struct{}
 	cancelOnce sync.Once
+	// task is the task whose conversation the run is in, nil for none.
+	task *store.Task
 }
 
 // stop closes cancel once.

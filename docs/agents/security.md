@@ -75,6 +75,18 @@ bounded in delay and chain length and, like any type, denied unless named. A web
 `deny` is the default for every type an agent does not name, and denied
 types are not even offered.
 
+## Web Push
+
+- A push leaves orbit for a third party (the browser vendor's push
+  service, then the device's lock screen), so it carries only the
+  attention row's title (an agent name and a fixed phrase) and a link into
+  the app. Never a report, a question, an error or an action's parameters:
+  agents read finance data. The payload is encrypted to the device, so the
+  push service sees only its size.
+- A subscription's endpoint is a URL a browser chose, and orbit posts to it
+  from inside the network, so registration accepts only https URLs on the
+  known push services (`push.AllowedEndpoint`).
+
 ## The API
 
 - Deployed behind traefik at a public hostname. `/ui/` is behind authentik
@@ -232,6 +244,7 @@ run; `internal/build`):
   cannot build for any other ref. Neither has `workflows`, so GitHub
   refuses a workflow change too. An Actions log is fetched by following
   its storage redirect by hand, with no credential.
+- **A restack is code**: a stacked ticket's branch moved onto a new base is `git rebase --onto` in orbit's clone, pushed with the same one refspec; the read and delivery tokens are minted for it and revoked after, and no model runs.
 - **The PR is orbit's**: title and body from the model's result, scrubbed
   of attribution, with the ticket and plan version and, for orbit itself,
   a trust boundary line. A compromised model can therefore at most open a

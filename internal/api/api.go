@@ -23,6 +23,7 @@ import (
 
 	"github.com/kensac/orbit/internal/auth"
 	"github.com/kensac/orbit/internal/engine"
+	"github.com/kensac/orbit/internal/push"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -50,6 +51,9 @@ type Server struct {
 	// internal listener's POST /api/v1/drain starts it. Nil is never
 	// draining.
 	Drain *engine.Drain
+	// Push sends Web Push and holds its key; nil is push off (the inbox
+	// still works).
+	Push *push.Sender
 	// OAuth, when set, serves the authorization server MCP clients sign in through (oauth.go) on the public listener. Without it /mcp still takes an authentik token from a client that has one.
 	OAuth *OAuthProxy
 }
@@ -86,6 +90,10 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
 	api("POST /api/v1/conversations/{id}/messages", s.conversationMessage)
+	api("GET /api/v1/conversations/{id}/tasks", s.conversationTasks)
+	api("GET /api/v1/conversations/{id}/tasks/stream", s.streamTasks)
+	api("GET /api/v1/tasks/{id}", s.getTask)
+	api("POST /api/v1/tasks/{id}/cancel", s.cancelTask)
 	api("POST /api/v1/conversations/{id}/uploads", s.createUpload)
 	api("POST /api/v1/conversations/{id}/uploads/url", s.uploadURL)
 	api("GET /api/v1/conversations/{id}/uploads/{upload}", s.getUpload)
@@ -115,6 +123,13 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/actions/{id}", s.getAction)
 	api("POST /api/v1/actions/{id}/approve", s.decide(true))
 	api("POST /api/v1/actions/{id}/reject", s.decide(false))
+	api("GET /api/v1/attention", s.listAttention)
+	api("POST /api/v1/attention/{id}/dismiss", s.dismissAttention)
+	api("GET /api/v1/push", s.pushInfo)
+	api("GET /api/v1/push/subscriptions", s.listPushSubscriptions)
+	api("POST /api/v1/push/subscriptions", s.savePushSubscription)
+	api("DELETE /api/v1/push/subscriptions", s.deletePushSubscription)
+	api("POST /api/v1/push/test", s.testPush)
 	api("POST /api/v1/tickets", s.createTicket)
 	api("GET /api/v1/tickets", s.listTickets)
 	api("GET /api/v1/tickets/{id}", s.getTicket)
@@ -123,6 +138,11 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/retry", s.ticketMove(store.TicketApproved))
 	api("POST /api/v1/tickets/{id}/reopen", s.ticketMove(store.TicketOpen))
 	api("POST /api/v1/tickets/{id}/checks/rerun", s.rerunChecks)
+	api("GET /api/v1/tickets/{id}/comments", s.listComments)
+	api("POST /api/v1/tickets/{id}/comments", s.addComment)
+	api("POST /api/v1/tickets/{id}/comments/{comment}/edit", s.editComment)
+	api("POST /api/v1/tickets/{id}/comments/{comment}/withdraw", s.withdrawComment)
+	api("POST /api/v1/tickets/{id}/review", s.submitReview)
 	s.memoryRoutes(api)
 	s.skillsRoutes(api)
 

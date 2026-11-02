@@ -66,14 +66,18 @@ func Builtins(d Deployment) []*Agent {
 		sess.Live = 0
 	}
 	return []*Agent{{
-		Name:            BuiltinName,
-		Description:     "A Claude Code session you can reach from anywhere.",
-		Charter:         builtinCharter,
-		Runner:          runner,
-		Tools:           tools,
-		Chat:            true,
-		Sandbox:         sandbox,
-		Needs:           needs,
+		Name:        BuiltinName,
+		Description: "A Claude Code session you can reach from anywhere.",
+		Charter:     builtinCharter,
+		Runner:      runner,
+		Tools:       tools,
+		Chat:        true,
+		Sandbox:     sandbox,
+		Needs:       needs,
+		// The general agent coordinates the others: in its person's chat a
+		// delegation applies directly, unattended it waits for approval
+		// (docs/ARCHITECTURE.md, Delegation).
+		Delegates:       []string{"*"},
 		MessagesTrigger: true,
 		Session:         sess,
 		// It may define agents, itself included (docs/api.md, Defining
@@ -89,7 +93,9 @@ func Builtins(d Deployment) []*Agent {
 }
 
 func builtinActions(d Deployment) ActionSet {
-	rules := ActionSet{"agent:define": RuleAuto, "continue": RuleAuto}
+	// It delegates under approve: directly in its person's chat, after
+	// approval when unattended.
+	rules := ActionSet{"agent:define": RuleAuto, "continue": RuleAuto, "delegate": RuleApprove}
 	if d.GitHub != nil {
 		rules["github:clone"] = RuleAuto
 		rules["github:pr"] = RuleApprove
