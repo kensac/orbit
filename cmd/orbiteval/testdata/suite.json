@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "cases": [{
+    "name": "quiet-day",
+    "provenance": "Synthetic reference: a source with no records; charter review-v1",
+    "inputs": {"records": []},
+    "max_cost_usd": 0.01,
+    "checks": [
+      {"pointer": "/summary", "op": "equals", "value": "Nothing to review"},
+      {"pointer": "/actions", "op": "count", "value": 0},
+      {"pointer": "/notify/send", "op": "equals", "value": false}
+    ]
+  }]
+}
