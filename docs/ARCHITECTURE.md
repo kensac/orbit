@@ -437,9 +437,9 @@ orbit (hetzner) --internal network, bearer token--> orbit sandboxd (hetzner, hol
   bits only, no extended attributes, a size and entry cap. The readback is
   spooled first, so a refusal is a clean error, never a truncated tar.
 - **`orbit egress`** (`internal/egress`) is the container's only route out:
-  a CONNECT proxy on the internal network and one other, allowing exact
-  hostnames on port 443 to public addresses, logging every decision, and
-  refusing to load an allowlist that names GitHub.
+  a proxy on the internal network and one other, logging every decision. The build profile tunnels to exact
+  hostnames on port 443 at public addresses, only for TLS naming that host, and
+  refuses to load an allowlist that names GitHub; the workstation profile is the open web (any public host and port but SMTP's, plain HTTP too) minus deny lists of hosts and networks. Neither dials a private, loopback, link-local or tailnet address.
 - **`orbit credproxy`** (`internal/credproxy`) is the CLI's only route to its backend: every sandbox has `ANTHROPIC_BASE_URL` pointing at it on the internal network. At attach, sandboxd replaces the backend credential a caller sends with a token: the credential sealed (AES-256-GCM) under `ORBIT_CREDPROXY_KEY`, which only sandboxd and the proxy hold, with the container's address on the sandbox network and its expiry. The proxy opens it, requires the request to come from that address before then, and forwards only `POST /v1/messages` and `/v1/messages/count_tokens` to `api.anthropic.com` with the real credential in the header the CLI used (`Authorization` for a subscription token, `x-api-key` for an API key), streaming the answer back as it arrives. A sandbox therefore never holds the credential; seen against the real CLI in tickets.md (Credential proxy: what the CLI does).
 - **Attach** is an HTTP upgrade: orbit writes the process's stdin and
   half-closes it; sandboxd sends framed stdout, stderr and a final exit
