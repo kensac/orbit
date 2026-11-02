@@ -65,7 +65,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 func (s *Store) MigrateTo(ctx context.Context, version int64) error {
 	db := stdlib.OpenDBFromPool(s.Pool)
 	defer db.Close()
-	p, err := goose.NewProvider(goose.DialectPostgres, db, mustSub(migrations, "migrations"))
+	p, err := newProvider(db)
 	if err != nil {
 		return err
 	}
@@ -73,8 +73,13 @@ func (s *Store) MigrateTo(ctx context.Context, version int64) error {
 	return err
 }
 
+// newProvider is the one goose provider. Out-of-order is allowed because agents land migrations in parallel: new files are named by UTC timestamp (YYYYMMDDHHMMSS_name.sql, docs/agents/store.md), so a migration merged after a later-numbered one still applies instead of failing the start.
+func newProvider(db *sql.DB) (*goose.Provider, error) {
+	return goose.NewProvider(goose.DialectPostgres, db, mustSub(migrations, "migrations"), goose.WithAllowOutofOrder(true))
+}
+
 func migrate(ctx context.Context, db *sql.DB) error {
-	p, err := goose.NewProvider(goose.DialectPostgres, db, mustSub(migrations, "migrations"))
+	p, err := newProvider(db)
 	if err != nil {
 		return err
 	}
