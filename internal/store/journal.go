@@ -212,13 +212,20 @@ func syncInTx(ctx context.Context, tx pgx.Tx, runID string, attempt int) error {
 }
 
 // SyncJournal projects whatever of a run's transcript the journal does not
-// hold yet. It is cheap when there is nothing to do: one indexed read.
+// hold yet. A run whose journal is up to date costs one read and no write,
+// which is what lets every reader (the stream's poll included) call it.
 func (s *Store) SyncJournal(ctx context.Context, runID string) error {
+	_, err := s.syncRun(ctx, runID)
+	return err
+}
+
+// syncRun is SyncJournal, saying whether there was anything to sync.
+func (s *Store) syncRun(ctx context.Context, runID string) (bool, error) {
 	attempts, err := s.unsyncedAttempts(ctx, runID)
 	if err != nil || len(attempts) == 0 {
-		return err
+		return false, err
 	}
-	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+	return true, pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := lockJournal(ctx, tx, runID); err != nil {
 			return err
 		}
@@ -231,18 +238,27 @@ func (s *Store) SyncJournal(ctx context.Context, runID string) error {
 	})
 }
 
-// unsyncedAttempts are a run's attempts with events the journal has not
-// projected, or that ended since their last sync.
+// unsyncedSQL selects the attempts of the run in scope as r that have
+// events the journal has not projected, or that ended since their last
+// sync (attemptEnd's conditions, so a synced attempt never matches again).
+// An attempt's newest event is one descent of run_events' primary key
+// (run_id, attempt, seq) and attempts run 1..r.attempt, so the check
+// never reads a run's whole transcript.
+const unsyncedSQL = `
+	SELECT n.attempt FROM generate_series(1, r.attempt) AS n (attempt)
+	CROSS JOIN LATERAL (SELECT max(e.seq) AS last FROM run_events e WHERE e.run_id = r.id AND e.attempt = n.attempt) e
+	LEFT JOIN journal_sources j ON j.run_id = r.id AND j.attempt = n.attempt
+	LEFT JOIN run_attempts a ON a.run_id = r.id AND a.attempt = n.attempt
+	WHERE e.last IS NOT NULL
+	  AND (j.through IS NULL OR j.through < e.last
+	   OR (NOT j.closed AND ((a.outcome IS NOT NULL AND a.ended_at IS NOT NULL)
+	       OR (a.run_id IS NULL AND (r.attempt > n.attempt
+	           OR (r.status IN ('succeeded', 'failed', 'cancelled', 'skipped') AND r.finished_at IS NOT NULL))))))`
+
+// unsyncedAttempts are a run's attempts unsyncedSQL selects, oldest first.
 func (s *Store) unsyncedAttempts(ctx context.Context, runID string) ([]int, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT e.attempt FROM (SELECT attempt, max(seq) AS last FROM run_events WHERE run_id = $1 GROUP BY attempt) e
-		LEFT JOIN journal_sources j ON j.run_id = $1 AND j.attempt = e.attempt
-		LEFT JOIN run_attempts a ON a.run_id = $1 AND a.attempt = e.attempt
-		JOIN runs r ON r.id = $1
-		WHERE j.through IS NULL OR j.through < e.last
-		   OR (NOT j.closed AND (a.outcome IS NOT NULL
-		       OR (a.run_id IS NULL AND (r.attempt > e.attempt OR r.status IN ('succeeded', 'failed', 'cancelled', 'skipped')))))
-		ORDER BY e.attempt`, runID)
+	rows, err := s.Pool.Query(ctx, `SELECT u.attempt FROM runs r CROSS JOIN LATERAL (`+unsyncedSQL+`) u
+		WHERE r.id = $1 ORDER BY u.attempt`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -253,38 +269,38 @@ func (s *Store) unsyncedAttempts(ctx context.Context, runID string) ([]int, erro
 // all false limits it to runs running or finished within the last hour,
 // which is all a deploy's older instance can still be writing; all true
 // is the full pass orbit serve makes once at start. It returns how many
-// runs it synced.
-func (s *Store) BackfillJournal(ctx context.Context, all bool) (int, error) {
-	q := `SELECT r.id::text FROM runs r WHERE (r.status = 'running' OR r.finished_at > now() - interval '1 hour')
-		AND EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = r.id) ORDER BY r.created_at, r.id`
+// runs it synced and, for each run whose sync failed, that error: a
+// failing run is skipped so it never holds back the runs after it, and
+// is retried by the next pass that selects it and by any reader of it.
+// err is a failure to list the runs, or ctx ending.
+func (s *Store) BackfillJournal(ctx context.Context, all bool) (synced int, failed []error, err error) {
+	scope := `(r.status = 'running' OR r.finished_at > now() - interval '1 hour')`
 	if all {
-		q = `SELECT DISTINCT e.run_id::text FROM run_events e
-			LEFT JOIN journal_sources j ON j.run_id = e.run_id AND j.attempt = e.attempt
-			WHERE j.run_id IS NULL OR j.through < e.seq OR NOT j.closed`
+		scope = `r.attempt > 0`
 	}
-	rows, err := s.Pool.Query(ctx, q)
+	rows, err := s.Pool.Query(ctx, `SELECT r.id::text FROM runs r WHERE `+scope+`
+		AND EXISTS (`+unsyncedSQL+`) ORDER BY r.created_at, r.id`)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	runs, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	n := 0
 	for _, id := range runs {
-		before, err := s.unsyncedAttempts(ctx, id)
-		if err != nil {
-			return n, err
+		did, err := s.syncRun(ctx, id)
+		if ctx.Err() != nil {
+			return synced, failed, ctx.Err()
 		}
-		if len(before) == 0 {
+		if err != nil {
+			failed = append(failed, fmt.Errorf("run %s: %w", id, err))
 			continue
 		}
-		if err := s.SyncJournal(ctx, id); err != nil {
-			return n, err
+		if did {
+			synced++
 		}
-		n++
 	}
-	return n, nil
+	return synced, failed, nil
 }
 
 // ---------------------------------------------------------------- reads

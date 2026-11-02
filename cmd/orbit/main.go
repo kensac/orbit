@@ -553,7 +553,11 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			defer loops.Done()
 			all := true
 			for life.Err() == nil {
-				if n, err := s.BackfillJournal(life, all); err != nil {
+				n, failed, err := s.BackfillJournal(life, all)
+				for _, f := range failed {
+					log.Error("journal backfill skipped a run", "err", f)
+				}
+				if err != nil {
 					if life.Err() == nil {
 						log.Error("journal backfill", "err", err)
 					}
