@@ -19,7 +19,7 @@ type Attempt struct {
 	SpecSHA    *string    `json:"spec_sha,omitempty"`
 	StartedAt  time.Time  `json:"started_at"`
 	EndedAt    *time.Time `json:"ended_at,omitempty"`
-	// Outcome is succeeded, failed, handed_back or lost; absent while the
+	// Outcome is succeeded, failed, skipped, handed_back or lost; absent while the
 	// attempt runs.
 	Outcome   *string `json:"outcome,omitempty"`
 	SessionID *string `json:"session_id,omitempty"`
@@ -144,7 +144,7 @@ func (s *Store) AttemptChain(ctx context.Context, runID string, attempt int) (ch
 	}
 	err = s.Pool.QueryRow(ctx, `
 		SELECT $2 = 1 OR a.recovered_from IS NOT NULL OR a.recover_skipped IS NOT NULL
-		       OR r.status IN ('succeeded', 'failed', 'cancelled')
+		       OR r.status IN ('succeeded', 'failed', 'cancelled', 'skipped')
 		       OR EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = $1 AND e.attempt = $2)
 		FROM run_attempts a JOIN runs r ON r.id = a.run_id
 		WHERE a.run_id = $1 AND a.attempt = $2`, runID, attempt).Scan(&settled)

@@ -65,6 +65,40 @@ notify: {channels: [ghost]}
 	}
 }
 
+func TestReservedAgentNamesFail(t *testing.T) {
+	for name := range ReservedAgentNames {
+		_, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/" + name + ".yaml": "name: " + name + "\ncharter: x\n"}))
+		if err == nil || !strings.Contains(err.Error(), "name is reserved") {
+			t.Errorf("agent %q: err = %v, want reserved", name, err)
+		}
+	}
+}
+
+func TestTransformsAreValidatedAtLoad(t *testing.T) {
+	agent := func(transforms string) string {
+		return "name: a\ncharter: x\nsources: [{name: s, kind: file, path: /x}]\ntransforms:\n" + transforms
+	}
+	for _, bad := range []string{
+		"  - {name: t, source: ghost, kind: sure-monthly}\n",
+		"  - {name: s, source: s, kind: sure-monthly}\n",
+		"  - {name: t, source: s, kind: nope}\n",
+		"  - {name: t, source: s, kind: json-filter}\n",
+		"  - {name: t, source: s, kind: json-filter, params: {where: [{field: x, op: like}]}}\n",
+	} {
+		if _, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": agent(bad)})); err == nil || !strings.Contains(err.Error(), "transform") {
+			t.Errorf("%s: err = %v", bad, err)
+		}
+	}
+	cfg, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": agent(
+		"  - {name: t, source: s, kind: json-filter, params: {where: [{field: x, op: gt, value: 1}]}}\n")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := cfg.Agents["a"]; !a.Withheld("s") || a.Withheld("t") {
+		t.Fatal("a source only a transform reads is withheld from the model")
+	}
+}
+
 func TestUnknownFieldsAndMismatchedNamesFail(t *testing.T) {
 	if _, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\ntriggerz: []\n"})); err == nil {
 		t.Error("an unknown field must fail the load, not be ignored")

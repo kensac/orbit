@@ -151,7 +151,7 @@ conversation:
    "started_at": "...", "finished_at": "...", "steps": 4,
    "summary": "...", "report": "<markdown>",
    "questions": [{"id": "uuid-of-the-question-message", "body": "...", "open": true}],
-   "error": null, "cost_usd": 0.03,
+   "error": null, "cost_usd": 0.03, "gate": null,
    "actions": [{"id": "uuid", "type": "notify", "status": "pending", "reason": "...", "params": {}}],
    "needs_input": true},
   {"kind": "message", "id": "uuid-of-the-question-message", "at": "...", "from": "agent",
@@ -175,7 +175,9 @@ conversation:
   question.
 - **Runs.** `trigger` is `schedule`, `manual`, `message` or `continue` (the
   agent asked to be woken again). `status` is
-  `queued`, `running`, `succeeded`, `failed` or `cancelled`. `attempt` counts
+  `queued`, `running`, `succeeded`, `failed`, `cancelled` or `skipped` (it
+  ended without a backend call because a gate, code, found nothing to judge;
+  `gate` names it, and is `null` for every other status). `attempt` counts
   claims (0 while never started; a run interrupted by a deploy is claimed
   again). `started_at` is the latest attempt's start, `null` while queued.
   `finished_at` is `null` until final. `steps` is the number of tool calls in
@@ -395,7 +397,7 @@ The access token is authentik's own (the `orbit-mcp` provider), so its issuer an
                "observed_at": "...", "run_id": "uuid"}},
  "cost": {
    "total": {"api_equivalent_usd": 1.234567, "runs": 42, "runs_with_cost": 40,
-             "by_status": {"queued": 0, "running": 1, "succeeded": 38, "failed": 3, "cancelled": 0}},
+             "by_status": {"queued": 0, "running": 1, "succeeded": 38, "failed": 3, "cancelled": 0, "skipped": 0}},
    "by_agent": [{"agent": "finance", "api_equivalent_usd": 0.811000, "runs": 30,
                  "runs_with_cost": 29, "by_status": {"...": 0}}],
    "by_day": [{"date": "2026-10-03", "api_equivalent_usd": 0.000000, "runs": 0}]}}
@@ -435,7 +437,7 @@ The access token is authentik's own (the `orbit-mcp` provider), so its issuer an
   (30 days). At most 366 days; `from` after `to`, a longer range or a date
   that is not `YYYY-MM-DD` is `400`. `by_day` lists every day of the range,
   oldest first, zero or not. `by_agent` lists agents with a run in the range,
-  by name. `by_status` always has all five statuses.
+  by name. `by_status` always has all six statuses.
 
 ## Readiness and drain
 
@@ -482,7 +484,8 @@ The access token is authentik's own (the `orbit-mcp` provider), so its issuer an
   measured by the database clock (`checked_at`); a run is requeued past
   `engine.StaleAfter` (300 s).
 - `agents` is every agent in the configuration in force, by name.
-  `last_success` is its newest succeeded run, `null` if none.
+  `last_success` is its newest succeeded or skipped run (a gate finding
+  nothing to judge is not a stale agent), `null` if none.
   `next_fires` is each schedule trigger's next fire after now, read in the
   agent's timezone, soonest first, in UTC; `[]` for a disabled agent or one
   without triggers. A fire is enqueued by the scheduler's leader, so it is
