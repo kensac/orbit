@@ -186,8 +186,15 @@ func (c *claudeCode) chatArgs(req Request, home string, keepDays int) []string {
 		"--strict-mcp-config", "--mcp-config", string(mcp),
 		"--setting-sources", "",
 		"--settings", chatSettings(keepDays, hooks, sandboxed, req.Connectors.Ask()),
-		"--allowedTools", strings.Join(allowed, ","),
 	)
+	webDeny := []string(nil)
+	if !sandboxed {
+		allowed, webDeny = webRules(allowed, req.WebAllow)
+	}
+	args = append(args, "--allowedTools", strings.Join(allowed, ","))
+	if len(webDeny) > 0 {
+		args = append(args, "--disallowedTools", strings.Join(webDeny, ","))
+	}
 	if sandboxed {
 		args = append(args, "--permission-mode", "bypassPermissions")
 	}
