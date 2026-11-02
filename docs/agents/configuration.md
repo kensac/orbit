@@ -18,6 +18,20 @@ private key (`private_key_env`: PEM, or base64 of the PEM for a one-line env
 file), and the `repositories` tickets and `github:merge` may target. Without
 it, a request ticket or a `github:merge` rule fails validation.
 
+## Build
+
+`build:` in `orbit.yaml` turns approved tickets into PRs: `sandboxd` (the
+service's tailnet `host:port` or `unix:/path`), `token_env` (default
+`ORBIT_SANDBOX_TOKEN`), `agent` (whose claude-code runner, timeout and
+`github:merge` rule a build uses; timeout at most `spec.MaxBuildTimeout`),
+`author` (`"Name <email>"`, the App's bot user), and per repository the
+`commands` a build may run (argv prefixes of plain words), `protected`
+globs and `max_diff_lines`. Each repository must be in
+`github.repositories`, and today must be `kensac/orbit` (docs/tickets.md,
+Open decisions). Without the section no ticket is built; approved tickets
+wait. orbit also needs `CLAUDE_CODE_OAUTH_TOKEN`, the one credential the
+sandbox receives. `orbit validate` lists both variables.
+
 ## Templates in sources
 
 URLs and query values may use `{{today}}`, `{{now}}`, `{{month_start}}`,

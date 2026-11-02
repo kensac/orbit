@@ -31,6 +31,7 @@ type PullRequest struct {
 	Title          string `json:"title"`
 	Body           string `json:"body"`
 	MergeCommitSHA string `json:"merge_commit_sha"`
+	HTMLURL        string `json:"html_url"`
 	Head           struct {
 		Ref  string `json:"ref"`
 		SHA  string `json:"sha"`
@@ -56,19 +57,24 @@ type RequiredCheck struct {
 
 // CheckRun is one check run on a commit.
 type CheckRun struct {
+	// ID is also the Actions job's id when App.Slug is github-actions.
+	ID         int64  `json:"id"`
 	Name       string `json:"name"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
+	HTMLURL    string `json:"html_url"`
 	App        struct {
-		ID int64 `json:"id"`
+		ID   int64  `json:"id"`
+		Slug string `json:"slug"`
 	} `json:"app"`
 }
 
 // Status is one commit status (the older statuses API, still used by some
 // integrations).
 type Status struct {
-	Context string `json:"context"`
-	State   string `json:"state"`
+	Context   string `json:"context"`
+	State     string `json:"state"`
+	TargetURL string `json:"target_url"`
 }
 
 func repoPath(repo string) (string, error) {

@@ -25,3 +25,7 @@ linters:
       # hold obviously fake credentials.
       - path: _test\.go
         linters: [gosec, bodyclose, errcheck]
+      # The fakes tests run against (a fake GitHub, a fake sandboxd) are
+      # test code in packages of their own.
+      - path: internal/.*/(githubtest|buildtest)/
+        linters: [gosec, bodyclose, errcheck]

@@ -57,6 +57,9 @@ is the design; the topic documents below are the rules for changing it.
 - `internal/store/`: every database read and write; `migrations/` is the schema.
 - `internal/api/`: JSON API, the run and approval pages, `/healthz`, `/readyz`, `/metrics`.
 - `examples/`: a complete configuration, loaded by tests and `make validate`.
+- `internal/build/`: the build runner (tool policy, stdio permission
+  protocol, diff policy, commit, push, PR); `internal/tickets/`: the ticket
+  loop that carries a ticket from approved to done.
 - `internal/sandboxd/`, `internal/egress/`, `internal/sandbox/`: the build
   sandbox service (the only holder of a docker socket), its egress proxy,
   and orbit's client for it.

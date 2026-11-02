@@ -48,3 +48,19 @@ github:
   app_id: 123456
   private_key_env: ORBIT_GITHUB_APP_PRIVATE_KEY
   repositories: [kensac/orbit]
+
+# How approved tickets are built (docs/tickets.md, The build run): in a
+# sandbox from orbit sandboxd, run by the agent named here, under each
+# repository's tool policy. Without this section no ticket is built.
+build:
+  sandboxd: sandbox.example.ts.net:8091
+  token_env: ORBIT_SANDBOX_TOKEN
+  agent: orbit
+  # The App's bot user: id from `gh api /users/orbit-kensac%5Bbot%5D --jq .id`.
+  author: "orbit-kensac[bot] <351241810+orbit-kensac[bot]@users.noreply.github.com>"
+  repositories:
+    kensac/orbit:
+      commands: [go build, go test, go vet, gofmt, make check, make fmt, make test,
+                 git status, git diff, git log, git show, ls, rg]
+      protected: ["deploy/**"]
+      max_diff_lines: 2000

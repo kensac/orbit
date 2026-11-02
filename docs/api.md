@@ -310,7 +310,8 @@ the concatenated `text`: `text` is what the agent narrated while working.
 A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)):
 `POST /tickets` (opens its conversation; returns `ticket_id`,
 `conversation_id`, `message_id`, `run_id`), `GET /tickets`,
-`GET /tickets/{id}` (the ticket, its plans and transitions),
+`GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that
+reached merging carries `merge_action_id`, its `github:merge` action),
 `POST /tickets/{id}/plans/{version}/approve`, and
 `POST /tickets/{id}/{abandon,retry,reopen}`. Its thread and messages are
 its conversation's (`/conversations/{conversation_id}/thread`,

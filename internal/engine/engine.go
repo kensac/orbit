@@ -24,6 +24,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/kensac/orbit/internal/actions"
+	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/notify"
@@ -53,6 +54,11 @@ type Engine struct {
 	Harness string
 	// HeartbeatEvery overrides heartbeatEvery when set; tests shorten it.
 	HeartbeatEvery time.Duration
+	// Builder runs build runs (internal/build); nil fails them.
+	Builder *build.Runner
+	// Drain is this instance's drain; a draining instance starts no build
+	// sandbox (build.go).
+	Drain *Drain
 
 	mu  sync.RWMutex
 	cfg *Snapshot
@@ -112,6 +118,9 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 	actx, lose := context.WithCancelCause(ctx)
 	defer lose(nil)
 	go e.heartbeat(actx, c, lose, log)
+	if c.Trigger == store.TriggerBuild {
+		return e.executeBuild(ctx, actx, snap, a, c, start, log)
+	}
 
 	st := &attemptState{}
 	out, res, err := e.attempt(actx, snap, a, c, log, st)
@@ -364,11 +373,27 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	types := actions.Catalog(a, snap.Config.Deployment)
 	schema := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, true)
 	envelope := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, false)
+	tk, err := e.Store.TicketForConversation(ctx, c.ConversationID)
+	if err != nil {
+		return nil, nil, err
+	}
+	planning := takesPlan(tk)
+	if planning {
+		schema, envelope = withPlan(schema), withPlan(envelope)
+	}
+	if tk != nil {
+		if inputs, err = e.ticketInput(ctx, c, tk, workdir, inputsDir, inputs); err != nil {
+			return nil, nil, err
+		}
+	}
 	var hr *runner.Harness
 	if e.Harness != "" && r.Kind() == "claude-code" {
 		hr = &runner.Harness{Bin: e.Harness, Figures: figures}
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr != nil)
+	if tk != nil {
+		system += ticketContract(tk, planning)
+	}
 	trigger := c.Trigger
 	prompt := userPrompt(a, now, promptRun{Trigger: trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing},
 		rc, convo, inputs)
@@ -403,6 +428,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	out, err := validate(envelope, res.Output)
 	if err != nil {
 		return nil, res, fmt.Errorf("output does not match the contract: %w", err)
+	}
+	if planning {
+		out.planTicket = tk.ID
 	}
 	if figures {
 		// The hook already sent the output back for these, up to
@@ -490,6 +518,9 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		types[t.Name] = t
 	}
 	o := store.Outcome{Questions: out.Questions}
+	if out.planTicket != "" && strings.TrimSpace(out.Plan) != "" {
+		o.Plan = &store.PlanProposal{TicketID: out.planTicket, Body: strings.TrimSpace(out.Plan)}
+	}
 	if out.Memory.Update {
 		m := out.Memory.Content
 		o.Memory = &m

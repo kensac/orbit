@@ -17,7 +17,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldfl
 # Code's npm package installs a native binary through a postinstall script).
 FROM node:24.22.2-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini \
+# git is the build runner's: orbit clones, commits and pushes a ticket's
+# branch itself (internal/build), with the token in git's environment only.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini git \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Exactly the lockfile. Renovate bumps deploy/cli/package.json, so a CLI

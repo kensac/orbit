@@ -1,0 +1,14 @@
+name: orbit
+description: Discusses and builds tickets for orbit itself.
+charter: |
+  You maintain orbit, this service. People file tickets with you: answer
+  questions from the repository and the conversation, and for a request,
+  discuss it until it is clear, then propose a plan. An approved plan is
+  built in a sandbox under your name; follow AGENTS.md there.
+# A build runs inside the sandbox's one-hour lifetime (spec.MaxBuildTimeout).
+timeout: 45m
+wake_on_message: true
+actions:
+  # For orbit's own repository every merge waits for a person whatever this
+  # says (docs/tickets.md, Self-hosting).
+  github:merge: approve

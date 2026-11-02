@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -63,6 +64,21 @@ type Server struct {
 	Patched    []map[string]string
 	Merged     map[string]string
 	Calls      []string
+
+	// The build delivery's side. PR nil means no PR exists yet: creating
+	// one makes it PR 7, with its head at BranchHead(ref).
+	BranchHead func(ref string) string
+	Created    []map[string]any
+	// Compare answers compare/{base}...{head}, keyed "base...head";
+	// "identical" when base and head are equal, "diverged" otherwise.
+	Compare map[string]string
+	// CompareFiles are the files every compare reports changed.
+	CompareFiles []string
+	// JobLogs are Actions job logs by job id, served through a redirect
+	// as GitHub does.
+	JobLogs map[int64]string
+	// MergeSHA is the commit the merge creates.
+	MergeSHA string
 }
 
 // New starts a fake, stopped when the test ends.
@@ -85,6 +101,7 @@ func (f *Server) Reset() {
 		"base": map[string]any{"ref": "main", "repo": map[string]any{"full_name": "kensac/orbit", "default_branch": "main"}},
 	}
 	f.Mergeable = []any{true}
+	f.MergeSHA = "2222"
 	f.Protection = map[string]any{"required_status_checks": map[string]any{"contexts": []string{"check"}}}
 	f.CheckRuns = []map[string]any{
 		{"name": "check", "status": "completed", "conclusion": "success", "app": map[string]any{"id": 15368}},
@@ -105,11 +122,23 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 	f.Mu.Lock()
 	defer f.Mu.Unlock()
 	f.Calls = append(f.Calls, r.Method+" "+r.URL.Path)
-	if r.Header.Get("X-GitHub-Api-Version") != "2022-11-28" {
+	if r.Header.Get("X-GitHub-Api-Version") != "2022-11-28" && !strings.HasPrefix(r.URL.Path, "/joblogs/") {
 		f.write(w, 400, map[string]string{"message": "no api version"})
 		return
 	}
 	auth := r.Header.Get("Authorization")
+	if id, ok := strings.CutPrefix(r.URL.Path, "/joblogs/"); ok {
+		// The log's storage: a presigned URL, no GitHub credential.
+		if auth != "" {
+			f.write(w, 400, map[string]string{"message": "a credential was sent to the log storage"})
+			return
+		}
+		var n int64
+		_, _ = fmt.Sscan(id, &n)
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte(f.JobLogs[n]))
+		return
+	}
 	switch {
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/installation":
 		if !f.validJWT(strings.TrimPrefix(auth, "Bearer ")) {
@@ -145,7 +174,43 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "DELETE" && r.URL.Path == "/installation/token":
 		f.Revoked = append(f.Revoked, auth)
 		w.WriteHeader(204)
+	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls":
+		list := []any{}
+		if f.PR != nil {
+			head := f.PR["head"].(map[string]any)
+			if r.URL.Query().Get("head") == "kensac:"+head["ref"].(string) &&
+				(r.URL.Query().Get("state") == "all" || r.URL.Query().Get("state") == f.PR["state"]) {
+				list = append(list, f.PR)
+			}
+		}
+		f.write(w, 200, list)
+	case r.Method == "POST" && r.URL.Path == "/repos/kensac/orbit/pulls":
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		if f.PR != nil && f.PR["state"] == "open" && f.PR["head"].(map[string]any)["ref"] == b["head"] {
+			f.write(w, 422, map[string]string{"message": "A pull request already exists for kensac:" + b["head"].(string) + "."})
+			return
+		}
+		f.Created = append(f.Created, b)
+		sha := Head
+		if f.BranchHead != nil {
+			sha = f.BranchHead(b["head"].(string))
+		}
+		f.PR = map[string]any{
+			"number": 7, "state": "open", "draft": false, "merged": false, "mergeable_state": "clean",
+			"title": b["title"], "body": b["body"], "html_url": "https://github.com/kensac/orbit/pull/7",
+			"head": map[string]any{"ref": b["head"], "sha": sha, "repo": map[string]any{"full_name": "kensac/orbit"}},
+			"base": map[string]any{"ref": b["base"], "repo": map[string]any{"full_name": "kensac/orbit", "default_branch": "main"}},
+		}
+		f.write(w, 201, f.PR)
+	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls/7" && f.PR == nil:
+		f.write(w, 404, map[string]string{"message": "Not Found"})
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls/7":
+		if f.BranchHead != nil && f.PR["state"] == "open" {
+			// A push to the branch moves the open PR's head.
+			head := f.PR["head"].(map[string]any)
+			head["sha"] = f.BranchHead(head["ref"].(string))
+		}
 		pr := map[string]any{}
 		for k, v := range f.PR {
 			pr[k] = v
@@ -154,19 +219,38 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		pr["mergeable"] = f.Mergeable[i]
 		f.PRReads++
 		f.write(w, 200, pr)
-	case r.Method == "PATCH" && r.URL.Path == "/repos/kensac/orbit/pulls/7":
+	case r.Method == "PATCH" && r.URL.Path == "/repos/kensac/orbit/pulls/7" && f.PR != nil:
 		var b map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		f.Patched = append(f.Patched, b)
-		f.PR["body"] = b["body"]
+		for k, v := range b {
+			f.PR[k] = v
+		}
 		f.write(w, 200, f.PR)
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/compare/"):
+		bh := strings.TrimPrefix(r.URL.Path, "/repos/kensac/orbit/compare/")
+		st, ok := f.Compare[bh]
+		if !ok {
+			st = "diverged"
+			if b, h, _ := strings.Cut(bh, "..."); b == h {
+				st = "identical"
+			}
+		}
+		files := []any{}
+		for _, n := range f.CompareFiles {
+			files = append(files, map[string]any{"filename": n})
+		}
+		f.write(w, 200, map[string]any{"status": st, "files": files})
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/actions/jobs/") && strings.HasSuffix(r.URL.Path, "/logs"):
+		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/repos/kensac/orbit/actions/jobs/"), "/logs")
+		http.Redirect(w, r, f.Srv.URL+"/joblogs/"+id, http.StatusFound)
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/branches/main":
 		f.write(w, 200, map[string]any{"name": "main", "protected": f.Protection != nil, "protection": f.Protection})
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/rules/branches/main":
 		f.write(w, 200, f.Rules)
-	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/commits/"+Head+"/check-runs":
+	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/commits/"+f.checkedSHA()+"/check-runs":
 		f.write(w, 200, map[string]any{"total_count": len(f.CheckRuns), "check_runs": f.CheckRuns})
-	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/commits/"+Head+"/status":
+	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/commits/"+f.checkedSHA()+"/status":
 		f.write(w, 200, map[string]any{"statuses": f.Statuses})
 	case r.Method == "PUT" && r.URL.Path == "/repos/kensac/orbit/pulls/7/merge":
 		_ = json.NewDecoder(r.Body).Decode(&f.Merged)
@@ -174,10 +258,22 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			f.write(w, 409, map[string]string{"message": "Head branch was modified"})
 			return
 		}
-		f.write(w, 200, map[string]any{"sha": "2222", "merged": true})
+		f.PR["state"], f.PR["merged"], f.PR["merge_commit_sha"] = "closed", true, f.MergeSHA
+		f.write(w, 200, map[string]any{"sha": f.MergeSHA, "merged": true})
 	default:
 		f.write(w, 404, map[string]string{"message": "Not Found"})
 	}
+}
+
+// checkedSHA is the commit whose checks the fake reports: the PR's head,
+// or Head when there is no PR.
+func (f *Server) checkedSHA() string {
+	if f.PR != nil {
+		if sha, _ := f.PR["head"].(map[string]any)["sha"].(string); sha != "" {
+			return sha
+		}
+	}
+	return Head
 }
 
 func (f *Server) validJWT(tok string) bool {

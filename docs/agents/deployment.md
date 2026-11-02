@@ -137,7 +137,7 @@ networks:
 
 - **Token:** `ORBIT_SANDBOX_TOKEN`, at least 32 characters, in Infisical as
   `OCI_ORBIT_SANDBOX_TOKEN` and `HETZNER_ORBIT_SANDBOX_TOKEN` (the same
-  value; rotated together). orbit's side reads it once build runs are wired.
+  value; rotated together). orbit reads it as `build.token_env`.
 - **Images:** both pinned by digest; `ghcr.io/kensac/orbit-build` is pushed
   by `build-push-ghcr.yml` beside the orbit image. orbit's image is private,
   so oci logs in to ghcr on deploy as hetzner does (`ghcr_username` in its
@@ -153,3 +153,39 @@ networks:
   hetzner `curl -s -o /dev/null -w '%{http_code}' -X DELETE
   http://100.123.116.85:8091/v1/sandboxes/$(printf 'a%.0s' {1..64})`
   answers 401 without the token and 404 with it.
+
+## Building tickets: what hetzner and oci need
+
+In order; each step is safe to take alone (without step 4 approved tickets
+just wait).
+
+1. **oci**: sandboxd and egress as above, at the image digest that carries
+   this build runner, `ghcr.io/kensac/orbit-build` present (public package
+   or pulled), and `OCI_ORBIT_SANDBOX_TOKEN` in Infisical. Check with the
+   `curl` above.
+2. **Infisical**: `HETZNER_ORBIT_SANDBOX_TOKEN` with the same value
+   (`playbooks/secret-set.yml -e key=HETZNER_ORBIT_SANDBOX_TOKEN`), so it
+   renders into `/root/.env` as `ORBIT_SANDBOX_TOKEN`.
+3. **hetzner, `compose.orbit.yml`**: the `orbit` service's environment
+   gains `- ORBIT_SANDBOX_TOKEN=${ORBIT_SANDBOX_TOKEN}`. orbit reaches
+   `100.123.116.85:8091` over the tailnet, which the container already has
+   (it reaches Infisical and GitHub the same way). `ORBIT_DATA_DIR` holds
+   each build's clone under `builds/` while it runs; it is removed after.
+   The image carries `git` for this (deploy/Dockerfile); check with
+   `docker exec orbit git --version`.
+4. **hetzner, `orbit/orbit.yaml`**: the `build:` section
+   (docs/tickets.md, Configuration) with `sandboxd: 100.123.116.85:8091`
+   and `agent:` an agent whose spec has `timeout:` at most 50m and
+   `actions: {github:merge: approve}`. The config reloads on its own; check
+   `config reloaded` in the log and `orbit_config_valid` 1.
+5. **GitHub**: `main` of `kensac/orbit` protected (a PR and the `check`
+   status required, the App off the bypass list), as for `github:merge`.
+
+**Claiming it works:** file a small request ticket, approve its plan, and
+watch the ticket go `building` (the build run's stream shows
+`orbit.build` steps and `orbit.permission` decisions), `review` (a PR from
+`orbit-kensac[bot]` on `orbit/<8 hex>`), then `merging` with an approval
+notification once CI is green. After the merge and the deploy that moves
+hetzner's pin, the ticket is `done` when `docker exec orbit orbit version`
+is the merge commit or a descendant. Until that has happened once, a real
+build in a real sandbox is unverified.
