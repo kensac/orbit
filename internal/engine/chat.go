@@ -524,7 +524,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	}
 	req := runner.Request{
 		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
-		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin, Connectors: t.connectors,
+		Tools: a.Tools, WebAllow: webAllow(a), Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin, Connectors: t.connectors,
 	}
 	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
 		return nil, nil, err
@@ -692,4 +692,12 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		result = json.RawMessage(`{}`)
 	}
 	return fmt.Sprintf("%s executed (action %s): %s", v.Type, id, result), false
+}
+
+// webAllow is the agent's WebFetch allowlist for a run on orbit's host; a sandboxed run's network is its egress.
+func webAllow(a *spec.Agent) []string {
+	if a.Web == nil || a.Sandbox != "" {
+		return nil
+	}
+	return a.Web.Allow
 }

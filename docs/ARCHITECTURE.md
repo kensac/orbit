@@ -497,6 +497,7 @@ ticket approved --ticket loop (internal/tickets)--> build run (trigger build) in
        -> archive (tar) -> diff policy -> commit as orbit-kensac[bot] -> push orbit/<id> (deliver token) -> PR
   -> FinishBuild: run succeeded and ticket review, one transaction
 ticket loop, every 30 s: checks green -> github:merge proposed (approve for orbit itself)
+  (a race: every lane built on orbit/<id>-<lane>, scored in code, a person's ticket:pick, then as above)
   -> action loop executes it -> merged -> done (on deploy, for orbit)
 ```
 

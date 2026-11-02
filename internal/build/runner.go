@@ -41,8 +41,11 @@ func ParseIdentity(s string) (Identity, error) {
 type Job struct {
 	RunID   string
 	Attempt int
-	// TicketID names the branch (Branch).
-	TicketID    string
+	// TicketID names the branch (Branch), with Lane for a race lane's
+	// (LaneBranch).
+	TicketID string
+	// Lane is the race lane this build is ("a", "b", "c"), or empty.
+	Lane        string
 	Title       string
 	Repo        string
 	Plan        string
@@ -64,7 +67,10 @@ type Job struct {
 	// StackPR is that ticket's PR, named in this one's body.
 	StackPR int
 	Policy  spec.BuildRepo
-	// Model and MaxTurns are the build agent's runner's; Timeout its.
+	// Model and MaxTurns are the build agent's runner's, Model unless the
+	// lane's variant names one; Timeout the agent's. Effort is the lane
+	// variant's --effort, empty for the CLI's own.
+	Effort   string
 	Model    string
 	MaxTurns int
 	Timeout  time.Duration
@@ -232,7 +238,7 @@ func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
 	if d.App == nil || d.Sandbox == nil {
 		return nil, errors.New("the build needs the GitHub App and sandboxd")
 	}
-	branch, err := Branch(j.TicketID)
+	branch, err := LaneBranch(j.TicketID, j.Lane)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +258,7 @@ func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
 	var g git
 	if r.Pool != nil {
 		// The ticket's clone, kept between its builds, or a spare one.
-		if g, err = r.Pool.Acquire(ctx, TicketKey(j.TicketID), j.Repo, home); err != nil {
+		if g, err = r.Pool.Acquire(ctx, LaneKey(j.TicketID, j.Lane), j.Repo, home); err != nil {
 			return nil, err
 		}
 	} else {
@@ -434,7 +440,7 @@ func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git, scripts Sc
 		binary = "claude"
 	}
 	ar := sandbox.AttachRequest{
-		Argv: cliArgs(binary, j.Model, j.MaxTurns, systemPrompt(policy, j.Purpose)),
+		Argv: cliArgs(binary, j.Model, j.Effort, j.MaxTurns, systemPrompt(policy, j.Purpose)),
 		Env:  j.Env,
 	}
 	proc := func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
@@ -522,7 +528,7 @@ func (r *Runner) deliver(ctx context.Context, j Job, d Deps, g git, res *Result,
 	}
 	defer func() { _ = tok.Revoke(context.WithoutCancel(ctx)) }()
 	if push {
-		rs, err := refspec(j.TicketID, res.HeadSHA)
+		rs, err := refspec(res.Branch, res.HeadSHA)
 		if err != nil {
 			return err
 		}
@@ -589,6 +595,20 @@ func PRBody(model string, j Job, trust []string) string {
 	var b strings.Builder
 	b.WriteString(strings.TrimSpace(github.ScrubAttribution(model)))
 	fmt.Fprintf(&b, "\n\n---\n\nBuilt by orbit from ticket `%s` (%q), plan version %d.", j.TicketID, j.Title, j.PlanVersion)
+	if j.Lane != "" {
+		var with []string
+		if j.Model != "" {
+			with = append(with, "model `"+j.Model+"`")
+		}
+		if j.Effort != "" {
+			with = append(with, "effort `"+j.Effort+"`")
+		}
+		fmt.Fprintf(&b, "\n\nRace lane `%s`", j.Lane)
+		if len(with) > 0 {
+			fmt.Fprintf(&b, " (%s)", strings.Join(with, ", "))
+		}
+		b.WriteString(": the same plan is built on other lanes; a person picks one, and orbit closes the others' PRs and keeps their branches.")
+	}
 	if j.StackPR > 0 {
 		fmt.Fprintf(&b, "\n\nStacked on #%d: this PR's base is that one's branch until it merges; then orbit moves this branch onto the default branch, and only then merges it.", j.StackPR)
 	}
