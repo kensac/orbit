@@ -255,6 +255,10 @@ func validate(args []string) error {
 		refs[b.TokenEnv] = true
 		refs["CLAUDE_CODE_OAUTH_TOKEN"] = true
 	}
+	if addr, tokenEnv := cfg.Deployment.SandboxService(); addr != "" {
+		refs[tokenEnv] = true
+		refs["CLAUDE_CODE_OAUTH_TOKEN"] = true
+	}
 	names := make([]string, 0, len(cfg.Agents))
 	for n := range cfg.Agents {
 		names = append(names, n)

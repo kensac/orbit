@@ -196,7 +196,19 @@ removed, cut at a word to 60 characters (`store.DefaultTitle`, code, never
 a model). `client_request_id` makes a retry return the first result, as for
 messages below.
 
+`POST /conversations` takes the same body plus `agent`, and creates the conversation with that agent, or with the built-in general agent `orbit` when `agent` is absent: what "New chat" calls. 404 when the agent is not configured.
+
 `GET /conversations/{id}` returns `{"conversation": {...}}`, the same shape.
+
+`GET /conversations/{id}/files` lists a chat agent's workspace for the conversation (below, Chat agents) as of its newest snapshot, stored after every run:
+
+```json
+{"files": [{"path": "src/main.go", "bytes": 13, "modified_at": "..."}],
+ "snapshot": {"id": 4, "conversation_id": "uuid", "run_id": "uuid", "attempt": 1,
+              "sha256": "hex", "bytes": 10240, "files": 3, "created_at": "..."}}
+```
+
+Regular files only, by path; orbit's own state (`.orbit/`, the run's `inputs/`) is left out. `snapshot` is `null` (and `files` empty) for a conversation without one. `GET /conversations/{id}/files/{path}` is one file, always as a download (`application/octet-stream`, `Content-Disposition: attachment`, `nosniff`, a CSP that runs nothing), 404 for a path the snapshot does not have.
 
 `PATCH /conversations/{id}` `{"title": "...", "archived": true}` (either
 field) returns the updated `{"conversation": {...}}`. A title is at most 240
@@ -232,6 +244,10 @@ The browser sends the file as the body of a `PUT` to `url`, with no `Authorizati
 `GET /conversations/{id}/uploads/{upload}` is the file: its `media_type` as `Content-Type`, `Content-Disposition: inline` for an image (not SVG) and `attachment` for everything else, with `nosniff` and a CSP that runs nothing.
 
 A message carries uploads with `attachments` (below): ids of uploads of the same conversation, at most 20; one from another conversation is a `400`. A message with attachments may have an empty `body`.
+
+## Chat agents
+
+An agent with `chat: true` (the built-in `orbit` is one) is a Claude Code session rather than a report writer: its run's `report` is the session's final message, as written, and `summary` that reply's first line. It changes its memory, asks questions and proposes actions with orbit's tools during the turn instead of in a schema, so its runs carry `questions` and `actions` as any run does. Each conversation has its own workspace (`GET /conversations/{id}/files`): files the agent writes, and the person's uploads, stay between messages. With `sandbox: workstation` (the built-in's, when sandboxd is configured) the session runs in a sandbox container with Claude Code's full tool set and the open internet; `sandbox: build` with the tools it names.
 
 ## A conversation's thread
 
@@ -400,7 +416,7 @@ An attempt (`store.Attempt`), oldest first:
 
 `attempt`, `worker` and `started_at` are always present; the rest is omitted when unset. `outcome` is `succeeded`, `failed`, `skipped`, `handed_back` (stopped by its instance) or `lost` (reaped without a heartbeat), absent while the attempt runs. `recovered_from` is the attempt whose session it continued, `recover_skipped` why it started over instead. `cost_usd` is the attempt's share, absent when unknown (a killed process saved none); `session_cost_usd` is the backend's running total for the session after it.
 
-`POST /runs/{id}/cancel` is `200 {"cancelled": true}` for a queued run, 409 otherwise.
+`POST /runs/{id}/cancel` stops a run. A queued run is cancelled at once: `200 {"cancelled": true, "status": "cancelled"}`. A running run is asked to stop: `202 {"cancelled": false, "status": "cancelling"}`; its attempt sees the request within 2 s (`engine.cancelPoll`), interrupts the backend (a chat agent's turn through Claude Code's control channel, which ends the turn with what it has; any other run's backend is stopped), and ends the run `cancelled`, with the reply so far as its `report` and `error` `"stopped by its person"`. A stopped run notifies nothing. Any other state is 409.
 
 ### Events
 

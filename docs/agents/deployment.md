@@ -104,6 +104,8 @@ The build sandbox runs on hetzner today, beside orbit, in `hetzner-vps-config` a
 - **Images:** `ghcr.io/kensac/orbit-build` is pushed by `build-push-ghcr.yml` beside the orbit image. sandboxd pulls it through the Engine API without credentials, so the package must be public (it is built from this public repository and holds nothing private) or pulled on the host before sandboxd starts.
 - **Claiming it is deployed:** `docker logs orbit-sandboxd` shows `sandboxd: serving` (it exits on a failed host check: no seccomp, a network that is not internal, an image it cannot get), and `docker logs orbit-egress` shows `egress: serving` with the allowlist.
 
+**Workstation profile** (sandboxed chats, `sandbox: workstation`): a second `orbit egress` with `ORBIT_EGRESS_ALLOW=*` (any public host on 443, never a private or tailnet address) on the `orbit-sandbox` and `orbit-egress` networks, named for example `orbit-egress-open`, and sandboxd's environment gains `ORBIT_SANDBOX_WORKSTATION_PROXY=orbit-egress-open:3128`. Without it sandboxd refuses that profile (400), and the built-in agent's runs fail naming the variable.
+
 ## Building tickets: what hetzner needs
 
 In order; each step is safe to take alone (without step 3 approved tickets just wait).
