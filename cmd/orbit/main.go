@@ -13,6 +13,7 @@
 //	orbit import skills <dir> [--attach <agent>] [--apply]   seed the skills library through the API
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
 //	orbit hook --root <dir> --state <dir> [--figures] [--status <socket>]   orbit's hook, run by Claude Code
+//	orbit agent-hook --root <dir> --def <hook>   one of an agent's own hooks, run by Claude Code
 //	orbit tls-cert --dir <d> [--owner uid:gid]   orbit-db's self-signed TLS certificate
 //	orbit sandboxd           the build sandbox service (holds the docker socket)
 //	orbit egress             the allowlisting proxy, a sandbox's only route out
@@ -89,6 +90,8 @@ func main() {
 		err = importCmd(ctx, os.Args[2:])
 	case "mcp", "hook":
 		err = harnessCmd(os.Args[1], os.Args[2:])
+	case "agent-hook":
+		os.Exit(agentHookCmd(os.Args[2:]))
 	case "tls-cert":
 		err = tlsCertCmd(os.Args[2:])
 	case "sandboxd":
@@ -128,6 +131,22 @@ func harnessCmd(name string, args []string) error {
 		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, revision)
 	}
 	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state, Status: *statusSock})
+}
+
+// agentHookCmd runs one of an agent's own hooks for Claude Code (spec hooks): the definition is a flag orbit wrote, the event is stdin, and the exit code is the CLI's to read.
+func agentHookCmd(args []string) int {
+	fs := flag.NewFlagSet("agent-hook", flag.ContinueOnError)
+	root := fs.String("root", "", "the run's working directory")
+	def := fs.String("def", "", "the hook, as orbit encoded it")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	d, err := harness.DecodeAgentHook(*def)
+	if err != nil || *root == "" {
+		fmt.Fprintln(os.Stderr, "orbit agent-hook: --root and a valid --def are required")
+		return 1
+	}
+	return harness.AgentHook(os.Stdin, os.Stdout, os.Stderr, d, *root)
 }
 
 func usage() {

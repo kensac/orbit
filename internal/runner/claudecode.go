@@ -86,7 +86,8 @@ const hookTimeout = 10
 // output, and with Status every hook event posted to the run's status
 // listener. One PreToolUse entry for every tool keeps it one process per
 // event; the hook decides by tool name. Matchers are tool names joined by
-// |, or * for all.
+// |, or * for all. An agent's own hooks (spec hooks) follow orbit's on
+// their event.
 func harnessHooks(h *Harness, workdir, home string) map[string]any {
 	command := shellQuote(h.Bin) + " hook --root " + shellQuote(workdir) +
 		" --state " + shellQuote(harness.StateDir(home))
@@ -103,22 +104,37 @@ func harnessHooks(h *Harness, workdir, home string) map[string]any {
 		}
 		return []any{e}
 	}
+	out := map[string]any{}
 	if h.Status == "" {
 		matcher := "Read|Glob|Grep"
 		if h.Figures {
 			matcher += "|StructuredOutput"
 		}
-		return map[string]any{"PreToolUse": entry(matcher)}
-	}
-	hooks := map[string]any{}
-	for _, ev := range status.HookEvents {
-		m := ""
-		if status.ToolEvents[ev] {
-			m = "*"
+		out["PreToolUse"] = entry(matcher)
+	} else {
+		for _, ev := range status.HookEvents {
+			m := ""
+			if status.ToolEvents[ev] {
+				m = "*"
+			}
+			out[ev] = entry(m)
 		}
-		hooks[ev] = entry(m)
 	}
-	return hooks
+	for _, ah := range h.AgentHooks {
+		timeout := hookTimeout
+		if ah.Def.Timeout > 0 {
+			// The CLI's bound sits a little past the command's own, so the command's timeout is the one that reports.
+			timeout = int(ah.Def.Timeout.Seconds()) + 5
+		}
+		entry := map[string]any{"hooks": []any{map[string]any{"type": "command", "timeout": timeout,
+			"command": shellQuote(h.Bin) + " agent-hook --root " + shellQuote(workdir) + " --def " + harness.EncodeAgentHook(ah.Def)}}}
+		if ah.Matcher != "" {
+			entry["matcher"] = ah.Matcher
+		}
+		list, _ := out[ah.Event].([]any)
+		out[ah.Event] = append(list, entry)
+	}
+	return out
 }
 
 // harnessMCP is the --mcp-config that starts `orbit mcp` for the run.

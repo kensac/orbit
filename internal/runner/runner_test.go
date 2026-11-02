@@ -659,3 +659,20 @@ func TestSkillsPluginArgs(t *testing.T) {
 		t.Fatalf("args without skills: %s", none)
 	}
 }
+
+func TestAgentHooksJoinOrbits(t *testing.T) {
+	h := &Harness{Bin: "/orbit", AgentHooks: []AgentHook{
+		{Event: "PreToolUse", Matcher: "WebFetch", Def: harness.AgentHookDef{Event: "PreToolUse", Deny: "no"}},
+		{Event: "Stop", Def: harness.AgentHookDef{Event: "Stop", Say: "check"}},
+	}}
+	hooks := harnessHooks(h, "/w", "/h")
+	pre := hooks["PreToolUse"].([]any)
+	if len(pre) != 2 || pre[1].(map[string]any)["matcher"] != "WebFetch" {
+		t.Fatalf("PreToolUse = %v", pre)
+	}
+	stop := hooks["Stop"].([]any)[0].(map[string]any)
+	cmd := stop["hooks"].([]any)[0].(map[string]any)["command"].(string)
+	if _, has := stop["matcher"]; has || !strings.HasPrefix(cmd, "'/orbit' agent-hook --root '/w' --def ") {
+		t.Fatalf("Stop = %v", stop)
+	}
+}
