@@ -201,6 +201,7 @@ without docker):
   The proxy never dials a private, loopback, link-local or CGNAT address
   (every tailnet address), so an allowed name that resolves to one cannot
   reach the host's networks.
+- A build never shares a network with the workstation profile's open proxy: workstation sandboxes join `ORBIT_SANDBOX_WORKSTATION_NETWORK`, which sandboxd requires with the open proxy and refuses to be the build network, and both must be internal (`TestWorkstationOwnNetwork`, `TestConfigValidate`). Otherwise code in a build could name the open proxy and leave its allowlist behind.
 - The environment is sandboxd's fixed list plus one backend credential (`sandbox.AllowedEnv` permits `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, and an attach carrying both is refused); no orbit secret, no GitHub token. orbit chooses it as for an ordinary run, for builds and sandboxed chats alike (`build.SandboxEnv` through `claudeproto.Credential` and `claudeproto.Env`): the subscription token when set, else the API key.
 - Callers cannot pass docker options: the create request is the tar and a
   run id, the attach request is argv and env (unknown fields refused); the

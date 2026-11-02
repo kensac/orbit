@@ -59,7 +59,7 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		_ = json.NewEncoder(w).Encode(dockerInfo{SecurityOptions: []string{"name=seccomp,profile=builtin"}})
 	})
 	mux.HandleFunc("GET "+p+"/networks/{name}", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(networkState{Name: r.PathValue("name"), Internal: r.PathValue("name") == "orbit-sandbox"})
+		_ = json.NewEncoder(w).Encode(networkState{Name: r.PathValue("name"), Internal: r.PathValue("name") == "orbit-sandbox" || r.PathValue("name") == "orbit-workstation"})
 	})
 	mux.HandleFunc("GET "+p+"/images/", func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, testImage+"/json") {
@@ -568,6 +568,10 @@ func TestCheckRefusesOpenNetwork(t *testing.T) {
 	if err := h.srv.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "not internal") {
 		t.Fatalf("check on a non-internal network: %v", err)
 	}
+	h.srv.cfg.Network, h.srv.cfg.WorkstationProxy, h.srv.cfg.WorkstationNetwork = "orbit-sandbox", "orbit-egress-open:3128", "open-ish"
+	if err := h.srv.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "open-ish is not internal") {
+		t.Fatalf("check on a non-internal workstation network: %v", err)
+	}
 }
 
 func bufioReader(c net.Conn) *bufio.Reader { return bufio.NewReader(c) }
@@ -577,14 +581,48 @@ func TestProfiles(t *testing.T) {
 	if _, err := s.profile("workstation"); err == nil {
 		t.Fatal("an unconfigured workstation profile was accepted")
 	}
-	s.cfg.WorkstationProxy = "orbit-egress-open:3128"
-	for name, want := range map[string]string{"": "orbit-egress:3128", "build": "orbit-egress:3128", "workstation": "orbit-egress-open:3128"} {
+	s.cfg.Network, s.cfg.WorkstationProxy, s.cfg.WorkstationNetwork = "orbit-sandbox", "orbit-egress-open:3128", "orbit-workstation"
+	for name, want := range map[string][2]string{
+		"":            {"orbit-egress:3128", "orbit-sandbox"},
+		"build":       {"orbit-egress:3128", "orbit-sandbox"},
+		"workstation": {"orbit-egress-open:3128", "orbit-workstation"},
+	} {
 		cfg, err := s.profile(name)
-		if err != nil || cfg.Proxy != want {
-			t.Errorf("%q: %q %v, want %q", name, cfg.Proxy, err, want)
+		if err != nil || cfg.Proxy != want[0] || cfg.Network != want[1] {
+			t.Errorf("%q: %q on %q, %v, want %v", name, cfg.Proxy, cfg.Network, err, want)
 		}
 	}
 	if _, err := s.profile("root"); err == nil {
 		t.Fatal("an unknown profile was accepted")
+	}
+}
+
+// TestWorkstationOwnNetwork: a workstation sandbox joins its own network with the open proxy, never the builds' network, so no build shares a network with that proxy.
+func TestWorkstationOwnNetwork(t *testing.T) {
+	h := newHarness(t)
+	h.srv.cfg.WorkstationProxy, h.srv.cfg.WorkstationNetwork = "orbit-egress-open:3128", "orbit-workstation"
+	ctx := context.Background()
+	if err := h.srv.Check(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range []string{sandbox.ProfileBuild, sandbox.ProfileWorkstation} {
+		if _, err := h.client.CreateProfile(ctx, "run-"+profile, profile, workTar(t)); err != nil {
+			t.Fatalf("%s: %v", profile, err)
+		}
+	}
+	h.fd.mu.Lock()
+	defer h.fd.mu.Unlock()
+	got := map[string]string{}
+	for _, c := range h.fd.created {
+		proxy := ""
+		for _, e := range c.Env {
+			if v, ok := strings.CutPrefix(e, "HTTPS_PROXY="); ok {
+				proxy = v
+			}
+		}
+		got[c.Labels[LabelRunID]] = c.HostConfig.NetworkMode + " " + proxy
+	}
+	if got["run-build"] != "orbit-sandbox http://orbit-egress:3128" || got["run-workstation"] != "orbit-workstation http://orbit-egress-open:3128" {
+		t.Fatalf("networks and proxies: %v", got)
 	}
 }
