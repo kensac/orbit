@@ -221,7 +221,7 @@ carries a title and a link only; bursts fold into one summary push.
   questions are shown to the conversation's next run so it does not ask
   again.
 - **Messages** to an agent are consumed by the first run of their
-  conversation that starts after them. A run that fails or is interrupted hands them back.
+  conversation that starts after them. A run that fails or is interrupted hands them back. Each attempt's read is a `message_reads` row, kept when it hands the message back (`released_at`); a message waits while no attempt holds it (`store.waitingMessage`).
 
 ## Memory entries
 
