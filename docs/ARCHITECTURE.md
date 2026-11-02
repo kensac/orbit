@@ -200,7 +200,10 @@ signalling between writers and readers. `GET /usage` and `GET /health` are
 the admin read side, computed from stored rows and the configuration in
 force: subscription windows from the newest `rate_limit_event` Claude Code
 wrote into a run's stream (what it last reported, not a live query), exact
-cost sums, the queue, running runs and next fires. Contract: docs/api.md.
+cost sums, the queue, running runs and next fires. `/mcp` serves the same
+reads and writes as MCP tools (`internal/api/mcp.go`, stateless Streamable
+HTTP), with an OAuth proxy in front of authentik for clients that need
+dynamic registration (`oauth.go`). Contract: docs/api.md.
 
 ## Reliability
 
