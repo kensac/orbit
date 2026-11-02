@@ -94,7 +94,12 @@ type Fetcher struct {
 	GitHub func(ctx context.Context, repo string, perms github.Permissions) (*github.Token, error)
 	// Now is time.Now, replaceable in tests: a loki query ends at it.
 	Now func() time.Time
+	// Delivery is the webhook delivery that started the run, the content of its webhook sources; nil for a run no delivery started.
+	Delivery *Fetched
 }
+
+// ErrAbsent is a webhook source's answer on a run no delivery started: there is nothing to read, which is not a failure.
+var ErrAbsent = errors.New("no webhook delivery started this run")
 
 // Fetch fetches one source.
 func (f *Fetcher) Fetch(ctx context.Context, s spec.Source, vars map[string]string) (*Fetched, error) {
@@ -109,6 +114,16 @@ func (f *Fetcher) Fetch(ctx context.Context, s spec.Source, vars map[string]stri
 		return f.github(ctx, s)
 	case "file":
 		return f.file(s)
+	case "webhook":
+		if f.Delivery == nil {
+			return nil, ErrAbsent
+		}
+		if int64(len(f.Delivery.Content)) > s.MaxBytes {
+			return nil, fmt.Errorf("the delivery's body is %d bytes, more than max_bytes %d", len(f.Delivery.Content), s.MaxBytes)
+		}
+		out := *f.Delivery
+		out.Name = s.Name
+		return &out, nil
 	}
 	return nil, fmt.Errorf("unknown source kind %q", s.Kind)
 }

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/notify"
 	"github.com/kensac/orbit/internal/spec"
@@ -52,6 +53,9 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 		if a.RuleFor(TaskCancelType) != spec.RuleDeny {
 			out = append(out, taskCancelType())
 		}
+		if a.RuleFor(TaskRetryType) != spec.RuleDeny {
+			out = append(out, taskRetryType(targets))
+		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(d.Endpoints)) {
 		typ := "webhook:" + name
@@ -62,11 +66,24 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 	if d.GitHub != nil && a.RuleFor(MergeType) != spec.RuleDeny {
 		out = append(out, mergeType(d))
 	}
-	if d.GitHub != nil && len(d.GitHub.CommentRepositories) > 0 && a.RuleFor(CommentType) != spec.RuleDeny {
-		out = append(out, commentType(d))
+	if d.GitHub != nil && a.Chat {
+		if a.RuleFor(CloneType) != spec.RuleDeny {
+			out = append(out, cloneType(d))
+		}
+		if a.RuleFor(PRType) != spec.RuleDeny {
+			out = append(out, prType(d))
+		}
 	}
 	if a.RuleFor(DefineType) != spec.RuleDeny {
 		out = append(out, defineType(a))
+	}
+	if a.RuleFor(SaveType) != spec.RuleDeny {
+		out = append(out, saveType())
+	}
+	for _, t := range ScheduleTypes {
+		if a.RuleFor(t) != spec.RuleDeny {
+			out = append(out, scheduleType(t, a))
+		}
 	}
 	return out
 }
@@ -283,15 +300,19 @@ type Executor struct {
 	Env        func(string) (string, bool)
 	// MergeOptions tunes github:merge's wait for mergeability (tests).
 	MergeOptions github.MergeOptions
-	// Tasks carries out delegation (delegate, task:message, task:cancel);
+	// Tasks carries out delegation (delegate, task:message, task:cancel, task:retry);
 	// nil fails them.
 	Tasks TaskOps
 	// Continue enqueues a continuation for agent, asked for by run fromRun.
 	// It returns the queued run's id, and queued false when one was
 	// already waiting (whose id it returns instead).
 	Continue func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (id string, queued bool, err error)
+	// Git is where github:clone and github:pr run git.
+	Git build.Git
 	// Define applies an agent:define for the call's run.
 	Define func(ctx context.Context, c Call, spec json.RawMessage) (json.RawMessage, error)
+	// Schedule applies a schedule action or run:now for the call's run.
+	Schedule func(ctx context.Context, c Call, p ScheduleParams) (json.RawMessage, error)
 }
 
 // Call is one action to execute: its type and parameters, and the agent
@@ -303,6 +324,9 @@ type Call struct {
 	RunID  string
 	Type   string
 	Params json.RawMessage
+	// Workspace is the run's conversation's workspace, for github:clone
+	// and github:pr; nil for an agent without one.
+	Workspace Workspace
 	// Rule is the rule it was recorded under: auto, or approve when a person approved it.
 	Rule spec.Rule
 }
@@ -348,13 +372,15 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 		return e.webhook(ctx, strings.TrimPrefix(typ, "webhook:"), params)
 	case typ == MergeType:
 		return e.merge(ctx, params)
-	case typ == CommentType:
-		return e.comment(ctx, params)
+	case typ == CloneType:
+		return e.clone(ctx, c)
+	case typ == PRType:
+		return e.publish(ctx, c)
 	case typ == store.DecisionType:
 		// A person approved it; the task it holds starts at the next
 		// reconcile. Nothing else happens here.
 		return json.RawMessage(`{"decided":true}`), nil
-	case typ == DelegateType, typ == TaskMessageType, typ == TaskCancelType:
+	case IsTaskType(typ):
 		if e.Tasks == nil {
 			return nil, fmt.Errorf("%s: not available in this process", typ)
 		}
@@ -368,6 +394,15 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 			return nil, fmt.Errorf("agent:define: not available in this process")
 		}
 		return e.Define(ctx, c, sp)
+	case IsScheduleType(typ):
+		p, err := DecodeSchedule(typ, params)
+		if err != nil {
+			return nil, err
+		}
+		if e.Schedule == nil {
+			return nil, fmt.Errorf("%s: not available in this process", typ)
+		}
+		return e.Schedule(ctx, c, p)
 	}
 	return nil, fmt.Errorf("unknown action type %q", typ)
 }
@@ -399,4 +434,65 @@ func strictDecode(p json.RawMessage, into any) error {
 	dec := json.NewDecoder(bytes.NewReader(p))
 	dec.DisallowUnknownFields()
 	return dec.Decode(into)
+}
+
+// SaveType saves the conversation it is proposed in as a new agent. The model drafts only the words (SaveParams); orbit builds the rest from what the conversation did and proposes the result as an agent:define for a person to approve (engine/save.go), so this type is never stored or executed itself.
+const SaveType = "agent:save"
+
+// SaveParams are agent:save's params: what needs judgment.
+type SaveParams struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Charter     string   `json:"charter"`
+	Starters    []string `json:"starters,omitempty"`
+}
+
+func saveType() Type {
+	return Type{
+		Name: SaveType,
+		Description: "Save this conversation as a new agent the person can reuse. You write only its name, a one-line description, " +
+			"its charter (the standing instruction: what to do, from what, and how to report) and up to " + fmt.Sprint(spec.MaxStarters) + " starter prompts. " +
+			"orbit adds what this conversation actually did: the tools used, the pages fetched (as sources), the action types the person approved (each waiting for approval), " +
+			"and any schedule asked for with schedule:add. The person reviews the whole agent before it exists.",
+		ParamsSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name":        map[string]any{"type": "string", "pattern": spec.AgentNamePattern},
+				"description": map[string]any{"type": "string", "maxLength": 200},
+				"charter":     map[string]any{"type": "string", "minLength": 1, "maxLength": 20000},
+				"starters": map[string]any{"type": "array", "maxItems": spec.MaxStarters,
+					"items": map[string]any{"type": "string", "minLength": 1, "maxLength": spec.MaxStarterLen}},
+			},
+			"required":             []string{"name", "description", "charter"},
+			"additionalProperties": false,
+		},
+		Validate: func(p json.RawMessage) error {
+			_, err := DecodeSave(p)
+			return err
+		},
+	}
+}
+
+// DecodeSave reads agent:save's params.
+func DecodeSave(p json.RawMessage) (SaveParams, error) {
+	var v SaveParams
+	if err := strictDecode(p, &v); err != nil {
+		return v, err
+	}
+	switch {
+	case !agentNameRE.MatchString(v.Name):
+		return v, fmt.Errorf("agent:save: name %q is not an agent name (%s)", v.Name, spec.AgentNamePattern)
+	case strings.TrimSpace(v.Charter) == "":
+		return v, fmt.Errorf("agent:save: charter is required")
+	case len(v.Description) > 200 || len(v.Charter) > 20000:
+		return v, fmt.Errorf("agent:save: description is at most 200 bytes, charter 20000")
+	case len(v.Starters) > spec.MaxStarters:
+		return v, fmt.Errorf("agent:save: at most %d starters", spec.MaxStarters)
+	}
+	for _, s := range v.Starters {
+		if strings.TrimSpace(s) == "" || len(s) > spec.MaxStarterLen {
+			return v, fmt.Errorf("agent:save: each starter is 1 to %d bytes", spec.MaxStarterLen)
+		}
+	}
+	return v, nil
 }

@@ -2,6 +2,7 @@ package sandboxd
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"time"
@@ -105,7 +106,9 @@ type hostConfig struct {
 }
 
 type mount struct {
-	Type          string        `json:"Type"`
+	Type string `json:"Type"`
+	// Source names a box's volume; a build's is anonymous.
+	Source        string        `json:"Source,omitempty"`
 	Target        string        `json:"Target"`
 	ReadOnly      bool          `json:"ReadOnly"`
 	VolumeOptions volumeOptions `json:"VolumeOptions"`
@@ -140,6 +143,8 @@ type execCreate struct {
 	WorkingDir   string   `json:"WorkingDir"`
 	Cmd          []string `json:"Cmd"`
 	Env          []string `json:"Env"`
+	// ConsoleSize is a TTY's [rows, cols] at start.
+	ConsoleSize []int `json:"ConsoleSize,omitempty"`
 }
 
 // user is the uid:gid every process runs as.
@@ -155,6 +160,7 @@ func containerSpec(cfg Config, runID string, now time.Time) containerCreate {
 		LabelExpires: strconv.FormatInt(now.Add(Lifetime).Unix(), 10),
 	}
 	proxy := "http://" + cfg.Proxy
+	credHost, _, _ := net.SplitHostPort(cfg.CredProxy)
 	return containerCreate{
 		Image: cfg.Image,
 		User:  user,
@@ -172,8 +178,10 @@ func containerSpec(cfg Config, runID string, now time.Time) containerCreate {
 			"HTTP_PROXY=" + proxy,
 			"https_proxy=" + proxy,
 			"http_proxy=" + proxy,
-			"NO_PROXY=",
-			"no_proxy=",
+			// The backend is reached through the credential proxy, directly on this network, never through egress.
+			"ANTHROPIC_BASE_URL=http://" + cfg.CredProxy,
+			"NO_PROXY=" + credHost,
+			"no_proxy=" + credHost,
 			"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
 			"DISABLE_AUTOUPDATER=1",
 			"GIT_TERMINAL_PROMPT=0",
@@ -252,8 +260,11 @@ func execSpec(ar sandbox.AttachRequest) execCreate {
 
 // containerState is the part of a container inspect sandboxd checks.
 type containerState struct {
-	ID     string `json:"Id"`
-	Config struct {
+	ID      string `json:"Id"`
+	Name    string `json:"Name"`
+	Created string `json:"Created"`
+	Config  struct {
+		Image  string            `json:"Image"`
 		User   string            `json:"User"`
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
@@ -271,13 +282,26 @@ type containerState struct {
 		Memory         int64    `json:"Memory"`
 		PidsLimit      *int64   `json:"PidsLimit"`
 	} `json:"HostConfig"`
-	Mounts []struct {
-		Type        string `json:"Type"`
-		Destination string `json:"Destination"`
-	} `json:"Mounts"`
-	State struct {
+	Mounts []mountState `json:"Mounts"`
+	State  struct {
 		Running bool `json:"Running"`
+		// Health is absent for a container without a healthcheck.
+		Health *struct {
+			Status string `json:"Status"`
+		} `json:"Health"`
 	} `json:"State"`
+	NetworkSettings struct {
+		Networks map[string]struct {
+			IPAddress string `json:"IPAddress"`
+		} `json:"Networks"`
+	} `json:"NetworkSettings"`
+}
+
+// mountState is one mount of an inspected container; Name is a volume's.
+type mountState struct {
+	Type        string `json:"Type"`
+	Name        string `json:"Name"`
+	Destination string `json:"Destination"`
 }
 
 // verifyCreated checks that the container the daemon made is the one

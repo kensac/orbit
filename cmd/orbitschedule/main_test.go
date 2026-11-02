@@ -26,7 +26,7 @@ func TestPreviewCommand(t *testing.T) {
 	}
 }
 func TestPreviewRequiresExplicitValidArguments(t *testing.T) {
-	for _, args := range [][]string{{"daily at 9am"}, {"--timezone", "Local", "daily at 9am"}, {"--timezone", "not/a/zone", "daily at 9am"}, {"--timezone", "UTC", "--count", "21", "daily at 9am"}, {"--timezone", "UTC", "--anchor", "2026-11-02", "daily at 9am"}, {"--timezone", "UTC", "daily at 8"}} {
+	for _, args := range [][]string{{"daily at 9am"}, {"--timezone", "Local", "daily at 9am"}, {"--timezone", "not/a/zone", "daily at 9am"}, {"--timezone", "UTC", "--count", "21", "daily at 9am"}, {"--timezone", "UTC", "--anchor", "2026-11-02", "daily at 9am"}, {"--timezone", "UTC", "daily at 25"}} {
 		var out bytes.Buffer
 		if err := run(args, &out, time.Now()); err == nil {
 			t.Fatalf("accepted %s", strings.Join(args, " "))

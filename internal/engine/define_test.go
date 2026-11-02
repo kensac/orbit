@@ -1,7 +1,9 @@
 package engine_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -179,5 +181,26 @@ func TestADefinitionGetsNoSecretsNoFilesNoShell(t *testing.T) {
 		if a := e.Current().Config.Agents[name]; a != nil && a.Origin != "builtin" {
 			t.Errorf("%s was defined", name)
 		}
+	}
+}
+
+// A change that is stored but whose reload fails is a success that says the
+// reload is pending, not a failure a caller would retry into a second version.
+func TestAStoredDefinitionWithAFailedReloadIsPending(t *testing.T) {
+	e, s, _ := harnessWith(t, &fakeRunner{}, "")
+	e.Reloader = func(context.Context) error { return errors.New("disk full") }
+	d, err := e.DefineAgent(ctx, engine.DefineRequest{Spec: json.RawMessage(`{"name": "news", "charter": "Read the news."}`), Author: "kanishk"})
+	if err != nil {
+		t.Fatalf("define = %v, want success", err)
+	}
+	if d.Definition == nil || d.Definition.Version != 1 || !strings.Contains(d.PendingReload, "disk full") || d.Agent == nil || d.Agent.Name != "news" {
+		t.Fatalf("defined = %+v", d)
+	}
+	if h, err := s.DefinitionHistory(ctx, "news"); err != nil || len(h) != 1 {
+		t.Fatalf("history = %v %v", h, err)
+	}
+	st, err := e.ChangeAgentState(ctx, "news", "disable", "kanishk", "", 0)
+	if err != nil || st.Definition.Version != 2 || st.PendingReload == "" {
+		t.Fatalf("disable = %+v %v", st, err)
 	}
 }

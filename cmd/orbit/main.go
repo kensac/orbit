@@ -4,19 +4,22 @@
 //	orbit serve              control: API, scheduler, delivery, actions, config sync, and executors
 //	orbit worker             executors only: claim and run what this host's capabilities cover
 //	orbit migrate            apply database migrations and exit
+//	orbit restore-check [--expect FILE]   read a restored orbit-db read only (deploy/restore-drill.sh)
+//	orbit preflight [--config DIR]   check this binary can migrate the database and the running one survives it, changing nothing
 //	orbit validate [dir]     load and check a configuration directory
 //	orbit run <agent> [prompt]   queue a manual run (a running serve picks it up)
 //	orbit approve <action-id> / orbit reject <action-id>
-//	orbit healthcheck [--ready]  exit 0 if the local server answers /healthz (/readyz)
+//	orbit healthcheck [--ready | --url <url>]  exit 0 if the local server answers /healthz (/readyz), or url answers 200
 //	orbit drain              tell the local server to drain (a deploy replacing it)
 //	orbit import claude-memory <dir> --scope <s> [--apply]   seed memory entries through the API
 //	orbit import skills <dir> [--attach <agent>] [--apply]   seed the skills library through the API
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
-//	orbit hook --root <dir> --state <dir> [--figures]   orbit's hook, run by Claude Code
+//	orbit hook --root <dir> --state <dir> [--figures] [--status <socket>]   orbit's hook, run by Claude Code
 //	orbit agent-hook --root <dir> --def <hook>   one of an agent's own hooks, run by Claude Code
 //	orbit tls-cert --dir <d> [--owner uid:gid]   orbit-db's self-signed TLS certificate
 //	orbit sandboxd           the build sandbox service (holds the docker socket)
 //	orbit egress             the allowlisting proxy, a sandbox's only route out
+//	orbit credproxy          a sandbox's route to its backend, adding the credential it never holds
 package main
 
 import (
@@ -52,10 +55,12 @@ import (
 	"github.com/kensac/orbit/internal/push"
 	"github.com/kensac/orbit/internal/repos"
 	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/tickets"
+	subusage "github.com/kensac/orbit/internal/usage"
 )
 
 // revision is set at build time (-ldflags -X main.revision=<sha>).
@@ -77,14 +82,18 @@ func main() {
 		err = worker(ctx, log)
 	case "migrate":
 		err = withStore(ctx, func(s *store.Store) error { return s.Migrate(ctx) })
+	case "preflight":
+		err = preflightCmd(ctx, os.Args[2:])
 	case "validate":
 		err = validate(os.Args[2:])
+	case "restore-check":
+		err = restoreCheckCmd(ctx, os.Args[2:])
 	case "run":
 		err = enqueue(ctx, os.Args[2:])
 	case "approve", "reject":
 		err = decide(ctx, os.Args[1] == "approve", os.Args[2:])
 	case "healthcheck":
-		err = healthcheck(len(os.Args) > 2 && os.Args[2] == "--ready")
+		err = healthcheckCmd(os.Args[2:])
 	case "drain":
 		err = drainCmd()
 	case "import":
@@ -99,6 +108,8 @@ func main() {
 		err = sandboxdCmd(ctx, log)
 	case "egress":
 		err = egressCmd(ctx, log)
+	case "credproxy":
+		err = credproxyCmd(ctx, log)
 	case "vapid":
 		err = vapid()
 	case "version":
@@ -120,6 +131,7 @@ func harnessCmd(name string, args []string) error {
 	root := fs.String("root", "", "the run's working directory")
 	figures := fs.Bool("figures", false, "check the output's money amounts")
 	state := fs.String("state", "", "the directory the tool server and the hook share")
+	statusSock := fs.String("status", "", "the run's status socket the hook posts every event to")
 	search := fs.String("search", "", "the engine's search socket for this agent (mcp)")
 	repoSock := fs.String("repos", "", "the engine's repository tools socket for this agent (mcp)")
 	promSock := fs.String("prometheus", "", "the engine's prometheus tool socket for this agent (mcp)")
@@ -132,7 +144,7 @@ func harnessCmd(name string, args []string) error {
 	if name == "mcp" {
 		return harness.ServeMCP(os.Stdin, os.Stdout, *root, *state, *search, *repoSock, *promSock, revision)
 	}
-	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state})
+	return harness.Hook(os.Stdin, os.Stdout, harness.HookOptions{Root: *root, Figures: *figures, State: *state, Status: *statusSock})
 }
 
 // agentHookCmd runs one of an agent's own hooks for Claude Code (spec hooks): the definition is a flag orbit wrote, the event is stdin, and the exit code is the CLI's to read.
@@ -152,25 +164,42 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | validate [dir] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | restore-check [--expect file] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills <dir> | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
 	os.Exit(2)
 }
 
-// healthcheck is the image's HEALTHCHECK (liveness, /healthz), and with
-// --ready the rollout's readiness wait (/readyz): the image has no curl.
-func healthcheck(ready bool) error {
-	path := "/healthz"
-	if ready {
-		path = "/readyz"
+// healthcheckCmd is the image's HEALTHCHECK (liveness, /healthz), with --ready the rollout's readiness wait (/readyz), and with --url the healthcheck compose gives sandboxd and egress: the image has no curl.
+func healthcheckCmd(args []string) error {
+	fs := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
+	ready := fs.Bool("ready", false, "probe /readyz instead of /healthz")
+	url := fs.String("url", "", "probe this URL instead (sandboxd's and egress's healthchecks)")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
+	if *url != "" && *ready {
+		return errors.New("healthcheck: --url and --ready are exclusive")
+	}
+	target := *url
+	if target == "" {
+		path := "/healthz"
+		if *ready {
+			path = "/readyz"
+		}
+		target = "http://" + local(env("ORBIT_LISTEN", ":8080")) + path
+	}
+	return probe(target)
+}
+
+// probe is one healthcheck request: 200 within the timeout, or an error naming the answer.
+func probe(target string) error {
 	c := &http.Client{Timeout: 4 * time.Second}
-	resp, err := c.Get("http://" + local(env("ORBIT_LISTEN", ":8080")) + path)
+	resp, err := c.Get(target) //nolint:gosec // the operator's own probe target, from the command line
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: %s", path, resp.Status)
+		return fmt.Errorf("%s: %s", target, resp.Status)
 	}
 	return nil
 }
@@ -250,6 +279,21 @@ func validate(args []string) error {
 	if err != nil {
 		return err
 	}
+	names := make([]string, 0, len(cfg.Agents))
+	for n := range cfg.Agents {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	fmt.Printf("ok: %d agent(s): %s\n", len(names), strings.Join(names, ", "))
+	env := referencedEnv(cfg)
+	if len(env) > 0 {
+		fmt.Printf("environment referenced: %s\n", strings.Join(env, ", "))
+	}
+	return nil
+}
+
+// referencedEnv is the environment a configuration needs, sorted. The claude-code backend's is listed as its two alternatives in one entry.
+func referencedEnv(cfg *spec.Config) []string {
 	b, _ := json.Marshal(cfg)
 	refs := map[string]bool{}
 	for _, r := range spec.EnvRefs(string(b)) {
@@ -266,13 +310,20 @@ func validate(args []string) error {
 		if r.APIKeyEnv != "" {
 			refs[r.APIKeyEnv] = true
 		}
+		if r.Kind == "claude-code" {
+			refs[claudeBackend] = true
+		}
 	}
 	if g := cfg.Deployment.GitHub; g != nil {
 		refs[g.PrivateKeyEnv] = true
 	}
+	for v := range cfg.Deployment.WebhookSecrets {
+		refs[v] = true
+	}
 	if m := cfg.Deployment.Mail; m != nil {
 		refs[m.IMAP.UsernameEnv], refs[m.IMAP.PasswordEnv] = true, true
 	}
+	// A build or a sandboxed chat hands the sandbox the subscription token itself (engine.buildCredential), so these name it alone.
 	if b := cfg.Deployment.Build; b != nil {
 		refs[b.TokenEnv] = true
 		refs["CLAUDE_CODE_OAUTH_TOKEN"] = true
@@ -281,21 +332,12 @@ func validate(args []string) error {
 		refs[tokenEnv] = true
 		refs["CLAUDE_CODE_OAUTH_TOKEN"] = true
 	}
-	names := make([]string, 0, len(cfg.Agents))
-	for n := range cfg.Agents {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	fmt.Printf("ok: %d agent(s): %s\n", len(names), strings.Join(names, ", "))
-	var env []string
+	env := make([]string, 0, len(refs))
 	for r := range refs {
 		env = append(env, r)
 	}
 	sort.Strings(env)
-	if len(env) > 0 {
-		fmt.Printf("environment referenced: %s\n", strings.Join(env, ", "))
-	}
-	return nil
+	return env
 }
 
 func enqueue(ctx context.Context, args []string) error {
@@ -464,7 +506,9 @@ func serve(ctx context.Context, log *slog.Logger) error {
 
 		stopStreams := make(chan struct{})
 		apiSrv := &api.Server{Store: s, Engine: eng, Token: token, Verifier: verifier, Log: log, Wake: nudge, Stop: stopStreams,
-			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher}
+			ConfigState: configState, Drain: drain, OAuth: oauth, Push: pusher,
+			WorkspaceGroup: strings.TrimSpace(os.Getenv("ORBIT_WORKSPACE_GROUP")),
+			Boxes:          boxClient(func() spec.Deployment { return eng.Current().Config.Deployment }), WorkspaceOrigins: auth.SplitList(os.Getenv("ORBIT_WORKSPACE_ORIGINS"))}
 		srv := httpServer(env("ORBIT_LISTEN", ":8080"), apiSrv.Handler())
 		internal := httpServer(env("ORBIT_INTERNAL_LISTEN", "127.0.0.1:8081"), apiSrv.InternalHandler())
 		// Bind before any executor starts: an instance that cannot serve
@@ -483,6 +527,11 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		}
 
 		var loops sync.WaitGroup
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			watchSandboxd(life, func() *spec.Config { return eng.Current().Config }, log.With("component", "sandboxd-probe"))
+		}()
 		// The ticket loop starts builds and proposes merges, so it stops
 		// with claims: a draining instance leaves both to the ready one.
 		loops.Add(1)
@@ -502,6 +551,19 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			(&mail.Poller{
 				Store: s, Config: func() *spec.Config { return eng.Current().Config }, Secret: []byte(token),
 				Env: os.LookupEnv, Log: log.With("component", "mail"), Wake: nudge,
+			}).Run(claimCtx)
+		}()
+
+		// The usage poller is best effort and off without usage_poll; it
+		// stops with claims, and two instances share one poll per interval
+		// (subusage.Poller.maybePoll).
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			(&subusage.Poller{
+				Store: s, Client: &http.Client{}, Env: os.LookupEnv, Worker: eng.Worker, Version: revision,
+				Config: func() *spec.Deployment { return &eng.Current().Config.Deployment },
+				Log:    log.With("component", "usage"),
 			}).Run(claimCtx)
 		}()
 
@@ -621,6 +683,12 @@ func serve(ctx context.Context, log *slog.Logger) error {
 					log.Warn("failed runs whose worker was lost", "runs", failed)
 				}
 				failOrphanedActions(life, s, log)
+				if !drain.Draining() {
+					// A held runner is tried again here (engine/hold.go); a probe that succeeds wakes the executors.
+					if _, err := eng.ProbeHolds(life); err != nil {
+						log.Error("probe held runners", "err", err)
+					}
+				}
 				if !drain.Draining() && time.Since(lastLearn) >= engine.LearnEvery {
 					lastLearn = time.Now()
 					if err := eng.EnqueueLearning(life); err != nil {
@@ -708,6 +776,33 @@ const writeTimeout = 5 * time.Minute
 // reader syncs the run it reads itself, so this only bounds how stale the
 // steps of a run nobody streams can be while an older instance writes it.
 const journalSyncEvery = 30 * time.Second
+
+// boxClient is sandboxd's client for agents' boxes: the sandboxd chats use
+// (spec.Deployment.SandboxService) with its token, made again only when
+// either changes.
+func boxClient(deployment func() spec.Deployment) func() (*sandbox.Client, error) {
+	var mu sync.Mutex
+	var key string
+	var c *sandbox.Client
+	return func() (*sandbox.Client, error) {
+		addr, tokenEnv := deployment().SandboxService()
+		if addr == "" {
+			return nil, errors.New("orbit.yaml names no sandboxd (a sandbox: or build: section)")
+		}
+		token := os.Getenv(tokenEnv)
+		mu.Lock()
+		defer mu.Unlock()
+		if c != nil && key == addr+"\x00"+token {
+			return c, nil
+		}
+		nc, err := sandbox.NewClient(addr, token)
+		if err != nil {
+			return nil, fmt.Errorf("%w (%s)", err, tokenEnv)
+		}
+		c, key = nc, addr+"\x00"+token
+		return c, nil
+	}
+}
 
 func httpServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: writeTimeout}
@@ -801,27 +896,18 @@ func configHash(dir string) string {
 }
 
 func seedMetrics(ctx context.Context, s *store.Store) error {
-	rows, err := s.Pool.Query(ctx, `SELECT agent, max(finished_at) FROM runs WHERE status IN ('succeeded', 'skipped') GROUP BY agent`)
+	last, err := s.LastSuccessTimes(ctx)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var agent string
-		var t time.Time
-		if err := rows.Scan(&agent, &t); err != nil {
-			return err
-		}
+	for agent, t := range last {
 		metrics.SeedLastSuccess(agent, t)
 	}
-	return rows.Err()
+	return nil
 }
 
 func refreshGauges(ctx context.Context, s *store.Store, log *slog.Logger) {
-	var pending, queued int
-	err := s.Pool.QueryRow(ctx, `SELECT
-		(SELECT count(*) FROM actions WHERE status = 'pending'),
-		(SELECT count(*) FROM runs WHERE status = 'queued' AND (run_after IS NULL OR run_after <= now()))`).Scan(&pending, &queued)
+	pending, queued, err := s.GaugeCounts(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Warn("gauges", "err", err)
@@ -830,6 +916,13 @@ func refreshGauges(ctx context.Context, s *store.Store, log *slog.Logger) {
 	}
 	metrics.Pending.Set(float64(pending))
 	metrics.Queued.Set(float64(queued))
+	if age, err := s.OldestQueuedAge(ctx); err != nil {
+		if ctx.Err() == nil {
+			log.Warn("gauges", "err", err)
+		}
+	} else {
+		metrics.QueuedOldest.Set(age.Seconds())
+	}
 }
 
 func sleep(ctx context.Context, d time.Duration) {
