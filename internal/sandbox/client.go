@@ -83,12 +83,26 @@ func readError(resp *http.Response) error {
 	return &Error{Status: resp.StatusCode, Message: msg}
 }
 
-// Create starts a sandbox for runID with archive (a tar) as its workdir.
+// Create starts a build sandbox for runID with archive (a tar) as its
+// workdir.
 func (c *Client) Create(ctx context.Context, runID string, archive io.Reader) (CreateResponse, error) {
+	return c.CreateProfile(ctx, runID, "", archive)
+}
+
+// CreateProfile starts a sandbox of a profile (ValidProfile; "" is the
+// build one).
+func (c *Client) CreateProfile(ctx context.Context, runID, profile string, archive io.Reader) (CreateResponse, error) {
 	if !ValidRunID(runID) {
 		return CreateResponse{}, fmt.Errorf("invalid run id %q", runID)
 	}
-	resp, err := c.do(ctx, http.MethodPost, PathSandboxes+"?run_id="+url.QueryEscape(runID), archive, "application/x-tar")
+	if !ValidProfile(profile) {
+		return CreateResponse{}, fmt.Errorf("unknown sandbox profile %q", profile)
+	}
+	q := "?run_id=" + url.QueryEscape(runID)
+	if profile != "" {
+		q += "&profile=" + url.QueryEscape(profile)
+	}
+	resp, err := c.do(ctx, http.MethodPost, PathSandboxes+q, archive, "application/x-tar")
 	if err != nil {
 		return CreateResponse{}, err
 	}

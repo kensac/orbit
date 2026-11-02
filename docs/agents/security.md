@@ -215,6 +215,10 @@ without docker):
 - Tunnelled traffic is opaque: the proxy sees hostnames, not requests, so
   it cannot tell a download from an upload to an allowed host.
 
+## Sandboxed chats
+
+A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as a workstation when sandboxd is configured) runs Claude Code in a sandboxd container with `bypassPermissions`; a workstation has every tool. There is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the backend credential is in the container, readable by any command the model runs. A workstation's egress reaches any public host (`orbit egress` with `*`, still never a private, loopback, link-local or tailnet address), so the credential and anything the session read can leave the box, by design: it holds no GitHub token, no orbit secret, and nothing of the person's beyond what they gave the conversation. Pushing, merging, mail and spend stay orbit's actions, under the agent's rules. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
+
 ## Build runs
 
 What a build's model can do, and what stops it (docs/tickets.md, The build
@@ -244,6 +248,8 @@ run; `internal/build`):
   cannot build for any other ref. Neither has `workflows`, so GitHub
   refuses a workflow change too. An Actions log is fetched by following
   its storage redirect by hand, with no credential.
+- **Setup and cleanup scripts run only by content hash.** They are repository code orbit runs in the sandbox outside the tool policy, so each must hash to a value in `trusted_scripts`, which only a person's configuration change adds; a build that changed one on its branch cannot get its version run. They get no credential at all.
+- **A kept clone is orbit's**: the checkout pool reuses a ticket's clone across its builds, cleaned before each use, its `.git` written only by orbit's git.
 - **A restack is code**: a stacked ticket's branch moved onto a new base is `git rebase --onto` in orbit's clone, pushed with the same one refspec; the read and delivery tokens are minted for it and revoked after, and no model runs.
 - **The PR is orbit's**: title and body from the model's result, scrubbed
   of attribution, with the ticket and plan version and, for orbit itself,
