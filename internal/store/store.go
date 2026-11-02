@@ -720,17 +720,40 @@ type MemoryVersion struct {
 	RunID     *string   `json:"run_id,omitempty"`
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
+	// Author is the person who wrote or restored it through the API; RestoredFrom the version a restore copied.
+	Author       *string `json:"author"`
+	RestoredFrom *int64  `json:"restored_from"`
 }
 
 // MemoryHistory returns an agent's memory versions, newest first.
 func (s *Store) MemoryHistory(ctx context.Context, agent string, limit int) ([]MemoryVersion, error) {
 	limit = clampLimit(limit, 20, 200)
-	rows, err := s.Pool.Query(ctx, `SELECT id, run_id::text, content, created_at FROM memory_versions
+	rows, err := s.Pool.Query(ctx, `SELECT id, run_id::text, content, created_at, author, restored_from FROM memory_versions
 		WHERE agent = $1 ORDER BY id DESC LIMIT $2`, agent, limit)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[MemoryVersion])
+}
+
+// WriteMemory writes the next version of an agent's memory document: content as given, or, with restore above 0, a copy of that earlier version of the same agent's (ErrNotFound for another's). Nothing is replaced; the new version is the newest.
+func (s *Store) WriteMemory(ctx context.Context, agent, content string, restore int64, author string) (*MemoryVersion, error) {
+	var v MemoryVersion
+	var err error
+	if restore > 0 {
+		err = s.Pool.QueryRow(ctx, `INSERT INTO memory_versions (agent, content, author, restored_from)
+			SELECT agent, content, NULLIF($3, ''), id FROM memory_versions WHERE id = $2 AND agent = $1
+			RETURNING id, run_id::text, content, created_at, author, restored_from`, agent, restore, author).
+			Scan(&v.ID, &v.RunID, &v.Content, &v.CreatedAt, &v.Author, &v.RestoredFrom)
+	} else {
+		err = s.Pool.QueryRow(ctx, `INSERT INTO memory_versions (agent, content, author) VALUES ($1, $2, NULLIF($3, ''))
+			RETURNING id, run_id::text, content, created_at, author, restored_from`, agent, content, author).
+			Scan(&v.ID, &v.RunID, &v.Content, &v.CreatedAt, &v.Author, &v.RestoredFrom)
+	}
+	if errors.Is(err, pgx.ErrNoRows) || isForeignKeyViolation(err) {
+		return nil, ErrNotFound
+	}
+	return &v, err
 }
 
 // ---------------------------------------------------------------- messages
@@ -845,6 +868,8 @@ type Outcome struct {
 	Actions   []ProposedAction
 	// Plan is a plan the run proposed for its ticket (tickets.go).
 	Plan *PlanProposal
+	// Entries are the memory entry writes the run made, applied in order; each one's Result is set (entry_writes.go).
+	Entries []*EntryWrite
 }
 
 // PlanProposal is a ticket plan a run proposed. RecordOutcome sets Version
@@ -888,6 +913,9 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 				return err
 			}
 			p.Version = v
+		}
+		if err := applyEntryWrites(ctx, tx, runID, o.Entries); err != nil {
+			return err
 		}
 		for _, a := range o.Actions {
 			id, err := insertAction(ctx, tx, runID, agent, a)

@@ -169,6 +169,8 @@ type Agent struct {
 	// every run of this agent is shown, beside the profile's and its own.
 	// The API can attach more (docs/api.md, Memory entries).
 	Topics []string `yaml:"topics,omitempty" json:"topics,omitempty"`
+	// Learn is how orbit learns from this agent's conversations once they go quiet (engine/learn.go). Absent is on, with the defaults.
+	Learn *LearnSpec `yaml:"learn,omitempty" json:"learn,omitempty"`
 	// Needs names the capabilities a host must have to run this agent
 	// ("docker-network:hetzner", "sure", "browser", "sandbox"). A worker
 	// claims a run only when its ORBIT_CAPABILITIES cover every one; an
@@ -191,6 +193,25 @@ type SessionSpec struct {
 	// starting a process per run. Zero means no live process.
 	Live Duration `yaml:"live,omitempty" json:"live,omitempty"`
 }
+
+// LearnSpec configures an agent's learning runs.
+type LearnSpec struct {
+	// Enabled false turns learning off for the agent.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Idle is how long a conversation must be quiet before it is learned from.
+	Idle Duration `yaml:"idle,omitempty" json:"idle,omitempty"`
+	// Runner runs learning runs instead of the agent's own (a cheaper model).
+	Runner string `yaml:"runner,omitempty" json:"runner,omitempty"`
+}
+
+// DefaultLearnIdle is the quiet a conversation needs before it is learned from: long enough that the person has moved on, short enough that what they said is kept the same day.
+const DefaultLearnIdle = 30 * time.Minute
+
+// MinLearnIdle and MaxLearnIdle bound learn.idle: under five minutes a learning run would interrupt a conversation still going (and each one is a backend call); past a day, what was said waits too long to be kept.
+const (
+	MinLearnIdle = 5 * time.Minute
+	MaxLearnIdle = 24 * time.Hour
+)
 
 // DefaultSessionIdle is the resume window when a spec names none: a
 // working day's conversation, short enough that a stale session does not
@@ -701,6 +722,16 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("topics: %q is listed twice", t)
 		}
 		seenTopic[t] = true
+	}
+	if l := a.Learn; l != nil {
+		if l.Idle != 0 && (time.Duration(l.Idle) < MinLearnIdle || time.Duration(l.Idle) > MaxLearnIdle) {
+			at("learn.idle must be between %s and %s", MinLearnIdle, MaxLearnIdle)
+		}
+		if l.Runner != "" {
+			if _, ok := c.Deployment.Runners[l.Runner]; !ok {
+				at("learn.runner: unknown runner %q", l.Runner)
+			}
+		}
 	}
 	seenNeed := map[string]bool{}
 	for _, n := range a.Needs {
