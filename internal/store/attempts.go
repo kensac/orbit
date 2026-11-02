@@ -19,7 +19,7 @@ type Attempt struct {
 	SpecSHA    *string    `json:"spec_sha,omitempty"`
 	StartedAt  time.Time  `json:"started_at"`
 	EndedAt    *time.Time `json:"ended_at,omitempty"`
-	// Outcome is succeeded, failed, handed_back or lost; absent while the
+	// Outcome is succeeded, failed, skipped, handed_back or lost; absent while the
 	// attempt runs.
 	Outcome   *string `json:"outcome,omitempty"`
 	SessionID *string `json:"session_id,omitempty"`

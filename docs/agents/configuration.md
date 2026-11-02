@@ -62,6 +62,17 @@ as a paginated `http` source is); `where` is the query tool's conditions
 fails the run, naming it. A new kind is a function in
 `internal/transforms`, its parameters in `parse`, and a test.
 
+## Gates
+
+`gates:` in an agent are checks, in code, that end a run as `skipped` (naming the gate in `runs.gate`) before any backend call, so a quiet day costs no tokens and sends nothing. They apply only to scheduled runs with no person's message waiting: a message, a manual run, a continuation, a build and a recovered attempt always reach the model. They are checked in order, after sources and transforms:
+
+| kind | fields | skips when |
+|---|---|---|
+| `unchanged` | none | every input the model would see (by file name and sha256) is what the agent's newest succeeded run saw, under the same spec |
+| `items_above` | `input` (a source or transform), `items`, `n` | `input` has at most `n` records at `items` |
+
+A skipped run counts as a success for staleness (docs/agents/store.md).
+
 ## Templates in sources
 
 URLs and query values may use `{{today}}`, `{{now}}`, `{{month_start}}`,
