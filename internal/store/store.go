@@ -65,7 +65,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 func (s *Store) MigrateTo(ctx context.Context, version int64) error {
 	db := stdlib.OpenDBFromPool(s.Pool)
 	defer db.Close()
-	p, err := goose.NewProvider(goose.DialectPostgres, db, mustSub(migrations, "migrations"))
+	p, err := newProvider(db)
 	if err != nil {
 		return err
 	}
@@ -73,8 +73,13 @@ func (s *Store) MigrateTo(ctx context.Context, version int64) error {
 	return err
 }
 
+// newProvider is the one goose provider. Out-of-order is allowed because agents land migrations in parallel: new files are named by UTC timestamp (YYYYMMDDHHMMSS_name.sql, docs/agents/store.md), so a migration merged after a later-numbered one still applies instead of failing the start.
+func newProvider(db *sql.DB) (*goose.Provider, error) {
+	return goose.NewProvider(goose.DialectPostgres, db, mustSub(migrations, "migrations"), goose.WithAllowOutofOrder(true))
+}
+
 func migrate(ctx context.Context, db *sql.DB) error {
-	p, err := goose.NewProvider(goose.DialectPostgres, db, mustSub(migrations, "migrations"))
+	p, err := newProvider(db)
 	if err != nil {
 		return err
 	}
@@ -902,6 +907,8 @@ type Outcome struct {
 	Plan *PlanProposal
 	// Entries are the memory entry writes the run made, applied in order; each one's Result is set (entry_writes.go).
 	Entries []*EntryWrite
+	// Skills are the skill writes the run made (skills.go), applied after its entries.
+	Skills []*AgentSkillWrite
 }
 
 // PlanProposal is a ticket plan a run proposed. RecordOutcome sets Version
@@ -947,6 +954,9 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 			p.Version = v
 		}
 		if err := applyEntryWrites(ctx, tx, runID, o.Entries); err != nil {
+			return err
+		}
+		if err := applySkillWrites(ctx, tx, runID, agent, o.Skills); err != nil {
 			return err
 		}
 		for _, a := range o.Actions {

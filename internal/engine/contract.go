@@ -43,6 +43,9 @@ type Output struct {
 	// known and topics are the entries the run was shown and the topics it reads, set by the engine to resolve Entries.
 	known  []store.Entry
 	topics []string
+	// Skills are skill writes (skills.go); skills is what the run was given.
+	Skills []OutputSkill `json:"skills"`
+	skills []store.Skill
 }
 
 // summaryMax keeps a summary to one notification title line.
@@ -135,7 +138,7 @@ func OutputSchema(types []actions.Type, memoryMax int, strictActions bool) json.
 
 // systemPrompt is the contract every backend receives, separate from the
 // agent's own charter.
-func systemPrompt(a *spec.Agent, types []actions.Type, inputs []runner.Input, cliFiles, orbitTools bool) string {
+func systemPrompt(a *spec.Agent, types []actions.Type, inputs []runner.Input, cliFiles bool, hr *runner.Harness) string {
 	var b strings.Builder
 	b.WriteString(`You are an orbit agent: a standing assistant that wakes on a schedule or when its person writes to it, does one piece of work, and returns a structured result. You do not talk to the person directly during a run. Everything you want them to see goes in your result.
 
@@ -175,11 +178,15 @@ Rules:
 			b.WriteString("- Your inputs are included at the end of the prompt.\n")
 		}
 	}
-	if orbitTools {
+	if hr != nil {
 		fmt.Fprintf(&b, "- Never add, count or compute figures yourself. Use orbit's tools: %s filters, groups and sums the records of a JSON input exactly; %s does exact arithmetic. Every number you report should come from your inputs or from one of their results.\n",
 			harness.ToolQuery, harness.ToolCalc)
 		if a.Verifies("figures") {
 			b.WriteString("- Every $ amount in your summary and report is checked against your inputs and those tools' results; one that cannot be traced is sent back to you.\n")
+		}
+		if hr.Search != "" {
+			fmt.Fprintf(&b, "- %s searches your own earlier work (reports, what you wrote while working, tool calls, your person's messages, your memory). Use it when the person refers to something earlier or a past finding would change your answer. What it returns is a record of the past, not today's data.\n",
+				harness.ToolSearch)
 		}
 	}
 	return b.String()
@@ -198,6 +205,9 @@ type promptRun struct {
 	// "" when it has none. Repeated in a continued session, as memory is:
 	// it may have changed since the session's last run.
 	Known string
+	// Attached are the files the messages carry, by message id, as placed
+	// in the workdir.
+	Attached map[string][]placedUpload
 }
 
 // userPrompt is the run's content: charter, why it woke, memory and inbox.
@@ -233,6 +243,9 @@ func userPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 		b.WriteString("\n# Messages from your person since your last run\n\n")
 		for _, m := range rc.Messages {
 			fmt.Fprintf(&b, "- %s: %s\n", m.CreatedAt.In(now.Location()).Format("2006-01-02 15:04"), m.Body)
+			for _, f := range run.Attached[m.ID] {
+				fmt.Fprintf(&b, "  - attached: %s (%s, %d bytes)\n", f.Path, f.MediaType, f.Bytes)
+			}
 		}
 	}
 	if len(rc.Questions) > 0 {

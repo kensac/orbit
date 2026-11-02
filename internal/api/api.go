@@ -11,7 +11,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -51,10 +50,6 @@ type Server struct {
 	// internal listener's POST /api/v1/drain starts it. Nil is never
 	// draining.
 	Drain *engine.Drain
-	// Reload puts the configuration and the database's agent definitions
-	// in force after the API changes a definition. Nil reloads through
-	// Engine.Reload alone (tests).
-	Reload func(context.Context) error
 	// OAuth, when set, serves the authorization server MCP clients sign in through (oauth.go) on the public listener. Without it /mcp still takes an authentik token from a client that has one.
 	OAuth *OAuthProxy
 }
@@ -82,6 +77,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/agents/{name}/disable", s.setAgentState("disable"))
 	api("POST /api/v1/agents/{name}/archive", s.setAgentState("archive"))
 	api("GET /api/v1/agents/{name}/definitions", s.agentDefinitions)
+	api("POST /api/v1/agents/{name}/definitions/{version}/revert", s.revertAgent)
 	api("GET /api/v1/agents/{name}/thread", s.thread)
 	api("GET /api/v1/agents/{name}/conversations", s.listConversations)
 	api("POST /api/v1/agents/{name}/conversations", s.createConversation)
@@ -89,6 +85,11 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
 	api("POST /api/v1/conversations/{id}/messages", s.conversationMessage)
+	api("POST /api/v1/conversations/{id}/uploads", s.createUpload)
+	api("POST /api/v1/conversations/{id}/uploads/url", s.uploadURL)
+	api("GET /api/v1/conversations/{id}/uploads/{upload}", s.getUpload)
+	// The signature in the URL is the credential (uploads.go).
+	mux.HandleFunc("PUT /api/v1/uploads/signed", s.signedUpload)
 	api("GET /api/v1/agents/{name}/memory", s.memoryHistory)
 	api("POST /api/v1/agents/{name}/runs", s.startRun)
 	api("GET /api/v1/agents/{name}/messages", s.listMessages)
@@ -104,6 +105,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/runs/{id}/artifacts", s.listArtifacts)
 	api("GET /api/v1/runs/{id}/deliveries", s.listDeliveries)
 	api("GET /api/v1/artifacts/{id}", s.getArtifact)
+	api("GET /api/v1/search", s.searchHTTP)
 	api("GET /api/v1/usage", s.usage)
 	api("GET /api/v1/health", s.health)
 	api("GET /api/v1/actions", s.listActions)
@@ -124,6 +126,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/comments/{comment}/withdraw", s.withdrawComment)
 	api("POST /api/v1/tickets/{id}/review", s.submitReview)
 	s.memoryRoutes(api)
+	s.skillsRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
 
@@ -333,13 +336,15 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 		Wake *bool `json:"wake"`
 		// ClientMessageID makes a retry return the first result.
 		ClientMessageID string `json:"client_message_id"`
+		// Attachments are uploads of this conversation the message carries.
+		Attachments []string `json:"attachments"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if strings.TrimSpace(body.Body) == "" {
-		writeErr(w, http.StatusBadRequest, "body is required")
+	if strings.TrimSpace(body.Body) == "" && len(body.Attachments) == 0 {
+		writeErr(w, http.StatusBadRequest, "body or attachments is required")
 		return
 	}
 	wake := a.MessagesTrigger
@@ -348,7 +353,7 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 	}
 	res, replayed, err := s.Store.PostMessageOnce(r.Context(), store.PostMessage{
 		Agent: a.Name, SpecSHA: a.SHA, Body: body.Body, Author: actor(r, body.Author), ReplyTo: body.ReplyTo,
-		Wake: wake, ClientID: body.ClientMessageID, ConversationID: conversationID,
+		Wake: wake, ClientID: body.ClientMessageID, ConversationID: conversationID, Attachments: body.Attachments,
 	})
 	if err != nil {
 		respond(w, nil, err)

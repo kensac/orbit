@@ -36,6 +36,9 @@ type fakeRunner struct {
 	// savedCost, when set, is the running total a blocked run's
 	// transcript saves when it is stopped.
 	savedCost float64
+	// seen, when set, is called with the request while the run's workdir
+	// exists.
+	seen func(runner.Request)
 }
 
 func (f *fakeRunner) Kind() string  { return "claude-code" }
@@ -43,6 +46,9 @@ func (f *fakeRunner) Model() string { return "fake" }
 func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runner.Event)) (*runner.Result, error) {
 	f.got = req
 	f.calls++
+	if f.seen != nil {
+		f.seen(req)
+	}
 	sid := "s1"
 	if req.Session != nil {
 		// As the CLI does: continue req.Session.Resume in a new (forked)
@@ -166,7 +172,7 @@ actions:
 		return "", false
 	}
 	e := &engine.Engine{
-		Store: s, DataDir: t.TempDir(), Env: env, Client: srv.Client(), Secret: []byte("secret"),
+		Store: s, DataDir: t.TempDir(), ConfigDir: dir, Env: env, Client: srv.Client(), Secret: []byte("secret"),
 		NewRunner: func(string, spec.RunnerSpec, func(string) (string, bool)) (runner.Runner, error) { return fr, nil },
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

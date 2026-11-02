@@ -3,7 +3,6 @@ package claudeimport
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,8 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
+	"github.com/kensac/orbit/internal/frontmatter"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -23,16 +21,6 @@ type Memory struct {
 	File string `json:"file"`
 	Key  string `json:"key"`
 	store.EntryFields
-}
-
-// frontmatter is the header of a memory file. Claude Code writes type at the top level or, in newer files, under metadata.
-type frontmatter struct {
-	Name        string `yaml:"name"`
-	Description string `yaml:"description"`
-	Type        string `yaml:"type"`
-	Metadata    struct {
-		Type string `yaml:"type"`
-	} `yaml:"metadata"`
 }
 
 // indexLineRE is a line of MEMORY.md, the directory's index:
@@ -103,23 +91,20 @@ func indexTitles(path string) (map[string]string, error) {
 
 // ParseMemory maps one memory file. title, when not empty, is its title from the index; otherwise the name gives one.
 func ParseMemory(file string, content []byte, title string) (Memory, error) {
-	fm, body, err := splitFrontmatter(content)
+	fm, body, err := frontmatter.Split(content)
 	if err != nil {
 		return Memory{}, err
 	}
-	var h frontmatter
-	if err := yaml.Unmarshal(fm, &h); err != nil {
-		// Claude Code reads its own frontmatter leniently, and writes some that is not YAML (a value that opens with a quoted phrase), so read those line by line as it would.
-		h = lenientFrontmatter(fm)
-	}
-	typ := h.Type
+	f := frontmatter.Fields(fm)
+	// Claude Code writes type at the top level or, in newer files, under metadata.
+	typ := f["type"]
 	if typ == "" {
-		typ = h.Metadata.Type
+		typ = f["metadata.type"]
 	}
 	if !slices.Contains(store.EntryTypes, typ) {
 		return Memory{}, fmt.Errorf("type %q is not one of %s", typ, strings.Join(store.EntryTypes, ", "))
 	}
-	name := h.Name
+	name := f["name"]
 	if name == "" {
 		name = strings.TrimSuffix(file, filepath.Ext(file))
 	}
@@ -128,7 +113,7 @@ func ParseMemory(file string, content []byte, title string) (Memory, error) {
 	}
 	m := Memory{File: file, Key: store.EntryKey(name)}
 	m.Type, m.Title = typ, oneLine(title, 200)
-	m.Description = oneLine(h.Description, 400)
+	m.Description = oneLine(f["description"], 400)
 	m.Body, m.Why, m.HowToApply = splitReasons(body)
 	if m.Body == "" {
 		// A memory that is all reason still needs a body: its summary.
@@ -138,60 +123,6 @@ func ParseMemory(file string, content []byte, title string) (Memory, error) {
 		return Memory{}, fmt.Errorf("no body")
 	}
 	return m, nil
-}
-
-// lenientFrontmatter reads "key: value" lines: top-level name, description and type, and an indented type under metadata.
-func lenientFrontmatter(fm []byte) frontmatter {
-	var h frontmatter
-	inMeta := false
-	for _, line := range strings.Split(string(fm), "\n") {
-		indented := strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")
-		k, v, ok := strings.Cut(strings.TrimSpace(line), ":")
-		if !ok {
-			continue
-		}
-		v = strings.TrimSpace(v)
-		if !indented {
-			inMeta = k == "metadata"
-			switch k {
-			case "name":
-				h.Name = unquote(v)
-			case "description":
-				h.Description = unquote(v)
-			case "type":
-				h.Type = unquote(v)
-			}
-		} else if inMeta && k == "type" {
-			h.Metadata.Type = unquote(v)
-		}
-	}
-	return h
-}
-
-// unquote strips one pair of quotes around a whole value.
-func unquote(v string) string {
-	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
-		return v[1 : len(v)-1]
-	}
-	return v
-}
-
-// splitFrontmatter separates a leading "---" YAML block from the rest.
-func splitFrontmatter(b []byte) ([]byte, string, error) {
-	b = bytes.TrimPrefix(b, []byte("\ufeff"))
-	s := strings.ReplaceAll(string(b), "\r\n", "\n")
-	if !strings.HasPrefix(s, "---\n") {
-		return nil, "", fmt.Errorf("no frontmatter")
-	}
-	rest := s[4:]
-	end := strings.Index(rest, "\n---\n")
-	if end < 0 {
-		if strings.HasSuffix(rest, "\n---") {
-			return []byte(rest[:len(rest)-4]), "", nil
-		}
-		return nil, "", fmt.Errorf("frontmatter is not closed")
-	}
-	return []byte(rest[:end]), strings.TrimSpace(rest[end+5:]), nil
 }
 
 // reasonRE finds the paragraphs Claude Code memories mark "**Why:**" and "**How to apply:**" at the start of a line.
