@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -238,13 +239,16 @@ type Agent struct {
 	// Charter is the standing instruction every run starts from.
 	Charter string `yaml:"charter" json:"charter"`
 	// Starters are prompts a client offers for a new conversation with the agent (at most MaxStarters, each MaxStarterLen bytes).
-	Starters []string  `yaml:"starters,omitempty" json:"starters,omitempty"`
-	Enabled  *bool     `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	Timezone string    `yaml:"timezone,omitempty" json:"timezone,omitempty"`
-	Runner   string    `yaml:"runner,omitempty" json:"runner,omitempty"`
-	Timeout  Duration  `yaml:"timeout,omitempty" json:"timeout,omitempty"`
-	Triggers []Trigger `yaml:"triggers" json:"triggers"`
-	Sources  []Source  `yaml:"sources,omitempty" json:"sources,omitempty"`
+	Starters []string `yaml:"starters,omitempty" json:"starters,omitempty"`
+	Enabled  *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Timezone string   `yaml:"timezone,omitempty" json:"timezone,omitempty"`
+	Runner   string   `yaml:"runner,omitempty" json:"runner,omitempty"`
+	Timeout  Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// Budget limits API-equivalent cost and runner-started runs in a local
+	// calendar period. Only unattended scheduled runs are stopped by it.
+	Budget   *AgentBudget `yaml:"budget,omitempty" json:"budget,omitempty"`
+	Triggers []Trigger    `yaml:"triggers" json:"triggers"`
+	Sources  []Source     `yaml:"sources,omitempty" json:"sources,omitempty"`
 	// Transforms run over sources before the model sees them; each output
 	// is an input of its own (internal/transforms).
 	Transforms []Transform `yaml:"transforms,omitempty" json:"transforms,omitempty"`
@@ -325,6 +329,13 @@ type Agent struct {
 	Origin string `yaml:"-" json:"-"`
 	// Version is a database agent's definition version (agent_definitions).
 	Version int `yaml:"-" json:"-"`
+}
+
+// AgentBudget is the optional per-agent spend and run limit.
+type AgentBudget struct {
+	Period     string  `yaml:"period" json:"period"`
+	MaxCostUSD float64 `yaml:"max_cost_usd,omitempty" json:"max_cost_usd,omitempty"`
+	MaxRuns    int     `yaml:"max_runs,omitempty" json:"max_runs,omitempty"`
 }
 
 // RepoRef is one repository an agent reads, at a branch, tag or commit.
@@ -1105,6 +1116,20 @@ func (c *Config) validateAgent(a *Agent) []error {
 	}
 	if err := a.SetTimezone(a.Timezone); err != nil {
 		at("timezone: %v", err)
+	}
+	if b := a.Budget; b != nil {
+		if b.Period != "day" && b.Period != "week" && b.Period != "month" {
+			at("budget.period must be day, week or month")
+		}
+		if b.MaxCostUSD < 0 || math.IsNaN(b.MaxCostUSD) || math.IsInf(b.MaxCostUSD, 0) {
+			at("budget.max_cost_usd must be finite and non-negative")
+		}
+		if b.MaxRuns < 0 {
+			at("budget.max_runs must be non-negative")
+		}
+		if b.MaxCostUSD == 0 && b.MaxRuns == 0 {
+			at("budget needs max_cost_usd or max_runs")
+		}
 	}
 	if r, ok := c.Deployment.Runners[a.Runner]; !ok {
 		at("unknown runner %q", a.Runner)

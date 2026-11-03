@@ -176,6 +176,11 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 	if sk := missed(a, c, time.Now()); sk != nil {
 		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
 	}
+	if sk, err := e.budgetGate(ctx, a, c, time.Now()); err != nil {
+		return e.fail(ctx, snap, a, c, start, fmt.Errorf("check agent budget: %w", err), nil)
+	} else if sk != nil {
+		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
+	}
 	st := &attemptState{cancel: make(chan struct{})}
 	go e.watchCancel(actx, c, st, a.Chat, lose)
 	out, res, err := e.attempt(actx, snap, a, c, log, st)

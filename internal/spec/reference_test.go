@@ -34,6 +34,7 @@ var referenceTables = map[string]any{
 	"`board`":                           Board{},
 	"`titles`":                          Titles{},
 	"Agent":                             Agent{},
+	"`budget`":                          AgentBudget{},
 	"`triggers[]`":                      Trigger{},
 	"`sources[]`":                       Source{},
 	"`sources[].paginate`":              Paginate{},

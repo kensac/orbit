@@ -85,6 +85,29 @@ type HeldRun struct {
 	HeldUntil   time.Time `json:"held_until"`
 }
 
+// AgentBudgetUsage is API-equivalent usage from runs that started an
+// attempt in one agent's current budget period.
+type AgentBudgetUsage struct {
+	APIEquivalentUSD json.Number `json:"api_equivalent_usd"`
+	Runs             int         `json:"runs"`
+	RunsWithCost     int         `json:"runs_with_cost"`
+}
+
+// BudgetUsage totals known cost and runner-started runs for an agent in
+// [start, end). A gate-skipped run did not reach a runner and does not count.
+func (s *Store) BudgetUsage(ctx context.Context, agent string, start, end time.Time, excludeRunID string) (AgentBudgetUsage, error) {
+	var out AgentBudgetUsage
+	var cost string
+	err := s.Pool.QueryRow(ctx, `SELECT coalesce(round(sum(cost_usd) FILTER (WHERE attempt > 0 AND status <> 'skipped'), 6), 0)::text,
+		count(*) FILTER (WHERE attempt > 0 AND status <> 'skipped'),
+		count(cost_usd) FILTER (WHERE attempt > 0 AND status <> 'skipped')
+		FROM runs WHERE agent = $1 AND created_at >= $2 AND created_at < $3
+		AND (NULLIF($4, '')::uuid IS NULL OR id <> NULLIF($4, '')::uuid)`, agent, start, end, excludeRunID).
+		Scan(&cost, &out.Runs, &out.RunsWithCost)
+	out.APIEquivalentUSD = json.Number(cost)
+	return out, err
+}
+
 // DueScheduledRuns returns the queued schedule runs of agents that an
 // executor may claim now, oldest first.
 func (s *Store) DueScheduledRuns(ctx context.Context, agents []string) ([]string, error) {

@@ -72,6 +72,18 @@ type Chat struct {
 	Steered func(id string)
 	// Level is the run's permission level (spec.Levels, resolved by the engine), and Ceiling the widest its conversation may set: a process whose ceiling is full is launched so that it can be raised to it.
 	Level, Ceiling string
+	// CurrentLevel reports the process's current logical level while it is live.
+	CurrentLevel func() string
+	// ConnectorPrompts keeps explicit connector approvals available at the locked level.
+	ConnectorPrompts bool
+	// BeginPlanExit defers level changes until an ExitPlanMode request completes.
+	BeginPlanExit func(toolUseID string)
+	// WaitPlanExit blocks a later tool permission until deferred level changes apply.
+	WaitPlanExit func(context.Context) bool
+	// Choice is why the run is at Level, recorded with every application of it.
+	Choice LevelChoice
+	// Changes carries a new level for the turn in progress, or nil when it cannot change.
+	Changes <-chan LevelChange
 	// Prompt answers the CLI's permission requests during the turn; nil denies each one.
 	Prompt Prompt
 	// RecordPermission persists each decision before the CLI receives it.
@@ -202,11 +214,7 @@ func (c *claudeCode) chatArgs(req Request, home string, keepDays int) []string {
 	if len(webDeny) > 0 {
 		args = append(args, "--disallowedTools", strings.Join(webDeny, ","))
 	}
-	mode := startMode(req.Chat.Level)
-	if mode == PermissionMode(spec.LevelLocked) && len(req.Connectors.Ask()) > 0 {
-		// dontAsk drops explicit connector asks. In default mode orbit still denies other prompts.
-		mode = PermissionMode(spec.LevelAsk)
-	}
+	mode := startModeForLevel(req.Chat.Level, len(req.Connectors.Ask()) > 0)
 	args = append(args, "--permission-mode", mode)
 	if req.Chat.Ceiling == spec.LevelFull && sandboxed {
 		// Without it the CLI refuses set_permission_mode bypassPermissions, so a conversation could not be raised to full live.
@@ -355,14 +363,33 @@ func (t *chatTools) handler() claudeproto.Handler {
 				}
 				return conns.permission(ctx, req)
 			}
+			if req.Tool != "ExitPlanMode" && c.WaitPlanExit != nil && !c.WaitPlanExit(ctx) {
+				return claudeproto.Permission{Message: "orbit stopped waiting for a plan approval"}, nil
+			}
 			if server, tool, ok := splitToolName(req.Tool); ok {
 				if _, found := conns.find(server, tool); found {
 					return conns.permission(ctx, req)
 				}
 			}
+			if req.Tool == "ExitPlanMode" && c.BeginPlanExit != nil {
+				c.BeginPlanExit(req.ToolUseID)
+			}
 			decide := noPrompt
-			if c.Prompt != nil && spec.LevelRank(c.Level) > spec.LevelRank(spec.LevelLocked) {
-				decide = c.Prompt
+			if c.Prompt != nil {
+				decide = func(ctx context.Context, req claudeproto.PermissionRequest) claudeproto.Permission {
+					level := c.Level
+					if c.CurrentLevel != nil {
+						level = c.CurrentLevel()
+					}
+					if spec.LevelRank(level) <= spec.LevelRank(spec.LevelLocked) {
+						return noPrompt(ctx, req)
+					}
+					permission := c.Prompt(ctx, req)
+					if c.CurrentLevel != nil && spec.LevelRank(c.CurrentLevel()) <= spec.LevelRank(spec.LevelLocked) {
+						return noPrompt(ctx, req)
+					}
+					return permission
+				}
 			}
 			return claudeproto.Recorded(decide, c.RecordPermission)(ctx, req)
 		},
@@ -446,19 +473,25 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	if sess != nil {
 		resume, resumeAt = sess.Resume, sess.ResumeAt
 	}
-	// Auto and ask share launch arguments but must have distinct live processes.
-	key := hashArgs(c.bin, req.Workdir, append(append([]string(nil), extra...), req.Chat.Level), env)
+	// A live process moves between permission levels with set_permission_mode.
+	key := hashArgs(c.bin, req.Workdir, withoutMode(extra), env)
+	level, choice := req.Chat.Level, req.Chat.Choice
 
 	var p *liveProc
-	started := false
 	mode, parent := "fresh", resume
 	if sess != nil && sess.Live != nil {
 		if req.Chat.Fresh {
 			sess.Live.discard(sess.Key)
 		} else if p = sess.Live.take(sess.Key, key, resume); p != nil {
 			mode = "live"
+			targetMode := modeForLevel(level, len(req.Connectors.Ask()) > 0)
 			if err := p.switchModel(ctx, req, c.rs.Model); err != nil {
 				// The process cannot take them; one started with them can.
+				sess.Live.drop(p)
+				p, mode = nil, "fresh"
+			} else if !p.lv.needs(level, targetMode) {
+				emit(levelEvent(level, p.lv.applied(), p.lv.reportedMode(), "turn", "", choice))
+			} else if err := p.lv.apply(ctx, p.proc, level, targetMode, "turn", choice, emit); err != nil {
 				sess.Live.drop(p)
 				p, mode = nil, "fresh"
 			}
@@ -491,11 +524,24 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			return nil, err
 		}
 		p = &liveProc{proc: proc, tools: tools, busy: true, model: req.Model, effort: req.Effort}
-		started = true
 		if sess != nil {
 			p.key = sess.Key
 		}
 		p.hash = key
+		first := level
+		if level == spec.LevelAuto {
+			first = spec.LevelAsk
+		}
+		firstMode := modeForLevel(first, len(req.Connectors.Ask()) > 0)
+		p.lv.set(first, first, firstMode)
+		if level != first {
+			if err := p.lv.apply(ctx, p.proc, level, modeForLevel(level, len(req.Connectors.Ask()) > 0), "start", choice, emit); err != nil {
+				dropOrKill(sess, p)
+				return nil, fmt.Errorf("set the permission level: %w", err)
+			}
+		} else {
+			emit(levelEvent(level, level, firstMode, "start", "", choice))
+		}
 	} else if sb, ok := p.proc.(*sandboxProc); ok && len(req.Chat.Push) > 0 {
 		if err := sb.push(ctx, req.Chat.Push); err != nil {
 			dropOrKill(sess, p)
@@ -512,16 +558,13 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	if sb, ok := p.proc.(*sandboxProc); ok {
 		ws = sb
 	}
+	req.Chat.CurrentLevel = p.lv.safeLevel
+	req.Chat.ConnectorPrompts = len(req.Connectors.Ask()) > 0
+	req.Chat.BeginPlanExit = p.lv.beginPlanExit
+	req.Chat.WaitPlanExit = p.lv.waitPlanExitDone
 	p.tools.set(req.Chat, ws)
 	p.tools.connectors(req.Connectors)
 	defer func() { p.tools.set(nil, nil); p.tools.connectors(nil) }()
-
-	if started && req.Chat.Level == spec.LevelAuto {
-		if _, err := applyLevel(ctx, p.proc, req.Chat.Level, emit); err != nil {
-			dropOrKill(sess, p)
-			return nil, fmt.Errorf("set the permission level: %w", err)
-		}
-	}
 
 	var (
 		imu     sync.Mutex
@@ -556,6 +599,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		steer = newSteering(p.proc, req.Chat, emit)
 		go steer.feed(turnCtx, req.Chat.Steer)
 	}
+	changed := watchLevel(ctx, turnCtx, p, req.Chat, emit)
 	stopWatch := req.Stall.watch(turnCtx, p.proc, func(ctx context.Context) error {
 		_, err := p.proc.Interrupt(ctx, false)
 		return err
@@ -564,10 +608,12 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		if steer != nil {
 			steer.observe(l)
 		}
+		p.lv.observe(l)
 		emit(Event{Kind: l.Kind, Payload: l.Raw})
 	})
 	stopWatch()
 	endTurn()
+	<-changed
 	imu.Lock()
 	interrupted, rec := stopped, receipt
 	imu.Unlock()
