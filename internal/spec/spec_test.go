@@ -48,6 +48,56 @@ func TestAgentBudgetsValidate(t *testing.T) {
 	}
 }
 
+func TestGoogleActionsRequireFixedAuthenticatedWriteToolsAndAgentConnector(t *testing.T) {
+	orbit := base + `
+credentials:
+  GOOGLE_TOKEN: {url_prefix: https://gws.example/}
+connectors:
+  gws:
+    url: https://gws.example/mcp
+    auth: {kind: header, header: Authorization, value: 'Bearer ${GOOGLE_TOKEN}'}
+    write_tools: [create_draft, create_event]
+google_actions:
+  gmail_draft: {connector: gws, tool: create_draft}
+  calendar_create: {connector: gws, tool: create_event, calendar_id: team@example.com}
+`
+	validAgent := `name: a
+charter: x
+connectors: [gws]
+actions: {"gmail:draft": approve, "calendar:create": approve}
+`
+	cfg, err := Load(write(t, map[string]string{"orbit.yaml": orbit, "agents/a.yaml": validAgent}))
+	if err != nil {
+		t.Fatalf("valid typed actions: %v", err)
+	}
+	if cfg.Agents["a"].RuleFor("gmail:draft") != RuleApprove {
+		t.Fatalf("actions = %#v", cfg.Agents["a"].Actions)
+	}
+	for name, tc := range map[string]struct{ deployment, agent, want string }{
+		"missing binding": {base, `name: a
+charter: x
+actions: {"gmail:draft": approve}
+`, "google_actions.gmail_draft"},
+		"missing agent connector": {orbit, `name: a
+charter: x
+actions: {"gmail:draft": approve}
+`, "must list connector"},
+		"tool not write":            {strings.Replace(orbit, "write_tools: [create_draft, create_event]", "write_tools: [create_event]", 1), validAgent, "must be listed"},
+		"connector unauthenticated": {strings.Replace(orbit, "auth: {kind: header, header: Authorization, value: 'Bearer ${GOOGLE_TOKEN}'}", "auth: {kind: none}", 1), validAgent, "must have authentication"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := Load(write(t, map[string]string{"orbit.yaml": tc.deployment, "agents/a.yaml": tc.agent}))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				var actions ActionSet
+				if cfg != nil && cfg.Agents["a"] != nil {
+					actions = cfg.Agents["a"].Actions
+				}
+				t.Fatalf("error = %v, want %q; actions=%#v", err, tc.want, actions)
+			}
+		})
+	}
+}
+
 func write(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()

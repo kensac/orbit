@@ -19,6 +19,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/spec"
@@ -108,6 +109,10 @@ type connectorHarness struct {
 }
 
 func connectorSetup(t *testing.T, sr *connRunner) *connectorHarness {
+	return connectorSetupExtra(t, sr, "", "")
+}
+
+func connectorSetupExtra(t *testing.T, sr *connRunner, deploymentExtra, agentExtra string) *connectorHarness {
 	t.Helper()
 	s := testdb.New(t)
 	f := &fakeMCP{}
@@ -146,8 +151,9 @@ connectors:
     description: Housing listings.
     auth: {kind: header, header: Authorization, value: "Bearer ${HW_TOKEN}"}
     write_tools: [create_view, drop_all]
-`, srv.URL))
-	write("agents/finance.yaml", `
+%[2]s
+`, srv.URL, deploymentExtra))
+	write("agents/finance.yaml", fmt.Sprintf(`
 name: finance
 charter: Watch the listings.
 triggers: [{schedule: "0 9 1 * *"}]
@@ -155,7 +161,8 @@ wake_on_message: true
 connectors: [hw]
 actions:
   "mcp:hw:drop_all": deny
-`)
+%[1]s
+`, agentExtra))
 	cfg, err := spec.Load(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -423,6 +430,45 @@ func TestAnApproveToolInAnUnattendedRunBecomesAPendingAction(t *testing.T) {
 	a, err := ch.s.GetAction(ctx, later)
 	if err != nil || a.Status != "executed" || !strings.Contains(string(a.Result), "created") {
 		t.Fatalf("action = %+v %v", a, err)
+	}
+}
+
+func TestTypedGmailDraftUsesConfiguredConnectorAfterApproval(t *testing.T) {
+	output := `{"summary":"draft ready","report":"draft ready","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[{"type":"gmail:draft","params":{"to":["person@example.com"],"subject":"Meeting notes","body":"Hello"},"reason":"Save a draft for review"}]}`
+	sr := &connRunner{output: output, script: func(ctx context.Context, req runner.Request) error {
+		server(t, req)
+		return nil
+	}}
+	ch := connectorSetupExtra(t, sr,
+		"google_actions:\n  gmail_draft: {connector: hw, tool: create_view}",
+		`  "gmail:draft": approve`)
+	c := ch.run(t, false)
+	if ch.mcp.writeCount() != 0 {
+		t.Fatal("a typed write ran before approval")
+	}
+	acts, err := ch.s.ListActions(ctx, "finance", "pending", 10)
+	if err != nil || len(acts) != 1 || acts[0].Type != actions.GmailDraftType || acts[0].RunID != c.ID {
+		t.Fatalf("pending Gmail action = %+v, %v", acts, err)
+	}
+	if err := ch.s.DecideAction(ctx, acts[0].ID, true, "kanishk"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.e.ExecuteActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ch.mcp.writeCount() != 1 {
+		t.Fatalf("connector writes = %d, want one", ch.mcp.writeCount())
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(ch.mcp.writes[0]), &args); err != nil || args["userId"] != "me" {
+		t.Fatalf("Gmail tool args = %s, %v", ch.mcp.writes[0], err)
+	}
+	if got := ch.mcp.auths[len(ch.mcp.auths)-1]; got != "Bearer hw-secret" {
+		t.Fatalf("Gmail connector request auth = %q", got)
+	}
+	act, err := ch.s.GetAction(ctx, acts[0].ID)
+	if err != nil || act.Status != "executed" || !strings.Contains(string(act.Result), "created") {
+		t.Fatalf("Gmail action = %+v, %v", act, err)
 	}
 }
 

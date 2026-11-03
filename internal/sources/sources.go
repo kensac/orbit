@@ -182,6 +182,8 @@ func (f *Fetcher) Fetch(ctx context.Context, s spec.Source, vars Vars) (*Fetched
 		return f.loki(ctx, s, vars)
 	case "github":
 		return f.github(ctx, s)
+	case "lake":
+		return f.lake(ctx, s, vars)
 	case "file":
 		return f.file(s)
 	case "webhook":
