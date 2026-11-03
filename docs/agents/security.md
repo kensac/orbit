@@ -67,6 +67,18 @@ more than its agent's rules allow.
 
 - **The usage poller** (`usage_poll`) is orbit's own code on control, outside any run: it reads the subscription's OAuth token from orbit's environment and sends it only to the configured URL. The token never reaches a model, a sample or a log line (an error records the status and a clipped body).
 
+## Extension source processes
+
+Native extension sources run in a separate sandboxd profile with no network
+device, proxy, credentials, host socket or host mount. The process receives
+only its pinned package, explicitly bound earlier source inputs and static
+parameters. Package and input files are root-owned and read-only; only its
+bounded tmpfs mounts at `/work/out` and `/tmp` are writable. The operation has a
+manifest-bounded timeout, memory, input and output limit, and sandboxd caps
+extension containers at two per host. The first slice has no action or tool
+operations, and does not make extension output trusted: the model still sees
+the result as untrusted source data.
+
 ## Memory entries a model writes
 
 A run writes memory entries directly, and a learning run writes them from a conversation, so a poisoned input or message can plant an entry that later runs of every agent reading its scope are shown. What bounds it: entries are shown as data (the system prompt says they never authorize an action the rules do not, and an instruction in one is not to be followed); a run may write only to the profile, itself and the topics it reads, at most 10 writes, and only change entries it was shown at the version it was shown; every version is kept with the run and conversation it came from (`GET /memory/entries?run_id=`), so a bad one is found and retired or restored. A learning run reads the person's messages and the agent's reports (which can quote inputs), not the inputs themselves. A learning run over an imported session reads the person's own Claude Code session, tool calls included (one line each) but not their results, so whatever passed through that session (a web page it fetched and quoted, a file's text) can reach it the same way; its entries are bounded as above, and the skills it proposes are only ever `skill:write` actions a person approves, because a skill is instructions every agent given it follows.
@@ -124,6 +136,7 @@ A connector's tools act on a person's account at another service (internal/conne
 - **No credential reaches the model's process.** Each connector is an SDK MCP server in the CLI's `--mcp-config`: its calls arrive in orbit's process over the control channel, and orbit sends them to the server with the credential. The CLI's environment stays `runner.childEnv`, and a sandbox gets nothing new; `TestClaudeCodeConnectors` fails if the credential reaches the CLI's environment or arguments.
 - **Requests go only to the connector's URL.** The URL is configuration; orbit refuses a request to another host and follows no redirect, and a header credential must be bound to a prefix the URL starts with (`credentials:`, checked at load and per call).
 - **Writes wait for a person.** A tool in `write_tools`, or one an agent's rules set to `approve`, never runs on the model's word: in a run answering its person it runs only after they approve the pending `connector:` action in the chat (one execution, claimed in the database, so the action loop and the run cannot both run it); in any other run it is only recorded. A call the CLI makes without asking first is refused, not run. A `deny` tool is not offered.
+- **Enabling access is a separate approval.** `agent:define` may add only connector names from `orbit.yaml`; adding one widens the target agent and always waits for a person, even when its rule is `auto`. The model sees connector names, not URLs, auth settings or credentials. This does not start OAuth; an authenticated person starts that through the connector API. File agents stay read-only.
 - **What a compromised model can do:** call any `auto` tool with any arguments, as often as its turn allows: read what the person's account there can read, and, with `WebFetch`, send it anywhere. Treat an `auto` tool like a source the model chooses the query of. A server's tool descriptions and results are data written by someone else: they reach the model like any input, and a server may describe a write tool as read-only, which is why `write_tools` decides and the server's hints do not.
 - **OAuth.** A sign-in is started by an authenticated person (`POST /connectors/{name}/authorize`); its state (PKCE verifier, client, metadata, the person) is sealed under `ORBIT_CONNECTOR_KEY` with a 15-minute expiry, so the unauthenticated callback accepts only a state orbit made. Tokens are sealed in `connector_tokens` under the same key, so the database and its backups hold none in the clear; a host holding the key and the database can use them, which is why only hosts advertising `connectors` get the key. Every version is kept with who signed in; a person signs in again to replace one.
 

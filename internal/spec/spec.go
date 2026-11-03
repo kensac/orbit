@@ -26,6 +26,7 @@ import (
 	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 
+	"github.com/kensac/orbit/internal/extensions"
 	"github.com/kensac/orbit/internal/rrule"
 	"github.com/kensac/orbit/internal/transforms"
 )
@@ -47,6 +48,8 @@ const (
 type Config struct {
 	Deployment Deployment
 	Agents     map[string]*Agent
+	// ExtensionPackages contains the validated deployment pins loaded from disk.
+	ExtensionPackages map[string]*extensions.Package `yaml:"-" json:"-"`
 }
 
 // Deployment is orbit.yaml.
@@ -70,6 +73,8 @@ type Deployment struct {
 	// Sandbox is sandboxd for sandboxed chat agents, when it is not the
 	// build section's (SandboxService).
 	Sandbox *SandboxService `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
+	// Extensions enables pinned native source operations. It is off by default.
+	Extensions *ExtensionsConfig `yaml:"extensions,omitempty" json:"extensions,omitempty"`
 	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
 	// UsagePoll polls the subscription's usage windows (usage.go). Without
@@ -91,6 +96,16 @@ type Deployment struct {
 	WebhookSecrets map[string]WebhookSecret `yaml:"webhook_secrets,omitempty" json:"webhook_secrets,omitempty"`
 	// Board tunes GET /board (docs/api.md, The board).
 	Board *Board `yaml:"board,omitempty" json:"board,omitempty"`
+}
+
+type ExtensionsConfig struct {
+	Enabled  bool                    `yaml:"enabled" json:"enabled"`
+	Packages map[string]ExtensionPin `yaml:"packages,omitempty" json:"packages,omitempty"`
+}
+
+type ExtensionPin struct {
+	Path   string `yaml:"path" json:"path"`
+	SHA256 string `yaml:"sha256" json:"sha256"`
 }
 
 // GoogleActions configures the MCP tools used by typed Google write actions.
@@ -258,9 +273,11 @@ type Agent struct {
 	Timeout  Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 	// Budget limits API-equivalent cost and runner-started runs in a local
 	// calendar period. Only unattended scheduled runs are stopped by it.
-	Budget   *AgentBudget `yaml:"budget,omitempty" json:"budget,omitempty"`
-	Triggers []Trigger    `yaml:"triggers" json:"triggers"`
-	Sources  []Source     `yaml:"sources,omitempty" json:"sources,omitempty"`
+	Budget *AgentBudget `yaml:"budget,omitempty" json:"budget,omitempty"`
+	// QuietHours suppresses scheduled runs in this agent's local timezone.
+	QuietHours *QuietHours `yaml:"quiet_hours,omitempty" json:"quiet_hours,omitempty"`
+	Triggers   []Trigger   `yaml:"triggers" json:"triggers"`
+	Sources    []Source    `yaml:"sources,omitempty" json:"sources,omitempty"`
 	// Transforms run over sources before the model sees them; each output
 	// is an input of its own (internal/transforms).
 	Transforms []Transform `yaml:"transforms,omitempty" json:"transforms,omitempty"`
@@ -463,10 +480,9 @@ const DefaultSessionIdle = 6 * time.Hour
 // day a fresh session with the thread in its prompt is cheaper and as good.
 const MaxSessionIdle = 24 * time.Hour
 
-// MaxSessionLive bounds how long an idle live process is kept. Each one is
-// a resident CLI process; an hour covers a conversation with pauses, and
-// resume picks up after it closes.
-const MaxSessionLive = time.Hour
+// MaxSessionLive bounds how long an idle live process is kept. Memory
+// pressure can close it earlier; resume picks up from its saved transcript.
+const MaxSessionLive = MaxSessionIdle
 
 // DefaultSessionStall is session.stall when a spec names none.
 const DefaultSessionStall = 10 * time.Minute
@@ -598,8 +614,9 @@ func triggerSchedule(t Trigger, loc *time.Location) (Schedule, error) {
 // Source is data the harness fetches before a run and hands to the agent as
 // a file. The harness holds the credentials; the model only sees the data.
 type Source struct {
-	Name string `yaml:"name" json:"name"`
-	Kind string `yaml:"kind" json:"kind"`
+	Name      string           `yaml:"name" json:"name"`
+	Kind      string           `yaml:"kind" json:"kind"`
+	Extension *ExtensionSource `yaml:"extension,omitempty" json:"extension,omitempty"`
 	// http
 	URL      string            `yaml:"url,omitempty" json:"url,omitempty"`
 	Headers  map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
@@ -631,6 +648,14 @@ type Source struct {
 	// ByTrigger overrides query values for runs of one trigger: a person's
 	// message may want a wider window than the schedule's review.
 	ByTrigger map[string]SourceOverride `yaml:"by_trigger,omitempty" json:"by_trigger,omitempty"`
+}
+
+// ExtensionSource is the explicitly granted package operation and its bindings.
+type ExtensionSource struct {
+	Package    string            `yaml:"package" json:"package"`
+	Operation  string            `yaml:"operation" json:"operation"`
+	Parameters map[string]any    `yaml:"parameters,omitempty" json:"parameters,omitempty"`
+	Inputs     map[string]string `yaml:"inputs,omitempty" json:"inputs,omitempty"`
 }
 
 // SourceOverride is what a source changes for runs of one trigger.
@@ -852,7 +877,7 @@ var (
 	// Kinds every adapter registry must cover. Kept here so validation does
 	// not import the adapters (which import spec).
 	channelKinds = []string{"ntfy", "smtp", "webhook", "log"}
-	sourceKinds  = []string{"http", "prometheus", "loki", "github", "lake", "file", "webhook"}
+	sourceKinds  = []string{"http", "prometheus", "loki", "github", "lake", "file", "webhook", "extension"}
 	runnerKinds  = []string{"claude-code", "codex", "anthropic"}
 	notifyWhen   = []string{"", "always", "agent", "never"}
 	verifyChecks = []string{"figures"}
@@ -946,6 +971,9 @@ func load(dir string, defs []Definition, all bool) (*Config, error) {
 	}
 	cfg.applyDefaults()
 	cfg.applyBuildDefaults()
+	if err := cfg.loadExtensionPackages(); err != nil {
+		return nil, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -970,6 +998,27 @@ func decodeFile(path string, into any) error {
 	dec.KnownFields(true)
 	if err := dec.Decode(into); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
+	}
+	return nil
+}
+
+func (c *Config) loadExtensionPackages() error {
+	if c.Deployment.Extensions == nil || !c.Deployment.Extensions.Enabled {
+		return nil
+	}
+	c.ExtensionPackages = map[string]*extensions.Package{}
+	for id, pin := range c.Deployment.Extensions.Packages {
+		if !extensions.ValidID(id) || !sha256RE.MatchString(pin.SHA256) || !filepath.IsAbs(pin.Path) {
+			return fmt.Errorf("extensions.packages.%s: id, absolute path and lowercase sha256 pin are required", id)
+		}
+		pkg, err := extensions.ValidateDir(pin.Path)
+		if err != nil {
+			return fmt.Errorf("extensions.packages.%s: %w", id, err)
+		}
+		if pkg.Manifest.ID != id || pkg.Digest != pin.SHA256 {
+			return fmt.Errorf("extensions.packages.%s: manifest id or package digest does not match the deployment pin", id)
+		}
+		c.ExtensionPackages[id] = pkg
 	}
 	return nil
 }
@@ -1034,6 +1083,16 @@ func (c *Config) Validate() error {
 		c.Deployment.loc = loc
 	}
 	d := c.Deployment
+	if d.Extensions != nil {
+		if !d.Extensions.Enabled && len(d.Extensions.Packages) > 0 {
+			errs = append(errs, fmt.Errorf("extensions: package pins require enabled: true"))
+		}
+		if d.Extensions.Enabled {
+			if addr, _ := d.SandboxService(); addr == "" {
+				errs = append(errs, fmt.Errorf("extensions: enabled requires sandboxd in sandbox or build"))
+			}
+		}
+	}
 	for name, ch := range d.Channels {
 		if !nameRE.MatchString(name) {
 			errs = append(errs, fmt.Errorf("channel %q: invalid name", name))
@@ -1157,6 +1216,11 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("budget needs max_cost_usd or max_runs")
 		}
 	}
+	if q := a.QuietHours; q != nil {
+		if err := q.Validate(); err != nil {
+			at("quiet_hours: %v", err)
+		}
+	}
 	if r, ok := c.Deployment.Runners[a.Runner]; !ok {
 		at("unknown runner %q", a.Runner)
 	} else if len(a.Tools) > 0 && r.Kind != "claude-code" {
@@ -1179,6 +1243,8 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 	}
 	seen := map[string]bool{}
+	priorSources := map[string]bool{}
+	extensionSources := 0
 	for _, s := range a.Sources {
 		if !nameRE.MatchString(s.Name) {
 			at("source %q: invalid name", s.Name)
@@ -1242,6 +1308,60 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if !a.hasWebhook() {
 				at("source %q: a webhook source needs a webhook trigger", s.Name)
 			}
+		case "extension":
+			extensionSources++
+			if s.Extension == nil {
+				at("source %q: extension package and operation are required", s.Name)
+				break
+			}
+			if c.Deployment.Extensions == nil || !c.Deployment.Extensions.Enabled {
+				at("source %q: extension runtime is disabled", s.Name)
+				break
+			}
+			pin, ok := c.ExtensionPackages[s.Extension.Package]
+			if !ok {
+				at("source %q: extension package %q is not pinned", s.Name, s.Extension.Package)
+				break
+			}
+			var operation *extensions.Operation
+			for i := range pin.Manifest.Operations {
+				if pin.Manifest.Operations[i].Name == s.Extension.Operation {
+					operation = &pin.Manifest.Operations[i]
+					break
+				}
+			}
+			if operation == nil || operation.Kind != "source" {
+				at("source %q: package operation %q is not a source operation", s.Name, s.Extension.Operation)
+				break
+			}
+			parameters := s.Extension.Parameters
+			if parameters == nil {
+				parameters = map[string]any{}
+			}
+			params, err := json.Marshal(parameters)
+			if err == nil {
+				err = extensions.ValidateInstance(operation.InputSchema, params)
+			}
+			if err != nil {
+				at("source %q: extension parameters: %v", s.Name, err)
+			}
+			if len(s.Extension.Inputs) != len(operation.Inputs) {
+				at("source %q: extension inputs must bind every declared slot", s.Name)
+			}
+			for _, slot := range operation.Inputs {
+				bound := s.Extension.Inputs[slot]
+				if bound == "" || !priorSources[bound] {
+					at("source %q: extension input %q must name an earlier source", s.Name, slot)
+				} else if a.Withheld(bound) {
+					at("source %q: extension input %q cannot read withheld source %q", s.Name, slot, bound)
+				}
+			}
+		}
+		if s.Kind != "extension" && s.Extension != nil {
+			at("source %q: extension configuration is only valid for extension sources", s.Name)
+		}
+		if s.Kind == "extension" && (s.URL != "" || len(s.Headers) > 0 || len(s.Query) > 0 || s.Expr != "" || s.Path != "" || s.Repo != "" || s.Resource != "" || s.Ref != "" || s.State != "" || s.Bucket != "" || s.Prefix != "" || s.Region != "" || s.AccessKeyID != "" || s.SecretAccessKey != "" || s.SessionToken != "" || s.MaxObjects != 0 || s.Paginate != nil || len(s.ByTrigger) > 0 || s.Limit != 0 || s.Since != 0) {
+			at("source %q: extension sources take only name, kind, extension and max_bytes", s.Name)
 		}
 		if s.Kind != "github" && (s.Repo != "" || s.Resource != "" || s.Ref != "" || s.State != "") {
 			at("source %q: repo, resource, ref and state are for a github source", s.Name)
@@ -1255,6 +1375,10 @@ func (c *Config) validateAgent(a *Agent) []error {
 		if s.Kind != "lake" && (s.Bucket != "" || s.Prefix != "" || s.Region != "" || s.AccessKeyID != "" || s.SecretAccessKey != "" || s.SessionToken != "" || s.MaxObjects != 0) {
 			at("source %q: bucket, prefix, region, S3 credentials and max_objects are for a lake source", s.Name)
 		}
+		priorSources[s.Name] = true
+	}
+	if extensionSources > 8 {
+		at("at most 8 extension sources are allowed per run")
 	}
 	for _, t := range a.Transforms {
 		if !nameRE.MatchString(t.Name) {
@@ -1593,4 +1717,36 @@ func EnvRefs(s string) []string {
 func hasKey(m map[string]string, k string) bool {
 	_, ok := m[k]
 	return ok
+}
+
+// ClaudeEfforts are the effort levels Claude Code takes (--effort and the
+// effortLevel setting; 2.1.316's --help, and its apply_flag_settings accepts
+// an unknown level and ignores it, so orbit checks).
+var ClaudeEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+
+// modelName is a model as a runner is given it: an alias (opus, sonnet) or an
+// id (claude-opus-4-5, gpt-5-codex), with Claude Code's [1m] suffix allowed.
+var modelName = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,99}(\[1m\])?$`)
+
+// CheckModel says whether a runner of kind can be told model and effort per
+// conversation ("" is the runner's own). Every kind takes a model; only
+// claude-code takes an effort.
+func CheckModel(kind, model, effort string) error {
+	if model != "" {
+		if !modelName.MatchString(model) {
+			return fmt.Errorf("model %q is not a model name (lowercase letters, digits, . _ : -)", model)
+		}
+		if kind == "anthropic" && !strings.HasPrefix(model, "claude-") {
+			return fmt.Errorf("model %q: an anthropic runner takes a model id (claude-...)", model)
+		}
+	}
+	if effort != "" {
+		if kind != "claude-code" {
+			return fmt.Errorf("effort: a %s runner takes none (only claude-code)", kind)
+		}
+		if !slices.Contains(ClaudeEfforts, effort) {
+			return fmt.Errorf("effort %q is not one of %s", effort, strings.Join(ClaudeEfforts, ", "))
+		}
+	}
+	return nil
 }

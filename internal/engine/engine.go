@@ -6,6 +6,7 @@ package engine
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"encoding/hex"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/build"
+	"github.com/kensac/orbit/internal/extensions"
 	"github.com/kensac/orbit/internal/forms"
 	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/harness"
@@ -34,6 +36,7 @@ import (
 	"github.com/kensac/orbit/internal/notify"
 	"github.com/kensac/orbit/internal/repos"
 	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/sources"
 	"github.com/kensac/orbit/internal/spec"
@@ -190,6 +193,9 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		return e.executeLearn(ctx, actx, snap, a, c, start, log)
 	}
 
+	if sk := quietHours(a, c, time.Now()); sk != nil {
+		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
+	}
 	if sk := missed(a, c, time.Now()); sk != nil {
 		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
 	}
@@ -349,7 +355,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := e.Store.SetRunner(ctx, c.ID, c.Attempt, r.Kind(), r.Model(), a.SHA); err != nil {
+	model, effort, dropped, err := e.conversationModel(ctx, c.ConversationID, r.Kind())
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := e.Store.SetRunnerAt(ctx, c.ID, c.Attempt, r.Kind(), cmp.Or(model, r.Model()), effort, a.SHA); err != nil {
 		return nil, nil, err
 	}
 
@@ -485,6 +495,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		events.emit(kind, b)
 	}
 
+	if dropped != "" {
+		emit("orbit.model_skipped", map[string]any{"reason": dropped})
+	}
 	if c.Attempt > 1 && claudeCode {
 		emit("orbit.recovery", map[string]any{"recovers_attempt": recFrom(rec), "skipped_because": skipped})
 	}
@@ -493,6 +506,54 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		GitHub: func(ctx context.Context, repo string, perms github.Permissions) (*github.Token, error) {
 			return e.readToken(ctx, snap.Config.Deployment, repo, perms)
 		}}
+	if ext := snap.Config.Deployment.Extensions; ext != nil && ext.Enabled {
+		addr, tokenEnv := snap.Config.Deployment.SandboxService()
+		fetcher.Extension = func(ctx context.Context, source spec.Source, prior map[string]*sources.Fetched) (*sources.Fetched, error) {
+			grant := source.Extension
+			if grant == nil {
+				return nil, errors.New("extension source has no package operation grant")
+			}
+			pin, ok := snap.Config.Deployment.Extensions.Packages[grant.Package]
+			pkg := snap.Config.ExtensionPackages[grant.Package]
+			if !ok || pkg == nil {
+				return nil, fmt.Errorf("extension package %q is not pinned", grant.Package)
+			}
+			if e.Env == nil {
+				return nil, errors.New("extension sandbox token environment is unavailable")
+			}
+			token, _ := e.Env(tokenEnv)
+			client, err := sandbox.NewClient(addr, token)
+			if err != nil {
+				return nil, fmt.Errorf("extension sandboxd: %w", err)
+			}
+			parameters := grant.Parameters
+			if parameters == nil {
+				parameters = map[string]any{}
+			}
+			parameterBytes, err := json.Marshal(parameters)
+			if err != nil {
+				return nil, fmt.Errorf("extension parameters: %w", err)
+			}
+			input := make(map[string]extensions.Input, len(grant.Inputs))
+			for slot, sourceName := range grant.Inputs {
+				fetched := prior[sourceName]
+				if fetched == nil {
+					return nil, fmt.Errorf("extension input %q source %q has no fetched result", slot, sourceName)
+				}
+				input[slot] = extensions.Input{MediaType: fetched.MediaType, Content: fetched.Content}
+			}
+			result, err := extensions.Invoke(ctx, client, extensions.Invocation{PackageID: grant.Package, Directory: pin.Path,
+				Digest: pin.SHA256, Operation: grant.Operation, Parameters: parameterBytes, Inputs: input})
+			if err != nil {
+				return nil, err
+			}
+			if int64(len(result)) > source.MaxBytes {
+				return nil, fmt.Errorf("extension result exceeds source max_bytes %d", source.MaxBytes)
+			}
+			return &sources.Fetched{Name: source.Name, MediaType: "application/json", Content: result,
+				Meta: map[string]any{"extension": grant.Package, "operation": grant.Operation, "sha256": pin.SHA256}}, nil
+		}
+	}
 	if c.Trigger == store.TriggerWebhook {
 		d, err := e.Store.WebhookForRun(ctx, c.ID)
 		if err != nil {
@@ -517,11 +578,12 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 	}
 	raw := map[string][]byte{} // every source fetched, for its transforms
+	fetchedByName := map[string]*sources.Fetched{}
 	for _, s := range a.Sources {
 		if rec != nil {
 			break
 		}
-		f, err := fetcher.Fetch(ctx, s, vars)
+		f, err := fetcher.FetchWithInputs(ctx, s, vars, fetchedByName)
 		if errors.Is(err, sources.ErrAbsent) {
 			// Its transforms are skipped and a gate on it counts no records (transform.go, gate.go).
 			emit("orbit.source_absent", map[string]any{"source": s.Name, "reason": err.Error()})
@@ -539,6 +601,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			ext = ".md"
 		}
 		raw[s.Name] = f.Content
+		fetchedByName[s.Name] = f
 		if a.Withheld(s.Name) {
 			// Only its transforms read it: kept as the record of what was
 			// fetched, never written where the model can read it.
@@ -706,7 +769,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}}
 	}
 	if chat {
-		out, res, err := e.chatTurn(ctx, snap, a, c, r, chatTurn{stall: stall, workdir: workdir, home: home, inputsDir: inputsDir, now: now,
+		out, res, err := e.chatTurn(ctx, snap, a, c, r, chatTurn{stall: stall, model: model, effort: effort, workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached,
 				WorkspaceChanges: wsNote}, fresh: wsFresh,
 			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, steer: &st.steer, rec: rec, instructor: st.instructor,
@@ -714,6 +777,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		if out != nil {
 			out.connectorCalls = gw.pendingCalls()
 		}
+
 		return out, res, st.sawStall(err)
 	}
 	via := len(builtin) > 0
@@ -756,9 +820,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 
 	req := runner.Request{
 		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
-		Tools: a.Tools, WebAllow: webAllow(a), OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin, Connectors: conns, Stall: stall,
+		Tools: a.Tools, WebAllow: webAllow(a), OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin, Connectors: conns, Stall: stall, Model: model, Effort: effort,
 	}
-	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
+	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), cmp.Or(model, r.Model()), a.Charter, req)); err != nil {
 		return nil, nil, err
 	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
@@ -1397,4 +1461,29 @@ func recFrom(r *recovery) int {
 		return 0
 	}
 	return r.from
+}
+
+// conversationModel is the model and effort a conversation's runs use
+// instead of the runner's own ("" for the runner's). A conversation's pair
+// that its runner no longer takes (the agent moved to another runner since it
+// was set) is not used, and dropped says why, for an orbit.model_skipped
+// event.
+func (e *Engine) conversationModel(ctx context.Context, conversationID, kind string) (model, effort, dropped string, err error) {
+	if conversationID == "" {
+		return "", "", "", nil
+	}
+	conv, err := e.Store.GetConversation(ctx, conversationID)
+	if err != nil {
+		return "", "", "", err
+	}
+	if conv.Model != nil {
+		model = *conv.Model
+	}
+	if conv.Effort != nil {
+		effort = *conv.Effort
+	}
+	if err := spec.CheckModel(kind, model, effort); err != nil {
+		return "", "", "the conversation's " + err.Error(), nil
+	}
+	return model, effort, "", nil
 }

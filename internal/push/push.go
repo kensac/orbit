@@ -1,6 +1,8 @@
 // Package push wakes a person's devices when something needs them: each
 // attention row (store/attention.go) with push set becomes one Web Push to
-// every registered device, sent straight to the browser's push service.
+// every registered device, sent straight to the browser's push service,
+// except the devices of a person whose app is showing that conversation
+// (Presence).
 //
 // A push says only which agent wants what and where to look: its title is
 // the attention row's title (an agent name and a fixed phrase) and its link
@@ -37,6 +39,10 @@ const (
 	// TTL is how long a push service keeps a push for an offline device;
 	// MaxAge for the same reason.
 	TTL = MaxAge
+	// Presence is how long a heartbeat (POST /presence, every 30 s) keeps
+	// a conversation's pushes off its person's devices: they are looking
+	// at it. Two heartbeats missed and it no longer does.
+	Presence = 60 * time.Second
 )
 
 // Payload is the JSON the service worker receives. It is everything a
@@ -103,15 +109,54 @@ func Link(base string, a store.Attention) string {
 	return l
 }
 
-// Deliver sends whatever is waiting, if the gap allows: one row as itself,
-// several as one summary that opens the inbox.
+// Deliver sends whatever is waiting, if the gap allows, to each person's
+// devices: one row as itself, several as one summary that opens the inbox.
+// A row of the conversation a person's app is showing (Presence) is left
+// out of what that person is sent; their inbox and the thread show it.
 func (s *Sender) Deliver(ctx context.Context) error {
 	items, err := s.Store.ClaimPush(ctx, Gap, MaxAge)
 	if err != nil || len(items) == 0 {
 		return err
 	}
-	_, err = s.send(ctx, "", summarize(s.LinkBase, items))
-	return err
+	subs, err := s.Store.ListPushSubscriptions(ctx, "")
+	if err != nil {
+		return err
+	}
+	watching, err := s.Store.Watching(ctx, Presence)
+	if err != nil {
+		// Unknown presence never silences a push.
+		s.Log.Warn("read presence", "err", err)
+		watching = nil
+	}
+	for author, devices := range byAuthor(subs) {
+		if send := unseen(items, watching[author]); len(send) > 0 {
+			s.sendTo(ctx, devices, summarize(s.LinkBase, send))
+		}
+	}
+	return nil
+}
+
+// unseen is items without those of the conversation a person is looking
+// at ("" when they are not known to be looking at one).
+func unseen(items []store.Attention, watching string) []store.Attention {
+	if watching == "" {
+		return items
+	}
+	var out []store.Attention
+	for _, a := range items {
+		if a.ConversationID != watching {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func byAuthor(subs []store.PushSubscription) map[string][]store.PushSubscription {
+	out := map[string][]store.PushSubscription{}
+	for _, sub := range subs {
+		out[sub.Author] = append(out[sub.Author], sub)
+	}
+	return out
 }
 
 // Test sends one push to author's devices, so a person can see that
@@ -142,10 +187,13 @@ func (s *Sender) send(ctx context.Context, author string, p Payload) (int, error
 	if err != nil {
 		return 0, err
 	}
-	body, err := json.Marshal(p)
-	if err != nil {
-		return 0, err
-	}
+	return s.sendTo(ctx, subs, p), nil
+}
+
+// sendTo sends p to each device and records each result; it returns how
+// many accepted it.
+func (s *Sender) sendTo(ctx context.Context, subs []store.PushSubscription, p Payload) int {
+	body, _ := json.Marshal(p)
 	urgency := "high"
 	if p.Kind == store.AttentionFailure || p.Kind == "test" {
 		urgency = "normal"
@@ -167,7 +215,7 @@ func (s *Sender) send(ctx context.Context, author string, p Payload) (int, error
 			s.Log.Error("record push", "err", rerr)
 		}
 	}
-	return sent, nil
+	return sent
 }
 
 // pushHosts are the push services orbit will post to. A subscription's
