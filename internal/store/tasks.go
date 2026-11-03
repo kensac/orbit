@@ -159,7 +159,7 @@ const taskSelect = `
 	       COALESCE((SELECT json_agg(json_build_object('attempt', a.attempt, 'agent', a.agent, 'conversation_id', a.conversation_id,
 	                     'brief', a.brief, 'error', a.error, 'finished_at', a.finished_at, 'retry_action_id', a.retry_action_id) ORDER BY a.attempt)
 	                 FROM task_attempts a WHERE a.task_id = t.id), '[]'),
-	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', true) ORDER BY m.created_at, m.id)
+	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', true, 'fields', m.fields) ORDER BY m.created_at, m.id)
 	                 FROM messages m WHERE m.conversation_id = t.conversation_id AND ` + openQuestion + `), '[]'),
 	       t.created_at, t.updated_at, t.finished_at
 	FROM tasks t

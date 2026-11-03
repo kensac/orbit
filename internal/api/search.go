@@ -15,11 +15,11 @@ import (
 // searchParams is a search as a client writes it, from the query string or
 // an MCP call.
 type searchParams struct {
-	Q              string `json:"q" jsonschema:"what to find: words, \"a quoted phrase\", or for either, -word to exclude"`
+	Q              string `json:"q" jsonschema:"what to find: words or identifiers (parseConfig, parse_config, a/b.go), \"a quoted phrase\", or for either, -word to exclude; and operators agent:<name>, kind:<kinds>, repo:<owner/name or name>, path:<part of a file path>"`
 	Agent          string `json:"agent,omitempty" jsonschema:"only this agent's"`
 	ConversationID string `json:"conversation_id,omitempty" jsonschema:"only this conversation's"`
 	RunID          string `json:"run_id,omitempty" jsonschema:"only this run's"`
-	Kind           string `json:"kind,omitempty" jsonschema:"comma list of message, question, report, error, narration, tool_call, memory, memory_entry, session"`
+	Kind           string `json:"kind,omitempty" jsonschema:"comma list of message, question, report, error, narration, tool_call, memory, memory_entry, skill, session"`
 	From           string `json:"from,omitempty" jsonschema:"on or after: YYYY-MM-DD in the deployment's timezone, or an RFC 3339 time"`
 	To             string `json:"to,omitempty" jsonschema:"up to: YYYY-MM-DD (that day included), or an RFC 3339 time (excluded)"`
 	Limit          int    `json:"limit,omitempty" jsonschema:"at most this many results (default 20, at most 100)"`
@@ -85,7 +85,7 @@ func (s *Server) search(ctx context.Context, p searchParams) (map[string]any, er
 		}
 		hits[i] = h
 	}
-	return map[string]any{"query": p.Q, "total": page.Total, "results": hits}, nil
+	return map[string]any{"query": p.Q, "total": page.Total, "results": hits, "repaired": page.Repaired}, nil
 }
 
 // searchHTTP serves GET /search (docs/api.md).
@@ -103,8 +103,8 @@ func (s *Server) searchHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) addSearchTool(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "search", Description: "Full-text search across everything orbit stores: " +
 		"people's messages, agents' questions, run reports and errors, what agents narrated while working, " +
-		"the inputs of their tool calls, their memory, and the person's imported Claude Code sessions. Ranked best first, each with a highlighted snippet " +
-		"and the run and conversation it came from (read them with read_thread)."},
+		"the inputs of their tool calls, their memory, skills, and the person's imported Claude Code sessions. Ranked best first, each with a highlighted snippet " +
+		"and the run and conversation it came from (read them with read_thread). A query that matches nothing is retried once with its misspelt words corrected, and repaired says so."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in searchParams) (*mcp.CallToolResult, any, error) {
 			out, err := s.search(ctx, in)
 			if err != nil {
