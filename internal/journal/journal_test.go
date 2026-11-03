@@ -106,7 +106,7 @@ func TestAClaudeCodeTurnBecomesTypedItems(t *testing.T) {
 		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"done","is_error":true}]}}`,
 		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t4","name":"TodoWrite","input":{"todos":[`+
 			`{"content":"read","status":"completed"},{"content":"sum","status":"in_progress"}]}}]}}`,
-		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t5","name":"StructuredOutput","input":{"summary":"s","questions":["Which card?"]}}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t5","name":"StructuredOutput","input":{"summary":"s","questions":["Which card?",{"question":"Which month?","fields":[{"name":"m","type":"date"}]}]}}]}}`,
 		`{"type":"result","subtype":"success","is_error":false,"duration_ms":4200,"total_cost_usd":0.02,"usage":{"output_tokens":90}}`,
 	)
 
@@ -171,6 +171,10 @@ func TestAClaudeCodeTurnBecomesTypedItems(t *testing.T) {
 	var q Question
 	if m.latest(t, "question:1.10.0", &q); q.Text != "Which card?" {
 		t.Fatalf("question = %+v", q)
+	}
+	// A question with a form is an item by its text; the form is the thread's.
+	if m.latest(t, "question:1.10.1", &q); q.Text != "Which month?" {
+		t.Fatalf("question with a form = %+v", q)
 	}
 	var st Status
 	if m.latest(t, "status:1.1.0", &st); st.Code != "system.init" || !strings.Contains(st.Detail.Head, `"claude-x"`) {

@@ -37,6 +37,7 @@ var referenceTables = map[string]any{
 	"`triggers[]`":                      Trigger{},
 	"`sources[]`":                       Source{},
 	"`sources[].paginate`":              Paginate{},
+	"`sources[].by_trigger.<trigger>`":  SourceOverride{},
 	"`transforms[]`":                    Transform{},
 	"`gates[]`":                         Gate{},
 	"`notify`":                          NotifySpec{},
