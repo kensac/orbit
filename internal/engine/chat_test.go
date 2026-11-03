@@ -103,7 +103,7 @@ func (f *fakeSandbox) CreateChatBox(_ context.Context, name, _ string, archive i
 	if _, err := workspace.Unpack(archive, workspace.Into(filepath.Join(f.roots[name], "work"))); err != nil {
 		return sandbox.CreateResponse{}, err
 	}
-	return sandbox.CreateResponse{ID: name}, nil
+	return sandbox.CreateResponse{ID: name, ExpiresAt: time.Now().Add(sandbox.ChatBoxCredentialTTL)}, nil
 }
 
 func (f *fakeSandbox) AttachChatBox(ctx context.Context, name string, req sandbox.ChatBoxAttachRequest, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
