@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -92,6 +93,23 @@ func (c *Client) Create(ctx context.Context, runID string, archive io.Reader) (C
 // CreateProfile starts a sandbox of a profile (ValidProfile; "" is the
 // build one).
 func (c *Client) CreateProfile(ctx context.Context, runID, profile string, archive io.Reader) (CreateResponse, error) {
+	var memoryBytes int64
+	if profile == ProfileExtension {
+		memoryBytes = 256 << 20
+	}
+	return c.createProfile(ctx, runID, profile, memoryBytes, archive)
+}
+
+// CreateExtension starts a network-disabled extension sandbox with the
+// operation's validated memory limit.
+func (c *Client) CreateExtension(ctx context.Context, runID string, memoryBytes int64, archive io.Reader) (CreateResponse, error) {
+	if memoryBytes < 1 || memoryBytes > 256<<20 {
+		return CreateResponse{}, fmt.Errorf("extension memory limit is outside the allowed range")
+	}
+	return c.createProfile(ctx, runID, ProfileExtension, memoryBytes, archive)
+}
+
+func (c *Client) createProfile(ctx context.Context, runID, profile string, memoryBytes int64, archive io.Reader) (CreateResponse, error) {
 	if !ValidRunID(runID) {
 		return CreateResponse{}, fmt.Errorf("invalid run id %q", runID)
 	}
@@ -101,6 +119,9 @@ func (c *Client) CreateProfile(ctx context.Context, runID, profile string, archi
 	q := "?run_id=" + url.QueryEscape(runID)
 	if profile != "" {
 		q += "&profile=" + url.QueryEscape(profile)
+	}
+	if profile == ProfileExtension {
+		q += "&memory_bytes=" + strconv.FormatInt(memoryBytes, 10)
 	}
 	resp, err := c.do(ctx, http.MethodPost, PathSandboxes+q, archive, "application/x-tar")
 	if err != nil {
