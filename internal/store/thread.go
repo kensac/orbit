@@ -118,6 +118,9 @@ type ThreadRun struct {
 	Folded *FoldedSkips `json:"folded,omitempty"`
 	// TriggerIndex is which of the agent's triggers fired, for FoldSkips.
 	TriggerIndex *int `json:"-"`
+	// Changes is what the run changed in its workspace, counted; nil for a
+	// run without a workspace or not yet finished. The API fills it.
+	Changes *ChangeSummary `json:"changes"`
 }
 
 // FoldedSkips is a streak of consecutive skipped runs of one trigger with one gate, shown as its newest run.
