@@ -20,6 +20,15 @@ more than its agent's rules allow.
   Verified against the real CLI on 2026-11-01: a read inside the workdir
   worked; a path outside it and `/proc/self/environ` were both denied.
   Codex runs with `-s read-only`.
+
+- **Agent-made pages:** `page:publish` is an explicitly granted chat action,
+  available only while answering a person's message. It stores bounded HTML
+  in the immutable action row and serves it only as authenticated,
+  conversation-scoped JSON after execution. The portfolio treats the HTML as
+  untrusted and renders it in an iframe with an opaque origin. Its policy
+  blocks external resources and script network requests; the sandbox blocks
+  forms, popups and navigation of the parent page. A page may navigate its
+  own frame. It is never served as a standalone page.
 - **Network:** whatever the agent's `tools` grant (for example `WebFetch`).
   A tool that can reach the network can exfiltrate what the run read; grant it
   only to agents whose inputs you would be fine to see leave. `web: {allow: [...]}` narrows WebFetch to named domains (one `WebFetch(domain:...)` allow rule each, never the bare tool) and denies the private names (`spec.PrivateWebNames`) with `--disallowedTools`, which no allow or answer overrides. Seen on 2.1.316: an allowed domain and a `*.` subdomain were fetched, another domain and `localhost` were denied, and a WebFetch to `127.0.0.1` reached the host's loopback, so an address is never a valid entry. The rules match the URL's host, not where it resolves: an allowed public name that resolves to a private or tailnet address is still reached, which only a sandbox's egress (it never dials one) prevents. An allowed domain is still a channel out for what the run read.
@@ -211,7 +220,7 @@ A mail is a message from a person, so it is held to who may send one (`internal/
 
 ## Workers
 
-A worker (`orbit worker`) holds the database URL, its backend credential and the source credentials of the capabilities it advertises; no API token, approval secret, channel credential, GitHub key or sandbox token (docs/agents/deployment.md, Environment per role). So a compromised worker host reaches what its own agents could read, plus the database: every run's inputs and transcripts, which is why workers run on fleet hosts only and reach orbit-db over the tailnet with TLS, never publicly. It cannot send a notification (control does, from `outbox`, with the links it signs) or execute an action (control's action loop executes only actions recorded under each agent's rules). Stored session transcripts (`session_transcripts`) are the same model-written state as the files above, now readable from the database too; a restore writes only regular files named for the session, under the claiming host's own projects directory.
+A worker (`orbit worker`) holds the database URL, its backend credential and the source credentials of the capabilities it advertises; no API token, approval secret, channel credential, GitHub key or sandbox token (docs/agents/deployment.md, Environment per role). So a compromised worker host reaches what its own agents could read, plus the database: every run's inputs and transcripts, which is why workers run on fleet hosts only and reach orbit-db over the tailnet with TLS, never publicly. It cannot send a notification (control does, from `outbox`, with the links it signs) or execute an external action (control's action loop executes only actions recorded under each agent's rules). The database-only `page:publish` action is the exception: it stores bounded page content during a person's chat turn and has no external credential or endpoint. Stored session transcripts (`session_transcripts`) are the same model-written state as the files above, now readable from the database too; a restore writes only regular files named for the session, under the claiming host's own projects directory.
 
 ## GitHub
 

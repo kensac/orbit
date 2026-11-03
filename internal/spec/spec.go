@@ -1585,6 +1585,10 @@ func (c *Config) validateAgent(a *Agent) []error {
 		switch {
 		case typ == "notify", typ == "continue", typ == "agent:define", typ == "agent:save", typ == "skill:write",
 			typ == "schedule:add", typ == "schedule:pause", typ == "schedule:resume", typ == "schedule:remove", typ == "run:now", typ == "template:create":
+		case typ == "page:publish":
+			if !a.Chat {
+				at("action %q: requires chat: true", typ)
+			}
 		case typ == "delegate":
 			if len(a.Delegates) == 0 && len(a.DelegateTemplates) == 0 {
 				at("action %q: needs delegates or delegate_templates, the targets this one may hand tasks to", typ)
@@ -1618,7 +1622,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 		case strings.HasPrefix(typ, ConnectorActionPrefix):
 			at("action %q: a connector tool's rule is named mcp:<connector>:<tool>", typ)
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, skill:write, template:create, gmail:draft, calendar:create, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr, github:comment or mcp:<connector>:<tool>)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, skill:write, template:create, page:publish, gmail:draft, calendar:create, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr, github:comment or mcp:<connector>:<tool>)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
