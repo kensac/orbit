@@ -292,10 +292,12 @@ func chatPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 // chatState collects what a chat run's tools asked for: its outcome
 // beside the reply.
 type chatState struct {
-	mu        sync.Mutex
-	memory    *string
-	questions []OutputQuestion
-	actions   []chatAction
+	// conversation is the run's, whose uploads and answers a template:create reads.
+	conversation string
+	mu           sync.Mutex
+	memory       *string
+	questions    []OutputQuestion
+	actions      []chatAction
 }
 
 type chatAction struct {
@@ -498,7 +500,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 			return nil, nil, err
 		}
 	}
-	st := &chatState{}
+	st := &chatState{conversation: c.ConversationID}
 	chat := e.chatTools(snap, a, c, t.instructor, t.types, d.Defaults.MemoryMaxBytes, st)
 	e.repoChatTools(a, chat)
 	e.promChatTools(a, chat)
@@ -616,6 +618,28 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	if err := t.Validate(v.Params); err != nil {
 		return "invalid params: " + err.Error(), true
+	}
+	if v.Type == actions.TemplateCreateType {
+		define, ask, err := e.templateProposal(ctx, c.ConversationID, v.Params)
+		if err != nil {
+			return "refused: " + err.Error(), true
+		}
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if len(st.actions) >= maxActions {
+			return fmt.Sprintf("at most %d actions per reply", maxActions), true
+		}
+		st.actions = append(st.actions, v)
+		if ask != nil {
+			return fmt.Sprintf("orbit will ask the person, with a form, for %d value(s) only they give; when their answers arrive, propose this again.", len(ask.Fields)), false
+		}
+		var rendered struct {
+			Spec struct {
+				Name string `json:"name"`
+			} `json:"spec"`
+		}
+		_ = json.Unmarshal(define, &rendered)
+		return fmt.Sprintf("Rendered and checked: creating agent %q waits for the person's approval.", rendered.Spec.Name), false
 	}
 	// A schedule change is parsed by code now: one it cannot read is refused, and what a recorded one will do goes back to the model to confirm with the person (an executed one's result says it).
 	preview := ""

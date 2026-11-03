@@ -15,7 +15,7 @@ import (
 )
 
 // loki runs one LogQL query_range ending now: since back (default spec.DefaultLokiSince), at most limit lines (default spec.DefaultLokiLimit), newest first. The input is Loki's data without its stats: {resultType, result}.
-func (f *Fetcher) loki(ctx context.Context, s spec.Source, vars map[string]string) (*Fetched, error) {
+func (f *Fetcher) loki(ctx context.Context, s spec.Source, vars Vars) (*Fetched, error) {
 	used := map[string]bool{}
 	base, err := f.render(s.URL, vars, used)
 	if err != nil {

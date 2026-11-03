@@ -267,6 +267,7 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | `state` | `open`, `closed`, `all` | `open` | github issues and pulls: which are listed. |
 | `path` | path | required for file | A file on orbit's host, read as orbit's user (relative to orbit's working directory). |
 | `max_bytes` | int | `8388608` (8 MiB) | The most one source may fetch; more fails the run. |
+| `by_trigger` | map of trigger to override | none | http only: query values for runs of one trigger (`schedule`, `manual`, `message`, `continue`, `task`, `delegation`, `webhook`) over the source's own (below). |
 
 | Kind | Reaches | Risk |
 |---|---|---|
@@ -285,6 +286,14 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | `items_path` | dot path | required | Where each page's array is; pages are merged into one array. An empty page stops. |
 | `total_pages_path` | dot path | none | Where the page count is; stops at it. |
 | `max_pages` | int | `1000` | A guard: more pages fail the fetch. |
+
+### `sources[].by_trigger.<trigger>`
+
+What a run of that trigger fetches differently, for a window a scheduled review and a person's question need differently (a message run comparing months while the monthly review reads one).
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `query` | map | required | Replaces the source's query values by key and adds keys it lacks; may use `${VAR}` and templates; may not set `paginate.page_param`. |
 
 ### `transforms[]`
 
@@ -351,6 +360,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `agent:save` | Saves the conversation as a new agent: the model writes its name, description, charter and starters; orbit adds what the conversation did and proposes it as an `agent:define` that always waits for a person (configuration.md, Saving a conversation as an agent). | |
 | `run:now` | Starts a manual run of this agent or one in `delegates`; a run no message woke cannot start its own agent. `approve` applies directly in a run answering the person's message. | |
 | `skill:write` | Writes or retires one of the agent's skills as the next version; the approval shows the SKILL.md diff and the skill's scripts. | |
+| `template:create` | Creates an agent from a template in the library: code renders and dry-runs it and records an `agent:define` that waits for a person whatever the rule; a `user_prompt` parameter is asked of the person with a form. | |
 
 ### `notify`
 
