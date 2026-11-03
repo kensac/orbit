@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/actions"
+	"github.com/kensac/orbit/internal/forms"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 )
@@ -221,6 +222,9 @@ func tasksSection(tasks []store.Task, loc *time.Location) string {
 		}
 		for _, q := range t.Questions {
 			fmt.Fprintf(&b, "question (reply_to %s): %s\n", q.ID, q.Body)
+			if len(q.Fields) > 0 {
+				fmt.Fprintf(&b, "its form (answer each in your message):\n%s", forms.Describe(q.Fields))
+			}
 		}
 		if t.Report != nil {
 			fmt.Fprintf(&b, "summary: %s\n", t.Report.Summary)
