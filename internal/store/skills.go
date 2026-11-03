@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/kensac/orbit/internal/frontmatter"
+	"github.com/kensac/orbit/internal/orbitskills"
 )
 
 // Skill sources: who wrote a version.
@@ -23,6 +24,8 @@ const (
 	SkillByPerson = "person"
 	SkillByAgent  = "agent"
 	SkillByImport = "import"
+	// SkillBuiltIn is a skill built into orbit (internal/orbitskills): given to runs, never stored.
+	SkillBuiltIn = "builtin"
 )
 
 // Bounds on a skill. The owner's largest skill directory is under 1 MB with its scripts and an image; these leave room without letting one skill fill a run's directory.
@@ -94,6 +97,9 @@ func SkillDescription(name, content string) (string, error) {
 func validSkill(name, content string, files []SkillFile) (string, string, error) {
 	if !SkillNameRE.MatchString(name) {
 		return "", "", fmt.Errorf("%w: skill name %q must match %s", ErrInvalid, name, SkillNameRE)
+	}
+	if orbitskills.Has(name) {
+		return "", "", fmt.Errorf("%w: %q is a skill built into orbit; choose another name", ErrInvalid, name)
 	}
 	if len(content) > skillContentMax || !utf8.ValidString(content) {
 		return "", "", fmt.Errorf("%w: SKILL.md is UTF-8 of at most %d bytes", ErrInvalid, skillContentMax)

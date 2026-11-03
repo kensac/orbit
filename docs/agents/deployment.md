@@ -113,6 +113,10 @@ Web Push needs `ORBIT_VAPID_PUBLIC_KEY`, `ORBIT_VAPID_PRIVATE_KEY` (from
 `orbit vapid`) and `ORBIT_VAPID_SUBJECT` on control (docs/api.md, Attention
 and push); without them push is off and `serve` logs so.
 
+When Telegram is configured, add its `token_env` variable to the service's
+secret environment. The token is used only by the control service's Bot API
+poller and Telegram notification channel; workers do not need it.
+
 ## Seeding memory from Claude Code
 
 `orbit import claude-memory <dir> --scope <profile|topic:NAME|agent:NAME>` reads a Claude Code memory directory (`~/.claude/projects/<project>/memory`) and sends it to `POST /api/v1/memory/import`. Entries of the types in `--profile-types` (default `user`) go to the profile whatever `--scope` says. It is a dry run unless `--apply` is given: the server reports what it would create, update or leave alone. `--print` shows what was read from disk without calling a server. A file it cannot map (no frontmatter, an unknown type) is skipped with a warning; an operating system's droppings (macOS AppleDouble `._*` files, `.DS_Store`, `__MACOSX`, `Thumbs.db` and the like: `claudeimport.Junk`) are left out silently. Repeating it is safe: it matches by key and changes only what changed.

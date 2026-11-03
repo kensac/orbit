@@ -25,6 +25,8 @@ instance is in force on all within the 30 s poll.
 
 An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential, delegate target, need, connector or webhook trigger it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily) waits for a person's approval whatever the rule.
 
+In a conversation, `agent:define` lists the names of connectors already configured in `orbit.yaml` and accepts them in the target agent's `connectors` field. Adding one always waits for the person's approval, even when `agent:define` is `auto`. This only grants the target agent access to an existing connector; it does not add a server or start OAuth sign-in. A person signs in separately through `POST /api/v1/connectors/{name}/authorize` when that connector uses OAuth. Agents in configuration files remain read-only and must be changed in their YAML file.
+
 Database and built-in agents are held to what orbit.yaml offers (`spec.validateTrust`): no `file` source, no `${VAR}` that is not in `credentials:`, without a `sandbox`, only the tools in `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite), no precheck and no `run` hook. A spec breaking one fails validation, naming it.
 
 ### Saving a conversation as an agent
@@ -172,6 +174,24 @@ mail:
 
 `port` defaults to 993 (implicit TLS); any other port must offer STARTTLS. `mailbox` defaults to `INBOX` and must be orbit's own: every unseen mail in it is read and marked seen. The server must deliver `local+anything@domain` to the mailbox (Postfix's `recipient_delimiter`). Without `agent`, a mail that is not a reply is recorded and ignored. `poll` is at least 10s. With the section, every mail orbit sends carries a reply address and Message-ID naming its run's conversation.
 
+## Telegram
+
+Telegram uses the Bot API long poll, so no inbound public route is needed. The bot token is read only by Orbit's service from the selected channel's environment variable. Incoming updates are accepted only from the configured private-chat user ids; usernames are not used for authorization.
+
+```yaml
+channels:
+  telegram:
+    kind: telegram
+    token_env: ORBIT_TELEGRAM_BOT_TOKEN
+    chat_id: "123456789"
+telegram:
+  channel: telegram
+  agent: assistant
+  allow_users: [123456789]
+```
+
+An allowed text message starts a new conversation. A reply to an Orbit bot message continues the conversation that produced it. Unsupported updates, group messages, and messages from other users are kept as ignored inbox records. The poller stores each provider update before advancing its in-memory offset, so retries do not post it twice.
+
 ## Subscription usage and low-priority agents
 
 ```yaml
@@ -241,6 +261,28 @@ A skipped run counts as a success for staleness (docs/agents/store.md).
 - `webhook`: a signed delivery to `POST /hooks/<agent>/<webhook>` (Webhooks, below).
 
 Every kind takes `prompt`, the reason for the wake. `schedule` and `rrule` go through the same scheduler (one fire per trigger and time, `runs_one_per_fire`; after downtime only the newest missed fire), and an ended series never fires again.
+
+`quiet_hours: {start: "22:00", end: "07:00"}` on an agent suppresses scheduled runs in that local wall-clock interval. The start is included, the end excluded, and an end earlier than the start crosses midnight. A run is skipped before source fetches or backend startup if its scheduled fire or first claim is during quiet hours; manual runs and messages remain available. `GET /agents/{name}` and next-fire responses show the next configured fire outside quiet hours. Quiet-hour boundaries remain local across daylight saving changes.
+
+`calendar_skip` checks a configured read-only connector before the first attempt of each scheduled run. For example, a Google Calendar MCP connector can list events in a bounded window around the scheduled fire:
+
+```yaml
+connectors: [gws]
+calendar_skip:
+  connector: gws
+  tool: list_events
+  window_before: 15m
+  window_after: 1h
+  arguments:
+    calendarId: primary
+    timeMin: "{{window_start}}"
+    timeMax: "{{window_end}}"
+    singleEvents: true
+    orderBy: startTime
+  events_path: items
+```
+
+Orbit renders both window placeholders from the scheduled fire time and calls the named MCP tool with the connector's credential in orbit's process. The tool must be advertised read-only and must not be in the connector's `write_tools`. Orbit compares event start/end in code using half-open overlap, ignores canceled and transparent events, and records only a `calendar_busy` skip and its queried window. Event details are not stored or shown to the agent. A missing connector, unavailable tool, failed call or malformed event response fails the run before sources or the backend are reached. This check is limited to scheduled first attempts; manual runs and messages are unchanged.
 
 **Missed fires.** A fire that starts too late is not run hours late: a schedule run claimed more than its trigger's `missed_grace` after its fire time (after downtime, or behind a long queue) ends `skipped` with gate `missed`, before anything is read or fetched, and notifies nothing. The default grace is the time from that fire to the trigger's next one, at most an hour (`spec.DefaultMissedGraceMax`): a five-minute trigger's fire may start up to five minutes late, a daily one's up to an hour. Set `missed_grace` (1m to 168h) for a job that must still run late, such as a monthly close. Only a run's first attempt is judged; a missed fire is no success for staleness.
 
@@ -358,7 +400,9 @@ fails at runtime, not at load.
 
 ## Connectors
 
-`connectors:` in `orbit.yaml` names MCP servers; an agent's `connectors: [<name>, ...]` gives its runs their tools, as `mcp__<name>__<tool>` (claude-code runners only; docs/ARCHITECTURE.md, Connectors). orbit is the gateway: it lists the tools before each run and makes every call itself with the connector's credential, so neither the CLI nor a sandbox ever holds one.
+`connectors:` in `orbit.yaml` names MCP servers; an agent's `connectors: [<name>, ...]` gives its runs their tools, as `mcp__<name>__<tool>` (claude-code runners only; docs/ARCHITECTURE.md, Connectors). orbit is the gateway: it lists the tools before each run and makes every call itself. HTTP credentials stay in orbit; package-backed stdio servers run without credentials in sandboxd.
+
+A signed-in person can also add a public OAuth connector by URL at `POST /api/v1/connectors/catalog` (docs/api.md). Its URL, description, scopes, and creator are stored as configuration; OAuth grants remain separately sealed in `connector_tokens`. These records join the deployment's connector map and are offered to `agent:define`. Every tool of a catalog connector defaults to `approve`; an agent must explicitly set a tool rule to change that behavior.
 
 ```yaml
 credentials:
@@ -372,13 +416,26 @@ connectors:
   sheets:
     url: https://sheets.example.com/mcp
     auth: {kind: oauth}
+  local-tools:
+    transport: stdio
+    package: local-tools
+    description: Read-only tools from a reviewed local package.
 ```
+
+An stdio connector names an exact native package in `extensions.packages`; it
+has no URL or authentication. Every declared operation must be a local `tool`
+with bounded input and output schemas. Orbit checks the package digest and
+manifest, starts it in sandboxd's networkless extension profile, and takes
+the offered tool names, descriptions and schemas from the pinned manifest.
+The server's result content remains untrusted. Review package code before
+pinning it. This first slice checks package structure and integrity, but does
+not include antivirus signatures or claim malware detection.
 
 - **Auth.** `none`; `header`, whose value may carry only `credentials:` variables bound to a prefix the connector's URL starts with (the same binding as a source's, checked at load and on every call; orbit follows no redirect); or `oauth`, where a person signs in once through `POST /api/v1/connectors/{name}/authorize` (docs/api.md, Connectors) and orbit keeps the token, sealed under `ORBIT_CONNECTOR_KEY` (at least 32 characters, on every host that calls the connector), a new version per sign-in and per refresh, none deleted. An oauth connector nobody has signed in is left out of runs, and the run's prompt says so.
 - **Rules.** A tool in `write_tools` waits for a person (`approve`); any other runs when called (`auto`), the server's `readOnlyHint` notwithstanding, since the deployment says what changes the world. An agent overrides one tool with `mcp:<connector>:<tool>: auto | approve | deny` in `actions`; `deny` is not offered at all. An `approve` call in a run answering its person's message is asked for in the chat: it becomes a pending action `connector:<connector>/<tool>` the person approves or rejects (`POST /actions/{id}/approve`), and the call runs once they approve, its result going back to the model in the same turn. In any other run it is recorded as that pending action and the model is told it waits; orbit executes it at most once after approval, from the action loop, with the result on the action. An `auto` call to a `write_tools` tool also leaves an executed action as its record. Unlike an `act` action in a chat, which a run answering its person executes on their message, a connector call waits for the person to approve its exact arguments even then: they never saw them. Approving with `always` (docs/api.md, Actions) sets that tool's `mcp:<connector>:<tool>` to `auto`.
 - **Results.** A result over 32 KiB is written into the attempt's inputs (`inputs/.../connectors/<connector>-<tool>-<n>.json`) and stored as an artifact; the model is given its path. Every call is an `orbit.connector` event with its bounded result.
 - **Hosts.** A worker that runs an agent with connectors needs their credentials (`ORBIT_CONNECTOR_KEY`, the header variables, a `client_secret_env`); give such an agent a capability only those hosts advertise (docs/agents/deployment.md, Capabilities). `orbit validate` lists the variables.
-- `transport: stdio` is refused: a local server would run in sandboxd, which is not built.
+- **Stdio packages.** Set `extensions.enabled: true`, pin the package by absolute path and SHA-256 under `extensions.packages`, then set `transport: stdio` and its package ID. The package must declare only `tool` operations, without input slots or endpoint bindings. It has no credentials or network access, and is limited by the smallest declared operation memory ceiling. Calls are still subject to the agent's connector rules and `write_tools` approvals.
 
 ### Typed Google writes
 
@@ -399,11 +456,18 @@ the agent. The connector must authenticate and list the fixed tool in
 ## Sessions and continuations
 
 `session` (claude-code runners only) is `{resume: true, idle: <=24h, live:
-<=1h}`; `idle` defaults to 6h, `live` to 0 (no live process) and may not exceed
-`idle`. `live` is refused with a runner's `max_budget_usd`, because the CLI
-counts that budget over a process's whole life, every run fed into it. An
-agent with `session` needs `ORBIT_DATA_DIR` on a persistent volume; without
-one every run after a restart starts fresh (it does not fail).
+<=24h}`; `idle` defaults to 6h, `live` to 0 (no live process) and may not exceed
+`idle`. Linux closes idle live processes when memory is pressured. A process
+whose credential has a shorter expiry is forcibly stopped at that deadline.
+Reloading configuration keeps a live process when its invocation and session
+are still compatible. The persistent chat-box integration passes its proxy
+grant expiry as the process hard deadline and preserves the box and workspace
+when stopping the CLI; that integration is tracked separately by W11. `live`
+is refused with a runner's
+`max_budget_usd`, because the CLI counts that budget over a process's whole
+life, every run fed into it. An agent with `session` needs `ORBIT_DATA_DIR`
+on a persistent volume; without one every run after a restart starts fresh
+(it does not fail).
 
 `continue` is an action type like any other: absent means denied. Its bounds
 are constants in `internal/actions` (`ContinueMinDelay`, `ContinueMaxDelay`,
@@ -411,7 +475,7 @@ are constants in `internal/actions` (`ContinueMinDelay`, `ContinueMaxDelay`,
 
 ## Delegation
 
-`delegates: [<agent>, ...]` (or `["*"]`, every configured agent, itself included) names the agents an agent may hand tasks to; an unknown name fails the load. The `delegate` action needs it, and is denied unless named, like any action; `task:message`, `task:cancel` and `task:retry` follow the `delegate` rule unless named themselves. In a run answering the person's message, `approve` on these applies directly (docs/ARCHITECTURE.md, Delegation). Bounds are constants in `internal/store` (`MaxTasksPerDelegation`, `MaxTaskDepth`, `MaxConversationTasks`, `MaxTaskFailures`).
+`delegates: [<agent>, ...]` (or `["*"]`, every configured agent, itself included) names the agents an agent may hand tasks to; an unknown name fails the load. `delegate_templates: [<template>, ...]` (or `["*"]`, every active template) lets `delegate` instantiate typed workers from those active templates. A template worker is fresh, and its connectors are the intersection of the parent agent and rendered template; a task may narrow that set further. `delegate` needs at least one of `delegates` or `delegate_templates` and is denied unless named, like any action. `task:message`, `task:cancel` and `task:retry` require `delegates` and follow the `delegate` rule unless named themselves. In a run answering the person's message, `approve` on these applies directly (docs/ARCHITECTURE.md, Delegation). Bounds are constants in `internal/store` (`MaxTasksPerDelegation`, `MaxTaskDepth`, `MaxConversationTasks`, `MaxTaskFailures`).
 
 ## Checks
 
@@ -428,6 +492,7 @@ unattended runs: schedule, manual, continue, build. A run answering a
 person's message never notifies, whatever it says: the person is reading
 the chat. Failures and pending approvals of unattended runs always notify, except a failure that holds its runner (the backend refused orbit's login, or the subscription window is spent): that sends one notification for the runner (or, for a run a person started, the run's own failure report), and the runner's unattended runs wait until it answers again (docs/ARCHITECTURE.md, Reliability).
 Another exception is a run that read a mail (`mail:`): its report, or a short note when it fails, is mailed to the sender as a reply, through the agent's first `smtp` channel (else the deployment's first by name) and no other channel, whatever `notify.when` is.
+Likewise, a run that read a Telegram message replies to that chat through the configured Telegram channel, regardless of `notify.when`.
 
 ## Memory topics
 

@@ -61,6 +61,11 @@ type Request struct {
 	Connectors *Connectors
 	// Stall watches a Claude Code chat or live turn for a silent backend.
 	Stall *Stall
+	// Model and Effort, when set, replace the runner's own for this run (a
+	// conversation's, checked by spec.CheckModel). A live process takes
+	// them for its next turn (claude-code's set_model and
+	// apply_flag_settings), so changing them does not end it.
+	Model, Effort string
 }
 
 // Harness is orbit's own code inside the CLI's process tree.
@@ -118,6 +123,10 @@ type Session struct {
 	// it for LiveIdle after the turn.
 	Open     bool
 	LiveIdle time.Duration
+	// LiveUntil is a hard expiration for a live process whose environment
+	// carries a short-lived credential. It is set when the process starts
+	// and is never extended by later turns.
+	LiveUntil time.Time
 	// Started is called once the runner knows how it will use the session
 	// (mode fresh, resumed or live; parent the session continued), before
 	// the prompt is sent. An error aborts the run.

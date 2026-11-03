@@ -27,6 +27,8 @@ import (
 type Type struct {
 	Name        string
 	Description string
+	// Brief, when set, is what a run with orbit's built-in skills is told in its place: the type in a line, the skill named in its description holding the rest.
+	Brief string
 	// ParamsSchema is the JSON Schema of params, shown to the agent and
 	// enforced before the action is stored.
 	ParamsSchema map[string]any
@@ -35,7 +37,7 @@ type Type struct {
 
 // Catalog returns the action types an agent's spec enables (rule auto or
 // approve), in a stable order. Denied types are not offered at all.
-func Catalog(a *spec.Agent, d spec.Deployment) []Type {
+func Catalog(a *spec.Agent, d spec.Deployment, available ...[]store.Template) []Type {
 	var out []Type
 	if r := a.RuleFor("notify"); r != spec.RuleDeny {
 		out = append(out, notifyType(a))
@@ -43,9 +45,21 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 	if r := a.RuleFor("continue"); r != spec.RuleDeny {
 		out = append(out, continueType())
 	}
-	if targets := a.DelegateTargets(); len(targets) > 0 {
+	targets := a.DelegateTargets()
+	var templates []store.Template
+	if len(available) > 0 {
+		for _, tpl := range available[0] {
+			if tpl.Status != "active" {
+				continue
+			}
+			if slices.Contains(a.DelegateTemplateTargets(), "*") || slices.Contains(a.DelegateTemplateTargets(), tpl.Name) {
+				templates = append(templates, tpl)
+			}
+		}
+	}
+	if len(targets) > 0 || len(templates) > 0 {
 		if a.RuleFor(DelegateType) != spec.RuleDeny {
-			out = append(out, delegateType(targets))
+			out = append(out, delegateType(targets, templates, a.Connectors))
 		}
 		if a.RuleFor(TaskMessageType) != spec.RuleDeny {
 			out = append(out, taskMessageType())
@@ -79,7 +93,7 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 		out = append(out, commentType(d))
 	}
 	if a.RuleFor(DefineType) != spec.RuleDeny {
-		out = append(out, defineType(a))
+		out = append(out, defineType(a, d.Connectors))
 	}
 	if a.RuleFor(SaveType) != spec.RuleDeny {
 		out = append(out, saveType())
@@ -168,20 +182,37 @@ type TemplateRef struct {
 	Version int    `json:"version"`
 }
 
-func defineType(a *spec.Agent) Type {
+func defineType(a *spec.Agent, configured map[string]spec.Connector) Type {
+	connectors := slices.Sorted(maps.Keys(configured))
+	connectorNote := "No connectors are configured in orbit.yaml."
+	var connectorSchema map[string]any
+	if len(connectors) > 0 {
+		connectorNote = "Preconfigured connectors that can be enabled for a database agent: " + strings.Join(connectors, ", ") + "."
+		connectorSchema = map[string]any{
+			"type":        "array",
+			"items":       map[string]any{"type": "string", "enum": connectors},
+			"description": "Preconfigured connector names the target agent may use. Adding a connector always waits for the person's approval.",
+		}
+	}
+	properties := map[string]any{
+		"name": map[string]any{"type": "string", "pattern": spec.AgentNamePattern},
+	}
+	if connectorSchema != nil {
+		properties["connectors"] = connectorSchema
+	}
 	return Type{
 		Name: DefineType,
 		Description: "Create an agent or change one (yourself included, \"" + a.Name + "\"): spec is the whole agent, " +
-			"the same fields as an agents/<name>.yaml file (name, description, charter, triggers, sources, tools, actions, " +
+			"the same fields as an agents/<name>.yaml file (name, description, charter, triggers, sources, connectors, tools, actions, " +
 			"session, notify, ...; durations as strings like \"15m\"). It replaces the agent's spec as a new version; " +
 			"every version is kept and can be reverted. Agents defined in configuration files cannot be changed this way. " +
-			"A change that adds a tool, source, credential, delegate target or need, or allows an action more readily, waits for a person's approval. " +
+			connectorNote + " Adding a connector grants that database agent access to its tools, so the change always waits for a person's approval; it does not add a server or sign in. " +
+			"A change that adds a tool, source, credential, delegate target or need, or allows an action more readily, also waits for a person's approval. " +
 			"Such an agent may use, without a sandbox, only the tools " + strings.Join(spec.UnsandboxedTools, ", ") + "; never a file source or a ${VAR} but orbit.yaml's credentials.",
 		ParamsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"spec": map[string]any{"type": "object", "properties": map[string]any{
-					"name": map[string]any{"type": "string", "pattern": spec.AgentNamePattern}}, "required": []string{"name"}},
+				"spec": map[string]any{"type": "object", "properties": properties, "required": []string{"name"}},
 			},
 			"required":             []string{"spec"},
 			"additionalProperties": false,
@@ -318,7 +349,8 @@ const MaxContinueChain = 12
 
 func continueType() Type {
 	return Type{
-		Name: "continue",
+		Name:  "continue",
+		Brief: "Be woken again after_minutes from now, with note as what your next run is told (the orbit-continuations skill says how).",
 		Description: fmt.Sprintf("Be woken again after_minutes from now (%d to %d) to carry on a longer task. "+
 			"note is what your next run is told: what you were doing and what to do next. "+
 			"At most %d continuations in a row; one waits at a time.",
@@ -395,11 +427,12 @@ type Executor struct {
 // and run that proposed it.
 type Call struct {
 	// ID is the action's own id.
-	ID     string
-	Agent  string
-	RunID  string
-	Type   string
-	Params json.RawMessage
+	ID             string
+	Agent          string
+	RunID          string
+	ConversationID string
+	Type           string
+	Params         json.RawMessage
 	// Workspace is the run's conversation's workspace, for github:clone
 	// and github:pr; nil for an agent without one.
 	Workspace Workspace

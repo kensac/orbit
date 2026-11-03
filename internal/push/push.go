@@ -1,6 +1,8 @@
 // Package push wakes a person's devices when something needs them: each
 // attention row (store/attention.go) with push set becomes one Web Push to
-// every registered device, sent straight to the browser's push service.
+// every registered device, sent straight to the browser's push service,
+// except the devices of a person whose app is showing that conversation
+// (Presence).
 //
 // A push says only which agent wants what and where to look: its title is
 // the attention row's title (an agent name and a fixed phrase) and its link
@@ -22,6 +24,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/metrics"
+	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/webpush"
 )
@@ -37,6 +40,10 @@ const (
 	// TTL is how long a push service keeps a push for an offline device;
 	// MaxAge for the same reason.
 	TTL = MaxAge
+	// Presence is how long a heartbeat (POST /presence, every 30 s) keeps
+	// a conversation's pushes off its person's devices: they are looking
+	// at it. Two heartbeats missed and it no longer does.
+	Presence = 60 * time.Second
 )
 
 // Payload is the JSON the service worker receives. It is everything a
@@ -50,7 +57,14 @@ type Payload struct {
 	Tag   string `json:"tag"`
 	Kind  string `json:"kind"`
 	Count int    `json:"count"`
+	// Actions are the notification's buttons: on a single pending action
+	// or permission request only (actions.go).
+	Actions []Action `json:"actions,omitempty"`
 }
+
+// KindClose is a push that carries no notification: the service worker
+// closes the one with its tag, because what it showed has closed.
+const KindClose = "close"
 
 // Sender sends pushes. Control instances only: it holds the VAPID key.
 type Sender struct {
@@ -60,7 +74,12 @@ type Sender struct {
 	// LinkBase is the app's path for orbit ("/orbit"); links are built
 	// under it (Link).
 	LinkBase string
-	Log      *slog.Logger
+	// Secret signs push action links; PublicURL is orbit's public origin
+	// they point at (Deployment.PublicURL). Either unset: no action
+	// buttons, only the link.
+	Secret    secret.Key
+	PublicURL func() string
+	Log       *slog.Logger
 }
 
 // FromEnv builds a Sender from ORBIT_VAPID_PUBLIC_KEY,
@@ -88,27 +107,123 @@ func FromEnv(s *store.Store, log *slog.Logger) (*Sender, error) {
 }
 
 // Link is where a person acts on a row: its conversation, at the action or
-// question when there is one (a fragment the app scrolls to).
+// question or permission request when there is one (a fragment the app
+// scrolls to).
 func Link(base string, a store.Attention) string {
 	l := base + "/c/" + a.ConversationID
 	switch {
 	case a.ActionID != nil: // an approval, or a delegated task's decision
 		l += "#action-" + *a.ActionID
+	case a.ApprovalID != nil: // a CLI permission request
+		l += "#approval-" + *a.ApprovalID
 	case a.Kind == store.AttentionQuestion && a.MessageID != nil:
 		l += "#message-" + *a.MessageID
 	}
 	return l
 }
 
-// Deliver sends whatever is waiting, if the gap allows: one row as itself,
-// several as one summary that opens the inbox.
+// Deliver sends whatever is waiting, if the gap allows, to each person's
+// devices: one row as itself, several as one summary that opens the inbox.
+// A row of the conversation a person's app is showing (Presence) is left
+// out of what that person is sent; their inbox and the thread show it.
 func (s *Sender) Deliver(ctx context.Context) error {
 	items, err := s.Store.ClaimPush(ctx, Gap, MaxAge)
 	if err != nil || len(items) == 0 {
 		return err
 	}
-	_, err = s.send(ctx, "", summarize(s.LinkBase, items))
-	return err
+	subs, err := s.Store.ListPushSubscriptions(ctx, "")
+	if err != nil {
+		return err
+	}
+	watching, err := s.Store.Watching(ctx, Presence)
+	if err != nil {
+		// Unknown presence never silences a push.
+		s.Log.Warn("read presence", "err", err)
+		watching = nil
+	}
+	for author, devices := range byAuthor(subs) {
+
+		send := unseen(items, watching[author])
+		if len(send) == 0 {
+			continue
+		}
+		p := summarize(s.LinkBase, send)
+		if len(send) == 1 {
+			p.Actions = s.actions(send[0], author, time.Now())
+		}
+		s.sendTo(ctx, devices, p)
+		ids := make([]string, len(send))
+		for i, a := range send {
+			ids[i] = a.ID
+		}
+		if err := s.Store.RecordPushSent(ctx, author, p.Tag, ids); err != nil {
+			s.Log.Error("record push sent", "err", err)
+		}
+	}
+	return nil
+}
+
+// Close takes notifications whose rows have closed (decided elsewhere,
+// answered, expired, dismissed) off the devices they were sent to: a push
+// of kind close with the same tag, which the service worker uses to close
+// that notification, and the push service to drop one still undelivered
+// (the Topic header). Apple's push service is skipped: Safari counts a
+// push that shows no notification against the subscription and revokes it
+// after a few, so an iOS notification stays until it is tapped.
+func (s *Sender) Close(ctx context.Context) error {
+	closes, err := s.Store.ClaimClosedPush(ctx, MaxAge)
+	if err != nil || len(closes) == 0 {
+		return err
+	}
+	subs, err := s.Store.ListPushSubscriptions(ctx, "")
+	if err != nil {
+		return err
+	}
+	devices := byAuthor(subs)
+	for _, c := range closes {
+		var to []store.PushSubscription
+		for _, d := range devices[c.Author] {
+			if !silentRevokes(d.Endpoint) {
+				to = append(to, d)
+			}
+		}
+		s.sendTo(ctx, to, Payload{Tag: c.Tag, Kind: KindClose})
+	}
+	return nil
+}
+
+// silentRevokes reports whether endpoint's push service revokes a
+// subscription that receives pushes showing nothing (Apple's).
+func silentRevokes(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return true
+	}
+	h := u.Hostname()
+	return h == "push.apple.com" || strings.HasSuffix(h, ".push.apple.com")
+}
+
+// unseen is items without those of the conversation a person is looking
+// at ("" when they are not known to be looking at one).
+func unseen(items []store.Attention, watching string) []store.Attention {
+	if watching == "" {
+		return items
+	}
+	var out []store.Attention
+	for _, a := range items {
+		if a.ConversationID != watching {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func byAuthor(subs []store.PushSubscription) map[string][]store.PushSubscription {
+	out := map[string][]store.PushSubscription{}
+	for _, sub := range subs {
+		out[sub.Author] = append(out[sub.Author], sub)
+	}
+	return out
 }
 
 // Test sends one push to author's devices, so a person can see that
@@ -130,7 +245,7 @@ func summarize(base string, items []store.Attention) Payload {
 	}
 	return Payload{
 		Title: fmt.Sprintf("%d things need you: %s", len(items), strings.Join(agents, ", ")),
-		URL:   base + "/inbox", Tag: "orbit-inbox", Kind: "summary", Count: len(items),
+		URL:   base + "/inbox", Tag: store.SummaryTag, Kind: "summary", Count: len(items),
 	}
 }
 
@@ -139,12 +254,15 @@ func (s *Sender) send(ctx context.Context, author string, p Payload) (int, error
 	if err != nil {
 		return 0, err
 	}
-	body, err := json.Marshal(p)
-	if err != nil {
-		return 0, err
-	}
+	return s.sendTo(ctx, subs, p), nil
+}
+
+// sendTo sends p to each device and records each result; it returns how
+// many accepted it.
+func (s *Sender) sendTo(ctx context.Context, subs []store.PushSubscription, p Payload) int {
+	body, _ := json.Marshal(p)
 	urgency := "high"
-	if p.Kind == store.AttentionFailure || p.Kind == "test" {
+	if p.Kind == store.AttentionFailure || p.Kind == "test" || p.Kind == KindClose {
 		urgency = "normal"
 	}
 	sent := 0
@@ -164,7 +282,7 @@ func (s *Sender) send(ctx context.Context, author string, p Payload) (int, error
 			s.Log.Error("record push", "err", rerr)
 		}
 	}
-	return sent, nil
+	return sent
 }
 
 // pushHosts are the push services orbit will post to. A subscription's

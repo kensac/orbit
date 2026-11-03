@@ -56,6 +56,10 @@ type Config struct {
 	// (ORBIT_SANDBOX_BOX_RUNTIME), apart from Runtime so builds and boxes
 	// move to gVisor separately.
 	BoxRuntime string
+	// ExtensionProfile is set only by profile(); requests cannot set limits or network policy.
+	ExtensionProfile bool
+	// ExtensionMemoryBytes is a per-invocation limit clamped by profile().
+	ExtensionMemoryBytes int64
 }
 
 // MinTokenLen matches ORBIT_API_TOKEN's floor.

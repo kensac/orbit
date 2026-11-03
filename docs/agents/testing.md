@@ -11,6 +11,15 @@
   stdin line, and can crash, hang, or send a control request mid-turn.
 - **The engine is tested end to end** with a fake runner and an httptest
   server standing in for sources, channels and endpoints.
+- **sandboxd's Docker integration tests** use a real daemon when available and
+  skip locally when it is not. Under CI, missing Docker fails the test instead
+  of skipping it. `TestIntegrationIsolation` exercises both the build profile
+  and the native extension profile; extension checks include filesystem
+  boundaries, absent network and credentials, process capabilities, inspected
+  resource limits, per-invocation scratch, timeout cleanup and container
+  removal. This does not cover every isolation acceptance case in
+  [plugins.md](../plugins.md), so it is not by itself evidence that extensions
+  are ready to enable.
 - **The CLI protocol has its own real-CLI check**: `ORBIT_REAL_CLAUDE=claude go test -run RealCLI ./internal/claudeproto/` (initialize with a host hook, set_permission_mode, can_use_tool allowed and denied, a hook_callback per call, an interrupt that withdraws a pending permission request; and `TestRealCLISteer`: a message written during a tool call folded into that turn, one written after the last tool call starting its own turn after the result, `cancel_async_message` withdrawing a queued one, an interrupt with `cancel_queued` listing it in its receipt). Run it after a CLI bump; it uses the person's own login, so it never runs in CI. The same command runs `TestRealCLIPermissionModes` for mode changes, launch flags, edits, and prompts.
 
 ## The real-CLI smoke
@@ -39,7 +48,7 @@ After changing the hook events or `internal/status`, watch `runs.hook_status` du
 
 After changing delegation, run one agent with `delegates` naming two others and `actions: {delegate: approve}` against the real CLI: message it asking for two independent pieces of work. Check the delegate action was approved by the attended rule, both task runs ran at once (different agents), each task is `done` with the run's report, one `delegation` run woke the parent, and its report integrates both.
 
-After changing skills or their wiring, run an agent with one skill whose `SKILL.md` tells it to read a file of the skill: the run's events show the `Skill` tool on `orbit:<name>`, then `mcp__orbit__skill` for `SKILL.md` and for the file, and the answer uses the file's content (seen on 2.1.316).
+After changing skills or their wiring, run an agent with one skill whose `SKILL.md` tells it to read a file of the skill: the run's events show the `Skill` tool on `orbit:<name>`, then `mcp__orbit__skill` for `SKILL.md` and for the file, and the answer uses the file's content (seen on 2.1.316). After changing references or the built-in skills, also give it a `references/` file and ask for something only it holds: the `SKILL.md` read lists it by name and heading, and a `reference` call loads it; and run an agent with `verify: [figures]` that loads `orbit-query` before its first query.
 
 After changing sessions or the live process, also run an agent with
 `session: {resume: true, live: 10m}` and `continue: approve`: a message (run
@@ -49,6 +58,12 @@ session alone (`resumed`, a new `session_id`), an approved `continue` that
 runs at its `run_after`, and a `kill -9` of the live process mid-turn (that
 run fails with "claude exited during the turn"; the next starts fresh), with a
 Read outside the workdir denied in the live turn.
+
+The live-process unit tests also pin idle eviction under simulated memory
+pressure, the maximum 24-hour window, and the hard expiry used by a sandbox
+credential grant. The engine reload test changes deployment configuration
+without changing a chat invocation and verifies that the same process and box
+serve the next message.
 
 After changing chat runs (`runner/chat.go`), run `ORBIT_REAL_CLAUDE=<wrapper> go test -run RealCLIChat ./internal/runner/`: orbit's SDK MCP tool is listed and called over the control channel, the reply is the final message, the second turn is `live` in the same process, and an interrupt ends the third turn with a result; `RealCLIChatPermissionLevels`: one live process at locked denies a Read outside the workspace unasked, then takes the next run at ask after a `set_permission_mode` and sends that Read to orbit's prompt (seen on 2.1.316); `RealCLIChatPlanApproval` (sonnet by default): the session's `ExitPlanMode` comes to orbit's prompt, and after the allow the CLI is back in the mode it planned from (plan, then acceptEdits on 2.1.316). The sandboxed path is covered by `TestASandboxedChatKeepsItsWorkspace` against a fake sandboxd that runs the argv locally; a real sandbox is seen only on hetzner.
 

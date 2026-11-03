@@ -119,6 +119,71 @@ func SanitizeIn(dst io.Writer, src io.Reader) error {
 	return tw.Close()
 }
 
+// SanitizeExtensionIn gives only /work/out to the unprivileged process as a
+// writable directory. The package and input tree are root-owned and read-only.
+func SanitizeExtensionIn(dst io.Writer, src io.Reader) error {
+	tw := tar.NewWriter(dst)
+	now := time.Now()
+	if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "./", Mode: 0o555, Uid: 0, Gid: 0, ModTime: now}); err != nil {
+		return err
+	}
+	tr := tar.NewReader(src)
+	var total int64
+	for n := 0; ; n++ {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read extension archive: %w", err)
+		}
+		if n >= maxEntries {
+			return fmt.Errorf("archive has more than %d entries", maxEntries)
+		}
+		if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeDir {
+			return fmt.Errorf("extension entry %q is not a regular file or directory", h.Name)
+		}
+		name, err := cleanName(h.Name)
+		if err != nil {
+			return err
+		}
+		if name == "." {
+			continue
+		}
+		readonly := strings.HasPrefix(name, "extension/") || strings.HasPrefix(name, "inputs/") ||
+			h.Typeflag == tar.TypeDir && (name == "extension" || name == "inputs")
+		if !readonly {
+			return fmt.Errorf("extension archive entry %q is outside the package and input roots", name)
+		}
+		mode, uid, gid := h.Mode&0o111, 0, 0
+		if h.Typeflag == tar.TypeDir {
+			mode |= 0o555
+		} else {
+			mode |= 0o444
+		}
+		out := &tar.Header{Typeflag: h.Typeflag, Name: name, Mode: mode, Uid: uid, Gid: gid, ModTime: h.ModTime}
+		if h.Typeflag == tar.TypeDir {
+			out.Name += "/"
+		}
+		if h.Typeflag == tar.TypeReg {
+			out.Size = h.Size
+			total += out.Size
+		}
+		if total > sandbox.MaxArchiveBytes {
+			return fmt.Errorf("archive content exceeds %d bytes", sandbox.MaxArchiveBytes)
+		}
+		if err := tw.WriteHeader(out); err != nil {
+			return err
+		}
+		if h.Typeflag == tar.TypeReg {
+			if _, err := io.CopyN(tw, tr, out.Size); err != nil {
+				return fmt.Errorf("read %s: %w", name, err)
+			}
+		}
+	}
+	return tw.Close()
+}
+
 // SanitizeOut copies docker's tar of /work (entries prefixed "work/") to dst
 // with entries relative to the workdir, owners and extended attributes
 // dropped, and the same type, name and size rules as SanitizeIn. A workdir

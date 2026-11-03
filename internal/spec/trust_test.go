@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 const trustBase = base + `
@@ -158,8 +159,18 @@ func TestWidening(t *testing.T) {
 	if w := Widening(nil, &Agent{Name: "n", Charter: "x"}); len(w) != 0 {
 		t.Fatalf("bare = %v", w)
 	}
+	if w := Widening(&Agent{DelegateTemplates: []string{"weekly"}}, &Agent{DelegateTemplates: []string{"weekly", "daily"}}); !reflect.DeepEqual(w, []string{"delegate from template daily"}) {
+		t.Fatalf("template delegation widening = %v", w)
+	}
 	if w := Widening(nil, &Agent{Tools: []string{"WebFetch"}, Actions: ActionSet{"agent:define": RuleAuto}}); !reflect.DeepEqual(w, []string{"tool WebFetch", "action agent:define: auto, was deny"}) {
 		t.Fatalf("new = %v", w)
+	}
+	calendar := &CalendarSkip{Connector: "gws", Tool: "list_events", WindowAfter: Duration(time.Hour)}
+	if w := Widening(&Agent{}, &Agent{CalendarSkip: calendar}); !reflect.DeepEqual(w, []string{"calendar skip configuration"}) {
+		t.Fatalf("calendar skip widening = %v", w)
+	}
+	if w := Widening(&Agent{CalendarSkip: calendar}, &Agent{}); len(w) != 0 {
+		t.Fatalf("removing a calendar skip widened: %v", w)
 	}
 }
 

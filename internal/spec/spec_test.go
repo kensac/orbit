@@ -2,6 +2,7 @@ package spec
 
 import (
 	"errors"
+	"github.com/kensac/orbit/internal/extensions"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,6 +22,52 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if a.RuleFor("webhook:home-assistant") != RuleApprove || a.RuleFor("webhook:other") != RuleDeny {
 		t.Fatal("rules: named types take their rule, unnamed ones are denied")
+	}
+}
+
+func TestPinnedExtensionSourceRequiresDeploymentPinAndEarlierInputs(t *testing.T) {
+	packageDir, err := filepath.Abs("../extensions/testdata/reducer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := extensions.ValidateDir(packageDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orbit := base + "sandbox: {sandboxd: 'sandboxd:8080'}\nextensions:\n  enabled: true\n  packages:\n    daily-total: {path: '" + packageDir + "', sha256: " + pkg.Digest + "}\n"
+	agent := `name: a
+charter: x
+sources:
+  - {name: input, kind: http, url: https://example.com/data}
+  - name: derived
+    kind: extension
+    extension:
+      package: daily-total
+      operation: sum
+      inputs: {transactions: input}
+`
+	cfg, err := Load(write(t, map[string]string{"orbit.yaml": orbit, "agents/a.yaml": agent}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ExtensionPackages["daily-total"].Digest != pkg.Digest {
+		t.Fatal("package digest was not loaded")
+	}
+	bad := strings.Replace(agent, "transactions: input", "transactions: later", 1)
+	if _, err := Load(write(t, map[string]string{"orbit.yaml": orbit, "agents/a.yaml": bad})); err == nil || !strings.Contains(err.Error(), "earlier source") {
+		t.Fatalf("later source binding error = %v", err)
+	}
+	for name, tc := range map[string]struct{ deployment, agent, want string }{
+		"runtime disabled":  {strings.Replace(orbit, "enabled: true", "enabled: false", 1), agent, "package pins require enabled"},
+		"digest mismatch":   {strings.Replace(orbit, pkg.Digest, strings.Repeat("0", 64), 1), agent, "digest does not match"},
+		"undeclared input":  {orbit, strings.Replace(agent, "transactions: input", "missing: input", 1), "must name an earlier source"},
+		"invalid parameter": {orbit, strings.Replace(agent, "operation: sum", "operation: sum\n      parameters: {unknown: value}", 1), "extension parameters"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(write(t, map[string]string{"orbit.yaml": tc.deployment, "agents/a.yaml": tc.agent})); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -45,6 +92,80 @@ func TestAgentBudgetsValidate(t *testing.T) {
 		if (err == nil) != tc.valid {
 			t.Errorf("budget %s: err = %v, valid = %v", tc.budget, err, tc.valid)
 		}
+	}
+}
+
+func TestTelegramConfigurationRequiresChannelAgentAndExplicitUsers(t *testing.T) {
+	deployment := strings.Replace(base, "channels: {c: {kind: log}}", `channels:
+  c: {kind: log}
+  telegram: {kind: telegram, token_env: TELEGRAM_TOKEN, chat_id: "12345"}
+`, 1) + `
+telegram: {channel: telegram, agent: a, allow_users: [12345]}
+`
+	if _, err := Load(write(t, map[string]string{
+		"orbit.yaml":    deployment,
+		"agents/a.yaml": "name: a\ncharter: x\n",
+	})); err != nil {
+		t.Fatalf("valid Telegram config: %v", err)
+	}
+	for name, cfg := range map[string]string{
+		"channel kind":    strings.Replace(deployment, "kind: telegram, token_env", "kind: log, token_env", 1),
+		"missing token":   strings.Replace(deployment, ", token_env: TELEGRAM_TOKEN", "", 1),
+		"empty allowlist": strings.Replace(deployment, "allow_users: [12345]", "allow_users: []", 1),
+		"duplicate user":  strings.Replace(deployment, "allow_users: [12345]", "allow_users: [12345, 12345]", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(write(t, map[string]string{"orbit.yaml": cfg, "agents/a.yaml": "name: a\ncharter: x\n"}))
+			if err == nil {
+				t.Fatal("invalid Telegram config loaded")
+			}
+		})
+	}
+}
+
+func TestAgentQuietHoursValidate(t *testing.T) {
+	for _, tc := range []struct {
+		quiet string
+		valid bool
+	}{
+		{`{start: "22:00", end: "07:00"}`, true},
+		{`{start: "09:00", end: "17:00"}`, true},
+		{`{start: "09:00", end: "09:00"}`, false},
+		{`{start: "9:00", end: "17:00"}`, false},
+		{`{start: "24:00", end: "07:00"}`, false},
+		{`{start: "22:00"}`, false},
+	} {
+		_, err := Load(write(t, map[string]string{
+			"orbit.yaml":    base,
+			"agents/a.yaml": "name: a\ncharter: x\nquiet_hours: " + tc.quiet + "\n",
+		}))
+		if (err == nil) != tc.valid {
+			t.Errorf("quiet_hours %s: err = %v, valid = %v", tc.quiet, err, tc.valid)
+		}
+	}
+}
+
+func TestQuietHoursContainment(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		q    QuietHours
+		at   time.Time
+		want bool
+	}{
+		{"cross midnight start included", QuietHours{"22:00", "07:00"}, time.Date(2026, 11, 1, 22, 0, 0, 0, loc), true},
+		{"cross midnight before end", QuietHours{"22:00", "07:00"}, time.Date(2026, 11, 2, 6, 59, 0, 0, loc), true},
+		{"end excluded", QuietHours{"22:00", "07:00"}, time.Date(2026, 11, 2, 7, 0, 0, 0, loc), false},
+		{"day interval", QuietHours{"09:00", "17:00"}, time.Date(2026, 11, 2, 12, 0, 0, 0, loc), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.q.Contains(tc.at, loc); got != tc.want {
+				t.Fatalf("Contains(%s) = %v, want %v", tc.at, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -240,9 +361,12 @@ func TestSessionSpec(t *testing.T) {
 	if cfg.Agents["a"].RuleFor("continue") != RuleApprove {
 		t.Fatal("continue is an action type with a rule")
 	}
+	if _, err := load(base, "session: {resume: true, idle: 24h, live: 24h}\n"); err != nil {
+		t.Fatalf("the maximum live window should be accepted: %v", err)
+	}
 	for _, c := range []struct{ orbit, agent, want string }{
 		{base, "session: {resume: true, idle: 48h}\n", "session.idle"},
-		{base, "session: {resume: true, idle: 1h, live: 2h}\n", "session.live must be between"},
+		{base, "session: {resume: true, idle: 48h, live: 48h}\n", "session.live must be between"},
 		{base, "session: {resume: true, idle: 10m, live: 20m}\n", "must not exceed session.idle"},
 		{base, "session: {live: 5m}\n", "need resume: true"},
 		{"defaults: {runner: r, channels: [c]}\nrunners: {r: {kind: codex}}\nchannels: {c: {kind: log}}\n", "session: {resume: true}\n", "needs a claude-code runner"},
@@ -464,11 +588,25 @@ func TestDelegatesAreResolvedAndChecked(t *testing.T) {
 		t.Fatal("task types follow the delegate rule unless named")
 	}
 	_, err = Load(write(t, map[string]string{
+		"orbit.yaml":                  base,
+		"agents/template-parent.yaml": "name: template-parent\ncharter: x\ndelegate_templates: [weekly-report]\nactions: {delegate: approve}\n",
+	}))
+	if err != nil {
+		t.Fatalf("template-only delegate target: %v", err)
+	}
+	_, err = Load(write(t, map[string]string{
+		"orbit.yaml":                  base,
+		"agents/template-parent.yaml": "name: template-parent\ncharter: x\ndelegate_templates: [weekly-report, '*']\nactions: {delegate: approve}\n",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "already names every active template") {
+		t.Fatalf("wildcard with a specific template: %v", err)
+	}
+	_, err = Load(write(t, map[string]string{
 		"orbit.yaml":       base,
 		"agents/boss.yaml": "name: boss\ncharter: x\ndelegates: [nobody]\n",
 		"agents/two.yaml":  "name: two\ncharter: x\nactions: {delegate: auto}\n",
 	}))
-	for _, want := range []string{`delegates: "nobody" is not a configured agent`, `agent "two": action "delegate": needs delegates`} {
+	for _, want := range []string{`delegates: "nobody" is not a configured agent`, `agent "two": action "delegate": needs delegates or delegate_templates`} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("error %v lacks %q", err, want)
 		}
@@ -719,6 +857,28 @@ sources:
 		`source "p": by_trigger is only for http sources`} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("error lacks %q: %v", want, err)
+		}
+	}
+}
+func TestCheckModel(t *testing.T) {
+	for _, c := range []struct {
+		kind, model, effort string
+		ok                  bool
+	}{
+		{"claude-code", "opus", "high", true},
+		{"claude-code", "claude-opus-4-5", "", true},
+		{"claude-code", "sonnet[1m]", "max", true},
+		{"claude-code", "", "", true},
+		{"claude-code", "Opus", "", false},
+		{"claude-code", "opus; rm", "", false},
+		{"claude-code", "", "extreme", false},
+		{"codex", "gpt-5-codex", "", true},
+		{"codex", "", "high", false},
+		{"anthropic", "claude-sonnet-4-5", "", true},
+		{"anthropic", "sonnet", "", false},
+	} {
+		if err := CheckModel(c.kind, c.model, c.effort); (err == nil) != c.ok {
+			t.Errorf("%s %q %q: %v", c.kind, c.model, c.effort, err)
 		}
 	}
 }
