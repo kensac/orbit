@@ -145,6 +145,7 @@ func (s *Server) routes(internal bool) http.Handler {
 
 	api("GET /api/v1/agents/{name}/memory", s.memoryHistory)
 	api("POST /api/v1/agents/{name}/runs", s.startRun)
+	api("POST /api/v1/agents/{name}/replay", s.replayEvaluation)
 	api("GET /api/v1/agents/{name}/messages", s.listMessages)
 	api("POST /api/v1/agents/{name}/messages", s.sendMessage)
 	api("GET /api/v1/runs", s.listRuns)
@@ -193,6 +194,11 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/terminals/{tid}", s.getTerminal)
 	api("POST /api/v1/terminals/{tid}/kill", s.killTerminal)
 	api("POST /api/v1/terminals/{tid}/attach", s.attachTicket)
+	api("GET /api/v1/workspaces/{id}/accounts", s.listAccounts)
+	api("POST /api/v1/workspaces/{id}/accounts", s.createAccount)
+	api("GET /api/v1/workspaces/{id}/accounts/{aid}", s.getAccount)
+	api("PATCH /api/v1/workspaces/{id}/accounts/{aid}", s.renameAccount)
+	api("POST /api/v1/workspaces/{id}/accounts/{aid}/login", s.loginAccount)
 	// The ticket in Sec-WebSocket-Protocol is the credential (terminals.go).
 	mux.HandleFunc("GET /api/v1/terminals/{tid}/ws", s.terminalSocket)
 	s.memoryRoutes(api)

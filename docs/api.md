@@ -585,6 +585,16 @@ token's person. Only with the operator token, an `"author"` field names it
 
 `POST /agents/{name}/runs` `{"prompt": "optional"}` starts a run without a
 message, in the default conversation: `202 {"run_id": "uuid"}`.
+`POST /agents/{name}/replay` `{"cases": [{"name", "input": <JSON>}]}`
+evaluates each saved input sequentially against one snapshot of the current
+charter and active skills, returning `{"results": [{"name", "output",
+"cost_usd"}]}` in request order. It creates no runs or artifacts and sends
+no sources, memory, messages, connectors or agent tools to the backend.
+Claude Code gets read-only file access to private temporary input and skill
+files. This is not a full run replay: behavior that depends on sources,
+memory, messages, tools, sessions or hooks is absent. Requests have at most
+32 cases, 8 MiB per input, 32 MiB total input and 512 KiB per output. Each
+case runs under the agent's configured timeout.
 `GET /agents/{name}/messages` lists the default conversation's messages.
 
 ## Streaming a run
@@ -1112,6 +1122,34 @@ The ticket is single-use, expires in 30 s, and is bound to the terminal, the per
 Close codes: `4001` when the instance drains or shuts down: reconnect with a new ticket and the ready instance takes the terminal, which kept running. `4008` when the client took no output for 30 s: reattach. A socket closing for any reason detaches only its own tmux client; the session lives on.
 
 **Without a WebSocket** (planned, for a proxy that cannot carry one): `GET /terminals/{tid}/output` is SSE, `ready` then `data` events (`{"b64": "..."}`, id an output offset), resumable with `Last-Event-ID` (a lost offset replays the scrollback after a `ready`); `POST /terminals/{tid}/input` `{"b64": "...", "cols"?, "rows"?}` writes input, `204`.
+
+### Accounts (box only): built
+
+A box holds Claude accounts besides its own profile: each is a directory, `/home/agent/.claude-accounts/<slot>`, on its own volume, which a terminal under the account has as `CLAUDE_CONFIG_DIR`. Its login (a full `claude auth login`, which claude.ai connectors need) lives only in that directory; orbit stores what a fixed script reads of it, never a token (docs/agents/security.md, Boxes and terminals). The shared profile in `~/.claude` (`settings.json`, `CLAUDE.md`, `skills`, `commands`, `agents`) is linked into every account's directory; the rest (credentials, `.claude.json` with its user MCP servers, sessions, history) is the account's own. A terminal without an account uses the box's own profile and the subscription token, as before.
+
+```json
+{"id": "uuid", "workspace_id": "uuid", "slot": "3c9ab5742fb5", "label": "personal",
+ "dir": "/home/agent/.claude-accounts/3c9ab5742fb5", "logged_in": true,
+ "email": "k@example.com", "account_uuid": "uuid", "org_id": "uuid", "org_name": "...",
+ "subscription_type": "max", "rate_limit_tier": "default_claude_max_20x",
+ "access_expires_at": "...", "refresh_expires_at": "...", "checked_at": "...",
+ "last_used_at": "...", "created_by": "kanishk", "created_at": "..."}
+```
+
+- `slot` names the account's volume (`orbit-box-<agent>-acct-<slot>`) and directory: 12 hex digits of its `id`.
+- `logged_in`, `email`, `account_uuid`, `org_id`, `org_name`, `subscription_type`, `rate_limit_tier` and the expiries are what the account's files said when `checked_at` was: `logged_in` is whether its credentials hold a refresh token; `access_expires_at` is the access token's expiry (the CLI refreshes it itself), `refresh_expires_at` the refresh token's, past which the account needs a new login. A read that finds no login sets `logged_in` false and clears the expiries but keeps the identity fields, so a logged-out account still says whose it was. Each is `null` until read, or when the CLI did not write it.
+- `last_used_at` is the newest attach of a terminal under the account, `null` before one.
+- An account is read from the box on every list and get while the box is running (a stopped box is not started for it), and when a terminal under it ends; otherwise the fields are as last read.
+
+Routes require the workspace to be a box (`409`, `no_shell`, otherwise). Mutations and account login require membership of `ORBIT_WORKSPACE_GROUP` (`403`, `group`); account reads use the authenticated workspace access.
+
+- `GET /workspaces/{id}/accounts`: `{"accounts": [<account>]}`, oldest first.
+- `POST /workspaces/{id}/accounts` `{"label", "cols", "rows", "restart"?: false}`: records the account, mounts its volume, links the shared profile in, and opens a `login` terminal of that size under it (`claude auth login`: the person opens the URL it prints and pastes the code back). `201 {"account", "terminal"}`. `label` is 1 to 100 bytes, unique in the workspace (`409`, `exists`); at most 16 accounts a box (`409`, `limit`). A stopped box is started with the new mount. A running box gains a mount only by being recreated, which ends every session in it: with any terminal running that is `409` (`busy`, naming how many) unless `restart` is true, which records them `exited` with `end_reason` `box_restarted` and recreates the box (its volumes kept). A failure after the account is recorded is `502`; the account is kept, and the box mounts it when it next starts.
+- `GET /workspaces/{id}/accounts/{aid}`: `{"account"}`.
+- `PATCH /workspaces/{id}/accounts/{aid}` `{"label"}`: `200 {"account"}`; `exists` as above.
+- `POST /workspaces/{id}/accounts/{aid}/login` `{"cols", "rows"}`: `201 {"terminal"}`, a new `login` terminal under the account, for a login past its `refresh_expires_at` or a switch to another login. `409` (`restart`) when the running box does not mount the account yet.
+
+Accounts are never deleted. Attaching to a `login` terminal is as for any terminal; when it ends, the account is read again before the `exit` frame, so the client's next list shows the login.
 
 ### Review comments
 
