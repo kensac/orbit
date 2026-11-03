@@ -102,6 +102,8 @@ A database agent is written through the API or by `agent:define`, and the built-
 - **"Approve and always allow" is a person's change**, made only through the API or MCP with their token (`POST /actions/{id}/approve` with `always`): a new version with that one type under `auto`, never offered to a model. It does not lift the widening check, which holds an `agent:define` for a person whatever its rule.
 - **"Save this conversation as an agent" (`agent:save`) never lets a model choose reach.** The model writes the name, description, charter and starters; the tools, sources, rules and schedules come from the conversation's record, no broader than what happened (an approved type becomes `approve`, never `auto`), and the whole agent waits for a person as an `agent:define`, whatever the rule.
 
+- **A template is a spec a person wrote, filled by code.** `template:create` gives a model no reach `agent:define` does not: what it renders is an `agent:define` of a new agent, always waiting for a person, held to everything above. Values are data in JSON strings, never scanned for slots, so a value cannot add a field or a slot. A `user_prompt` value is taken only from the person's own answers to orbit's question (store.FormAnswers), never from the proposal, and a `file` value only from the conversation's uploads.
+
 What is left: an agent with `WebFetch` can send what its run read to any host, and a change within the agent's current reach (its charter, its triggers, narrowing) applies without a person.
 
 A worker rebuilds agents from the database without their origin and does not repeat these checks: control validated every spec it recorded, and the credential binding is checked on every fetch.
