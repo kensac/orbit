@@ -278,6 +278,7 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | `state` | `open`, `closed`, `all` | `open` | github issues and pulls: which are listed. |
 | `path` | path | required for file | A file on orbit's host, read as orbit's user (relative to orbit's working directory). |
 | `max_bytes` | int | `8388608` (8 MiB) | The most one source may fetch; more fails the run. |
+| `by_trigger` | map of trigger to override | none | http only: query values for runs of one trigger (`schedule`, `manual`, `message`, `continue`, `task`, `delegation`, `webhook`) over the source's own (below). |
 
 | Kind | Reaches | Risk |
 |---|---|---|
@@ -296,6 +297,14 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | `items_path` | dot path | required | Where each page's array is; pages are merged into one array. An empty page stops. |
 | `total_pages_path` | dot path | none | Where the page count is; stops at it. |
 | `max_pages` | int | `1000` | A guard: more pages fail the fetch. |
+
+### `sources[].by_trigger.<trigger>`
+
+What a run of that trigger fetches differently, for a window a scheduled review and a person's question need differently (a message run comparing months while the monthly review reads one).
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `query` | map | required | Replaces the source's query values by key and adds keys it lacks; may use `${VAR}` and templates; may not set `paginate.page_param`. |
 
 ### `transforms[]`
 

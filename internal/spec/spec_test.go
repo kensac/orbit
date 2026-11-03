@@ -595,3 +595,56 @@ func TestGitHubBox(t *testing.T) {
 		}
 	}
 }
+
+func TestSourceByTrigger(t *testing.T) {
+	cfg, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": `
+name: a
+charter: x
+sources:
+  - name: s
+    kind: http
+    url: http://x/api
+    query: {start: "{{prev_month_start}}", end: "{{today}}"}
+    by_trigger:
+      message: {query: {start: "{{months_ago_start 3}}"}}
+      webhook: {query: {scope: all}}
+`}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := cfg.Agents["a"].Sources[0]
+	if q := s.QueryFor("message"); q["start"] != "{{months_ago_start 3}}" || q["end"] != "{{today}}" {
+		t.Fatalf("message query = %v", q)
+	}
+	if q := s.QueryFor("schedule"); q["start"] != "{{prev_month_start}}" {
+		t.Fatalf("schedule query = %v", q)
+	}
+	if q := s.QueryFor("webhook"); q["scope"] != "all" {
+		t.Fatalf("webhook query = %v", q)
+	}
+	_, err = Load(write(t, map[string]string{"orbit.yaml": base, "agents/b.yaml": `
+name: b
+charter: x
+sources:
+  - name: s
+    kind: http
+    url: http://x/api
+    paginate: {page_param: page, items_path: items}
+    by_trigger:
+      mail: {query: {start: x}}
+      manual: {query: {}}
+      message: {query: {page: "2"}}
+  - name: p
+    kind: prometheus
+    url: http://x
+    expr: up
+    by_trigger:
+      message: {query: {start: x}}
+`}))
+	for _, want := range []string{`unknown trigger "mail"`, "by_trigger.manual: query is required", `may not set the page parameter "page"`,
+		`source "p": by_trigger is only for http sources`} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q: %v", want, err)
+		}
+	}
+}
