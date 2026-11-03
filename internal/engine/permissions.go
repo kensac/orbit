@@ -41,8 +41,8 @@ func (e *Engine) runLevel(ctx context.Context, a *spec.Agent, c *store.ClaimedRu
 	return levelFor(a, Attended(c.Trigger), cp, time.Now()), nil
 }
 
-// watchLevel polls the conversation's level while the turn runs and sends each change, the newest replacing one not yet taken. A failed read keeps the level the turn has.
-func (e *Engine) watchLevel(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, cur runner.LevelChange, out chan runner.LevelChange) {
+// watchLevel polls the conversation's level while the turn runs and sends each change, the newest replacing one not yet taken; lvl is what the turn's approvals read. A failed read keeps the level the turn has.
+func (e *Engine) watchLevel(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, cur runner.LevelChange, lvl *currentLevel, out chan runner.LevelChange) {
 	t := time.NewTicker(levelPoll)
 	defer t.Stop()
 	attended := Attended(c.Trigger)
@@ -60,6 +60,7 @@ func (e *Engine) watchLevel(ctx context.Context, a *spec.Agent, c *store.Claimed
 				continue
 			}
 			cur = next
+			lvl.set(next.Level)
 			select {
 			case <-out:
 			default:
