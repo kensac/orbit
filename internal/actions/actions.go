@@ -27,6 +27,8 @@ import (
 type Type struct {
 	Name        string
 	Description string
+	// Brief, when set, is what a run with orbit's built-in skills is told in its place: the type in a line, the skill named in its description holding the rest.
+	Brief string
 	// ParamsSchema is the JSON Schema of params, shown to the agent and
 	// enforced before the action is stored.
 	ParamsSchema map[string]any
@@ -35,7 +37,7 @@ type Type struct {
 
 // Catalog returns the action types an agent's spec enables (rule auto or
 // approve), in a stable order. Denied types are not offered at all.
-func Catalog(a *spec.Agent, d spec.Deployment) []Type {
+func Catalog(a *spec.Agent, d spec.Deployment, available ...[]store.Template) []Type {
 	var out []Type
 	if r := a.RuleFor("notify"); r != spec.RuleDeny {
 		out = append(out, notifyType(a))
@@ -43,9 +45,21 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 	if r := a.RuleFor("continue"); r != spec.RuleDeny {
 		out = append(out, continueType())
 	}
-	if targets := a.DelegateTargets(); len(targets) > 0 {
+	targets := a.DelegateTargets()
+	var templates []store.Template
+	if len(available) > 0 {
+		for _, tpl := range available[0] {
+			if tpl.Status != "active" {
+				continue
+			}
+			if slices.Contains(a.DelegateTemplateTargets(), "*") || slices.Contains(a.DelegateTemplateTargets(), tpl.Name) {
+				templates = append(templates, tpl)
+			}
+		}
+	}
+	if len(targets) > 0 || len(templates) > 0 {
 		if a.RuleFor(DelegateType) != spec.RuleDeny {
-			out = append(out, delegateType(targets))
+			out = append(out, delegateType(targets, templates, a.Connectors))
 		}
 		if a.RuleFor(TaskMessageType) != spec.RuleDeny {
 			out = append(out, taskMessageType())
@@ -318,7 +332,8 @@ const MaxContinueChain = 12
 
 func continueType() Type {
 	return Type{
-		Name: "continue",
+		Name:  "continue",
+		Brief: "Be woken again after_minutes from now, with note as what your next run is told (the orbit-continuations skill says how).",
 		Description: fmt.Sprintf("Be woken again after_minutes from now (%d to %d) to carry on a longer task. "+
 			"note is what your next run is told: what you were doing and what to do next. "+
 			"At most %d continuations in a row; one waits at a time.",
@@ -395,11 +410,12 @@ type Executor struct {
 // and run that proposed it.
 type Call struct {
 	// ID is the action's own id.
-	ID     string
-	Agent  string
-	RunID  string
-	Type   string
-	Params json.RawMessage
+	ID             string
+	Agent          string
+	RunID          string
+	ConversationID string
+	Type           string
+	Params         json.RawMessage
 	// Workspace is the run's conversation's workspace, for github:clone
 	// and github:pr; nil for an agent without one.
 	Workspace Workspace

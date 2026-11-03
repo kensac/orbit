@@ -157,7 +157,23 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 	snap := e.Current()
 	start := time.Now()
 	log := e.Log.With("run", c.ID, "agent", c.Agent)
+	var task *store.Task
+	if c.Trigger == store.TriggerTask {
+		var err error
+		task, err = e.Store.TaskForConversation(ctx, c.ConversationID)
+		if err != nil {
+			return e.fail(ctx, snap, nil, c, start, err, nil)
+		}
+	}
 	a, ok := snap.Config.Agents[c.Agent]
+	if !ok && task != nil && task.Template != nil {
+		var err error
+		a, err = e.taskWorkerAgent(ctx, snap, c, task)
+		if err != nil {
+			return e.fail(ctx, snap, nil, c, start, err, nil)
+		}
+		ok = true
+	}
 	if !ok {
 		return e.fail(ctx, snap, nil, c, start, fmt.Errorf("agent %q is no longer configured", c.Agent), nil)
 	}
@@ -614,7 +630,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 	}
 
-	types := actions.Catalog(a, snap.Config.Deployment)
+	types, err := e.actionCatalog(ctx, a, snap.Config.Deployment)
+	if err != nil {
+		return nil, nil, err
+	}
 	schema := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, true)
 	envelope := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, false)
 	schema, envelope = withEntries(schema, true), withEntries(envelope, false)
@@ -655,7 +674,12 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	} else if len(a.Hooks) > 0 {
 		emit("orbit.hooks_skipped", map[string]any{"reason": "the agent's hooks need claude-code with orbit's harness binary"})
 	}
-	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, hr != nil && !chat, inputs)
+	withTool := hr != nil && !chat
+	var builtin []store.Skill
+	if withTool {
+		builtin = builtinSkills(types)
+	}
+	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, withTool, builtin, inputs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -686,13 +710,14 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached,
 				WorkspaceChanges: wsNote}, fresh: wsFresh,
 			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, steer: &st.steer, rec: rec, instructor: st.instructor,
-			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny), plugin: skillsPlugin, repos: repoRun, connectors: conns, pinned: pinned, skills: skills, record: record})
+			extra: entriesContract(topics, false) + skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny), plugin: skillsPlugin, repos: repoRun, connectors: conns, pinned: pinned, skills: skills, record: record})
 		if out != nil {
 			out.connectorCalls = gw.pendingCalls()
 		}
 		return out, res, st.sawStall(err)
 	}
-	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
+	via := len(builtin) > 0
+	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr, via)
 	if tk != nil {
 		system += ticketContract(tk, planning)
 	}
@@ -702,7 +727,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if known != "" {
 		system += knownContract
 	}
-	system += entriesContract(topics)
+	system += entriesContract(topics, via)
 	system += skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny)
 	system += connSection
 	delegated, err := e.Store.ConversationTasks(ctx, c.ConversationID, c.ID)
@@ -852,7 +877,11 @@ func leafErrors(o *jsonschema.OutputUnit) string {
 
 func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, start time.Time, out *Output, res *runner.Result) error {
 	types := map[string]actions.Type{}
-	for _, t := range actions.Catalog(a, snap.Config.Deployment) {
+	catalog, err := e.actionCatalog(ctx, a, snap.Config.Deployment)
+	if err != nil {
+		return err
+	}
+	for _, t := range catalog {
 		types[t.Name] = t
 	}
 	o := store.Outcome{Questions: e.outcomeQuestions(c, out.Questions)}
@@ -1304,7 +1333,11 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 		if err != nil || act == nil {
 			return err
 		}
-		call := actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)}
+		conversationID, err := e.Store.RunConversation(ctx, act.RunID)
+		if err != nil {
+			return err
+		}
+		call := actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, ConversationID: conversationID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)}
 		var after func()
 		if a, ok := snap.Config.Agents[act.Agent]; ok && a.Chat {
 			call.Workspace, after = e.storedWorkspace(ctx, act.RunID)

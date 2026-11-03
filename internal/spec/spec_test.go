@@ -467,11 +467,25 @@ func TestDelegatesAreResolvedAndChecked(t *testing.T) {
 		t.Fatal("task types follow the delegate rule unless named")
 	}
 	_, err = Load(write(t, map[string]string{
+		"orbit.yaml":                  base,
+		"agents/template-parent.yaml": "name: template-parent\ncharter: x\ndelegate_templates: [weekly-report]\nactions: {delegate: approve}\n",
+	}))
+	if err != nil {
+		t.Fatalf("template-only delegate target: %v", err)
+	}
+	_, err = Load(write(t, map[string]string{
+		"orbit.yaml":                  base,
+		"agents/template-parent.yaml": "name: template-parent\ncharter: x\ndelegate_templates: [weekly-report, '*']\nactions: {delegate: approve}\n",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "already names every active template") {
+		t.Fatalf("wildcard with a specific template: %v", err)
+	}
+	_, err = Load(write(t, map[string]string{
 		"orbit.yaml":       base,
 		"agents/boss.yaml": "name: boss\ncharter: x\ndelegates: [nobody]\n",
 		"agents/two.yaml":  "name: two\ncharter: x\nactions: {delegate: auto}\n",
 	}))
-	for _, want := range []string{`delegates: "nobody" is not a configured agent`, `agent "two": action "delegate": needs delegates`} {
+	for _, want := range []string{`delegates: "nobody" is not a configured agent`, `agent "two": action "delegate": needs delegates or delegate_templates`} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("error %v lacks %q", err, want)
 		}

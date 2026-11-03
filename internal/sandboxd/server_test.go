@@ -53,8 +53,9 @@ type fakeDocker struct {
 	sessions map[string]bool
 	exits    map[string]int
 	// home, when set, is the HOME a box's fixed scripts (sh -c with a
-	// $0 of runScripts) really run against on this machine.
-	home string
+	// $0 of runScripts) really run against on this machine; bin, when set,
+	// is put first on their PATH (fake curl, claude).
+	home, bin string
 }
 
 // runScripts are the $0 names of a box's fixed scripts the fake runs.
@@ -380,7 +381,11 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 // fake's home and the exec's environment is added.
 func (f *fakeDocker) runScript(t *testing.T, e execCreate, stdin []byte) (stdout, stderr []byte, code int) {
 	cmd := exec.Command(e.Cmd[0], e.Cmd[1:]...)
-	cmd.Env = append([]string{"HOME=" + f.home, "PATH=" + os.Getenv("PATH")}, e.Env...)
+	path := os.Getenv("PATH")
+	if f.bin != "" {
+		path = f.bin + string(os.PathListSeparator) + path
+	}
+	cmd.Env = append([]string{"HOME=" + f.home, "PATH=" + path}, e.Env...)
 	cmd.Stdin = bytes.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb

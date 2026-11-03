@@ -88,12 +88,15 @@ func FromEnv(s *store.Store, log *slog.Logger) (*Sender, error) {
 }
 
 // Link is where a person acts on a row: its conversation, at the action or
-// question when there is one (a fragment the app scrolls to).
+// question or permission request when there is one (a fragment the app
+// scrolls to).
 func Link(base string, a store.Attention) string {
 	l := base + "/c/" + a.ConversationID
 	switch {
 	case a.ActionID != nil: // an approval, or a delegated task's decision
 		l += "#action-" + *a.ActionID
+	case a.ApprovalID != nil: // a CLI permission request
+		l += "#approval-" + *a.ApprovalID
 	case a.Kind == store.AttentionQuestion && a.MessageID != nil:
 		l += "#message-" + *a.MessageID
 	}

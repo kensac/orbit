@@ -49,6 +49,7 @@ import (
 
 	"github.com/kensac/orbit/internal/api"
 	"github.com/kensac/orbit/internal/auth"
+	"github.com/kensac/orbit/internal/boxkeep"
 	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/harness"
@@ -100,6 +101,8 @@ func main() {
 		err = drainCmd()
 	case "import":
 		err = importCmd(ctx, os.Args[2:])
+	case "pack":
+		err = packCmd(ctx, os.Args[2:])
 	case "sync":
 		err = syncCmd(ctx, os.Args[2:], os.Stdout)
 	case "mcp", "hook":
@@ -168,7 +171,7 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | restore-check [--expect file] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills|claude-sessions <dir> | sync claude | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | restore-check [--expect file] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills|claude-sessions <dir> | pack <agent> --output <new-dir> | pack inspect <dir> | sync claude | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
 	os.Exit(2)
 }
 
@@ -500,6 +503,10 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		if err != nil {
 			return err
 		}
+		pollUsage, err := boxkeep.ParsePollUsage(os.Getenv("ORBIT_ACCOUNT_USAGE_POLL"))
+		if err != nil {
+			return err
+		}
 		if pusher == nil {
 			log.Info("ORBIT_VAPID_* not set: Web Push is off (the inbox still lists what needs attention)")
 		}
@@ -562,6 +569,18 @@ func serve(ctx context.Context, log *slog.Logger) error {
 				Store: s, Config: func() *spec.Config { return eng.Current().Config }, Env: os.LookupEnv,
 				Client: &http.Client{Timeout: 2 * time.Minute}, Revision: revision, Log: log.With("component", "tickets"),
 				Approval: eng.NotifyApproval, Wake: nudge, Restack: eng.Builder.Restack, Checkouts: checkouts,
+			}).Run(claimCtx)
+		}()
+
+		// The box keeper polls accounts' usage when that is on; it stops
+		// with claims, so a draining instance leaves the boxes to the
+		// ready one.
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			(&boxkeep.Keeper{
+				Store: s, Boxes: apiSrv.Boxes, PollUsage: pollUsage, Log: log.With("component", "boxes"),
+				Agents: func() []string { return boxkeep.BoxAgents(eng.Current().Config) },
 			}).Run(claimCtx)
 		}()
 
