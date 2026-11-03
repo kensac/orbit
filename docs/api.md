@@ -541,6 +541,7 @@ files. This is not a full run replay: behavior that depends on sources,
 memory, messages, tools, sessions or hooks is absent. Requests have at most
 32 cases, 8 MiB per input, 32 MiB total input and 512 KiB per output. Each
 case runs under the agent's configured timeout.
+`POST /agents/{grader}/grade` accepts `{"target_agent":"finance","cases":[{"name":"case","rubric":"...","output":{...}}]}` for model-based semantic checks. The grader must be an enabled, separately configured agent using a different runner configuration from the replay target. The backend receives only the rubric and candidate output, without either agent's charter, skills, sources, connectors, hooks, sessions, custom tools or actions. Claude Code can read the private temporary files holding this input through its built-in read-only file tools. The response is `{"grades":[{"name":"case","passed":true,"reason":"...","cost_usd":0.01}]}`. Grading creates no stored runs or artifacts. There are at most 32 cases, a 4 KiB rubric and a 512 KiB output per case. Reasons are limited to 512 characters.
 `GET /agents/{name}/messages` lists the default conversation's messages.
 
 ## Streaming a run
@@ -897,7 +898,7 @@ An agent hands tasks to other agents or instantiates a fresh worker from an acti
 
 ## Workspace
 
-**Partly built.** The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). Built: finding a workspace, snapshot reads (W1), snapshot writes (W3), history, the change stream and per-reply changes (W6), review comments (W7), the audit, and terminals in a box. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
+**Partly built.** The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). Built: finding a workspace, snapshot reads (W1), workspace search (#147), snapshot writes (W3), history, the change stream and per-reply changes (W6), review comments (W7), the audit, and terminals in a box. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
 
 A workspace is a file tree a person and an agent share. Routes take the authentik token as above; writes, trash, uploads, terminals and git writes also require membership of `ORBIT_WORKSPACE_GROUP` (default `ORBIT_OIDC_GROUP`; `403`, `check: "group"`). Errors carry a `check` beside `error`, as authentication errors do:
 
@@ -973,6 +974,17 @@ Reads are limited to 100 requests a second per person per workspace (per orbit i
 On the snapshot backend a write, mkdir, rename, trash, restore or upload stores a new snapshot (`source: person`, `run_id` null), made from the newest and applied again from the newest when another write got in first; it is refused with `busy` while a run of the conversation is running, since the run's own snapshot would follow it. `as_of` moves to it. The whole snapshot holds at most 256 MiB (`too_large`), so a signed upload larger than that is refused when it is asked for. Writes are limited to 20 a second per person per workspace (per instance), as reads are. A request's `X-Request-Id` (up to 128 printable characters; one is made when it has none) is echoed in the response and recorded with its events.
 
 The next turn of the conversation's agent is told, by code, which files the person changed since the agent last saw the workspace (added, modified, removed, renamed; at most 100 lines), and its working directory has the person's version: a live session process, whose sandbox holds the old copy, is not reused, and the session resumes in a new one started from the workspace as it is.
+
+### Search
+
+`GET /workspaces/{id}/search?q=&path=&regex=&case=&limit=&ref=` finds text in the workspace's files, line by line: `{"matches": [{"path": "src/a.go", "line": 3, "column": 6, "end_column": 12, "preview": "func Needle() {}", "preview_column": 1}], "truncated": false, "files_searched": 4}`.
+
+- `q` is the text (1 to 256 bytes), literal unless `regex=1`, which takes Go's RE2 syntax (linear in the text, so no pattern can run away; an invalid one is `request`). Matching ignores case unless `case=1`. A match never spans lines; an empty match is skipped.
+- `path` narrows to a directory or one file (default the root); `ref` searches a past version, as for `GET /files`. Files are searched in tree order (directories first, then by name); a binary file, one over the editor's 2 MiB, and what `.gitignore` ignores (unless `path` names it) are skipped, and orbit's own state is never in the tree. `files_searched` counts the files read.
+- `line` is 1-based; `column` and `end_column` are 1-based in UTF-16 code units (as a JavaScript string counts, where an editor puts a cursor), `end_column` just past the match. `preview` is the line (without its line ending), cut to at most 200 bytes around the match on character boundaries; `preview_column` is where it starts in the line.
+- `limit` defaults to 200 matches, at most 1000. A search stops at `limit` or after 5 seconds and returns what it found with `truncated` true.
+
+A search is a read: it spends one of the reads the rate allows, and, like every read, is not in the audit.
 
 ### History
 
