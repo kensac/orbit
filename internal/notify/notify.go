@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/telegram"
 )
 
 // Priority is how urgently a person should see a message.
@@ -51,6 +52,22 @@ type Message struct {
 	ReplyTo, MessageID, InReplyTo, References, Subject string
 	// To, when set, replaces the channel's recipients (smtp only): a reply to a mail goes to its sender.
 	To []string `json:",omitempty"`
+	// Telegram routing is trusted context from an inbound update or the run that produced this notification.
+	ConversationID  string `json:"conversation_id,omitempty"`
+	TelegramChatID  string `json:"telegram_chat_id,omitempty"`
+	TelegramReplyTo int64  `json:"telegram_reply_to,omitempty"`
+}
+
+// Receipt is the external message identity a reply may reference.
+type Receipt struct {
+	Channel   string
+	ChatID    string
+	MessageID int64
+}
+
+// ReceiptChannel reports the provider message id after a successful send.
+type ReceiptChannel interface {
+	SendWithReceipt(context.Context, Message) (Receipt, error)
 }
 
 // Channel delivers messages.
@@ -108,10 +125,55 @@ func New(name string, c spec.Channel, env Env, client *http.Client) (Channel, er
 			h[k] = rv
 		}
 		return &webhook{url: c.URL, headers: h, client: client}, nil
+	case "telegram":
+		token, err := need("token_env", c.TokenEnv)
+		if err != nil {
+			return nil, err
+		}
+		bot, err := telegram.NewClient(token, client)
+		if err != nil {
+			return nil, fmt.Errorf("channel %q: %w", name, err)
+		}
+		return &telegramChannel{name: name, chatID: c.ChatID, bot: bot}, nil
 	case "log":
 		return logChannel{name: name}, nil
 	}
 	return nil, fmt.Errorf("channel %q: unknown kind %q", name, c.Kind)
+}
+
+// ---------------------------------------------------------------- telegram
+
+type telegramChannel struct {
+	name   string
+	chatID string
+	bot    *telegram.Client
+}
+
+func (t *telegramChannel) Send(ctx context.Context, m Message) error {
+	_, err := t.SendWithReceipt(ctx, m)
+	return err
+}
+
+func (t *telegramChannel) SendWithReceipt(ctx context.Context, m Message) (Receipt, error) {
+	chatID := m.TelegramChatID
+	if chatID == "" {
+		chatID = t.chatID
+	}
+	parts := make([]string, 0, 3)
+	if title := strings.TrimSpace(m.Title); title != "" {
+		parts = append(parts, title)
+	}
+	if body := strings.TrimSpace(m.Body); body != "" {
+		parts = append(parts, body)
+	}
+	if m.Link != "" {
+		parts = append(parts, m.Link)
+	}
+	ref, err := t.bot.SendMessage(ctx, chatID, strings.Join(parts, "\n\n"), m.TelegramReplyTo)
+	if err != nil {
+		return Receipt{}, err
+	}
+	return Receipt{Channel: t.name, ChatID: ref.ChatID, MessageID: ref.MessageID}, nil
 }
 
 // ---------------------------------------------------------------- ntfy
