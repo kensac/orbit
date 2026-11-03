@@ -488,7 +488,7 @@ func readPackFile(root, p string) ([]byte, error) {
 }
 func walkPack(root string) ([]string, error) {
 	var out []string
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, e error) error {
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, e error) error { //nolint:gosec // root is operator-selected; WalkDir does not follow symlinks and file reads are separately checked.
 		if e != nil {
 			return e
 		}
