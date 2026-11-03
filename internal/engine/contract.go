@@ -211,7 +211,9 @@ func OutputSchema(types []actions.Type, memoryMax int, strictActions bool) json.
 
 // systemPrompt is the contract every backend receives, separate from the
 // agent's own charter.
-func systemPrompt(a *spec.Agent, types []actions.Type, inputs []runner.Input, cliFiles bool, hr *runner.Harness) string {
+//
+// via says the run has orbit's built-in skills (builtinSkills), so the how-to of orbit's tools, entries and actions is theirs and the contract keeps the rules.
+func systemPrompt(a *spec.Agent, types []actions.Type, inputs []runner.Input, cliFiles bool, hr *runner.Harness, via bool) string {
 	var b strings.Builder
 	b.WriteString(`You are an orbit agent: a standing assistant that wakes on a schedule or when its person writes to it, does one piece of work, and returns a structured result. You do not talk to the person directly during a run. Everything you want them to see goes in your result.
 
@@ -234,9 +236,17 @@ How your result is used:
 	if len(types) == 0 {
 		b.WriteString(" This agent has no actions enabled; return an empty list.\n")
 	} else {
-		b.WriteString(" Each is checked against the person's rules: some run automatically, some wait for approval, and the harness, not you, carries them out. Explain each in reason.\n\nAvailable actions:\n")
+		b.WriteString(" Each is checked against the person's rules: some run automatically, some wait for approval, and the harness, not you, carries them out. Explain each in reason.")
+		if via {
+			b.WriteString(" The orbit-actions skill says how they work.")
+		}
+		b.WriteString("\n\nAvailable actions:\n")
 		for _, t := range types {
-			fmt.Fprintf(&b, "- %s (%s): %s\n", t.Name, a.RuleFor(t.Name), t.Description)
+			desc := t.Description
+			if via && t.Brief != "" {
+				desc = t.Brief
+			}
+			fmt.Fprintf(&b, "- %s (%s): %s\n", t.Name, a.RuleFor(t.Name), desc)
 		}
 	}
 	b.WriteString(`
@@ -252,8 +262,13 @@ Rules:
 		}
 	}
 	if hr != nil {
-		fmt.Fprintf(&b, "- Never add, count or compute figures yourself. Use orbit's tools: %s filters, groups and sums the records of a JSON input exactly; %s does exact arithmetic. Every number you report should come from your inputs or from one of their results.\n",
-			harness.ToolQuery, harness.ToolCalc)
+		if via {
+			fmt.Fprintf(&b, "- Never add, count or compute figures yourself: every number you report comes from your inputs or from %s and %s (the orbit-query and orbit-calc skills say how).\n",
+				harness.ToolQuery, harness.ToolCalc)
+		} else {
+			fmt.Fprintf(&b, "- Never add, count or compute figures yourself. Use orbit's tools: %s filters, groups and sums the records of a JSON input exactly; %s does exact arithmetic. Every number you report should come from your inputs or from one of their results.\n",
+				harness.ToolQuery, harness.ToolCalc)
+		}
 		if a.Verifies("figures") {
 			b.WriteString("- Every $ amount in your summary and report is checked against your inputs and those tools' results; one that cannot be traced is sent back to you.\n")
 		}
