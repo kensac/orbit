@@ -113,6 +113,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/conversations", s.createConversation)
 	api("GET /api/v1/conversations/{id}", s.getConversation)
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
+	api("POST /api/v1/conversations/{id}/fork", s.forkConversation)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
 	api("POST /api/v1/conversations/{id}/read", s.markRead)
 	api("GET /api/v1/board", s.board)
