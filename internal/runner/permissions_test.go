@@ -265,8 +265,8 @@ func TestTheLevelIsPutBackWhenAPlanIsApproved(t *testing.T) {
 		t.Fatalf("log = %q: the level waits for the plan, then is applied", log)
 	}
 	got := evs.of("orbit.permissions")
-	if len(got) != 3 || got[1]["when"] != "live" || got[1]["applied"] != "edits" || got[2]["when"] != "plan" || got[2]["applied"] != "ask" {
-		t.Fatalf("orbit.permissions = %v", got)
+	if len(got) != 2 || got[1]["when"] != "live" || got[1]["applied"] != "ask" {
+		t.Fatalf("orbit.permissions = %v: the level changed during planning must apply after ExitPlanMode's result", got)
 	}
 }
 
