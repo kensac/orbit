@@ -22,6 +22,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `webhook_secrets` | map of variable to webhook secret | none | The signing secrets inbound webhooks are verified with, each bound to the agents whose webhook triggers may name it (below). |
 | `usage_poll` | map: `every` (default 5m, at least 1m), `token_env` (default `CLAUDE_CODE_OAUTH_TOKEN`) | absent | Poll the subscription's usage windows (configuration.md, Subscription usage and low-priority agents). |
 | `defer_low_priority` | bool | `false` | Hold `priority: low` agents' scheduled runs while a usage window is above `usage.DeferLowAbove`. |
+| `box` | map | absent | Literal MCP servers orbit mirrors into every account in a workstation box (below). |
 | `board` | map | absent | Tunes `GET /board` (below). |
 
 ### `defaults`
@@ -134,6 +135,12 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 |---|---|---|---|
 | `sandboxd` | `host:port` or `unix:/path` | `build.sandboxd` | The sandbox service for chat agents with `sandbox`. |
 | `token_env` | env var | `ORBIT_SANDBOX_TOKEN` | sandboxd's bearer token. |
+
+### `box`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `mcp_servers` | map of name to server JSON config | none | User MCP servers orbit adds to each Claude account with `claude mcp add-json -s user`; orbit removes only servers it previously managed. Names and config size are bounded, only `stdio`, `http` and `sse` are accepted, and values must be literal with no `${...}` substitutions. Keep credentials out of this configuration. |
 
 ### `credentials.<VAR>`
 

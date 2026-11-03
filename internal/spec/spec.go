@@ -27,6 +27,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kensac/orbit/internal/rrule"
+	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/transforms"
 )
 
@@ -80,6 +81,8 @@ type Deployment struct {
 	DeferLowPriority bool `yaml:"defer_low_priority,omitempty" json:"defer_low_priority,omitempty"`
 	// Credentials are the variables a source or an endpoint's headers may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
 	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
+	// Box configures the MCP servers orbit mirrors into every Claude account in agents’ boxes.
+	Box *BoxConfig `yaml:"box,omitempty" json:"box,omitempty"`
 	// Connectors are MCP servers agents may be given (connectors.go); orbit calls them on the agents' behalf.
 	Connectors map[string]Connector `yaml:"connectors,omitempty" json:"connectors,omitempty"`
 	// Expires records when a credential orbit cannot inspect stops working (the Claude Code subscription token lasts a year), keyed by its variable, as YYYY-MM-DD (expires.go). It only feeds orbit_credential_expiry_timestamp_seconds, so an alert fires before the date.
@@ -103,6 +106,32 @@ func (d Deployment) BoardIdle() time.Duration {
 		return 0
 	}
 	return time.Duration(d.Board.Idle)
+}
+
+// BoxConfig is what orbit mirrors into every agent's box.
+type BoxConfig struct {
+	// MCPServers are user MCP servers orbit adds to every Claude account in
+	// a box (`claude mcp add-json -s user`), by name, each a server's JSON
+	// config with literal values: it is in git and in each account's
+	// .claude.json, so it carries no secret.
+	MCPServers map[string]map[string]any `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
+}
+
+// MCPJSON is the managed servers as JSON, by name; nil without any.
+func (b *BoxConfig) MCPJSON() map[string]json.RawMessage {
+	if b == nil || len(b.MCPServers) == 0 {
+		return nil
+	}
+	out := make(map[string]json.RawMessage, len(b.MCPServers))
+	for n, c := range b.MCPServers {
+		raw, err := json.Marshal(c)
+		if err != nil {
+			// Validate refused it at load.
+			continue
+		}
+		out[n] = raw
+	}
+	return out
 }
 
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
@@ -1101,6 +1130,20 @@ func (c *Config) Validate() error {
 		}
 		if r.Kind == "anthropic" && r.APIKeyEnv == "" {
 			errs = append(errs, fmt.Errorf("runner %q: anthropic needs api_key_env", name))
+		}
+	}
+	if d.Box != nil {
+		raw := make(map[string]json.RawMessage, len(d.Box.MCPServers))
+		for n, c := range d.Box.MCPServers {
+			b, err := json.Marshal(c)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("box.mcp_servers.%s: %w", n, err))
+				continue
+			}
+			raw[n] = b
+		}
+		if err := sandbox.ValidateMCPServers(raw); err != nil {
+			errs = append(errs, fmt.Errorf("box.mcp_servers: %w", err))
 		}
 	}
 	if g := d.GitHub; g != nil {

@@ -56,12 +56,14 @@ type fakeDocker struct {
 	// home, when set, is the HOME a box's fixed scripts (sh -c with a
 	// $0 of runScripts) really run against on this machine; bin, when set,
 	// is put first on their PATH (fake curl, claude); run replaces the
-	// box's /run/orbit in their text.
+	// box's /run/orbit in their text; env is added to their environment
+	// (what a tmux server could have inherited).
 	home, bin, run string
+	env            []string
 }
 
 // runScripts are the $0 names of a box's fixed scripts the fake runs.
-var runScripts = map[string]bool{"orbit-account": true, "orbit-gh": true}
+var runScripts = map[string]bool{"orbit-account": true, "orbit-gh": true, "orbit-skills": true}
 
 type fakeContainer struct {
 	spec    containerCreate
@@ -391,7 +393,7 @@ func (f *fakeDocker) runScript(t *testing.T, e execCreate, stdin []byte) (stdout
 	if f.bin != "" {
 		path = f.bin + string(os.PathListSeparator) + path
 	}
-	cmd.Env = append([]string{"HOME=" + f.home, "PATH=" + path}, e.Env...)
+	cmd.Env = append(append([]string{"HOME=" + f.home, "PATH=" + path}, f.env...), e.Env...)
 	cmd.Stdin = bytes.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
