@@ -67,9 +67,9 @@ func (a *importAPI) Request(_ context.Context, method, path string, body io.Read
 func portableTestBundle(t *testing.T) string {
 	t.Helper()
 	fetch := bundleFetcher{
-		"agents/source":                `{"agent":{"name":"source","spec":{}}}`,
-		"agents/source/memory?limit=1": `{"versions":[{"content":"memory text"}]}`,
-		"agents/source/context":        `{"topics":[{"name":"finance","from":["api"]}],"skills":[]}`,
+		"agents/source":                                         `{"agent":{"name":"source","spec":{}}}`,
+		"agents/source/memory?limit=1":                          `{"versions":[{"content":"memory text"}]}`,
+		"agents/source/context":                                 `{"topics":[{"name":"finance","from":["api"]}],"skills":[]}`,
 		"memory/entries?limit=1000&scope=profile&status=active": `{"entries":[{"scope":"profile","key":"pref","type":"user","title":"Preference","body":"tea"}]}`,
 		"memory/entries?agent=source&limit=1000&status=active":  `{"entries":[{"scope":"agent","agent":"source","key":"local","type":"project","title":"Local","body":"source-only"}]}`,
 		"memory/entries?limit=1000&status=active&topic=finance": `{"entries":[{"scope":"topic","topic":"finance","key":"topic","type":"reference","title":"Topic","body":"fact"}]}`,
