@@ -484,14 +484,21 @@ type TaskMessage struct {
 	Body    string
 	// ReplyTo, when set, is the task's question it answers.
 	ReplyTo string
+	// Steerable reports whether an agent's runs can take a message mid-turn (a chat agent), as PostMessage.Steerable does for a person's.
+	Steerable func(agent string) bool
 }
 
-// MessageTask writes a parent's message into a task's conversation and,
-// unless a run there is already queued (it will read the message), queues
-// one to read it. A done task reopens. It returns the message and the run
-// that reads it.
-func (s *Store) MessageTask(ctx context.Context, m TaskMessage) (msgID, runID string, err error) {
-	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+// TaskMessaged is what MessageTask did: the message, the run that reads it, and how (DeliveredSteered into the task's running run, or DeliveredQueued for the next).
+type TaskMessaged struct {
+	MessageID string `json:"message_id"`
+	RunID     string `json:"run_id,omitempty"`
+	Delivered string `json:"delivered"`
+}
+
+// MessageTask writes a parent's message into a task's conversation. While a run of a chat agent works there (steerTarget: one nobody asked to stop), the message is a steer, folded into that run's turn (docs/ARCHITECTURE.md, Steering a running reply), and no run is queued. Otherwise, unless a run there is already queued (it will read the message), it queues one to read it. A done task reopens.
+func (s *Store) MessageTask(ctx context.Context, m TaskMessage) (TaskMessaged, error) {
+	out := TaskMessaged{Delivered: DeliveredQueued}
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var agent, parent, conv, status string
 		err := tx.QueryRow(ctx, `SELECT t.agent, t.parent_agent, t.conversation_id::text, t.status FROM tasks t
 			JOIN runs r ON r.id = $2 AND r.conversation_id = t.parent_conversation_id
@@ -517,27 +524,44 @@ func (s *Store) MessageTask(ctx context.Context, m TaskMessage) (msgID, runID st
 			}
 			replyTo = m.ReplyTo
 		}
-		if err := tx.QueryRow(ctx, `INSERT INTO messages (agent, direction, body, author, reply_to, conversation_id, created_at)
-			VALUES ($1, 'to_agent', $2, $3, $4, $5, clock_timestamp()) RETURNING id::text`,
-			agent, m.Body, AgentAuthorPrefix+parent, replyTo, conv).Scan(&msgID); err != nil {
+		delivery := DeliveryQueue
+		if status != TaskWaiting && status != TaskBlocked && m.Steerable != nil && m.Steerable(agent) {
+			running, err := steerTarget(ctx, tx, conv)
+			if err != nil {
+				return err
+			}
+			if running != "" {
+				out.Delivered, out.RunID, delivery = DeliveredSteered, running, DeliverySteer
+			}
+		}
+		// A queued message is the column's default, written as PostMessage writes one.
+		insert := `INSERT INTO messages (agent, direction, body, author, reply_to, conversation_id, created_at)
+			VALUES ($1, 'to_agent', $2, $3, $4, $5, clock_timestamp()) RETURNING id::text`
+		if delivery == DeliverySteer {
+			insert = `INSERT INTO messages (agent, direction, body, author, reply_to, conversation_id, created_at, delivery)
+				VALUES ($1, 'to_agent', $2, $3, $4, $5, clock_timestamp(), 'steer') RETURNING id::text`
+		}
+		if err := tx.QueryRow(ctx, insert, agent, m.Body, AgentAuthorPrefix+parent, replyTo, conv).Scan(&out.MessageID); err != nil {
 			return err
 		}
 		if status == TaskWaiting || status == TaskBlocked {
 			// It has not started: its first run reads this with the brief.
 			return nil
 		}
-		err = tx.QueryRow(ctx, `SELECT id::text FROM runs WHERE conversation_id = $1 AND status = 'queued' LIMIT 1`, conv).Scan(&runID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			runID, err = enqueueTaskRun(ctx, tx, agent, conv, "")
-		}
-		if err != nil {
-			return err
+		if delivery == DeliveryQueue {
+			err = tx.QueryRow(ctx, `SELECT id::text FROM runs WHERE conversation_id = $1 AND status = 'queued' LIMIT 1`, conv).Scan(&out.RunID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				out.RunID, err = enqueueTaskRun(ctx, tx, agent, conv, "")
+			}
+			if err != nil {
+				return err
+			}
 		}
 		_, err = tx.Exec(ctx, `UPDATE tasks SET status = 'working', finished_at = NULL, report_due_at = NULL, updated_at = now()
 			WHERE id = $1`, m.TaskID)
 		return err
 	})
-	return msgID, runID, err
+	return out, err
 }
 
 // TaskRetry is a parent's retry of one of its failed tasks.

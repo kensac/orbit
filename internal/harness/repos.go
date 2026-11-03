@@ -121,9 +121,14 @@ const maxRepoResponse = 1 << 20
 
 // Repo asks the engine listening on socket to run one repository tool.
 func Repo(socket string, req RepoRequest) (string, error) {
+	return ask(socket, "the repository tools", req)
+}
+
+// ask sends one tool request to the engine's socket for what (named in the error when it is not there) and returns its answer.
+func ask(socket, what string, req RepoRequest) (string, error) {
 	conn, err := net.DialTimeout("unix", socket, repoTimeout)
 	if err != nil {
-		return "", fmt.Errorf("the repository tools are unavailable: %w", err)
+		return "", fmt.Errorf("%s are unavailable: %w", what, err)
 	}
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(repoTimeout))
