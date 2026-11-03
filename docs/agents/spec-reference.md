@@ -241,6 +241,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `timeout` | duration | `defaults.timeout` | How long one run may take. |
 | `budget` | map (below) | none | API-equivalent cost and runner-started run limits per local period; scheduled runs are skipped once a limit is reached. |
 | `quiet_hours` | map (below) | none | Suppress a scheduled run if its fire or claim time is within the local interval. |
+| `calendar_skip` | map (below) | none | Check a named read-only connector tool for an overlapping event before a scheduled run. |
 | `triggers` | list | none | When the agent wakes on its own (below). |
 | `sources` | list | none | Data orbit fetches before a run (below). |
 | `transforms` | list | none | Code over a source before the model sees it (below). |
@@ -478,6 +479,23 @@ Uses the agent's `timezone`. Start is inclusive and end is exclusive. If end is 
 |---|---|---|---|
 | `start` | local time `HH:MM` | required | The first minute in the quiet interval. |
 | `end` | local time `HH:MM` | required | The first minute outside the quiet interval; must differ from start. |
+
+### `calendar_skip`
+
+Uses the configured connector credential in orbit's process. Checked only on the first attempt of a scheduled run, after quiet hours, missed-fire and budget checks, before source fetches or a backend call. Manual, message, webhook and recovered attempts are unaffected. The connector must be named by the agent, and the selected tool must be read-only according to its MCP metadata and not listed in `write_tools`. A query failure or malformed response fails the run closed.
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `connector` | connector name | required | Configured connector to query. |
+| `tool` | tool name | required | Read-only event listing tool. |
+| `window_before` | duration | `0` | Time before the scheduled fire included in the overlap window. |
+| `window_after` | duration | required | Positive time after the scheduled fire; combined window may not exceed 24h. |
+| `arguments` | JSON object | required | Fixed tool arguments containing both `{{window_start}}` and `{{window_end}}`; these are rendered as UTC RFC3339 values. |
+| `events_path` | dotted JSON path | `items` | Array of event objects in the result. |
+| `start_path` | dotted JSON path | `start` | Event start, as RFC3339 text or a Google Calendar `dateTime`/`date` object. |
+| `end_path` | dotted JSON path | `end` | Event end, parsed the same way as the start. |
+
+An event overlaps when its start is before the window end and its end is after the window start. Canceled and transparent events are ignored. Event data stays in orbit and is reduced to a skip decision; the skip summary contains only the window.
 
 ### `learn`
 

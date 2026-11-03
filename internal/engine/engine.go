@@ -204,6 +204,11 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 	} else if sk != nil {
 		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
 	}
+	if sk, err := e.calendarSkip(ctx, snap, a, c); err != nil {
+		return e.fail(ctx, snap, a, c, start, fmt.Errorf("check calendar: %w", err), nil)
+	} else if sk != nil {
+		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
+	}
 	st := &attemptState{cancel: make(chan struct{})}
 	go e.watchCancel(actx, c, st, a.Chat, lose)
 	out, res, err := e.attempt(actx, snap, a, c, log, st)
