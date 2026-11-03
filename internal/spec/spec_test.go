@@ -287,9 +287,12 @@ func TestSessionSpec(t *testing.T) {
 	if cfg.Agents["a"].RuleFor("continue") != RuleApprove {
 		t.Fatal("continue is an action type with a rule")
 	}
+	if _, err := load(base, "session: {resume: true, idle: 24h, live: 24h}\n"); err != nil {
+		t.Fatalf("the maximum live window should be accepted: %v", err)
+	}
 	for _, c := range []struct{ orbit, agent, want string }{
 		{base, "session: {resume: true, idle: 48h}\n", "session.idle"},
-		{base, "session: {resume: true, idle: 1h, live: 2h}\n", "session.live must be between"},
+		{base, "session: {resume: true, idle: 48h, live: 48h}\n", "session.live must be between"},
 		{base, "session: {resume: true, idle: 10m, live: 20m}\n", "must not exceed session.idle"},
 		{base, "session: {live: 5m}\n", "need resume: true"},
 		{"defaults: {runner: r, channels: [c]}\nrunners: {r: {kind: codex}}\nchannels: {c: {kind: log}}\n", "session: {resume: true}\n", "needs a claude-code runner"},
