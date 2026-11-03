@@ -106,6 +106,81 @@ func TestContainerSpecRuntime(t *testing.T) {
 	}
 }
 
+func TestExtensionProfileHasNoNetworkOrCredentialEnvironment(t *testing.T) {
+	cfg := testConfig()
+	cfg.ExtensionProfile = true
+	cfg.ExtensionMemoryBytes = ExtensionMemoryBytes
+	c := containerSpec(cfg, "extension-1", time.Unix(1_800_000_000, 0))
+	if !c.NetworkDisabled || c.HostConfig.NetworkMode != "none" || len(c.NetworkingConfig.EndpointsConfig) != 0 {
+		t.Fatalf("extension network is enabled: %+v", c)
+	}
+	if !reflect.DeepEqual(c.Env, []string{"HOME=/tmp", "TMPDIR=/tmp", "LANG=C.UTF-8"}) {
+		t.Fatalf("extension environment = %v", c.Env)
+	}
+	if c.HostConfig.Memory != ExtensionMemoryBytes || c.HostConfig.MemorySwap != ExtensionMemoryBytes || c.HostConfig.NanoCpus != ExtensionNanoCPUs || c.HostConfig.PidsLimit != ExtensionPids {
+		t.Fatalf("extension limits = %+v", c.HostConfig)
+	}
+	if c.HostConfig.Tmpfs["/work/out"] == "" || c.HostConfig.Tmpfs["/tmp"] == "" {
+		t.Fatalf("extension scratch limits missing: %v", c.HostConfig.Tmpfs)
+	}
+	if c.Labels[LabelProfile] != sandbox.ProfileExtension {
+		t.Fatalf("extension profile label = %v", c.Labels)
+	}
+	got, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state containerState
+	if err := json.Unmarshal(got, &state); err != nil {
+		t.Fatal(err)
+	}
+	state.ID = strings.Repeat("a", 64)
+	state.Config.User = user
+	state.Config.Labels = c.Labels
+	state.HostConfig.ReadonlyRootfs = true
+	state.HostConfig.CapDrop = []string{"ALL"}
+	state.HostConfig.SecurityOpt = []string{"no-new-privileges:true"}
+	state.HostConfig.NetworkMode = "none"
+	state.HostConfig.Tmpfs = c.HostConfig.Tmpfs
+	for destination := range c.HostConfig.Tmpfs {
+		state.Mounts = append(state.Mounts, mountState{Type: "tmpfs", Destination: destination})
+	}
+	state.HostConfig.IpcMode = "private"
+	state.HostConfig.Memory = ExtensionMemoryBytes
+	state.HostConfig.MemorySwap = ExtensionMemoryBytes
+	state.HostConfig.NanoCpus = ExtensionNanoCPUs
+	pids := int64(ExtensionPids)
+	state.HostConfig.PidsLimit = &pids
+	if err := verifyCreated(cfg, state); err != nil {
+		t.Fatalf("verify extension profile: %v", err)
+	}
+}
+
+func TestExtensionProfileAttachIsFixedAndCredentialFree(t *testing.T) {
+	c := goodState()
+	c.Config.Labels[LabelProfile] = sandbox.ProfileExtension
+	for _, tc := range []struct {
+		name string
+		argv []string
+		env  map[string]string
+		ok   bool
+	}{
+		{name: "package entrypoint", argv: []string{"/work/extension/bin/reducer"}, ok: true},
+		{name: "outside package", argv: []string{"/usr/bin/cat"}},
+		{name: "traversal", argv: []string{"/work/extension/../bin/reducer"}},
+		{name: "extra argument", argv: []string{"/work/extension/bin/reducer", "--unsafe"}},
+		{name: "environment", argv: []string{"/work/extension/bin/reducer"}, env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "token"}},
+		{name: "empty env map", argv: []string{"/work/extension/bin/reducer"}, env: map[string]string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateProfileAttach(c, sandbox.AttachRequest{Argv: tc.argv, Env: tc.env})
+			if (err == nil) != tc.ok {
+				t.Fatalf("validateProfileAttach() = %v, want ok=%v", err, tc.ok)
+			}
+		})
+	}
+}
+
 // TestSpecTakesNoCallerOptions holds the shape of the inputs: the create
 // spec is a function of sandboxd's config, a run id and the clock, and the
 // exec spec of an AttachRequest, whose only fields are argv and env.
@@ -151,6 +226,8 @@ func goodState() containerState {
 	c.HostConfig.NetworkMode = "orbit-sandbox"
 	c.HostConfig.IpcMode = "private"
 	c.HostConfig.Memory = MemoryBytes
+	c.HostConfig.MemorySwap = MemoryBytes
+	c.HostConfig.NanoCpus = NanoCPUs
 	p := int64(Pids)
 	c.HostConfig.PidsLimit = &p
 	c.Mounts = append(c.Mounts, mountState{Type: "volume", Destination: "/work"})

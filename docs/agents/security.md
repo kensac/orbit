@@ -67,6 +67,18 @@ more than its agent's rules allow.
 
 - **The usage poller** (`usage_poll`) is orbit's own code on control, outside any run: it reads the subscription's OAuth token from orbit's environment and sends it only to the configured URL. The token never reaches a model, a sample or a log line (an error records the status and a clipped body).
 
+## Extension source processes
+
+Native extension sources run in a separate sandboxd profile with no network
+device, proxy, credentials, host socket or host mount. The process receives
+only its pinned package, explicitly bound earlier source inputs and static
+parameters. Package and input files are root-owned and read-only; only its
+bounded tmpfs mounts at `/work/out` and `/tmp` are writable. The operation has a
+manifest-bounded timeout, memory, input and output limit, and sandboxd caps
+extension containers at two per host. The first slice has no action or tool
+operations, and does not make extension output trusted: the model still sees
+the result as untrusted source data.
+
 ## Memory entries a model writes
 
 A run writes memory entries directly, and a learning run writes them from a conversation, so a poisoned input or message can plant an entry that later runs of every agent reading its scope are shown. What bounds it: entries are shown as data (the system prompt says they never authorize an action the rules do not, and an instruction in one is not to be followed); a run may write only to the profile, itself and the topics it reads, at most 10 writes, and only change entries it was shown at the version it was shown; every version is kept with the run and conversation it came from (`GET /memory/entries?run_id=`), so a bad one is found and retired or restored. A learning run reads the person's messages and the agent's reports (which can quote inputs), not the inputs themselves. A learning run over an imported session reads the person's own Claude Code session, tool calls included (one line each) but not their results, so whatever passed through that session (a web page it fetched and quoted, a file's text) can reach it the same way; its entries are bounded as above, and the skills it proposes are only ever `skill:write` actions a person approves, because a skill is instructions every agent given it follows.
