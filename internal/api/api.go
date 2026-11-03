@@ -131,6 +131,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	mux.HandleFunc("PUT /api/v1/uploads/signed", s.signedUpload)
 	api("GET /api/v1/agents/{name}/memory", s.memoryHistory)
 	api("POST /api/v1/agents/{name}/runs", s.startRun)
+	api("POST /api/v1/agents/{name}/replay", s.replayEvaluation)
 	api("GET /api/v1/agents/{name}/messages", s.listMessages)
 	api("POST /api/v1/agents/{name}/messages", s.sendMessage)
 	api("GET /api/v1/runs", s.listRuns)

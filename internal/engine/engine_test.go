@@ -228,6 +228,90 @@ func claim(t *testing.T, e *engine.Engine, s *store.Store) *store.ClaimedRun {
 	return c
 }
 
+func TestEvaluationReplayUsesOnlyCurrentCharterAndInput(t *testing.T) {
+	fr := &fakeRunner{output: replayOutput}
+	e, s, _ := harness(t, fr)
+	_, _, err := s.PutSkill(ctx, store.SkillWrite{Name: "eval-guide", Create: true,
+		Content: "---\nname: eval-guide\ndescription: Evaluation guide\n---\n\nCurrent saved skill."},
+		store.SkillProvenance{Source: store.SkillByPerson})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Current().Config.Agents["finance"].Skills = []string{"eval-guide"}
+	var replaySkill string
+	var prompts []string
+	charter := e.Current().Config.Agents["finance"].Charter
+	fr.seen = func(req runner.Request) {
+		prompts = append(prompts, req.Prompt)
+		if req.SkillsPlugin != "" {
+			b, err := os.ReadFile(filepath.Join(req.SkillsPlugin, "skills", "eval-guide", "SKILL.md"))
+			if err != nil {
+				t.Error(err)
+			}
+			replaySkill = string(b)
+		}
+		if fr.calls == 1 {
+			updated := *e.Current().Config
+			agents := make(map[string]*spec.Agent, len(updated.Agents))
+			for name, agent := range updated.Agents {
+				copyAgent := *agent
+				agents[name] = &copyAgent
+			}
+			agents["finance"].Charter = "changed while replaying"
+			updated.Agents = agents
+			if err := e.SetConfig(&updated); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	before, err := s.ListRuns(ctx, store.RunFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := json.RawMessage(`{"records":[{"amount":12}]}`)
+	results, err := e.Replay(ctx, "finance", []engine.EvaluationCase{{Name: "first", Input: input}, {Name: "second", Input: input}})
+	if err != nil || len(results) != 2 || string(results[1].Output) != replayOutput || results[1].CostUSD == nil || *results[1].CostUSD != 0.25 {
+		t.Fatalf("replay = %+v, %v", results, err)
+	}
+	if fr.got.Prompt == "" || !strings.Contains(fr.got.Prompt, charter) || strings.Contains(fr.got.Prompt, "changed while replaying") {
+		t.Fatalf("prompt omitted current charter: %s", fr.got.Prompt)
+	}
+	if len(prompts) != 2 || !strings.Contains(prompts[1], charter) || strings.Contains(prompts[1], "changed while replaying") {
+		t.Fatalf("replay did not pin its configuration snapshot: %+v", prompts)
+	}
+	if len(fr.got.Inputs) != 1 || string(fr.got.Inputs[0].Content) != string(input) {
+		t.Fatalf("replay inputs = %+v", fr.got.Inputs)
+	}
+	if !strings.Contains(replaySkill, "Current saved skill.") {
+		t.Fatalf("replay omitted active skill: %q", replaySkill)
+	}
+	if len(fr.got.Tools) != 0 || fr.got.Harness != nil || fr.got.Session != nil || fr.got.Connectors != nil || fr.got.SkillsPlugin == "" {
+		t.Fatalf("replay received capabilities or state: %+v", fr.got)
+	}
+	after, err := s.ListRuns(ctx, store.RunFilter{})
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("replay persisted a run: before %d, after %d, err %v", len(before), len(after), err)
+	}
+}
+
+func TestEvaluationReplayRejectsInvalidInputBeforeBackend(t *testing.T) {
+	fr := &fakeRunner{output: replayOutput}
+	e, _, _ := harness(t, fr)
+	for _, input := range []json.RawMessage{nil, json.RawMessage(`not json`), json.RawMessage(strings.Repeat("x", engine.MaxEvaluationInput+1))} {
+		if _, err := e.Replay(ctx, "finance", []engine.EvaluationCase{{Name: "invalid", Input: input}}); err == nil {
+			t.Errorf("accepted input of %d bytes", len(input))
+		}
+	}
+	if _, err := e.Replay(ctx, "finance", []engine.EvaluationCase{{Name: "valid-first", Input: json.RawMessage(`{}`)}, {Name: "invalid-second", Input: json.RawMessage(`bad`)}}); err == nil {
+		t.Fatal("accepted a suite with an invalid later case")
+	}
+	if fr.calls != 0 {
+		t.Fatalf("backend called %d times for invalid inputs", fr.calls)
+	}
+}
+
+const replayOutput = `{"summary":"ok","report":"ok","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[]}`
+
 const goodOutput = `{
   "summary": "October spend was $5,914",
   "report": "Spend was fine.",
