@@ -172,7 +172,7 @@ readable. Changing an archived agent is `404`; a file or built-in agent is
 
 A database or built-in agent's spec may not have a `file` source, a `${VAR}` that is not in orbit.yaml's `credentials`, without a `sandbox`, a tool outside `Read`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task` and `TodoWrite`, a precheck or a `run` hook: each is a `400` naming it (docs/agents/configuration.md, Agents in the database).
 
-**Agents change agents.** An agent whose rules enable `agent:define` (the built-in `orbit` does, `auto`) proposes `{"spec": {...}}`: a whole agent, as `POST /agents` takes it, for a new agent or one already defined in the database or built in, itself included. Executed, it goes through the same validation and is stored as the next version with the run as `run_id`. A file agent cannot be changed this way (the action fails, naming why). A change that widens the agent compared with its current version (a tool, source, credential, delegate target or need it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily; for a new agent, any of these) is recorded with `rule: "approve"` and waits as `pending` for a person, whatever the agent's rule; one executing by rule that widens the agent as it is by then fails, naming what it widens.
+**Agents change agents.** An agent whose rules enable `agent:define` (the built-in `orbit` does, `auto`) proposes `{"spec": {...}}`: a whole agent, as `POST /agents` takes it, for a new agent or one already defined in the database or built in, itself included. Executed, it goes through the same validation and is stored as the next version with the run as `run_id`. A file agent cannot be changed this way (the action fails, naming why). A change that widens the agent compared with its current version (a tool, source, credential, delegate target or need it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily; for a new agent, any of these) is recorded with `rule: "approve"` and waits as `pending` for a person, whatever the agent's rule; one executing by rule that widens the agent as it is by then fails, naming what it widens. Its params may also carry `template` (`{"name", "version"}`), which a `template:create` proposal sets (Templates, below): where the spec came from, a record only.
 
 **Schedules by talking.** `schedule:add`, `schedule:pause`, `schedule:resume` and `schedule:remove` change one database or built-in agent's triggers as the next version (`change: "update"`, the run as `run_id`), and `run:now` starts a manual run (docs/agents/configuration.md, Changing schedules by talking). Times are the person's words, parsed by orbit in the agent's timezone. An executed one's `result`, and a pending one's `preview` (Actions, below), is:
 
@@ -266,6 +266,32 @@ characters (400 otherwise). The default conversation cannot be archived
 
 `POST /conversations/{id}/messages` takes and returns exactly what
 `POST /agents/{name}/messages` does (below), in that conversation.
+
+### Conversation permissions
+
+A conversation has a permission level for the runs its person's messages start (`trigger` `message`): one of `locked`, `ask`, `edits`, `auto`, `full`, narrowest first (docs/agents/configuration.md, Permissions), never wider than its agent's `ceiling`. Without one of its own it is at its agent's `level`. Every other run (schedule, manual, continue, task, delegation) is at the agent's level, or the conversation's when that is narrower: an unattended run never takes a raised level.
+
+`GET /conversations/{id}/permissions`
+
+```json
+{"permissions": {
+  "level": "edits", "source": "conversation",
+  "agent_level": "ask", "ceiling": "full",
+  "levels": ["locked", "ask", "edits", "auto", "full"],
+  "current": {"version": 3, "level": "edits", "set_by": "kanishk", "set_at": "...", "expires_at": "..."},
+  "history": [{"version": 3, "level": "edits", "set_by": "kanishk", "set_at": "...", "expires_at": "..."}]}}
+```
+
+- `level` is what the next run its person's message starts runs at; `source` is `conversation` when `current` sets it, else `agent` (no version, the newest is `level: ""`, or it expired).
+- `levels` are the levels a `PUT` may set: those up to `ceiling`. A report agent's is `["locked"]`.
+- `current` is the newest version, in force or not, `null` for none; `history` is every version, newest first, at most 50. A version is never changed: each `PUT` adds one. `level: ""` is a version that returned the conversation to its agent's own. `expires_at` is `null` for one that does not expire.
+
+`PUT /conversations/{id}/permissions` `{"level": "edits", "expires_in": "1h"}` adds a version and returns `200` with the same `{"permissions": ...}` (without `history`).
+
+- `level` is required: a level name, or `null` for the agent's own. One that is not a level, or above the agent's `ceiling`, is `400`.
+- `expires_in` (optional) is a duration (`30m`, `1h`, `24h`), at most `168h`; after it the conversation is at its agent's level again. Not allowed with `null` (`400`).
+- The person is the token's; only with the operator token, `"by"` names it (default `operator`).
+- A reply being written takes the change within 2 s: orbit moves its Claude Code process with `set_permission_mode`, without restarting it, so a lowering holds from the next tool call. Raising works the same way for a run its person's message started; an unattended run takes only a lowering. A live process waiting between messages is moved before it takes the next run. Each application is a `permissions` item in the run's journal.
 
 ## The board
 
@@ -495,7 +521,7 @@ message, in the default conversation: `202 {"run_id": "uuid"}`.
 - **`text` and `tool`** are the prose-only view of the same rows, for a client that shows a run as lines: `text` for the first revision of each `message` of role `assistant`, `tool` for the first revision of each `tool_call` (its `name` and `summary`). A row with one is sent as that event followed by its `item`, in one write, both with the row's id. `text` chunks concatenate into the timeline's prose: every chunk after the timeline's first starts with a blank line (`"\n\n"`), so a client appends them verbatim. A model's reasoning is a `thinking` item, not `text`.
 - **`status`** carries `epoch` once the run has started (absent while queued without an attempt), and `continues` when the attempt resumed an earlier attempt's session (the attempt it continues). When `epoch` changes from the one a client was showing, the run started over: what the client holds belongs to an abandoned timeline, so it clears, and the new timeline streams from its first row. When only `attempt` changes, the timeline goes on: the client keeps what it has, and the next rows continue it.
 - **Replay and resume.** Without `Last-Event-ID`, the stream replays the timeline from its first row, then follows live, so a client that connects late gets everything. A client that reconnects with `Last-Event-ID` set to the last id it received (a browser `EventSource` does this itself) gets only the rows after that cursor, from any instance: the stream is read from the database, so a reconnect that a deploy sends to the new instance continues seamlessly. A cursor into another timeline, past the timeline's last row, or an id that is not a cursor (such as the `<attempt>.<seq>.<index>` ids of earlier releases) means a full replay of the current timeline. `status` and `done` are sent again on every connection.
-- **Requeue.** A run handed back (a deploy's drain past its cap, a crash) streams `status: queued`, then `status: running` with the next `attempt`, and the interrupted turn as a new revision (`state: interrupted`, or `unverifiable` when its worker was lost).
+- **Requeue.** A run handed back (a deploy's drain past its cap, a crash, a stalled turn) streams `status: queued`, then `status: running` with the next `attempt`, and the interrupted turn as a new revision (`state: interrupted`, or `unverifiable` when its worker was lost).
 - A heartbeat comment (`: ping`) is sent every 15 s. A finished run streams its status, its replay and `done` at once.
 - The stream ends when the instance serving it exits (the end of a deploy's drain); reconnect with `Last-Event-ID`.
 
@@ -565,7 +591,7 @@ An attempt (`store.Attempt`), oldest first:
 {"attempt": 1, "seq": 12, "at": "...", "kind": "assistant", "payload": {}}
 ```
 
-`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.figures_unverified`, a chat turn's `orbit.steer` (`{"message_id", "text", "author"}`: it took a steered message) and `orbit.steer_withdrawn` (`{"message_id", "confirmed"}`: a steered message written into the turn and not taken was withdrawn when it ended; `confirmed` false means the backend did not confirm it, and its process was closed), a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`, and a run's connector steps, `orbit.connector` (Connectors, below), with `orbit.permission` for each permission prompt of a connector tool.
+`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.stalled`, `orbit.figures_unverified`, a chat turn's `orbit.steer` (`{"message_id", "text", "author"}`: it took a steered message) and `orbit.steer_withdrawn` (`{"message_id", "confirmed"}`: a steered message written into the turn and not taken was withdrawn when it ended; `confirmed` false means the backend did not confirm it, and its process was closed), a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`, and a run's connector steps, `orbit.connector` (Connectors, below), with `orbit.permission` for each permission prompt of a connector tool.
 
 ### The journal
 
@@ -632,7 +658,8 @@ A row:
  "cost_usd": 0.02, "usage": {}, "error": "..."}
 ```
 
-- `state` is how the turn stands as orbit observed it: `running`; `completed` (the backend answered); `interrupted` (orbit saw its process end without a result: a timeout, a crash, a drain's hand-back); `unverifiable` (its attempt was lost, reaped without a heartbeat, and nothing observed how it ended).
+- `state` is how the turn stands as orbit observed it: `running`; `completed` (the backend answered); `interrupted` (orbit saw its process end without a result: a timeout, a crash, a drain's hand-back, or orbit ended it, said by `reason`); `unverifiable` (its attempt was lost, reaped without a heartbeat, and nothing observed how it ended).
+- `reason`, on an `interrupted` turn orbit ended itself, says why: `stalled` (the watchdog: the CLI wrote nothing, not even a keep_alive, for the agent's `session.stall` with no tool call running; an `orbit.stalled` event `{"idle_ms", "stall_ms"}` follows the turn's last line, and the run is handed back for its next attempt to continue the session, or fails on its last attempt). Absent otherwise.
 - `outcome` is the backend's own verdict, kept apart from `state`: `success`, `error`, `max_turns`, `max_tokens`, `refused`, or another word a backend reports. It is absent when none was reported, which is never success: an `interrupted` or `unverifiable` turn has none, and a `completed` turn can have `error` (an API error ends a turn too).
 - `completed_at` is absent while running and on an `unverifiable` turn. `duration_ms` and `cost_usd` are the backend's (Claude Code's result), `usage` its token counts, `error` its message when `outcome` is not `success`. Each is absent when not reported.
 - A turn is revision 1 when it opens and one more revision when it ends; the closing revision of an interrupted or lost attempt is written in the transaction that ends the attempt, so a reader that sees the run final sees how its turn ended.
@@ -707,7 +734,7 @@ MCP servers orbit calls for agents (orbit.yaml `connectors`, docs/agents/configu
 
 ## Attention and push
 
-Something waiting on a person is an **attention** row, written in the same transaction as the thing itself, one per thing (`key`): a pending approval (`approval`, key `action:<id>`), a run's question (`question`, `question:<message id>`), a failed run (`failure`, `failure:<run id>`) and a decision: a ticket plan to approve (`decision`, `plan:<ticket id>:<version>`) or a delegated task blocked on a person (`decision`, `action:<task:decision action id>`). Whether it is still open is read from the thing at query time: the action still `pending`, the question unanswered, the plan the ticket's newest while it is `planned`, a task's decision action still `pending`, a failure until a later run of its conversation succeeds or the person writes there. Dismissing closes any of them for the inbox only (a dismissed approval stays pending).
+Something waiting on a person is an **attention** row, written in the same transaction as the thing itself, one per thing (`key`): a pending approval (`approval`, key `action:<id>`), a run's question (`question`, `question:<message id>`), a failed run (`failure`, `failure:<run id>`), a budget limit reached (`budget`, key `budget:<agent>:<period start>`), and a decision: a ticket plan to approve (`decision`, `plan:<ticket id>:<version>`) or a delegated task blocked on a person (`decision`, `action:<task:decision action id>`). Whether it is still open is read from the thing at query time: the action still `pending`, the question unanswered, the plan the ticket's newest while it is `planned`, a task's decision action still `pending`, a failure until a later run of its conversation succeeds or the person writes there, and a budget alert until dismissed. Dismissing closes any of them for the inbox only (a dismissed approval stays pending).
 
 `GET /attention?limit=<n>` is everything open, newest first (`limit` defaults to and is at most 500):
 
@@ -1092,6 +1119,8 @@ After a conversation goes quiet, orbit runs a short learning pass over it (trigg
 
 `POST /conversations/{id}/learn` queues a learning run of that conversation now, whatever the quiet, through its newest message from the person: `202 {"run_id": "uuid"}`. 409 when the conversation has no message from the person or a learning run for that point exists already (learned, or tried); 400 for the learning conversation itself.
 
+The built-in agent `orbit` (while it learns) also learns from imported sessions (Imported sessions, below), in its learning conversation: one session at a time, newest first, each once per point (its `generation` and `lines` then), over the lines since the previous pass of it, once its newest line is `learn.idle` old and if it is under 30 days old. Such a run's `prompt` names the session and the point; its report lists the entry writes, the session's reusable procedures (`Procedures:`, what later passes over other sessions compare theirs with) and its skill proposals. A skill proposal (a procedure the run saw in this session and in at least one other it was shown) is never applied: it becomes a `skill:write` action with `rule: "approve"`, `params` `{"name", "content", "version", "sessions", "why"}` (`content` the whole `SKILL.md`, `version` 0 for a new skill or the library's current version, `sessions` the imported sessions' `id`s it was seen in, this one first), pending until a person approves it; approved, it writes that skill version (`source: "agent"`, `source_run_id` the learning run, the skill's other files kept; a version that moved meanwhile fails the action). A proposal that names fewer than two sessions, a session the run was not shown, a version that is not the library's or an invalid `SKILL.md` is refused in code and named in the report. `POST /sessions/{id}/learn` queues such a run now, whatever the session's age or quiet: `202 {"run_id"}`; 409 when that point has one already, 400 when the built-in agent does not learn, 404 for an unknown session.
+
 ### What an agent reads
 
 - `GET /agents/{name}/context`: `{"agent", "topics": [{"name", "from": ["spec"|"api"]}], "entries": <count>, "index": "<markdown>"}`. For an agent reading every topic, `topics` is each topic there is, `from` `spec`. `index` is exactly what a run's prompt carries (with `inputs/_memory.md` for the run's own inputs path), `""` when the agent reads no entries; when it cannot list every entry within its 8 KB it keeps feedback first, then the most recently changed, and says how many it left out and how to find them.
@@ -1175,6 +1204,56 @@ Routes:
 - `PUT /agents/{name}/skills/{skill}` and `DELETE` attach and detach, as for topics; attaching an unknown skill is 404. `GET /agents/{name}/context` lists the agent's `skills`: `[{"name", "from": ["spec"|"api"], "version", "status"}]`, `status` `missing` (and `version` null) for a name no skill has.
 
 **Skills agents write.** A skill steers every later run it is given to, so an agent writes one with the `skill:write` action, under its rule like any action (`auto`, `approve` or `deny`; unnamed, denied and not offered; the built-in `orbit` has it under `approve`). Its params are `{"op": "write"|"retire", "name", "content", "note"}`: `write` gives the whole `SKILL.md` of a new skill, or of one the run has, whose files stay; `retire` ends one the run has. At most 3 per run. Code resolves each when proposed and adds to its params `version` (the version the run had, which the write applies against; 0 for a new skill) and `changes`: `{"from_version", "lines_added", "lines_removed", "diff", "files", "scripts"}`, where `diff` is `SKILL.md`'s change, one `+` or `-` line each (at most 16 KB, then how many lines it left out), `files` the skill's other files, and `scripts` those of them that run (under `scripts/` or `bin/`, a script's extension, a `#!` line, or an executable's header). A retire of a skill the run lacks, a `SKILL.md` without a description, or a fourth write is `denied` with the reason. The approval notification leads with the change in words, `Writes skill deploy (version 1 to 2): SKILL.md +1 -1 lines; its 3 other files stay.`, then `Scripts and executables in this skill (...): scripts/go.sh, tools/check`, then the diff. Executed, the write is a `source: "agent"` version against `version` (a newer one fails the action, naming it), a written skill is attached to the agent, and the action's `result` is `{"skill", "op", "outcome": "written"|"unchanged", "version", "changes"}`. The versions the run was given are its `skills.json` artifact. A person reverts with `restore` or `retire`.
+
+## Templates
+
+orbit keeps a library of **agent templates**: an agent spec with `{{ name }}` slots and the typed parameters that fill them, every version kept (`internal/templates`, `internal/store/templates.go`). Creating an agent from one is code: the template's version is read, the values checked against its parameters, the slots filled, and the agent it gives dry-run through the same validation as `POST /agents` before anything is stored.
+
+A template:
+
+```json
+{"name": "news", "version": 2, "status": "active",
+ "description": "Morning headlines on topics you pick.",
+ "sha256": "<hex>", "source": "person", "author": "kanishk", "note": "...",
+ "restored_from": null, "created_at": "...", "updated_at": "...",
+ "parameters": [
+   {"name": "agent", "label": "Agent name", "type": "string", "mode": "required"},
+   {"name": "topics", "label": "Topics", "type": "string", "mode": "user_prompt", "description": "What to follow"},
+   {"name": "hour", "type": "number", "mode": "optional", "default": 8}],
+ "spec": {"name": "{{agent}}", "charter": "Summarize the news about {{topics}}.",
+          "triggers": [{"schedule": "0 {{hour}} * * *"}]}}
+```
+
+- `name` matches `^[a-z][a-z0-9-]{0,62}$`; `description` is required, one line of at most 400 bytes. The document (name, description, parameters, spec) is at most 64 KB. `version`, `status`, `sha256` (over the canonical document), `source` (`person`, or `import`), `author`, `note` and `restored_from` are as for skills.
+- `parameters` are form fields (as a question's, A conversation's thread: `name`, `label`, `type`, `options`, `default`) with `mode` in place of `required` and an optional `description` (at most 400 bytes): `required` (the creator gives a value), `optional` (its `default`, or empty, when none is given) or `user_prompt` (the person gives it at creation: through this API it is required like `required`, and a client shows the parameters as the form; in a conversation, orbit asks the person for it with a form, below). At most 12.
+- `spec` is the agent, exactly an agent file's fields as JSON (docs/agents/configuration.md), any string of which may hold slots, `{{name}}` or `{{ name }}`, each naming a parameter (another is a `400`). A string that is exactly one slot becomes the value itself, so a number or boolean parameter fills a number or boolean field; a slot inside a longer string becomes the value's text (a boolean as `true` or `false`). A `file` parameter's value is an upload id, and its slot becomes the file's text (UTF-8, at most 64 KB). An optional parameter without a value or default fills its slot with nothing. Values are never scanned for slots. A template is checked when written: its parameters, every slot, and the spec decoding as an agent with sample values; whether the rendered agent loads (its schedule, its sources, a restricted agent's limits) depends on the values, and is checked when it is rendered.
+- `spec` is in the responses of `GET /templates/{name}` and `GET /templates/{name}/versions/{v}` only; lists carry `parameters`.
+
+Routes:
+
+- `GET /templates?status=`: `{"templates": [...]}` by name, current versions; `status` as for skills.
+- `POST /templates` `{"template": {"name", "description", "parameters", "spec"}, "note"?}`: `201 {"template"}`; 409 when the name exists, 400 for an invalid template (unknown fields included).
+- `GET /templates/{name}`: `{"template": <current, in full>, "versions": [<every version without spec>, newest first]}`.
+- `GET /templates/{name}/versions/{version}`: `{"template": <that version, in full>}`.
+- `PUT /templates/{name}` `{"template", "version"?, "note"?}`: the next version (`template.name` may be omitted; if present it must be `{name}`). `version` is the version the client read; another is 409. A document identical to the current active version writes nothing: `{"template", "changed": false}`.
+- `POST /templates/{name}/restore` `{"restore": <version>, "version"?, "note"?}` and `POST /templates/{name}/retire` `{"version"?, "note"?}`: the next version, an active copy of an earlier one or retired. Nothing is created from a retired template.
+- `POST /templates/{name}/agents` `{"parameters": {"<name>": <value>}, "version"?, "name"?, "conversation_id"?, "dry_run"?}` creates an agent from the template's current version (or `version`): each value is the JSON type its parameter takes, checked as a form's answers are; `name` replaces the name the spec renders; `conversation_id` is whose uploads a `file` value may name (without it, a file value is refused). It always dry-runs first. A `required` or `user_prompt` parameter without a value or default is `400 {"error", "needs": [<field>]}`, the fields to ask for; an invalid value, a rendered agent that does not load, or a retired template is a `400` naming it; a name already defined is `409`. `dry_run: true` stores nothing: `200 {"valid": true, "spec": <the agent as loaded>, "next_fires", "widens", "template": {"name", "version"}}`, where `widens` is what the agent holds beyond nothing (as an `agent:define` preview names it). Otherwise the agent is defined as `POST /agents` defines one (its `author` the token's person): `201` with the same fields plus `definition` and `agent`, as `POST /agents` returns them.
+
+**In a conversation.** An agent whose rules enable `template:create` (the built-in `orbit` has it under `approve`) proposes `{"template", "version"?, "name"?, "parameters"}`. It is never executed as itself. When proposed, code renders it (the chat `act` tool answers at once with what will happen): a `user_prompt` value is the person's, taken from their `answers` to orbit's question for that template in this conversation and never from the proposal; when there are none, orbit asks it, a question with those parameters as its form (text `To create an agent from the template <name>, I need these from you.`), and the proposal is `denied` saying so. The person's answer reaches the agent's next run, which proposes again. A `required` value the proposal lacks, a parameter the template does not have, or a rendered agent that does not load denies it with the reason. A proposal that renders is recorded as an `agent:define` of the new agent, `pending` whatever the rules, its params the rendered `spec` and `template` (`{"name", "version"}`, the version it was rendered from); a person approves it like any action.
+
+### Sharing templates
+
+A template travels as a **bundle**: `{"format": "orbit.templates/1", "templates": [<document>]}`, each document `{"name", "description", "parameters", "spec"}` as a template is written. At most 100 templates and 1 MiB.
+
+- `POST /templates/share` `{"templates": [{"name", "version"?}], "link"?, "expires_in_hours"?}`: `200 {"bundle"}`, the named versions (the current one when `version` is absent, which must be active). With `link: true`, also `"link"` and `"expires_at"`: a URL under `public_url`, `<public_url>/api/v1/templates/shared/<token>`, that serves the bundle to anyone holding it, until it expires (`expires_in_hours`, 1 to 168; default 24). The token names those exact versions and the expiry, signed with a key derived from `ORBIT_API_TOKEN`, so the link always serves the same bundle and rotating the token voids every link. `503` without `public_url`.
+- `GET /templates/shared/{token}` takes no `Authorization`: the signature is the credential, as for signed uploads. `200` is the bundle; an altered or expired link is `403`.
+- `POST /templates/import` `{"bundle": {...}}` or `{"link": "<another orbit's link>"}`, with `dry_run`, `note`: `200 {"dry_run", "results": [{"name", "outcome": "created"|"updated"|"unchanged", "version", "lowered": [...]}]}`, in bundle order, as `source: "import"` versions with the token's person as `author`. All of it is one transaction; one bad template refuses the import (`400`, naming its index). A link is fetched with one GET: `https` only, a path under `/api/v1/templates/shared/`, no credential sent, no redirect followed, a public address only (checked on the connection, so a name resolving to a private, loopback or tailnet address is refused), within 10 s and 1 MiB.
+
+**What an import is held to**, all by code (`internal/share`) before anything is written:
+
+- **The scan.** Every key and string of the bundle, after JSON escapes are decoded, is checked for characters that hide or reorder text: Unicode tag characters (U+E0000 to U+E007F) and bidirectional controls (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069). One anywhere refuses the import, naming where (`/templates/0/spec/charter: a hidden character U+202E ...`).
+- **It grants nothing.** Every action rule in a template's spec that is not `deny` arrives as `approve`: an `auto`, and a slot that could render one, so nothing an import brings runs without a person. `connectors` are removed. `lowered` lists each change (`actions.notify: auto arrives as approve`). An agent created from an imported template is then held to everything any database agent is (Defining agents).
+
 
 ## Search
 
@@ -1316,6 +1395,12 @@ The answer is Prometheus's `data`, `{"resultType", "result"}`, with `warnings` w
    "by_agent": [{"agent": "finance", "api_equivalent_usd": 0.811000, "runs": 30,
                  "runs_with_cost": 29, "by_status": {"...": 0}}],
    "by_day": [{"date": "2026-10-03", "api_equivalent_usd": 0.000000, "runs": 0}]},
+ "budgets": [{"agent": "finance", "period": "month",
+              "period_start": "2026-11-01T04:00:00Z", "resets_at": "2026-12-01T05:00:00Z",
+              "api_equivalent_usd": 0.811000, "runs": 30, "runs_with_cost": 29,
+              "max_cost_usd": 5, "max_runs": 40,
+              "cost_utilization": 0.1622, "run_utilization": 0.75,
+              "alert": false, "exceeded": false}],
  "tokens": {
    "total": {"input": 1200, "output": 52000, "cache_read": 4100000, "cache_creation": 310000,
              "cache_hit_ratio": 0.929515, "attempts": 40, "runs": 39},
@@ -1328,6 +1413,7 @@ The answer is Prometheus's `data`, `{"resultType", "result"}`, with `warnings` w
 
 - **Each window is the freshest of two readings, and says which.** `source: "stream"`: the CLI writes a `rate_limit_event` into a run's stream when its rate-limit information changes; orbit stores it in the run's events (`GET /runs/{id}/events`), and this reads the newest one per window from runs created in the last 8 days (`store.RateLimitLookback`: the longest window, `seven_day`, and a day); `run_id` is that run. `source: "poll"`: with `usage_poll` configured, control asks the endpoint Claude Code's own `/usage` reads every few minutes and keeps each answer; this reads the newest successful one from the same 8 days (`run_id` and `status` are `null`: the endpoint reports neither). **The poll is best effort**: the endpoint is undocumented, its shape is the one Claude Code caches from it, and a poll that fails is recorded (`poll.last_error`) while the windows keep the last good reading. Of the two, the one observed later wins (`observed_at`); a tie goes to the stream. A window absent from the list was reported by neither in that time.
 - `poll` is the poller's state: `enabled` (and `every`) as configured, `last_at` the newest poll of any outcome, `last_ok_at` the newest successful one, `last_error` the newest poll's error when it failed, else `null`.
+- `budgets` lists configured agent budgets for the current local calendar period, with API-equivalent cost, runner-started runs, limit utilization, reset time and whether an alert threshold or limit has been reached. Reaching a limit skips the next scheduled run before source fetching or a backend call and raises one pushable attention alert per agent and period; manual runs and messages remain available.
 - `deferral` is low-priority holding (`defer_low_priority`; docs/agents/configuration.md): `enabled`, `threshold` (`usage.DeferLowAbove`, a fraction like `utilization`) and `held`, the scheduled runs held now, oldest hold first: when first and last held, how many times, and the window, reading and source behind the latest hold, and `held_until`, when it is judged again.
 - `window` is the CLI's name for it (`five_hour`, `seven_day`,
   `seven_day_opus`, `seven_day_sonnet`, ...). `status` is `allowed`,

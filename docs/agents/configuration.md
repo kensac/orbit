@@ -43,6 +43,10 @@ It is proposed as an `agent:define` with `rule: "approve"`, whatever the agent's
 
 A person approving any action can also make its type `auto` for that agent ("approve and always allow", docs/api.md, Actions): a new revertible version, like an API change.
 
+## Agents from templates
+
+A template is an agent spec with `{{ name }}` slots and typed parameters, kept in a versioned library (docs/api.md, Templates). `POST /templates/{name}/agents` renders one with a person's values, dry-runs it and defines the agent. An agent with `actions: {template:create: approve}` (the built-in `orbit` has it) proposes the same in a conversation: code renders it, asks the person with a form for any `user_prompt` parameter, and records the result as an `agent:define` a person approves whatever the rule (`auto` and `approve` both only offer the type). The agent it creates is a database agent, held to the same limits as any (above).
+
 ## Secrets
 
 Never in YAML. Channels name variables with `*_env`; source urls, headers, query
@@ -157,6 +161,8 @@ defer_low_priority: true             # hold priority: low agents' scheduled runs
 `usage_poll` makes control ask the endpoint Claude Code's own `/usage` screen reads (`spec.DefaultUsageURL`) with the subscription's OAuth token, and store each answer (`internal/usage`). **Best effort**: the endpoint is undocumented, so a change to it shows as failed polls in `/usage` (`subscription.poll.last_error`) and the windows fall back to what runs' streams reported. Two instances during a rollout share one poll per interval. The token stays on control and is sent only to that URL.
 
 `priority: low` on an agent (default normal) marks work that can wait. With `defer_low_priority`, while any subscription window not yet reset is above `usage.DeferLowAbove` (80%), that agent's scheduled runs are held in the queue, rechecked every `usage.DeferRecheck` (10m) and let go within `scheduler.DeferCheckEvery` (1m) of every window dropping below; each hold is recorded (`run_deferrals`, `/usage` `deferral.held`). Manual runs and a person's messages are never held. The reading is the freshest of polled and stream-reported values, so deferring works without `usage_poll`, on readings only as fresh as the last run.
+
+`budget:` on an agent can set `period: day|week|month`, `max_cost_usd`, and/or `max_runs`. Periods use the agent's timezone and week begins Monday. Usage includes runs that started an attempt, from every trigger, and excludes gate-skipped runs. A scheduled run whose budget is already used is skipped before source fetching or a backend call; manual runs and a person's messages are never blocked. The first blocked run in each period creates one pushable attention alert. `GET /usage` reports each configured budget and marks it `alert` at 80% and `exceeded` at its limit. Costs are backend-reported API-equivalent estimates, so a run in progress can finish above a cost limit and runs with no reported cost are not counted as known spend.
 
 ## Capabilities
 
@@ -318,6 +324,8 @@ fails at runtime, not at load.
 
 - **Defaults.** A chat in a `sandbox` is `full` with ceiling `full`: the container is the boundary (security.md, Sandboxed chats). Every other agent is `locked`, and an agent that is not a chat runs unattended, so it can be nothing else.
 - **Limits.** `level` is at most `ceiling`. Without a `sandbox` the widest is `edits`: `auto` and `full` let a call run without a person on orbit's host, beside its secrets. A level that is not one of the five, or one the agent cannot run, resolves down at run time, never up (`Agent.ResolveLevel`); at load it is an error.
+- **What `tools` names is allowed at every level.** A local chat's `tools` are given by name (`--allowedTools`), so no level asks for them; a level decides everything else. A workstation lists none, so only orbit's own tools are pre-allowed there.
+- **A conversation may set its own level** within the ceiling (docs/api.md, Conversation permissions), for the runs its person's messages start; unattended runs keep the agent's level, or the conversation's when it is narrower.
 - **A process can be raised.** Every chat process has the stdio permission prompt, and one whose ceiling is `full` is launched with `--allow-dangerously-skip-permissions` (without it the CLI refuses `set_permission_mode bypassPermissions`).
 
 ## Web allowlist

@@ -200,6 +200,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `timezone` | IANA zone | `orbit.yaml` timezone | Zone for triggers and source templates; parsed once at load (`Agent.Location`), and one the tz database does not have fails it. |
 | `runner` | runner name | `defaults.runner` | The backend. |
 | `timeout` | duration | `defaults.timeout` | How long one run may take. |
+| `budget` | map (below) | none | API-equivalent cost and runner-started run limits per local period; scheduled runs are skipped once a limit is reached. |
 | `triggers` | list | none | When the agent wakes on its own (below). |
 | `sources` | list | none | Data orbit fetches before a run (below). |
 | `transforms` | list | none | Code over a source before the model sees it (below). |
@@ -223,6 +224,22 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `connectors` | list of connector names | none | `orbit.yaml` connectors whose tools the agent's runs may call; claude-code only. Each tool's rule is `mcp:<connector>:<tool>` in `actions`. Adding one widens the agent. |
 | `repos` | list (below) | none | Repositories every run reads: the tree at a commit under `inputs/repos/<name>/`, plus orbit's history and pull request tools. Each must be in `github.read_repositories`; needs `github` in `needs` and a claude-code or codex runner. |
 | `priority` | `normal`, `low` | `normal` | `low` is work that can wait: with `defer_low_priority`, its scheduled runs are held while the subscription is nearly spent. |
+
+### `budget`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `period` | `day`, `week`, `month` | required | Local calendar period in the agent's timezone; weeks start Monday. |
+| `max_cost_usd` | number | none | API-equivalent cost limit for runner-started runs in the period. |
+| `max_runs` | integer | none | Runner-started run limit in the period. |
+
+At least one limit is required. Once either limit is reached, scheduled runs
+are skipped before sources or a model are called; manual runs and messages
+still run. The first blocked run per agent and period creates one dismissible
+attention alert and Web Push notification. `/usage` reports current use and
+alerts at 80% of either limit. A run already underway may finish past a cost
+limit; cost is the backend's reported API-equivalent estimate, and runs with
+no cost report are visible in `runs_with_cost` coverage.
 
 ### `triggers[]`
 
@@ -353,6 +370,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `agent:save` | Saves the conversation as a new agent: the model writes its name, description, charter and starters; orbit adds what the conversation did and proposes it as an `agent:define` that always waits for a person (configuration.md, Saving a conversation as an agent). | |
 | `run:now` | Starts a manual run of this agent or one in `delegates`; a run no message woke cannot start its own agent. `approve` applies directly in a run answering the person's message. | |
 | `skill:write` | Writes or retires one of the agent's skills as the next version; the approval shows the SKILL.md diff and the skill's scripts. | |
+| `template:create` | Creates an agent from a template in the library: code renders and dry-runs it and records an `agent:define` that waits for a person whatever the rule; a `user_prompt` parameter is asked of the person with a form. | |
 
 ### `notify`
 
@@ -388,6 +406,7 @@ claude-code runners only.
 | `resume` | bool | `false` | Continue the previous run's session when it succeeded under the same spec within `idle`. |
 | `idle` | duration | `6h` | The resume window, at most `24h`. |
 | `live` | duration | `0` (none) | Keep one process open this long after a message-started run and feed later runs into it; at most `1h` and at most `idle`. |
+| `stall` | duration | `10m` | A chat or live turn with no line from the CLI (keep_alive included) for this long, and no tool call running, is interrupted and the run handed back to continue the session (ARCHITECTURE.md, Stall watchdog); `1m` to `24h`. Needs no `resume`. |
 
 ### `learn`
 
