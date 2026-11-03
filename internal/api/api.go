@@ -184,9 +184,9 @@ func (s *Server) routes(internal bool) http.Handler {
 	s.workspaceRoutes(api)
 	s.workspaceWriteRoutes(api, mux)
 	s.skillsRoutes(api)
-	s.templatesRoutes(api)
 	s.connectorRoutes(api, mux)
 	s.sessionRoutes(api)
+	s.templatesRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
 	// The signature is the credential (hooks.go); traefik routes /hooks/ past forward-auth.
