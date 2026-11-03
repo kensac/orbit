@@ -262,6 +262,8 @@ A skipped run counts as a success for staleness (docs/agents/store.md).
 
 Every kind takes `prompt`, the reason for the wake. `schedule` and `rrule` go through the same scheduler (one fire per trigger and time, `runs_one_per_fire`; after downtime only the newest missed fire), and an ended series never fires again.
 
+`quiet_hours: {start: "22:00", end: "07:00"}` on an agent suppresses scheduled runs in that local wall-clock interval. The start is included, the end excluded, and an end earlier than the start crosses midnight. A run is skipped before source fetches or backend startup if its scheduled fire or first claim is during quiet hours; manual runs and messages remain available. `GET /agents/{name}` and next-fire responses show the next configured fire outside quiet hours. Quiet-hour boundaries remain local across daylight saving changes.
+
 **Missed fires.** A fire that starts too late is not run hours late: a schedule run claimed more than its trigger's `missed_grace` after its fire time (after downtime, or behind a long queue) ends `skipped` with gate `missed`, before anything is read or fetched, and notifies nothing. The default grace is the time from that fire to the trigger's next one, at most an hour (`spec.DefaultMissedGraceMax`): a five-minute trigger's fire may start up to five minutes late, a daily one's up to an hour. Set `missed_grace` (1m to 168h) for a job that must still run late, such as a monthly close. Only a run's first attempt is judged; a missed fire is no success for staleness.
 
 ## Webhooks
@@ -419,11 +421,18 @@ the agent. The connector must authenticate and list the fixed tool in
 ## Sessions and continuations
 
 `session` (claude-code runners only) is `{resume: true, idle: <=24h, live:
-<=1h}`; `idle` defaults to 6h, `live` to 0 (no live process) and may not exceed
-`idle`. `live` is refused with a runner's `max_budget_usd`, because the CLI
-counts that budget over a process's whole life, every run fed into it. An
-agent with `session` needs `ORBIT_DATA_DIR` on a persistent volume; without
-one every run after a restart starts fresh (it does not fail).
+<=24h}`; `idle` defaults to 6h, `live` to 0 (no live process) and may not exceed
+`idle`. Linux closes idle live processes when memory is pressured. A process
+whose credential has a shorter expiry is forcibly stopped at that deadline.
+Reloading configuration keeps a live process when its invocation and session
+are still compatible. The persistent chat-box integration passes its proxy
+grant expiry as the process hard deadline and preserves the box and workspace
+when stopping the CLI; that integration is tracked separately by W11. `live`
+is refused with a runner's
+`max_budget_usd`, because the CLI counts that budget over a process's whole
+life, every run fed into it. An agent with `session` needs `ORBIT_DATA_DIR`
+on a persistent volume; without one every run after a restart starts fresh
+(it does not fail).
 
 `continue` is an action type like any other: absent means denied. Its bounds
 are constants in `internal/actions` (`ContinueMinDelay`, `ContinueMaxDelay`,

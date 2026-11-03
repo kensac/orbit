@@ -278,9 +278,11 @@ type Agent struct {
 	Timeout  Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 	// Budget limits API-equivalent cost and runner-started runs in a local
 	// calendar period. Only unattended scheduled runs are stopped by it.
-	Budget   *AgentBudget `yaml:"budget,omitempty" json:"budget,omitempty"`
-	Triggers []Trigger    `yaml:"triggers" json:"triggers"`
-	Sources  []Source     `yaml:"sources,omitempty" json:"sources,omitempty"`
+	Budget *AgentBudget `yaml:"budget,omitempty" json:"budget,omitempty"`
+	// QuietHours suppresses scheduled runs in this agent's local timezone.
+	QuietHours *QuietHours `yaml:"quiet_hours,omitempty" json:"quiet_hours,omitempty"`
+	Triggers   []Trigger   `yaml:"triggers" json:"triggers"`
+	Sources    []Source    `yaml:"sources,omitempty" json:"sources,omitempty"`
 	// Transforms run over sources before the model sees them; each output
 	// is an input of its own (internal/transforms).
 	Transforms []Transform `yaml:"transforms,omitempty" json:"transforms,omitempty"`
@@ -483,10 +485,9 @@ const DefaultSessionIdle = 6 * time.Hour
 // day a fresh session with the thread in its prompt is cheaper and as good.
 const MaxSessionIdle = 24 * time.Hour
 
-// MaxSessionLive bounds how long an idle live process is kept. Each one is
-// a resident CLI process; an hour covers a conversation with pauses, and
-// resume picks up after it closes.
-const MaxSessionLive = time.Hour
+// MaxSessionLive bounds how long an idle live process is kept. Memory
+// pressure can close it earlier; resume picks up from its saved transcript.
+const MaxSessionLive = MaxSessionIdle
 
 // DefaultSessionStall is session.stall when a spec names none.
 const DefaultSessionStall = 10 * time.Minute
@@ -1225,6 +1226,11 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		if b.MaxCostUSD == 0 && b.MaxRuns == 0 {
 			at("budget needs max_cost_usd or max_runs")
+		}
+	}
+	if q := a.QuietHours; q != nil {
+		if err := q.Validate(); err != nil {
+			at("quiet_hours: %v", err)
 		}
 	}
 	if r, ok := c.Deployment.Runners[a.Runner]; !ok {

@@ -96,6 +96,17 @@ so `ORBIT_DATA_DIR` must be a persistent volume for resume to survive a restart.
   carries that turn's own `structured_output` (verified on 2.1.316). Any
   failure, a crash, a timeout or a mismatch closes the process; at most
   `runner.MaxLive` (4) are open, the least recently used idle one closed first.
+- **Process lifetime.** `live` may be up to 24 hours, bounded by `idle`.
+  Linux instances check memory every 15 seconds and close all idle CLI
+  processes when the current memory cgroup reaches 85% of its limit, or when
+  host-available memory falls below 1 GiB or 10% of total memory. A process
+  started with a short-lived credential has a hard expiry and is killed at
+  that deadline, even mid-turn. Persistent chat boxes must pass the proxy
+  grant's expiry as `Session.LiveUntil`; closing their CLI attach must preserve
+  the container and workspace. The isolated chat-box integration is tracked
+  separately by W11. A config reload does not close live processes;
+  each next turn reuses one only when its executable, working directory,
+  arguments, environment and session still match.
 - **Model and effort per conversation.** A conversation may set its own `model` and `effort` (`PATCH /conversations/{id}`, checked by `spec.CheckModel` against the runner's kind). A process started for a run gets them after the runner's own flags (`--model`, `--effort`; the CLI takes an option's last value). A live process is keyed by its arguments without them, so a change does not end it: before the next turn orbit sends `set_model` (a cleared model is the runner's own, since `set_model` with none is the CLI's default) and `apply_flag_settings` `{"effortLevel"}` (null is the model's default effort, whatever `--effort` the process started with), both verified on 2.1.316 by `get_settings`' applied model and effort; a process that refuses either is closed and the turn starts a new one with the flags. The CLI accepts an unknown effort level and ignores it, which is why orbit checks the level. Each run records the model and effort it ran with.
 - **Stall watchdog.** A chat or live turn is watched (`runner.Stall`): every line the CLI writes, `keep_alive` included (counted by `claudeproto.Conn` before it drops them), is a sign of life. With none for `session.stall` (default 10 minutes) and no tool call running in the attempt's journal (a tool may be silent for as long as it runs), orbit interrupts the turn, kills the process when the turn has not ended `claudeproto.CloseGrace` after the interrupt was sent, writes `orbit.stalled` (the journal ends that turn `interrupted` with `reason: stalled`) and hands the run back, so the next attempt continues the session, told why. On the last of `store.MaxAttempts` attempts the run fails instead. A one-shot process (no live process, not a chat) is bounded by the run's timeout alone.
 - **Recorded per run:** `session_mode` (fresh, resumed, live),
@@ -247,7 +258,7 @@ Separately from channels, everything waiting on a person is an `attention`
 row (store/attention.go), written in the transaction that created it, for
 attended runs too. It feeds the app's inbox (`GET /attention`) and, for
 unattended runs and for a chat run's permission request (its turn waits on the person), Web Push to the person's devices (`internal/push`), which
-carries a title and a link only; bursts fold into one summary push.
+carries a title and a link only; bursts fold into one summary push, and a person whose app is showing the conversation (a 30 s heartbeat, `POST /presence`, fresh for 60 s) is not pushed for it.
 
 ## Memory, questions, messages
 
