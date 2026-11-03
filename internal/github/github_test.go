@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -80,6 +81,44 @@ func TestTokenIsDownScopedToOneRepositoryAndTheAskedPermissions(t *testing.T) {
 	env := strings.Join(tok.GitAuthEnv(), "\n")
 	if strings.Contains(env, "ghs_test") || !strings.Contains(env, base64.StdEncoding.EncodeToString([]byte("x-access-token:ghs_test"))) {
 		t.Fatalf("git env = %s", env)
+	}
+}
+
+func TestPullFilesPagesAndHonorsLimit(t *testing.T) {
+	f := newFake(t)
+	f.PR = map[string]any{}
+	for i := range 205 {
+		f.PRFiles = append(f.PRFiles, map[string]any{"filename": fmt.Sprintf("file-%03d.go", i)})
+	}
+	tok, err := app(f).Token(ctx, "kensac/orbit", github.ReadPullDiff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := tok.Revoke(ctx); err != nil {
+			t.Errorf("revoke token: %v", err)
+		}
+	}()
+
+	files, err := tok.Client().PullFiles(ctx, "kensac/orbit", 7, 250)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 205 {
+		t.Fatalf("paged file count = %d, want 205", len(files))
+	}
+	if files[0].Filename != "file-000.go" || files[204].Filename != "file-204.go" {
+		t.Fatalf("paged first/last = %s / %s", files[0].Filename, files[204].Filename)
+	}
+	files, err = tok.Client().PullFiles(ctx, "kensac/orbit", 7, 150)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 150 {
+		t.Fatalf("limited file count = %d, want 150", len(files))
+	}
+	if files[149].Filename != "file-149.go" {
+		t.Fatalf("limited last file = %s", files[149].Filename)
 	}
 }
 

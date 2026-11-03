@@ -46,18 +46,22 @@ Deployment state is owned by the homelab configuration. Check its current image 
 
 ## In flight: owned by Claude Code agents (do not touch these areas)
 
+## In flight: owned by Codex
+
 | Area | Branch / PR | Notes |
 |---|---|---|
+| Garage S3 lake source | `codex/s3-lake` | Bounded read-only fetch of partitioned gzip NDJSON; transforms reduce it before the model sees it |
 | Permission levels | #155 perm-levels, #157 perm-conversation, #159 perm-approvals, approval-attention (after #159), #160 perm-webfetch | Configurable chat levels, approval prompts, pending approvals in the inbox and Web Push (`permission` attention rows, `#approval-<id>` links), and the WebFetch domain allowlist. |
 | Isolation: the credential proxy (the Claude token out of build sandboxes and sandboxed chats), egress profiles (`workstation`: the open web without private ranges, orbit or SMTP), the gVisor host plan for hetzner and oci | claude-isolation: iso-spike, then credproxy, egress-profiles | spike recorded in tickets.md (Credential proxy: what the CLI does); direct terminals keep their own login by choice |
 | Laptop sessions and config: `orbit import claude-sessions` and `POST /sessions/import` (imported sessions searchable as kind `session`), continuing one on the server, learning from them, `orbit sync claude`, deterministic local bundle of `CLAUDE.md` and skills for a later box import | #129 claude-sessions-import, #132 claude-sessions-continue, #140 claude-sessions-learn, #146 claude-sync | ARCHITECTURE.md, Imported sessions; box delivery is not built |
 | Agent templates (a versioned library, typed parameters, code-rendered creation, bundle sharing and import) | #126 and #134 merged; #137 refreshed on current main | question-forms, templates, template-bundles | #137 imports bundles with no grants and protects signed links |
 | Workspace: an IDE in the portfolio chat (explorer, editor, terminals with Claude Code (direct), diffs with line comments), one shell with the chat | #78 docs/workspace-contract (design); items below | design [docs/workspace.md](workspace.md), contract docs/api.md, Workspace |
+| Ticket PR diffs for line comments: `GET /tickets/{id}/diff` returns the ticket PR as diff files with real line numbers | #142, stacked on #139 | Reads GitHub patches with a per-request token limited to the ticket repository |
 | Delegation hardening: task outcomes (succeeded, failed, blocked), waking the parent at a task's failure, `task:retry` with a circuit breaker, a stall check for batches nothing can move | branches deleg-*, one PR per item, in order | claude-delegation |
 | Delegation hardening: task outcomes (succeeded, failed, blocked), waking the parent at a task's failure, `task:retry` with a circuit breaker, a stall check for batches nothing can move, `after` across batches | #92 #94 #99 #101 #112, branches deleg-*, merged in that order | claude-delegation. |
 | Event triggers and scheduling hygiene: webhook triggers (`/hooks/{agent}/{trigger}`, signed, deduped, the body a `webhook` source), missed-fire grace, a backend circuit breaker, folded skips in the thread | #96 webhook-triggers, #105 missed-fires, #121 backend-breaker, #123 fold-skips (claude-triggers) | typed schedule actions (`schedule:add`, `schedule:pause`) are another agent's |
 | Create and tune agents by talking: typed schedule actions (`schedule:add`, `schedule:pause`, `schedule:resume`, `schedule:remove`, `run:now`) parsed by code, "save this conversation as an agent", "approve and always allow" | #95 schedule-actions, #100 save-agent, #102 always-allow (claude-talk) | stacked in that order |
-| Typed actions and data sources: endpoint path templates with checked params (Sure categorize), `github` and `loki` sources, a `prometheus_query` tool, `github:comment` | `claude-actions/*` | Gmail drafts and Calendar events wait for the connectors work (#113) |
+| Typed actions and data sources: endpoint path templates with checked params (Sure categorize), `github` and `loki` sources, a `prometheus_query` tool, `github:comment`, typed Gmail draft and Calendar create actions through fixed connector tools | `codex/google-mail-calendar-actions` | Connector gateway (#113) is in place; Gmail and Calendar writes use explicit action rules and configured destinations. |
 
 ### Workspace: implementation items, in order
 

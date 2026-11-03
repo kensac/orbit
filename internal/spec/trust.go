@@ -32,6 +32,9 @@ func (a *Agent) Restricted() bool { return a.Origin == OriginDatabase || a.Origi
 // EnvRefs lists the variables a source renders into its requests, sorted and without repeats.
 func (s Source) EnvRefs() []string {
 	b := []string{s.URL, s.Expr}
+	if s.Kind == "lake" {
+		b = append(b, s.AccessKeyID, s.SecretAccessKey, s.SessionToken)
+	}
 	for _, v := range s.Headers {
 		b = append(b, v)
 	}
@@ -114,6 +117,8 @@ func (c *Config) validateTrust(a *Agent) []error {
 				u = strings.TrimRight(u, "/") + "/api/v1/query"
 			case "loki":
 				u = strings.TrimRight(u, "/") + "/loki/api/v1/query_range"
+			case "lake":
+				u = strings.TrimRight(u, "/") + "/"
 			}
 			if strings.Contains(u, "{{") || strings.Contains(u, "${") {
 				continue // checked on every request (sources.Fetcher)
