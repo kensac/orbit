@@ -41,6 +41,7 @@ var referenceTables = map[string]any{
 	"Agent":                             Agent{},
 	"`budget`":                          AgentBudget{},
 	"`quiet_hours`":                     QuietHours{},
+	"`calendar_skip`":                   CalendarSkip{},
 	"`triggers[]`":                      Trigger{},
 	"`sources[]`":                       Source{},
 	"`sources[].extension`":             ExtensionSource{},
