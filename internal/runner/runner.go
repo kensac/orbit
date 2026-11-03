@@ -59,6 +59,8 @@ type Request struct {
 	SkillsPlugin string
 	// Connectors are the MCP servers the run reaches through orbit (connectors.go); claude-code only. A run with any talks to the CLI over stream-json, whose control channel carries their calls.
 	Connectors *Connectors
+	// Stall watches a Claude Code chat or live turn for a silent backend.
+	Stall *Stall
 }
 
 // Harness is orbit's own code inside the CLI's process tree.
