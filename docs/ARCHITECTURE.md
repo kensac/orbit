@@ -299,6 +299,13 @@ Approval happens from a signed link (`/ui/actions/{id}?sig=`), the API, or
 `orbit approve`. An action is executed at most once: one interrupted during
 execution is failed for a person to check, never retried.
 
+`gmail:draft` and `calendar:create` are typed writes through configured
+connectors. `google_actions` fixes the connector and tool, and Calendar also
+fixes the calendar id; the agent supplies only validated message or event
+fields. The tools must be listed in the connector's `write_tools`. Orbit
+builds the Google API arguments and adds the connector credential when it
+calls the tool. The actions are denied unless an agent names their rule.
+
 ## The journal
 
 A run's journal (`internal/journal`, `journal_items`) is its transcript in one typed shape for every backend: messages, thinking (with a token estimate), tool calls with their full input and bounded results, diffs, plans, approvals, questions, status, and turns whose state (running, completed, interrupted, unverifiable) is kept apart from the backend's verdict. Code derives it from `run_events` as each event is stored, and backfills older runs with the same code, so the two agree; `run_events` stays the record it is derived from. Items are append-only revisions addressed by (run, epoch, seq): an epoch is a timeline of attempts that continue each other's sessions, so a cursor never mixes a resumed attempt with an abandoned one. Large values are a bounded head with their size and digest, the whole value fetched by digest. The stream, a thread run's `steps` and `turn`, MCP progress and the run page (`/ui/runs/{id}`, each item's latest revision, a subagent's nested under its call) all read it. Shapes: docs/api.md.
@@ -531,5 +538,4 @@ ticket loop, every 30 s: checks green -> github:merge proposed (approve for orbi
 The direction, so changes now do not close it off:
 
 - **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)); agents already take webhook triggers (Reliability, Webhooks).
-- **Gmail drafts and Calendar events** as actions (`gmail:draft`, `calendar:create`): orbit holds no Google credential, so they wait for the connectors work, where orbit holds a connector's credential and an action rule gates its writes.
 - **The workspace**: an IDE in the portfolio chat over files, terminals and git in a conversation's snapshot or an agent's box ([workspace.md](workspace.md)).

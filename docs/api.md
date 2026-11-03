@@ -740,6 +740,12 @@ A row:
 
 `rule` is the agent's rule for the type when it was proposed (`auto`, `approve`, `deny`). `decided_by` is the person, or `rule` for an action its rule approved or denied. `instructed_by` is the person whose message a chat agent was answering when it proposed the action: their message is the instruction (Chat agents, above), so an `approve` action they asked for is approved by them (`decided_by` is that person) without a second approval. `result` is what the executor returned; `error` is why it was denied (an unknown type, invalid params, a limit) or why it failed. `decided_by`, `decided_at`, `executed_at`, `result` and `error` are omitted when unset.
 
+`gmail:draft` and `calendar:create` are typed actions. Their parameters contain
+only message or event fields; `google_actions` in `orbit.yaml` fixes the
+authenticated connector and write tool, and fixes Calendar's destination.
+Orbit builds the Google API request and executes it through the connector.
+Both types are denied unless the agent names a rule.
+
 - `POST /actions/{id}/approve`, `POST /actions/{id}/reject`: `200 {"ok":
   true}`; 404 for an unknown action; 409 when it was already decided. With
   `{"client_request_id": "..."}` (same rules as `client_message_id`), a retry
