@@ -103,7 +103,9 @@ session: {resume: true, idle: 24h, live: 24h}
 	}
 	second := send("second", "beta\n")
 	if second.Status != "succeeded" || deref(second.Report) != "reply 2 saw beta alpha token tok-1" {
-		t.Fatalf("second = %s %q %q", second.Status, deref(second.Report), deref(second.Error))
+		var mode string
+		_ = s.Pool.QueryRow(ctx, "SELECT COALESCE(session_mode, '') FROM runs WHERE id = $1", second.ID).Scan(&mode)
+		t.Fatalf("second = %s %q %q mode=%s", second.Status, deref(second.Report), deref(second.Error), mode)
 	}
 	if client.created != 1 || client.gone != 0 {
 		t.Fatalf("box created=%d destroyed=%d; unchanged process should keep its box", client.created, client.gone)
