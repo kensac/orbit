@@ -274,13 +274,15 @@ func TestClaudeCodeResumesAForkOfTheSession(t *testing.T) {
 	r, _ := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
 	home := t.TempDir()
 	var got started
+	sess := session(home, "s1", 0.5, &got)
+	sess.ResumeAt = "u1"
 	res, err := r.Run(context.Background(), Request{Workdir: t.TempDir(), Prompt: "p", OutputSchema: json.RawMessage(`{}`),
-		Session: session(home, "s1", 0.5, &got)}, func(Event) {})
+		Session: sess}, func(Event) {})
 	if err != nil {
 		t.Fatal(err)
 	}
 	argv := read(t, filepath.Join(dir, "argv"))
-	if !strings.Contains(argv, "--resume\ns1\n--fork-session\n") || strings.Contains(argv, "--no-session-persistence") {
+	if !strings.Contains(argv, "--resume\ns1\n--fork-session\n--resume-session-at\nu1\n") || strings.Contains(argv, "--no-session-persistence") {
 		t.Fatalf("argv:\n%s", argv)
 	}
 	if !strings.Contains(argv, `"cleanupPeriodDays":2`) {

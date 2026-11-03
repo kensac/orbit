@@ -158,7 +158,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
-| `mcp_servers` | map of name to server JSON config | none | User MCP servers orbit adds to each Claude account with `claude mcp add-json -s user`; orbit removes only servers it previously managed. Names and config size are bounded, only `stdio`, `http` and `sse` are accepted, and values must be literal with no `${...}` substitutions. Keep credentials out of this configuration. |
+| `mcp_servers` | map of name to server JSON config | none | User MCP servers orbit adds to each Claude account with `claude mcp add-json -s user`; orbit removes only servers it previously managed. Names and config size are bounded, only `stdio`, `http` and `sse` are accepted, credential-bearing fields and secret-like arguments are refused, and HTTP URLs cannot include credentials, queries or fragments. Use per-account OAuth login for authentication. |
 
 ### `credentials.<VAR>`
 
@@ -462,6 +462,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `agent:save` | Saves the conversation as a new agent: the model writes its name, description, charter and starters; orbit adds what the conversation did and proposes it as an `agent:define` that always waits for a person (configuration.md, Saving a conversation as an agent). | |
 | `run:now` | Starts a manual run of this agent or one in `delegates`; a run no message woke cannot start its own agent. `approve` applies directly in a run answering the person's message. | |
 | `skill:write` | Writes or retires one of the agent's skills as the next version; the approval shows the SKILL.md diff and the skill's scripts. | |
+| `page:publish` | Publishes bounded immutable HTML in the current chat conversation; it runs only while answering a person's message and returns a page id and title for the portfolio renderer. | `chat: true` |
 | `template:create` | Creates an agent from a template in the library: code renders and dry-runs it and records an `agent:define` that waits for a person whatever the rule; a `user_prompt` parameter is asked of the person with a form. | |
 
 ### `notify`

@@ -112,8 +112,8 @@ func (f *fakeSandboxd) handler(t *testing.T) http.Handler {
 	})
 	mux.HandleFunc("GET /v1/boxes/{name}/accounts/{slot}/mcp", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"servers": []sandbox.MCPServer{
-			{Name: "claude.ai Gmail", Target: "https://gmailmcp.googleapis.com/mcp/v1", Status: sandbox.MCPNeedsAuth, Connector: true},
-			{Name: "orbit", Target: "https://orbit.kanishksachdev.com/mcp", Transport: "HTTP", Status: sandbox.MCPConnected},
+			{Name: "claude.ai Gmail", Status: sandbox.MCPNeedsAuth, Connector: true},
+			{Name: "orbit", Transport: "HTTP", Status: sandbox.MCPConnected},
 		}})
 	})
 	mux.HandleFunc("GET /v1/boxes/{name}/accounts/{slot}/usage", func(w http.ResponseWriter, r *http.Request) {

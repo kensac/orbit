@@ -46,6 +46,9 @@ version. The JSON is read-only evidence, never inbox messages or runs.
 - message read (`message_reads`, one per attempt that read a person's message, written in `StartRunContext`'s transaction): open, then `released_at` when the attempt hands the message back (`releaseMessages`: a failure, a requeue). At most one is open per message (`message_reads_one_holder`); a message with none open waits for the next run (`waitingMessage`). `messages.run_id` names the last run that read it and is never cleared by this image. A message marked read with no read row (`giveComments`, which gives a build its review comments when it is enqueued, or the previous image during a deploy) is held, and `releaseMessages` records it as handed back; the previous image's hand-back still clears `run_id`, which `waitingMessage` treats as waiting.
 - action: `pending -> approved | rejected`, `approved -> executing ->
   executed | failed`; `denied` and rule-approved are set at creation.
+  `page:publish` keeps its bounded title and HTML in the immutable action
+  params. Its action id is the page id; the conversation pages API returns
+  only executed actions joined through their run to the requested conversation.
 - ticket: `ticketEdges` in `tickets.go` is the table (diagram in
   docs/tickets.md); into `planned` and `approved` only through
   `ProposePlan`/`ApprovePlan`, which carry the plan version. Each transition
@@ -101,7 +104,7 @@ A message and a run are in exactly one conversation of their own agent
 to the agent's default conversation (`orbit_conversation_fill`, which also
 moves `last_activity_at`). Every query that reads a thread for a run filters
 by the run's conversation. Conversations are archived, never deleted, and
-the default one cannot be archived.
+the default one cannot be archived. A fork (`ForkConversation`) is a new conversation naming its parent and message (`forked_from`, `forked_at_message`) and the point it holds the parent's thread to (`fork_cutoff`); `Conversation` reads a fork's thread on into its parents up to each one's cutoff, and the fork's workspace starts as a copy of the parent's snapshot as of then.
 
 A mail (`mail_in`, keyed by Message-ID) is recorded in the same transaction as the message and run it becomes (`IngestMail`), so a mail fetched twice, by two instances or after a crash before it was marked seen, is acted on once. An ignored mail is recorded with its reason; every row keeps the raw mail.
 

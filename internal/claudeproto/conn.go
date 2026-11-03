@@ -95,9 +95,13 @@ func (c *Conn) read(r io.Reader) {
 
 // dispatch acts on one line: control traffic is handled here, keep_alive dropped, and every line but keep_alive is queued for Next, control lines included, so the transcript holds the whole exchange.
 func (c *Conn) dispatch(l Line) {
-	switch l.Type {
-	case "keep_alive":
+	if l.Type == "keep_alive" {
 		return
+	}
+	if c.h.Observe != nil {
+		c.h.Observe(l)
+	}
+	switch l.Type {
 	case "control_request":
 		var env controlEnvelope
 		if json.Unmarshal(l.Raw, &env) == nil && env.RequestID != "" {

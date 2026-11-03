@@ -13,6 +13,7 @@ A self-hosted Go service on Kanishk's server (hetzner) that runs Claude Code on 
 | Core | agents from YAML and the database (versioned), conversations (many per agent), runs as a queue, memory, questions, rule-gated actions, notifications (only for unattended runs); `agent:define` (agents change agents, definitions record their editor and revert) | #4 #6 #12 #22 #24 #47 |
 | Message reads | every attempt's read of a person's message kept across hand-backs and failures (`message_reads`); the next-run selection and the thread read from it | #75 |
 | Claude Code | `internal/claudeproto`: the CLI's stream-json protocol in Go (turns, control requests, interrupt with its receipt, messages written mid-turn with a uuid and their lifecycle, withdrawing a queued one, init capabilities, permission prompts, credential scrubbing); session resume with fork; a live process per conversation; import Claude Code sessions into orbit, searchable as kind `session` | #33 #35 #36 #39 #6 #129 |
+| Forks | `POST /conversations/{id}/fork {message_id}`: a new conversation holding the thread up to that message's answer, its first run continuing the answering run's session cut at its last assistant message (`--resume-session-at`, seen on 2.1.316), else a fresh session told the parent's thread up to there; workspace, model and effort copied | #149 |
 | Model and effort | per conversation (`PATCH /conversations/{id}` `model`, `effort`, checked against the runner kind), applied to an open live process with `set_model` and `apply_flag_settings` `effortLevel` (verified on 2.1.316), else as flags at the next process start; recorded per run | #145 |
 | Stall watchdog | a chat or live turn with no line from the CLI (keep_alive counted) for `session.stall` (10m) and no tool call running in the journal is interrupted, killed after the grace, ended `interrupted` with `reason: stalled`, and handed back so the next attempt continues the session; hook events (#37) are not yet a sign of life | #136 |
 | Journal | typed run journal (messages, thinking estimates, tool calls with inputs and bounded results, diffs, plans, approvals, questions, turn state vs outcome), read by the thread, the SSE stream, the run page and MCP; a reader of an up-to-date journal does one key read and no write, and the backfill skips a failing run | #34 #38 #70 |
@@ -101,6 +102,7 @@ The Claude side also plans: more sources (Gmail, Calendar, Drive, GitHub, Promet
 | Area | Branch / PR | Notes |
 |---|---|---|
 | Run event ordering | Codex, `codex/event-sequence`, #72 (merged) | Serializes sequence allocation, message capture and complete event/journal persistence across concurrent callbacks |
+| Permission prompt ordering | Codex, #157, #159, #163 | The chat runner observes CLI mode lines before handling a later control request; #163 is stacked on #159 |
 
 ## Open for Codex
 
@@ -118,6 +120,7 @@ Pick one, put your name and branch in the Owner column in your first PR, keep ea
 | 10 | Docs and onboarding: a user guide (what orbit can do, creating an agent in a minute, the chat, email, MCP), kept short | onboarding-guide, #52 | Built: [docs/guide/README.md](guide/README.md); API examples, approval results, email and MCP prerequisites; deployment availability stated explicitly |
 | 12 | Process lifetime: longer live window, close idle live processes under memory pressure, retain processes across unchanged-argument config reloads, and keep box-mode process lifetime tied to the box | `codex/process-lifetime` | Coordinating the box stop semantics with the W11 owner; persistent box cleanup must not destroy workspace state. |
 | 11 | Mergify merge queue: manual enqueue for ready PRs targeting `main`, squash merge after `check` and `scan` pass | `codex/mergify-merge-queue` | Queue configured with serial processing, one PR per check, and up to three speculative checks. GitHub ruleset configuration remains external. |
+| 12 | Agent-made HTML pages rendered inside portfolio chat only | `codex/page-publish` | Orbit adds a rule-gated `page:publish` action and conversation-scoped API; portfolio renderer is coordinated separately and remains open until its PR merges. |
 
 ## Standards (summary; AGENTS.md and docs/agents/ are authoritative)
 
