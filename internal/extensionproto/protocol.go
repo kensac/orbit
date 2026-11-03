@@ -4,6 +4,8 @@ package extensionproto
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +40,12 @@ type File struct {
 	MediaType string `json:"media_type"`
 	Bytes     int64  `json:"bytes"`
 	SHA256    string `json:"sha256"`
+}
+
+// Describe returns a file descriptor bound to exact content bytes.
+func Describe(name, path, mediaType string, content []byte) File {
+	sum := sha256.Sum256(content)
+	return File{Name: name, Path: path, MediaType: mediaType, Bytes: int64(len(content)), SHA256: hex.EncodeToString(sum[:])}
 }
 
 // Request carries one source operation and its explicitly named input files.

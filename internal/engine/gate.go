@@ -8,8 +8,10 @@ import (
 	"maps"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/budget"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/runner"
@@ -20,10 +22,65 @@ import (
 // gateSkip is a gate's verdict that a run has nothing to judge: the run
 // ends skipped, naming the gate, and no backend is called.
 type gateSkip struct {
-	gate, summary string
+	gate, summary, alertKey string
+}
+
+// budgetGate refuses a first scheduled attempt before it reads inputs or
+// calls a backend when the agent has reached either configured period limit.
+func (e *Engine) budgetGate(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, now time.Time) (*gateSkip, error) {
+	if a.Budget == nil || c.Trigger != "schedule" || c.Attempt != 1 {
+		return nil, nil
+	}
+	start, end, err := budget.Window(a.Budget.Period, now, a.Location())
+	if err != nil {
+		return nil, err
+	}
+	used, err := e.Store.BudgetUsage(ctx, a.Name, start, end, c.ID)
+	if err != nil {
+		return nil, err
+	}
+	cost, err := used.APIEquivalentUSD.Float64()
+	if err != nil {
+		return nil, fmt.Errorf("read budget cost for %s: %w", a.Name, err)
+	}
+	if !budget.Reached(cost, used.Runs, a.Budget.MaxCostUSD, a.Budget.MaxRuns) {
+		return nil, nil
+	}
+	var limits []string
+	if a.Budget.MaxRuns > 0 {
+		limits = append(limits, fmt.Sprintf("%d/%d runs", used.Runs, a.Budget.MaxRuns))
+	}
+	if a.Budget.MaxCostUSD > 0 {
+		limits = append(limits, fmt.Sprintf("$%s/$%.2f API-equivalent cost", used.APIEquivalentUSD, a.Budget.MaxCostUSD))
+	}
+	return &gateSkip{
+		gate: store.GateBudget,
+		summary: fmt.Sprintf("%s budget period starting %s reached its limit (%s)", a.Budget.Period,
+			start.In(a.Location()).Format(time.DateOnly), strings.Join(limits, ", ")),
+		alertKey: fmt.Sprintf("budget:%s:%s", a.Name, start.Format(time.RFC3339)),
+	}, nil
 }
 
 func (g *gateSkip) Error() string { return "skipped by gate " + g.gate + ": " + g.summary }
+
+// quietHours suppresses a first scheduled attempt when its fire time or
+// claim time falls inside the agent's local quiet interval.
+func quietHours(a *spec.Agent, c *store.ClaimedRun, now time.Time) *gateSkip {
+	if a == nil || a.QuietHours == nil || c.Trigger != "schedule" || c.Attempt != 1 {
+		return nil
+	}
+	loc := a.Location()
+	if c.ScheduledFor != nil && a.QuietHours.Contains(*c.ScheduledFor, loc) {
+		return &gateSkip{gate: store.GateQuietHours, summary: fmt.Sprintf(
+			"the scheduled fire at %s falls inside quiet hours %s-%s",
+			c.ScheduledFor.In(loc).Format("2006-01-02 15:04 MST"), a.QuietHours.Start, a.QuietHours.End)}
+	}
+	if a.QuietHours.Contains(now, loc) {
+		return &gateSkip{gate: store.GateQuietHours, summary: fmt.Sprintf(
+			"the run was claimed during quiet hours %s-%s local time", a.QuietHours.Start, a.QuietHours.End)}
+	}
+	return nil
+}
 
 // gated reports whether a run's gates apply: a scheduled or webhook run
 // with no person's message waiting. A message, a manual run, a
@@ -85,17 +142,17 @@ func (e *Engine) gate(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, w
 	return nil, nil
 }
 
-// skip ends a run a gate stopped: skipped, naming the gate, with no
-// notification (a quiet day sends nothing, as it costs nothing).
+// skip ends a run a gate stopped: skipped, naming the gate. A budget skip
+// also creates its period alert; ordinary gates keep a quiet day quiet.
 func (e *Engine) skip(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, start time.Time, g *gateSkip) error {
-	rr := store.RunResult{Attempt: c.Attempt, Status: store.StatusSkipped, Gate: g.gate,
+	rr := store.RunResult{Attempt: c.Attempt, Status: store.StatusSkipped, Gate: g.gate, BudgetAlertKey: g.alertKey,
 		Summary: "Skipped: " + g.summary, Report: "orbit did not call the model: " + g.summary + "."}
 	if err := e.Store.FinishRun(ctx, c.ID, rr); err != nil {
 		return err
 	}
 	metrics.RunSkipped(a.Name, g.gate)
-	if g.gate == store.GateMissed {
-		// The agent did no work, so it is not a success for staleness.
+	if g.gate == store.GateMissed || g.gate == store.GateBudget {
+		// A missed or budget-blocked fire did no work, so it is not a success for staleness.
 		metrics.RunMissed(a.Name, time.Since(start))
 		return nil
 	}

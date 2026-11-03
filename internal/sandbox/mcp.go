@@ -3,6 +3,7 @@ package sandbox
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"unicode"
@@ -40,6 +41,8 @@ func ValidMCPName(n string) bool {
 }
 
 var managedNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+var credentialArgRE = regexp.MustCompile(`(?i)(^|[-_])(token|secret|password|passwd|api[-_]?key|authorization|credential|bearer)(=|$)`)
+var credentialValueRE = regexp.MustCompile(`(?i)(?:bearer\s+\S+|(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-(?:ant-)?[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}))`)
 
 // ValidManagedName reports whether n can name a server orbit manages.
 func ValidManagedName(n string) bool { return managedNameRE.MatchString(n) }
@@ -62,13 +65,18 @@ func ValidateMCPServers(m map[string]json.RawMessage) error {
 		if err := json.Unmarshal(raw, &c); err != nil || c == nil {
 			return fmt.Errorf("MCP server %s: not a JSON object", n)
 		}
+		if err := rejectMCPCredentials(c); err != nil {
+			return fmt.Errorf("MCP server %s: %w", n, err)
+		}
 		switch c["type"] {
 		case "stdio":
 			if s, _ := c["command"].(string); s == "" {
 				return fmt.Errorf("MCP server %s: a stdio server needs a command", n)
 			}
 		case "http", "sse":
-			if s, _ := c["url"].(string); !strings.HasPrefix(s, "https://") && !strings.HasPrefix(s, "http://") {
+			s, _ := c["url"].(string)
+			u, err := url.Parse(s)
+			if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 				return fmt.Errorf("MCP server %s: an %s server needs an http(s) url", n, c["type"])
 			}
 		default:
@@ -76,6 +84,32 @@ func ValidateMCPServers(m map[string]json.RawMessage) error {
 		}
 		if strings.Contains(string(raw), "${") {
 			return fmt.Errorf("MCP server %s: ${...} would be expanded from the box's environment; write literal values", n)
+		}
+	}
+	return nil
+}
+
+func rejectMCPCredentials(v any) error {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, value := range x {
+			key := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(k))
+			if key == "env" || key == "headers" || strings.Contains(key, "auth") || strings.Contains(key, "token") || strings.Contains(key, "secret") || strings.Contains(key, "password") || strings.Contains(key, "credential") || key == "apikey" {
+				return fmt.Errorf("credential-bearing field %q is not allowed; use per-account OAuth login", k)
+			}
+			if err := rejectMCPCredentials(value); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, value := range x {
+			if err := rejectMCPCredentials(value); err != nil {
+				return err
+			}
+		}
+	case string:
+		if credentialArgRE.MatchString(x) || credentialValueRE.MatchString(x) {
+			return fmt.Errorf("argument resembles a credential; use per-account OAuth login")
 		}
 	}
 	return nil
@@ -93,13 +127,10 @@ const (
 // MCPServer is one line of `claude mcp list`.
 type MCPServer struct {
 	Name string `json:"name"`
-	// Target is its URL, or its command and arguments.
-	Target string `json:"target"`
-	// Transport is the CLI's (HTTP, SSE), "" when it printed none.
+	// Transport is the CLI's transport label; the command and target are
+	// deliberately omitted because they can contain credentials.
 	Transport string `json:"transport"`
 	Status    string `json:"status"`
-	// Detail is what followed the status (a failure's reason).
-	Detail string `json:"detail"`
 	// Connector is a claude.ai connector, which the account's login
 	// brings (named "claude.ai <name>").
 	Connector bool `json:"connector"`
@@ -138,9 +169,8 @@ func ParseMCPList(out []byte) []MCPServer {
 		if m := transportRE.FindStringSubmatch(target); m != nil {
 			s.Transport, target = m[1], strings.TrimSuffix(target, m[0])
 		}
-		s.Target = target
-		if st, detail, ok := strings.Cut(state, detailDash); ok {
-			state, s.Detail = st, detail
+		if st, _, ok := strings.Cut(state, detailDash); ok {
+			state = st
 		}
 		mark, word, _ := strings.Cut(state, " ")
 		switch {
@@ -154,7 +184,6 @@ func ParseMCPList(out []byte) []MCPServer {
 			s.Status = MCPPending
 		default:
 			s.Status = MCPUnknown
-			s.Detail = strings.TrimSpace(state + " " + s.Detail)
 		}
 		servers = append(servers, s)
 		if len(servers) >= MaxMCPServers*4 {

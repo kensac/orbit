@@ -224,6 +224,21 @@ func (s *Store) TerminalAttached(ctx context.Context, id string, cols, rows int)
 	return err
 }
 
+// TerminalResized records a standalone size change without claiming an attach.
+func (s *Store) TerminalResized(ctx context.Context, id string, cols, rows int) error {
+	tag, err := s.Pool.Exec(ctx, `UPDATE terminals SET cols = $2, rows = $3 WHERE id = $1 AND ended_at IS NULL`, id, cols, rows)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		if _, err := s.GetTerminal(ctx, id); err != nil {
+			return err
+		}
+		return ErrConflict
+	}
+	return nil
+}
+
 // ticketBytes is an attach ticket's entropy.
 const ticketBytes = 32
 

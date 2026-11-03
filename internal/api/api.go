@@ -61,6 +61,8 @@ type Server struct {
 	Push *push.Sender
 	// OAuth, when set, serves the authorization server MCP clients sign in through (oauth.go) on the public listener. Without it /mcp still takes an authentik token from a client that has one.
 	OAuth *OAuthProxy
+	// LinkClient, when set, fetches another orbit's template link in place of the guarded client (share.go's fetchBundle); tests point it at a local TLS server, which the guard refuses.
+	LinkClient *http.Client
 	// Boxes returns sandboxd's client for agents' boxes (terminals.go);
 	// nil is no boxes, and every workspace has no terminals.
 	Boxes func() (*sandbox.Client, error)
@@ -76,6 +78,9 @@ type Server struct {
 	// WorkspaceReadRate and WorkspaceWriteRate override the workspace's
 	// per-person rates (readRate, writeRate) when set; tests raise them.
 	WorkspaceReadRate, WorkspaceWriteRate float64
+	// ChangesPoll overrides how often a workspace change stream looks for
+	// new snapshots (changesPoll) when set; tests shorten it.
+	ChangesPoll time.Duration
 
 	termMu      sync.Mutex
 	termClients map[string]int
@@ -113,6 +118,12 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/conversations", s.createConversation)
 	api("GET /api/v1/conversations/{id}", s.getConversation)
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
+	api("GET /api/v1/conversations/{id}/permissions", s.getPermissions)
+	api("PUT /api/v1/conversations/{id}/permissions", s.putPermissions)
+	api("GET /api/v1/conversations/{id}/approvals", s.listApprovals)
+	api("GET /api/v1/approvals/{id}", s.getApproval)
+	api("POST /api/v1/approvals/{id}", s.decideApproval)
+	api("POST /api/v1/conversations/{id}/fork", s.forkConversation)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
 	api("POST /api/v1/conversations/{id}/read", s.markRead)
 	api("GET /api/v1/board", s.board)
@@ -127,10 +138,17 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/conversations/{id}/uploads/{upload}", s.getUpload)
 	api("GET /api/v1/conversations/{id}/files", s.workspaceFiles)
 	api("GET /api/v1/conversations/{id}/files/{path...}", s.workspaceFile)
+	api("GET /api/v1/conversations/{id}/pages/{page}", s.publishedConversationPage)
 	// The signature in the URL is the credential (uploads.go).
 	mux.HandleFunc("PUT /api/v1/uploads/signed", s.signedUpload)
+	// The token in the URL is the credential (attention.go, pushAct).
+	mux.HandleFunc("POST "+push.ActionPath, s.pushAct)
+	mux.HandleFunc("GET /api/v1/templates/shared/{token}", s.sharedTemplates)
+
 	api("GET /api/v1/agents/{name}/memory", s.memoryHistory)
 	api("POST /api/v1/agents/{name}/runs", s.startRun)
+	api("POST /api/v1/agents/{name}/replay", s.replayEvaluation)
+	api("POST /api/v1/agents/{name}/grade", s.gradeEvaluation)
 	api("GET /api/v1/agents/{name}/messages", s.listMessages)
 	api("POST /api/v1/agents/{name}/messages", s.sendMessage)
 	api("GET /api/v1/runs", s.listRuns)
@@ -153,6 +171,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/actions/{id}/reject", s.decide(false))
 	api("GET /api/v1/attention", s.listAttention)
 	api("POST /api/v1/attention/{id}/dismiss", s.dismissAttention)
+	api("POST /api/v1/presence", s.setPresence)
 	api("GET /api/v1/push", s.pushInfo)
 	api("GET /api/v1/push/subscriptions", s.listPushSubscriptions)
 	api("POST /api/v1/push/subscriptions", s.savePushSubscription)
@@ -172,10 +191,13 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/comments/{comment}/edit", s.editComment)
 	api("POST /api/v1/tickets/{id}/comments/{comment}/withdraw", s.withdrawComment)
 	api("POST /api/v1/tickets/{id}/review", s.submitReview)
+	api("GET /api/v1/tickets/{id}/diff", s.ticketDiff)
 	api("GET /api/v1/agents/{name}/workspace", s.agentWorkspace)
 	api("POST /api/v1/workspaces/{id}/terminals", s.createTerminal)
 	api("GET /api/v1/workspaces/{id}/terminals", s.listTerminals)
 	api("GET /api/v1/terminals/{tid}", s.getTerminal)
+	api("GET /api/v1/terminals/{tid}/scrollback", s.terminalScrollback)
+	api("POST /api/v1/terminals/{tid}/resize", s.terminalResize)
 	api("POST /api/v1/terminals/{tid}/kill", s.killTerminal)
 	api("POST /api/v1/terminals/{tid}/attach", s.attachTicket)
 	api("GET /api/v1/workspaces/{id}/accounts", s.listAccounts)
@@ -188,11 +210,14 @@ func (s *Server) routes(internal bool) http.Handler {
 	// The ticket in Sec-WebSocket-Protocol is the credential (terminals.go).
 	mux.HandleFunc("GET /api/v1/terminals/{tid}/ws", s.terminalSocket)
 	s.memoryRoutes(api)
+	s.conversationArchiveRoutes(api)
 	s.workspaceRoutes(api)
 	s.workspaceWriteRoutes(api, mux)
+	s.workspaceReviewRoutes(api)
 	s.skillsRoutes(api)
 	s.connectorRoutes(api, mux)
 	s.sessionRoutes(api)
+	s.templatesRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
 	// The signature is the credential (hooks.go); traefik routes /hooks/ past forward-auth.
@@ -328,8 +353,9 @@ func (s *Server) thread(w http.ResponseWriter, r *http.Request) {
 	s.serveThread(w, r, id)
 }
 
-// threadPage reads a thread page for HTTP and MCP alike: the before cursor and limit in, items, has_more and next_before out (listPage), with the conversation's meter.
-func threadPage(before string, limit int, fold bool, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) (map[string]any, error) {
+// threadPage reads a thread page for HTTP and MCP alike, adding workspace
+// change summaries before optional folding.
+func (s *Server) threadPage(ctx context.Context, before string, limit int, fold bool, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) (map[string]any, error) {
 	var c *store.ThreadCursor
 	if before != "" {
 		var err error
@@ -341,9 +367,11 @@ func threadPage(before string, limit int, fold bool, fetch func(before *store.Th
 	if err != nil {
 		return nil, err
 	}
+	if err := s.withRunChanges(ctx, page.Items); err != nil {
+		return nil, err
+	}
 	items := page.Items
 	if fold {
-		// limit and the cursor count every run, so paging is unchanged; a fold never crosses a page.
 		items = store.FoldSkips(items)
 	}
 	out := listPage("items", items, page.HasMore, page.NextBefore)
@@ -487,11 +515,19 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 		f.Before = &t
 	}
 	runs, err := s.Store.ListRuns(r.Context(), f)
+	if err == nil {
+		err = s.withRunsChanges(r.Context(), runs)
+	}
 	respond(w, map[string]any{"runs": orEmpty(runs)}, err)
 }
 
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 	run, err := s.Store.GetRun(r.Context(), r.PathValue("id"))
+	if err == nil {
+		runs := []store.Run{*run}
+		err = s.withRunsChanges(r.Context(), runs)
+		run = &runs[0]
+	}
 	if err != nil {
 		respond(w, nil, err)
 		return

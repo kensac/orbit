@@ -83,6 +83,21 @@ type Conversation struct {
 	// ReadThrough is how far the person has read it (MarkRead); null
 	// before they first did.
 	ReadThrough *time.Time `json:"read_through"`
+	// FromSession is the imported session it was started from (POST /conversations with from_session).
+	FromSession *string `json:"from_session"`
+	// Model and Effort are what the conversation's runs use instead of the
+	// agent's runner's own; null is the runner's.
+	Model  *string `json:"model"`
+	Effort *string `json:"effort"`
+	// ForkedFrom names the conversation and message a fork was started at
+	// (ForkConversation); null for any other.
+	ForkedFrom *ForkPoint `json:"forked_from"`
+}
+
+// ForkPoint is where a fork was started.
+type ForkPoint struct {
+	ConversationID string `json:"conversation_id"`
+	MessageID      string `json:"message_id"`
 }
 
 // derive fills the fields computed from the scanned ones.
@@ -102,7 +117,9 @@ var conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived, 
 	(SELECT json_build_object('id', r.id, 'status', r.status, 'trigger', r.trigger, 'created_at', r.created_at,
 	                          'finished_at', r.finished_at, 'summary', r.summary)
 	 FROM runs r WHERE r.conversation_id = c.id ORDER BY r.created_at DESC, r.id DESC LIMIT 1),
-	c.read_through`
+	c.read_through, c.from_session::text, c.model, c.effort,
+	CASE WHEN c.forked_from IS NOT NULL
+	     THEN json_build_object('conversation_id', c.forked_from, 'message_id', c.forked_at_message) END`
 
 // GetConversation returns one conversation.
 func (s *Store) GetConversation(ctx context.Context, id string) (*Conversation, error) {
@@ -204,6 +221,17 @@ type NewConversation struct {
 	Author   string
 	Wake     bool
 	ClientID string
+	// Seed starts the conversation from an imported session.
+	Seed *SessionSeed
+}
+
+// SessionSeed is an imported session a conversation starts from: its transcript, built under SessionID (a session id of orbit's, so the person's own session file is never the one written to), stored in session_transcripts with the conversation.
+type SessionSeed struct {
+	ExternalID string
+	SessionID  string
+	Title      string
+	Archive    []byte
+	Bytes      int64
 }
 
 // CreateResult is what opening a conversation did.
@@ -221,10 +249,29 @@ func (s *Store) CreateConversation(ctx context.Context, n NewConversation) (res 
 		return res, false, fmt.Errorf("%w: title is longer than %d characters", ErrInvalid, titleMax*4)
 	}
 	req := map[string]any{"op": "conversation", "title": title, "body": n.Body, "author": n.Author, "wake": n.Wake}
+	var fromSession, seedSession *string
+	if n.Seed != nil {
+		req["from_session"] = n.Seed.SessionID
+		fromSession, seedSession = &n.Seed.ExternalID, &n.Seed.SessionID
+		if title == "" && strings.TrimSpace(n.Body) == "" {
+			title = DefaultTitle(n.Seed.Title)
+		}
+	}
 	raw, replayed, err := s.withReceipt(ctx, n.Agent, n.ClientID, req, func(tx pgx.Tx) (json.RawMessage, error) {
 		var r CreateResult
-		err := tx.QueryRow(ctx, `INSERT INTO conversations (agent, title) VALUES ($1, $2) RETURNING id::text`,
-			n.Agent, title).Scan(&r.ConversationID)
+		if n.Seed != nil {
+			// The same snapshot of a session is the same seed id, so a second conversation from it shares the row (every resume forks).
+			if _, err := tx.Exec(ctx, `INSERT INTO session_transcripts (session_id, agent, external_session_id, archive, bytes)
+				VALUES ($1, $2, $3, $4, $5) ON CONFLICT (session_id) DO NOTHING`,
+				n.Seed.SessionID, n.Agent, n.Seed.ExternalID, n.Seed.Archive, n.Seed.Bytes); err != nil {
+				if isForeignKeyViolation(err) {
+					return nil, ErrNotFound
+				}
+				return nil, err
+			}
+		}
+		err := tx.QueryRow(ctx, `INSERT INTO conversations (agent, title, from_session, seed_session) VALUES ($1, $2, $3, $4) RETURNING id::text`,
+			n.Agent, title, fromSession, seedSession).Scan(&r.ConversationID)
 		if isForeignKeyViolation(err) {
 			return nil, ErrNotFound
 		}
@@ -247,11 +294,15 @@ func (s *Store) CreateConversation(ctx context.Context, n NewConversation) (res 
 	return res, replayed, json.Unmarshal(raw, &res)
 }
 
-// ConversationUpdate changes a conversation's title or archived flag; nil
-// leaves a field as it is.
+// ConversationUpdate changes a conversation's title, archived flag, model or
+// effort; nil leaves a field as it is, and an empty Model or Effort returns
+// it to the runner's own. The caller checks a model and effort against the
+// agent's runner (spec.CheckModel).
 type ConversationUpdate struct {
 	Title    *string
 	Archived *bool
+	Model    *string
+	Effort   *string
 }
 
 // UpdateConversation applies u. The default conversation cannot be
@@ -265,8 +316,10 @@ func (s *Store) UpdateConversation(ctx context.Context, id string, u Conversatio
 		u.Title = &t
 	}
 	tag, err := s.Pool.Exec(ctx, `UPDATE conversations SET
-		    title = COALESCE($2, title), archived = COALESCE($3, archived)
-		WHERE id = $1 AND NOT (is_default AND COALESCE($3, false))`, id, u.Title, u.Archived)
+		    title = COALESCE($2, title), archived = COALESCE($3, archived),
+		    model = CASE WHEN $4::text IS NULL THEN model ELSE NULLIF($4, '') END,
+		    effort = CASE WHEN $5::text IS NULL THEN effort ELSE NULLIF($5, '') END
+		WHERE id = $1 AND NOT (is_default AND COALESCE($3, false))`, id, u.Title, u.Archived, u.Model, u.Effort)
 	if err != nil {
 		return err
 	}

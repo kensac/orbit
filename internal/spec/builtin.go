@@ -83,17 +83,18 @@ func Builtins(d Deployment) []*Agent {
 		// The general agent coordinates the others: in its person's chat a
 		// delegation applies directly, unattended it waits for approval
 		// (docs/ARCHITECTURE.md, Delegation).
-		Delegates: []string{"*"},
+		Delegates:         []string{"*"},
+		DelegateTemplates: []string{"*"},
 		// It is the person's general session: every topic's entries,
 		// within the index budget (engine/known.go).
 		Topics:          []string{AllTopics},
 		MessagesTrigger: true,
 		Session:         sess,
 		// It may define agents, itself included (docs/api.md, Defining
-		// agents): each change is a new, revertible version.
-		// GitHub writes wait for approval unless the person asked for them
-		// in the conversation, which approves them (docs/api.md, Chat
-		// agents); unattended runs always wait.
+		// agents): each change is a new, revertible version. It delegates
+		// under approve: directly in its person's chat, after approval
+		// when unattended. It creates agents from templates, each one an
+		// agent:define a person approves. GitHub writes follow the rules below.
 		Actions: builtinActions(d),
 		// Replies stay in orbit; failures and approvals still notify.
 		Notify: NotifySpec{When: "never"},
@@ -107,7 +108,7 @@ func builtinActions(d Deployment) ActionSet {
 	// agent:save is always proposed for approval (engine/save.go). Its
 	// skill writes wait for a person: a skill steers every later run it
 	// is given to.
-	rules := ActionSet{"agent:define": RuleAuto, "skill:write": RuleApprove, "agent:save": RuleApprove, "continue": RuleAuto, "delegate": RuleApprove,
+	rules := ActionSet{"agent:define": RuleAuto, "skill:write": RuleApprove, "agent:save": RuleApprove, "template:create": RuleApprove, "page:publish": RuleApprove, "continue": RuleAuto, "delegate": RuleApprove,
 		"schedule:add": RuleApprove, "schedule:pause": RuleApprove, "schedule:resume": RuleApprove,
 		"schedule:remove": RuleApprove, "run:now": RuleApprove}
 	if d.GitHub != nil {

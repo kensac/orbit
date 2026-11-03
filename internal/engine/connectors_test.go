@@ -19,6 +19,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/spec"
@@ -28,9 +29,10 @@ import (
 
 // fakeMCP is an MCP server over streamable HTTP with a read tool, a write tool, a tool with a large result and one the agent denies; it refuses a request without the connector's credential.
 type fakeMCP struct {
-	mu     sync.Mutex
-	writes []string
-	auths  []string
+	mu           sync.Mutex
+	writes       []string
+	auths        []string
+	calendarArgs []string
 }
 
 const bigMarker = "the-end-of-a-large-result"
@@ -58,6 +60,32 @@ func (f *fakeMCP) handler(token func() string) http.Handler {
 		})
 	srv.AddTool(&mcp.Tool{Name: "drop_all", Description: "Delete everything.", InputSchema: obj},
 		func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) { return text("dropped"), nil })
+	srv.AddTool(&mcp.Tool{Name: "events", Description: "List calendar events.", InputSchema: obj, Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
+		func(_ context.Context, r *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			f.mu.Lock()
+			f.calendarArgs = append(f.calendarArgs, string(r.Params.Arguments))
+			f.mu.Unlock()
+			var args struct {
+				From string `json:"from"`
+				To   string `json:"to"`
+			}
+			if err := json.Unmarshal(r.Params.Arguments, &args); err != nil {
+				return nil, err
+			}
+			from, err := time.Parse(time.RFC3339, args.From)
+			if err != nil {
+				return nil, err
+			}
+			to, err := time.Parse(time.RFC3339, args.To)
+			if err != nil {
+				return nil, err
+			}
+			body, _ := json.Marshal(map[string]any{"items": []any{map[string]any{
+				"summary": "private meeting title", "start": map[string]string{"dateTime": from.Add(time.Minute).Format(time.RFC3339)},
+				"end": map[string]string{"dateTime": to.Add(-time.Minute).Format(time.RFC3339)},
+			}}})
+			return text(string(body)), nil
+		})
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -108,6 +136,10 @@ type connectorHarness struct {
 }
 
 func connectorSetup(t *testing.T, sr *connRunner) *connectorHarness {
+	return connectorSetupExtra(t, sr, "", "")
+}
+
+func connectorSetupExtra(t *testing.T, sr *connRunner, deploymentExtra, agentExtra string) *connectorHarness {
 	t.Helper()
 	s := testdb.New(t)
 	f := &fakeMCP{}
@@ -146,8 +178,9 @@ connectors:
     description: Housing listings.
     auth: {kind: header, header: Authorization, value: "Bearer ${HW_TOKEN}"}
     write_tools: [create_view, drop_all]
-`, srv.URL))
-	write("agents/finance.yaml", `
+%[2]s
+`, srv.URL, deploymentExtra))
+	write("agents/finance.yaml", fmt.Sprintf(`
 name: finance
 charter: Watch the listings.
 triggers: [{schedule: "0 9 1 * *"}]
@@ -155,7 +188,9 @@ wake_on_message: true
 connectors: [hw]
 actions:
   "mcp:hw:drop_all": deny
-`)
+  "mcp:hw:events": deny
+%[1]s
+`, agentExtra))
 	cfg, err := spec.Load(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -308,6 +343,59 @@ func TestConnectorToolsAreListedAndAReadToolRuns(t *testing.T) {
 	}
 }
 
+func TestCalendarBusySkipsScheduledRunBeforeSourcesAndRunner(t *testing.T) {
+	runnerCalled := false
+	sr := &connRunner{script: func(context.Context, runner.Request) error {
+		runnerCalled = true
+		return nil
+	}, output: connQuietOutput}
+	agent := `calendar_skip:
+  connector: hw
+  tool: events
+  window_before: 15m
+  window_after: 1h
+  arguments: {from: "{{window_start}}", to: "{{window_end}}"}
+  events_path: items
+`
+	ch := connectorSetupExtra(t, sr, "", agent)
+	a := ch.e.Current().Config.Agents["finance"]
+	idx := 0
+	fire := time.Now().UTC().Truncate(time.Second)
+	id, err := ch.s.EnqueueRun(ctx, store.NewRun{Agent: "finance", SpecSHA: a.SHA, Trigger: "schedule", TriggerIndex: &idx, ScheduledFor: &fire})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := ch.s.ClaimRun(ctx, "test")
+	if err != nil || c == nil {
+		t.Fatalf("claim = %+v, %v", c, err)
+	}
+	if c.ID != id {
+		t.Fatalf("claimed run %s, want %s", c.ID, id)
+	}
+	if err := ch.e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	run, err := ch.s.GetRun(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != store.StatusSkipped || run.Gate == nil || *run.Gate != store.GateCalendarBusy {
+		t.Fatalf("run = status %s, gate %v, summary %v", run.Status, run.Gate, run.Summary)
+	}
+	if runnerCalled {
+		t.Fatal("runner called for calendar-busy schedule")
+	}
+	if len(ch.mcp.calendarArgs) != 1 {
+		t.Fatalf("calendar queries = %d, want 1", len(ch.mcp.calendarArgs))
+	}
+	if strings.Contains(*run.Summary, "private meeting title") {
+		t.Fatalf("calendar event detail leaked into summary: %s", *run.Summary)
+	}
+	if !strings.Contains(ch.mcp.calendarArgs[0], "2026") {
+		t.Fatalf("calendar query did not render the window: %s", ch.mcp.calendarArgs[0])
+	}
+}
+
 func TestAnApproveToolWaitsForItsPersonInTheChat(t *testing.T) {
 	var ch *connectorHarness
 	sr := &connRunner{output: connQuietOutput, script: func(ctx context.Context, req runner.Request) error {
@@ -371,6 +459,42 @@ func TestAnApproveToolWaitsForItsPersonInTheChat(t *testing.T) {
 	}
 }
 
+func TestAnAgentCanEnableAConfiguredConnectorByTalking(t *testing.T) {
+	sr := &connRunner{script: func(context.Context, runner.Request) error { return nil }, output: `{"summary":"s","report":"r","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[{"type":"agent:define","reason":"Enable listings for reports.","params":{"spec":{"name":"reports","charter":"Read listings.","connectors":["hw"]}}}]}`}
+	ch := connectorSetupExtra(t, sr, "", "  \"agent:define\": auto\n")
+	if _, err := ch.e.DefineAgent(ctx, engine.DefineRequest{Spec: json.RawMessage(`{"name":"reports","charter":"Read listings."}`), Author: "kanishk"}); err != nil {
+		t.Fatal(err)
+	}
+	ch.run(t, true)
+	acts, err := ch.s.ListActions(ctx, "finance", "pending", 10)
+	if err != nil || len(acts) != 1 {
+		t.Fatalf("pending actions = %+v, %v", acts, err)
+	}
+	act := acts[0]
+	if act.Type != actions.DefineType || act.Rule != string(spec.RuleApprove) || act.Status != "pending" {
+		t.Fatalf("connector enable was not held for approval: %+v", act)
+	}
+	preview, err := ch.e.PreviewAction(ctx, &act)
+	if err != nil || !strings.Contains(string(preview), "connector hw") {
+		t.Fatalf("preview = %s, %v", preview, err)
+	}
+	if err := ch.e.ExecuteActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := ch.e.Current().Config.Agents["reports"].Connectors; len(got) != 0 {
+		t.Fatalf("connector enabled before approval: %v", got)
+	}
+	if err := ch.s.DecideAction(ctx, act.ID, true, "kanishk"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.e.ExecuteActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := ch.e.Current().Config.Agents["reports"].Connectors; len(got) != 1 || got[0] != "hw" {
+		t.Fatalf("approved connector set = %v", got)
+	}
+}
+
 func TestAnApproveToolInAnUnattendedRunBecomesAPendingAction(t *testing.T) {
 	sr := &connRunner{output: connQuietOutput, script: func(ctx context.Context, req runner.Request) error {
 		p := req.Connectors.Permit(ctx, "hw", "create_view", "toolu_1", json.RawMessage(`{"name":"later"}`))
@@ -423,6 +547,45 @@ func TestAnApproveToolInAnUnattendedRunBecomesAPendingAction(t *testing.T) {
 	a, err := ch.s.GetAction(ctx, later)
 	if err != nil || a.Status != "executed" || !strings.Contains(string(a.Result), "created") {
 		t.Fatalf("action = %+v %v", a, err)
+	}
+}
+
+func TestTypedGmailDraftUsesConfiguredConnectorAfterApproval(t *testing.T) {
+	output := `{"summary":"draft ready","report":"draft ready","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[{"type":"gmail:draft","params":{"to":["person@example.com"],"subject":"Meeting notes","body":"Hello"},"reason":"Save a draft for review"}]}`
+	sr := &connRunner{output: output, script: func(ctx context.Context, req runner.Request) error {
+		server(t, req)
+		return nil
+	}}
+	ch := connectorSetupExtra(t, sr,
+		"google_actions:\n  gmail_draft: {connector: hw, tool: create_view}",
+		`  "gmail:draft": approve`)
+	c := ch.run(t, false)
+	if ch.mcp.writeCount() != 0 {
+		t.Fatal("a typed write ran before approval")
+	}
+	acts, err := ch.s.ListActions(ctx, "finance", "pending", 10)
+	if err != nil || len(acts) != 1 || acts[0].Type != actions.GmailDraftType || acts[0].RunID != c.ID {
+		t.Fatalf("pending Gmail action = %+v, %v", acts, err)
+	}
+	if err := ch.s.DecideAction(ctx, acts[0].ID, true, "kanishk"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.e.ExecuteActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ch.mcp.writeCount() != 1 {
+		t.Fatalf("connector writes = %d, want one", ch.mcp.writeCount())
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(ch.mcp.writes[0]), &args); err != nil || args["userId"] != "me" {
+		t.Fatalf("Gmail tool args = %s, %v", ch.mcp.writes[0], err)
+	}
+	if got := ch.mcp.auths[len(ch.mcp.auths)-1]; got != "Bearer hw-secret" {
+		t.Fatalf("Gmail connector request auth = %q", got)
+	}
+	act, err := ch.s.GetAction(ctx, acts[0].ID)
+	if err != nil || act.Status != "executed" || !strings.Contains(string(act.Result), "created") {
+		t.Fatalf("Gmail action = %+v, %v", act, err)
 	}
 }
 

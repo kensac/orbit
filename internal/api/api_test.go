@@ -13,10 +13,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/api"
 	"github.com/kensac/orbit/internal/auth"
 	"github.com/kensac/orbit/internal/auth/authtest"
 	"github.com/kensac/orbit/internal/engine"
+	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/testdb"
@@ -33,6 +35,15 @@ type env struct {
 	s             *store.Store
 	e             *engine.Engine
 	is            *authtest.Issuer
+}
+
+type catalogDefineRunner struct{ output string }
+
+func (*catalogDefineRunner) Kind() string  { return "claude-code" }
+func (*catalogDefineRunner) Model() string { return "fake" }
+func (r *catalogDefineRunner) Run(context.Context, runner.Request, func(runner.Event)) (*runner.Result, error) {
+	cost := 0.01
+	return &runner.Result{Output: json.RawMessage(r.output), CostUSD: &cost, SessionID: "catalog-define"}, nil
 }
 
 const (
@@ -131,6 +142,124 @@ func TestInternalListenerAcceptsTheOperatorToken(t *testing.T) {
 	}
 }
 
+func TestAddCatalogConnectorDiscoversOAuthAndStartsSignIn(t *testing.T) {
+	var oauthURL string
+	oauthServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/.well-known/oauth-protected-resource/mcp"), r.URL.Path == "/.well-known/oauth-protected-resource":
+			_, _ = io.WriteString(w, `{"resource":"`+oauthURL+`/mcp","authorization_servers":["`+oauthURL+`"],"scopes_supported":["read"]}`)
+		case r.URL.Path == "/.well-known/oauth-authorization-server":
+			_, _ = io.WriteString(w, `{"issuer":"`+oauthURL+`","authorization_endpoint":"`+oauthURL+`/authorize","token_endpoint":"`+oauthURL+`/token","registration_endpoint":"`+oauthURL+`/register"}`)
+		case r.URL.Path == "/register":
+			_, _ = io.WriteString(w, `{"client_id":"orbit-test"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer oauthServer.Close()
+	oauthURL = oauthServer.URL
+	v := newEnv(t, func(a *api.Server, _ *http.Server) { a.LinkClient = oauthServer.Client() })
+	v.e.Client = oauthServer.Client()
+	v.e.Env = func(name string) (string, bool) {
+		if name == spec.ConnectorKeyEnv {
+			return token, true
+		}
+		return "", false
+	}
+	url := v.srv.URL + "/api/v1/connectors/catalog"
+	person := v.person("kanishk")
+	if code, b := call(t, "POST", url, person, `{"name":"acme","url":"`+oauthServer.URL+`/mcp","description":"Acme data","scopes":[]}`); code != http.StatusCreated {
+		t.Fatalf("add catalog connector = %d %v", code, b)
+	} else if b["authorize_url"] == nil || !strings.Contains(b["authorize_url"].(string), "client_id=orbit-test") {
+		t.Fatalf("authorize URL = %v", b)
+	}
+	if code, b := call(t, "GET", url, person, ""); code != http.StatusOK || len(b["connectors"].([]any)) != 1 {
+		t.Fatalf("catalog = %d %v", code, b)
+	}
+
+	manager, err := v.e.DefineAgent(ctx, engine.DefineRequest{Author: "kanishk", Spec: json.RawMessage(`{"name":"manager","charter":"Manage reports.","actions":{"agent:define":"auto"}}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var defineType actions.Type
+	for _, typ := range actions.Catalog(manager.Agent, v.e.Current().Config.Deployment) {
+		if typ.Name == actions.DefineType {
+			defineType = typ
+			break
+		}
+	}
+	if defineType.Name == "" {
+		t.Fatal("agent:define was not offered")
+	}
+	specProps := defineType.ParamsSchema["properties"].(map[string]any)["spec"].(map[string]any)["properties"].(map[string]any)
+	connectorItems := specProps["connectors"].(map[string]any)["items"].(map[string]any)
+	if enum := connectorItems["enum"].([]string); len(enum) != 1 || enum[0] != "acme" {
+		t.Fatalf("agent:define connector choices = %v", enum)
+	}
+	v.e.NewRunner = func(string, spec.RunnerSpec, func(string) (string, bool)) (runner.Runner, error) {
+		return &catalogDefineRunner{output: `{"summary":"s","report":"r","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[{"type":"agent:define","reason":"Enable the Acme connector for reports.","params":{"spec":{"name":"reports","charter":"Read Acme data.","connectors":["acme"]}}}]}`}, nil
+	}
+	if _, err := v.s.EnqueueRun(ctx, store.NewRun{Agent: manager.Agent.Name, SpecSHA: manager.Agent.SHA, Trigger: "manual"}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := v.s.ClaimRun(ctx, "catalog-define-test")
+	if err != nil || claimed == nil {
+		t.Fatalf("claim manager run = %v, %v", claimed, err)
+	}
+	if err := v.e.Execute(ctx, claimed); err != nil {
+		t.Fatal(err)
+	}
+	acts, err := v.s.ListActions(ctx, "manager", "pending", 10)
+	if err != nil || len(acts) != 1 {
+		t.Fatalf("pending agent:define = %+v, %v", acts, err)
+	}
+	act := acts[0]
+	if act.Type != actions.DefineType || act.Rule != string(spec.RuleApprove) || act.Status != "pending" {
+		t.Fatalf("enabling a catalog connector was not held for approval: %+v", act)
+	}
+	preview, err := v.e.PreviewAction(ctx, &act)
+	if err != nil || !strings.Contains(string(preview), "connector acme") {
+		t.Fatalf("agent:define preview = %s, %v", preview, err)
+	}
+	if got := v.e.Current().Config.Agents["reports"]; got != nil {
+		t.Fatalf("reports was enabled before approval: %+v", got.Connectors)
+	}
+	if err := v.s.DecideAction(ctx, act.ID, true, "kanishk"); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.e.ExecuteActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.e.Current().Config.Agents["reports"]; got == nil || len(got.Connectors) != 1 || got.Connectors[0] != "acme" {
+		t.Fatalf("approved catalog connector not enabled: %+v", got)
+	}
+	if code, _ := call(t, "POST", url, person, `{"name":"unsafe","url":"http://127.0.0.1/mcp"}`); code != http.StatusBadRequest {
+		t.Fatalf("non-HTTPS connector URL = %d", code)
+	}
+	if _, err := v.s.PutConnectorToken(ctx, "acme", []byte("sealed-grant"), nil, "kanishk"); err != nil {
+		t.Fatal(err)
+	}
+	revokeURL := v.srv.URL + "/api/v1/connectors/catalog/acme/revoke"
+	if code, _ := call(t, "POST", revokeURL, v.person("someone-else"), ""); code != http.StatusForbidden {
+		t.Fatalf("another person revoking connector = %d", code)
+	}
+	if code, body := call(t, "POST", revokeURL, person, ""); code != http.StatusOK || body["revoked_version"] != float64(1) {
+		t.Fatalf("owner revoking connector = %d %v", code, body)
+	}
+	if code, body := call(t, "GET", v.srv.URL+"/api/v1/connectors", person, ""); code != http.StatusOK {
+		t.Fatalf("list connectors after revoke = %d %v", code, body)
+	} else {
+		listed := body["connectors"].([]any)
+		for _, raw := range listed {
+			c := raw.(map[string]any)
+			if c["name"] == "acme" && c["connected"] != false {
+				t.Fatalf("revoked connector still connected: %v", c)
+			}
+		}
+	}
+}
+
 func TestManualRunAndMessageWake(t *testing.T) {
 	srv, s, _ := server(t)
 	code, v := call(t, "POST", srv.URL+"/api/v1/agents/a/runs", token, `{"prompt":"now"}`)
@@ -147,6 +276,106 @@ func TestManualRunAndMessageWake(t *testing.T) {
 	runs, _ := s.ListRuns(ctx, store.RunFilter{Agent: "a"})
 	if len(runs) != 2 {
 		t.Fatalf("runs = %d", len(runs))
+	}
+}
+
+type replayRunner struct {
+	got    runner.Request
+	calls  int
+	output json.RawMessage
+}
+
+func (r *replayRunner) Kind() string  { return "claude-code" }
+func (r *replayRunner) Model() string { return "fake" }
+func (r *replayRunner) Run(_ context.Context, req runner.Request, _ func(runner.Event)) (*runner.Result, error) {
+	r.got = req
+	r.calls++
+	cost := 0.13
+	output := r.output
+	if len(output) == 0 {
+		output = json.RawMessage(`{"summary":"ok","report":"ok","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[]}`)
+	}
+	return &runner.Result{Output: output, CostUSD: &cost}, nil
+}
+
+func TestEvaluationReplayUsesCurrentAgentWithoutPersisting(t *testing.T) {
+	v := newEnv(t, nil)
+	fr := &replayRunner{}
+	v.e.NewRunner = func(string, spec.RunnerSpec, func(string) (string, bool)) (runner.Runner, error) { return fr, nil }
+	before, err := v.s.ListRuns(ctx, store.RunFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, got := call(t, "POST", v.internal.URL+"/api/v1/agents/a/replay", token, `{"cases":[{"name":"one","input":{"records":[1,2]}}]}`)
+	results, _ := got["results"].([]any)
+	if code != http.StatusOK || len(results) != 1 || results[0].(map[string]any)["cost_usd"] != 0.13 {
+		t.Fatalf("replay = %d %v", code, got)
+	}
+	if len(fr.got.Tools) != 0 || fr.got.Harness != nil || fr.got.Session != nil || fr.got.Connectors != nil {
+		t.Fatalf("replay received capabilities: %+v", fr.got)
+	}
+	if len(fr.got.Inputs) != 1 || string(fr.got.Inputs[0].Content) != `{"records":[1,2]}` || !strings.Contains(fr.got.Prompt, "x") {
+		t.Fatalf("replay request = %+v", fr.got)
+	}
+	after, err := v.s.ListRuns(ctx, store.RunFilter{})
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("replay persisted a run: before %d after %d err %v", len(before), len(after), err)
+	}
+	if code, _ := call(t, "POST", v.internal.URL+"/api/v1/agents/a/replay", token, `{"cases":[{"name":"one","input":{"records":[]}}],"unexpected":true}`); code != http.StatusBadRequest {
+		t.Fatalf("unknown field = %d", code)
+	}
+	if code, _ := call(t, "POST", v.internal.URL+"/api/v1/agents/a/replay", token, `{}`); code != http.StatusBadRequest || fr.calls != 1 {
+		t.Fatalf("missing input = %d, backend calls %d", code, fr.calls)
+	}
+}
+
+func TestEvaluationGradeUsesSeparateReadOnlyBackendWithoutPersisting(t *testing.T) {
+	v := newEnv(t, nil)
+	fr := &replayRunner{output: json.RawMessage(`{"passed":true,"reason":"the output follows the rubric"}`)}
+	v.e.NewRunner = func(name string, _ spec.RunnerSpec, _ func(string) (string, bool)) (runner.Runner, error) {
+		if name != "grader-backend" {
+			t.Errorf("unexpected runner %q", name)
+		}
+		return fr, nil
+	}
+	cfg := *v.e.Current().Config
+	targetAgent := *cfg.Agents["a"]
+	targetAgent.Charter = "TARGET_AGENT_CHARTER_SENTINEL"
+	gradeAgent := targetAgent
+	gradeAgent.Name, gradeAgent.Runner = "grader", "grader-backend"
+	gradeAgent.Charter = "GRADER_AGENT_CHARTER_SENTINEL"
+	cfg.Agents = map[string]*spec.Agent{"a": &targetAgent, "grader": &gradeAgent}
+	cfg.Deployment.Runners = map[string]spec.RunnerSpec{"r": {Kind: "claude-code"}, "grader-backend": {Kind: "claude-code", Model: "grader-model"}}
+	if err := v.e.SetConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	before, err := v.s.ListRuns(ctx, store.RunFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, got := call(t, "POST", v.internal.URL+"/api/v1/agents/grader/grade", token,
+		`{"target_agent":"a","cases":[{"name":"one","rubric":"mentions the saved total","output":{"summary":"total is 4"}}]}`)
+	grades, _ := got["grades"].([]any)
+	if code != http.StatusOK || len(grades) != 1 || grades[0].(map[string]any)["passed"] != true {
+		t.Fatalf("grade = %d %v", code, got)
+	}
+	if len(fr.got.Tools) != 0 || fr.got.Harness != nil || fr.got.Session != nil || fr.got.Connectors != nil || fr.got.SkillsPlugin != "" {
+		t.Fatalf("grader received capabilities: %+v", fr.got)
+	}
+	if len(fr.got.Inputs) != 1 || !strings.Contains(string(fr.got.Inputs[0].Content), "mentions the saved total") || !strings.Contains(string(fr.got.Inputs[0].Content), `"summary":"total is 4"`) || strings.Contains(fr.got.System, targetAgent.Charter) || strings.Contains(fr.got.System, gradeAgent.Charter) {
+		t.Fatalf("grader request = %+v", fr.got)
+	}
+	if code, _ := call(t, "POST", v.internal.URL+"/api/v1/agents/grader/grade", token,
+		`{"target_agent":"a","unexpected":true,"cases":[]}`); code != http.StatusBadRequest {
+		t.Fatalf("unknown field = %d", code)
+	}
+	if code, _ := call(t, "POST", v.internal.URL+"/api/v1/agents/grader/grade", token,
+		`{"target_agent":"grader","cases":[{"name":"one","rubric":"check","output":{}}]}`); code != http.StatusBadRequest {
+		t.Fatalf("same grader and target accepted: %d", code)
+	}
+	after, err := v.s.ListRuns(ctx, store.RunFilter{})
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("grading persisted a run: before %d after %d err %v", len(before), len(after), err)
 	}
 }
 
@@ -315,5 +544,51 @@ func TestApproveAndAlwaysAllow(t *testing.T) {
 	autoID := pendingAction(t, s, e, "news", "notify", notify)
 	if code, got = call(t, "POST", srv.URL+"/api/v1/actions/"+autoID+"/approve", me, `{"always": true}`); code != 409 || !strings.Contains(got["error"].(string), "already auto") {
 		t.Fatalf("already auto = %d %v", code, got)
+	}
+}
+
+func TestConversationPageAPIRequiresExecutedPageAndMatchingConversation(t *testing.T) {
+	v := newEnv(t, nil)
+	_, err := v.s.EnqueueRun(ctx, store.NewRun{Agent: "a", SpecSHA: v.e.Current().Config.Agents["a"].SHA, Trigger: "manual"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := v.s.ClaimRun(ctx, "test")
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %+v, %v", claim, err)
+	}
+	conversationID, err := v.s.DefaultConversationID(ctx, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageID, err := v.s.StartActionNow(ctx, claim.ID, claim.Attempt, "a", store.ProposedAction{Type: "page:publish", Params: json.RawMessage(`{"title":"Report","html":"<main>hello</main>"}`), Rule: "auto"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.s.FinishAction(ctx, pageID, json.RawMessage(`{"page_id":"`+pageID+`","title":"Report"}`), nil); err != nil {
+		t.Fatal(err)
+	}
+	u := v.srv.URL + "/api/v1/conversations/" + conversationID + "/pages/" + pageID
+	if code, _ := call(t, "GET", u, "", ""); code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated = %d", code)
+	}
+	req, _ := http.NewRequest("GET", u, nil)
+	req.Header.Set("Authorization", "Bearer "+v.person("kanishk"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	page := got["page"].(map[string]any)
+	if resp.StatusCode != http.StatusOK || page["id"] != pageID || page["html"] != "<main>hello</main>" || resp.Header.Get("Cache-Control") != "private, no-store" || resp.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("page response = %d %+v headers=%v", resp.StatusCode, got, resp.Header)
+	}
+	wrong := v.srv.URL + "/api/v1/conversations/00000000-0000-0000-0000-000000000001/pages/" + pageID
+	if code, _ := call(t, "GET", wrong, v.person("kanishk"), ""); code != http.StatusNotFound {
+		t.Fatalf("cross-conversation page = %d", code)
 	}
 }

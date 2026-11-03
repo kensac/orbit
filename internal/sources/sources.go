@@ -166,6 +166,8 @@ type Fetcher struct {
 	Now func() time.Time
 	// Delivery is the webhook delivery that started the run, the content of its webhook sources; nil for a run no delivery started.
 	Delivery *Fetched
+	// Extension invokes a deployment-pinned, explicitly granted source operation.
+	Extension func(context.Context, spec.Source, map[string]*Fetched) (*Fetched, error)
 }
 
 // ErrAbsent is a webhook source's answer on a run no delivery started: there is nothing to read, which is not a failure.
@@ -173,7 +175,18 @@ var ErrAbsent = errors.New("no webhook delivery started this run")
 
 // Fetch fetches one source.
 func (f *Fetcher) Fetch(ctx context.Context, s spec.Source, vars Vars) (*Fetched, error) {
+	return f.FetchWithInputs(ctx, s, vars, nil)
+}
+
+// FetchWithInputs fetches one source with earlier source results available to
+// an extension operation. Other source kinds ignore the map.
+func (f *Fetcher) FetchWithInputs(ctx context.Context, s spec.Source, vars Vars, prior map[string]*Fetched) (*Fetched, error) {
 	switch s.Kind {
+	case "extension":
+		if f.Extension == nil {
+			return nil, errors.New("extension runtime is unavailable")
+		}
+		return f.Extension(ctx, s, prior)
 	case "http":
 		return f.http(ctx, s, vars)
 	case "prometheus":
@@ -182,6 +195,8 @@ func (f *Fetcher) Fetch(ctx context.Context, s spec.Source, vars Vars) (*Fetched
 		return f.loki(ctx, s, vars)
 	case "github":
 		return f.github(ctx, s)
+	case "lake":
+		return f.lake(ctx, s, vars)
 	case "file":
 		return f.file(s)
 	case "webhook":

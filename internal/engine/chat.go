@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -165,13 +166,21 @@ func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.Claimed
 	if len(cred) == 0 {
 		return nil, fmt.Errorf("a sandboxed chat needs %s or %s for the CLI in the sandbox", claudeproto.OAuthToken, claudeproto.APIKey)
 	}
+	persistent := profile == spec.SandboxWorkstation
+	label := c.ID
+	if persistent {
+		label, err = sandbox.ChatBoxName(c.ConversationID)
+		if err != nil {
+			return nil, fmt.Errorf("chat box: %w", err)
+		}
+	}
 	path, _ := runner.SessionFile(home, workdir, "x")
 	project := filepath.Dir(path)
 	// A workstation's own HOME, beside the conversation's (it is the
 	// model's, unlike HOME, which holds orbit's session state).
 	boxHome := filepath.Join(filepath.Dir(workdir), "box-home")
 	return &runner.Sandbox{
-		Client: client, Label: c.ID, Env: cred, Profile: profile,
+		Client: client, Label: label, Env: cred, Profile: profile, Persistent: persistent, RunID: c.ID,
 		Pack: func() ([]byte, error) {
 			tree, _, err := workspace.Pack(
 				workspace.Tree{Dir: workdir, Skip: func(rel string) bool { return rel == ".orbit" || strings.HasPrefix(rel, ".orbit/") }},
@@ -291,10 +300,12 @@ func chatPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 // chatState collects what a chat run's tools asked for: its outcome
 // beside the reply.
 type chatState struct {
-	mu        sync.Mutex
-	memory    *string
-	questions []OutputQuestion
-	actions   []chatAction
+	// conversation is the run's, whose uploads and answers a template:create reads.
+	conversation string
+	mu           sync.Mutex
+	memory       *string
+	questions    []OutputQuestion
+	actions      []chatAction
 }
 
 type chatAction struct {
@@ -461,6 +472,9 @@ type chatTurn struct {
 	skills []store.Skill
 	// repos is what the agent's repositories add (repos.go), or nil.
 	repos *repoRun
+	stall *runner.Stall
+	// model and effort are the conversation's (conversationModel).
+	model, effort string
 }
 
 // errCancelled is a run a person stopped; Execute records it cancelled.
@@ -494,7 +508,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 			return nil, nil, err
 		}
 	}
-	st := &chatState{}
+	st := &chatState{conversation: c.ConversationID}
 	chat := e.chatTools(snap, a, c, t.instructor, t.types, d.Defaults.MemoryMaxBytes, st)
 	e.repoChatTools(a, chat)
 	e.promChatTools(a, chat)
@@ -507,7 +521,11 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 		t.steer.Store(feed)
 		defer t.steer.Store(nil)
 	}
-	chat.Level, chat.Ceiling = a.PermissionLevel(), a.PermissionCeiling()
+	lc, err := e.runLevel(ctx, a, c)
+	if err != nil {
+		return nil, nil, err
+	}
+	chat.Level, chat.Ceiling, chat.Choice = lc.Level, a.PermissionCeiling(), lc.Choice
 	chat.RecordPermission = func(req claudeproto.PermissionRequest, p claudeproto.Permission) error {
 		return recordPermission(t.record, req, p)
 	}
@@ -531,13 +549,21 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	}
 	req := runner.Request{
 		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
-		Tools: a.Tools, WebAllow: webAllow(a), Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin, Connectors: t.connectors,
+		Tools: a.Tools, WebAllow: webAllow(a), Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin, Connectors: t.connectors, Stall: t.stall,
+		Model: t.model, Effort: t.effort,
 	}
-	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
+	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), cmp.Or(t.model, r.Model()), a.Charter, req)); err != nil {
 		return nil, nil, err
 	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
 	defer cancel()
+	changes := make(chan runner.LevelChange, 1)
+	chat.Changes = changes
+	lvl := &currentLevel{}
+	lvl.set(lc.Level)
+	deadline, _ := runCtx.Deadline()
+	chat.Prompt = e.approvalPrompt(a, c, lvl, deadline, t.emit)
+	go e.watchLevel(runCtx, a, c, lc, lvl, changes)
 	res, err := r.Run(runCtx, req, func(ev runner.Event) { t.emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
@@ -612,6 +638,31 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err := t.Validate(v.Params); err != nil {
 		return "invalid params: " + err.Error(), true
 	}
+	if v.Type == actions.PagePublishType && !Attended(c.Trigger) {
+		return "page:publish is only available while answering the person's message in this conversation", true
+	}
+	if v.Type == actions.TemplateCreateType {
+		define, ask, err := e.templateProposal(ctx, c.ConversationID, v.Params)
+		if err != nil {
+			return "refused: " + err.Error(), true
+		}
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if len(st.actions) >= maxActions {
+			return fmt.Sprintf("at most %d actions per reply", maxActions), true
+		}
+		st.actions = append(st.actions, v)
+		if ask != nil {
+			return fmt.Sprintf("orbit will ask the person, with a form, for %d value(s) only they give; when their answers arrive, propose this again.", len(ask.Fields)), false
+		}
+		var rendered struct {
+			Spec struct {
+				Name string `json:"name"`
+			} `json:"spec"`
+		}
+		_ = json.Unmarshal(define, &rendered)
+		return fmt.Sprintf("Rendered and checked: creating agent %q waits for the person's approval.", rendered.Spec.Name), false
+	}
 	// A schedule change is parsed by code now: one it cannot read is refused, and what a recorded one will do goes back to the model to confirm with the person (an executed one's result says it).
 	preview := ""
 	if actions.IsScheduleType(v.Type) && v.Type != actions.RunNowType {
@@ -640,7 +691,10 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if !a.Chat {
 		instructor = ""
 	}
-	now := (rule == spec.RuleAuto || (rule == spec.RuleApprove && instructor != "")) && !e.Outbox && v.Type != "continue"
+	// Workers leave credentialed actions for control. page:publish only
+	// writes validated content to this conversation's action row; executing
+	// it here lets the same attended turn receive its page reference.
+	now := (rule == spec.RuleAuto || (rule == spec.RuleApprove && instructor != "")) && (!e.Outbox || v.Type == actions.PagePublishType) && v.Type != "continue"
 	if now && v.Type == actions.DefineType && len(e.defineWidening(ctx, v.Params)) > 0 {
 		// A change that widens an agent waits for a person's decision on
 		// the change itself, whatever the rule (succeed holds it).
@@ -664,7 +718,7 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return "orbit could not record the action: " + err.Error(), true
 	}
 	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ActionTimeout)
-	result, xerr := e.executor(snap).Execute(actx, actions.Call{ID: id, Agent: a.Name, RunID: c.ID, Type: v.Type, Params: v.Params, Rule: rule,
+	result, xerr := e.executor(snap).Execute(actx, actions.Call{ID: id, Agent: a.Name, RunID: c.ID, ConversationID: c.ConversationID, Type: v.Type, Params: v.Params, Rule: rule,
 		Workspace: runner.WorkspaceOf(ctx)})
 	cancel()
 	if err := e.finishAction(ctx, snap, &store.Action{ID: id, RunID: c.ID, Agent: a.Name, Type: v.Type}, result, xerr); err != nil {
@@ -675,6 +729,9 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	if len(result) == 0 {
 		result = json.RawMessage(`{}`)
+	}
+	if v.Type == actions.PagePublishType {
+		return string(result), false
 	}
 	return fmt.Sprintf("%s executed (action %s): %s", v.Type, id, result), false
 }

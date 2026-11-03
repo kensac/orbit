@@ -112,7 +112,7 @@ func TestWorkspaceIsFoundFromItsConversationAndAgent(t *testing.T) {
 		t.Fatalf("workspace = %d %v", code, r)
 	}
 	caps := ws["capabilities"].(map[string]any)
-	if caps["read"] != true || caps["write"] != true || caps["terminals"] != false || caps["git"] != false || caps["watch"] != false ||
+	if caps["read"] != true || caps["write"] != true || caps["terminals"] != false || caps["git"] != false || caps["watch"] != true ||
 		len(caps["presets"].([]any)) != 0 {
 		t.Fatalf("capabilities = %v", caps)
 	}

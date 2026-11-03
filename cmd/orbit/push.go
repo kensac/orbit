@@ -9,14 +9,18 @@ import (
 	"github.com/kensac/orbit/internal/webpush"
 )
 
-// deliverPush sends what needs attention to every device, when push is
-// configured. Control only: it holds the VAPID key.
+// deliverPush sends what needs attention to every device, and takes what
+// closed off them, when push is configured. Control only: it holds the
+// VAPID key.
 func deliverPush(ctx context.Context, p *push.Sender, log *slog.Logger) {
 	if p == nil {
 		return
 	}
 	if err := p.Deliver(ctx); err != nil && ctx.Err() == nil {
 		log.Error("push", "err", err)
+	}
+	if err := p.Close(ctx); err != nil && ctx.Err() == nil {
+		log.Error("push close", "err", err)
 	}
 }
 

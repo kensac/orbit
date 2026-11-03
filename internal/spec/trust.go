@@ -32,6 +32,9 @@ func (a *Agent) Restricted() bool { return a.Origin == OriginDatabase || a.Origi
 // EnvRefs lists the variables a source renders into its requests, sorted and without repeats.
 func (s Source) EnvRefs() []string {
 	b := []string{s.URL, s.Expr}
+	if s.Kind == "lake" {
+		b = append(b, s.AccessKeyID, s.SecretAccessKey, s.SessionToken)
+	}
 	for _, v := range s.Headers {
 		b = append(b, v)
 	}
@@ -114,6 +117,8 @@ func (c *Config) validateTrust(a *Agent) []error {
 				u = strings.TrimRight(u, "/") + "/api/v1/query"
 			case "loki":
 				u = strings.TrimRight(u, "/") + "/loki/api/v1/query_range"
+			case "lake":
+				u = strings.TrimRight(u, "/") + "/"
 			}
 			if strings.Contains(u, "{{") || strings.Contains(u, "${") {
 				continue // checked on every request (sources.Fetcher)
@@ -205,6 +210,11 @@ func Widening(cur, next *Agent) []string {
 			out = append(out, "delegate to "+d)
 		}
 	}
+	for _, name := range next.DelegateTemplates {
+		if !slices.Contains(cur.DelegateTemplates, name) && !slices.Contains(cur.DelegateTemplates, "*") {
+			out = append(out, "delegate from template "+name)
+		}
+	}
 	for _, n := range next.Needs {
 		if !slices.Contains(cur.Needs, n) {
 			out = append(out, "need "+n)
@@ -215,6 +225,9 @@ func Widening(cur, next *Agent) []string {
 			// Its tools run as the agent's, on the person's account at that server.
 			out = append(out, "connector "+n)
 		}
+	}
+	if next.CalendarSkip != nil && !reflect.DeepEqual(cur.CalendarSkip, next.CalendarSkip) {
+		out = append(out, "calendar skip configuration")
 	}
 	for _, t := range next.Triggers {
 		// A webhook lets an outside sender start unattended runs with a body it wrote.

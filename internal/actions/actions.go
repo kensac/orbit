@@ -27,6 +27,8 @@ import (
 type Type struct {
 	Name        string
 	Description string
+	// Brief, when set, is what a run with orbit's built-in skills is told in its place: the type in a line, the skill named in its description holding the rest.
+	Brief string
 	// ParamsSchema is the JSON Schema of params, shown to the agent and
 	// enforced before the action is stored.
 	ParamsSchema map[string]any
@@ -35,7 +37,7 @@ type Type struct {
 
 // Catalog returns the action types an agent's spec enables (rule auto or
 // approve), in a stable order. Denied types are not offered at all.
-func Catalog(a *spec.Agent, d spec.Deployment) []Type {
+func Catalog(a *spec.Agent, d spec.Deployment, available ...[]store.Template) []Type {
 	var out []Type
 	if r := a.RuleFor("notify"); r != spec.RuleDeny {
 		out = append(out, notifyType(a))
@@ -43,9 +45,21 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 	if r := a.RuleFor("continue"); r != spec.RuleDeny {
 		out = append(out, continueType())
 	}
-	if targets := a.DelegateTargets(); len(targets) > 0 {
+	targets := a.DelegateTargets()
+	var templates []store.Template
+	if len(available) > 0 {
+		for _, tpl := range available[0] {
+			if tpl.Status != "active" {
+				continue
+			}
+			if slices.Contains(a.DelegateTemplateTargets(), "*") || slices.Contains(a.DelegateTemplateTargets(), tpl.Name) {
+				templates = append(templates, tpl)
+			}
+		}
+	}
+	if len(targets) > 0 || len(templates) > 0 {
 		if a.RuleFor(DelegateType) != spec.RuleDeny {
-			out = append(out, delegateType(targets))
+			out = append(out, delegateType(targets, templates, a.Connectors))
 		}
 		if a.RuleFor(TaskMessageType) != spec.RuleDeny {
 			out = append(out, taskMessageType())
@@ -63,6 +77,7 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 			out = append(out, webhookType(name, d.Endpoints[name]))
 		}
 	}
+	out = append(out, googleTypes(a, d)...)
 	if d.GitHub != nil && a.RuleFor(MergeType) != spec.RuleDeny {
 		out = append(out, mergeType(d))
 	}
@@ -78,7 +93,7 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 		out = append(out, commentType(d))
 	}
 	if a.RuleFor(DefineType) != spec.RuleDeny {
-		out = append(out, defineType(a))
+		out = append(out, defineType(a, d.Connectors))
 	}
 	if a.RuleFor(SaveType) != spec.RuleDeny {
 		out = append(out, saveType())
@@ -91,7 +106,65 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 	if a.RuleFor(SkillWriteType) != spec.RuleDeny {
 		out = append(out, skillWriteType())
 	}
+	if a.Chat && a.RuleFor(PagePublishType) != spec.RuleDeny {
+		out = append(out, pagePublishType())
+	}
+	if a.RuleFor(TemplateCreateType) != spec.RuleDeny {
+		out = append(out, templateCreateType())
+	}
 	return out
+}
+
+// TemplateCreateType creates an agent from a template in orbit's library. It is never executed as itself: when proposed, code renders the template with the parameters (engine/templates.go) and records the result as an agent:define that waits for a person, or, when the person must still give a user_prompt parameter, asks them with a form instead.
+const TemplateCreateType = "template:create"
+
+// TemplateCreate is template:create's params.
+type TemplateCreate struct {
+	Template string `json:"template"`
+	// Version is the template's version; 0 or absent is its current one.
+	Version int `json:"version,omitempty"`
+	// Name, when set, is the new agent's name in place of the one the template renders.
+	Name       string                     `json:"name,omitempty"`
+	Parameters map[string]json.RawMessage `json:"parameters"`
+}
+
+func templateCreateType() Type {
+	return Type{
+		Name: TemplateCreateType,
+		Description: "Create an agent from a template in orbit's library: template is its name, parameters its values by name " +
+			"(the template's parameters say each one's type). orbit renders it, checks the agent loads, and asks your person to approve it; " +
+			"a parameter only your person can give is asked of them with a form, and their answers come back to you to propose again.",
+		ParamsSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"template":   map[string]any{"type": "string", "pattern": `^[a-z][a-z0-9-]{0,62}$`},
+				"version":    map[string]any{"type": "integer", "minimum": 0},
+				"name":       map[string]any{"type": "string", "pattern": spec.AgentNamePattern},
+				"parameters": map[string]any{"type": "object"},
+			},
+			"required":             []string{"template", "parameters"},
+			"additionalProperties": false,
+		},
+		Validate: func(p json.RawMessage) error {
+			_, err := DecodeTemplateCreate(p)
+			return err
+		},
+	}
+}
+
+// DecodeTemplateCreate reads template:create's params.
+func DecodeTemplateCreate(p json.RawMessage) (TemplateCreate, error) {
+	var v TemplateCreate
+	if err := strictDecode(p, &v); err != nil {
+		return v, err
+	}
+	if v.Template == "" {
+		return v, fmt.Errorf("template:create: template is required")
+	}
+	if v.Version < 0 {
+		return v, fmt.Errorf("template:create: version is 0 (the current one) or more")
+	}
+	return v, nil
 }
 
 // DefineType creates or changes an agent defined in the database, this
@@ -102,22 +175,47 @@ const DefineType = "agent:define"
 
 type defineParams struct {
 	Spec json.RawMessage `json:"spec"`
+	// Template names the template version a define was rendered from (template:create); a record for the person approving it, not an input to the change.
+	Template *TemplateRef `json:"template,omitempty"`
 }
 
-func defineType(a *spec.Agent) Type {
+// TemplateRef names one version of a template.
+type TemplateRef struct {
+	Name    string `json:"name"`
+	Version int    `json:"version"`
+}
+
+func defineType(a *spec.Agent, configured map[string]spec.Connector) Type {
+	connectors := slices.Sorted(maps.Keys(configured))
+	connectorNote := "No connectors are configured in orbit.yaml."
+	var connectorSchema map[string]any
+	if len(connectors) > 0 {
+		connectorNote = "Preconfigured connectors that can be enabled for a database agent: " + strings.Join(connectors, ", ") + "."
+		connectorSchema = map[string]any{
+			"type":        "array",
+			"items":       map[string]any{"type": "string", "enum": connectors},
+			"description": "Preconfigured connector names the target agent may use. Adding a connector always waits for the person's approval.",
+		}
+	}
+	properties := map[string]any{
+		"name": map[string]any{"type": "string", "pattern": spec.AgentNamePattern},
+	}
+	if connectorSchema != nil {
+		properties["connectors"] = connectorSchema
+	}
 	return Type{
 		Name: DefineType,
 		Description: "Create an agent or change one (yourself included, \"" + a.Name + "\"): spec is the whole agent, " +
-			"the same fields as an agents/<name>.yaml file (name, description, charter, triggers, sources, tools, actions, " +
+			"the same fields as an agents/<name>.yaml file (name, description, charter, triggers, sources, connectors, tools, actions, " +
 			"session, notify, ...; durations as strings like \"15m\"). It replaces the agent's spec as a new version; " +
 			"every version is kept and can be reverted. Agents defined in configuration files cannot be changed this way. " +
-			"A change that adds a tool, source, credential, delegate target or need, or allows an action more readily, waits for a person's approval. " +
+			connectorNote + " Adding a connector grants that database agent access to its tools, so the change always waits for a person's approval; it does not add a server or sign in. " +
+			"A change that adds a tool, source, credential, delegate target or need, or allows an action more readily, also waits for a person's approval. " +
 			"Such an agent may use, without a sandbox, only the tools " + strings.Join(spec.UnsandboxedTools, ", ") + "; never a file source or a ${VAR} but orbit.yaml's credentials.",
 		ParamsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"spec": map[string]any{"type": "object", "properties": map[string]any{
-					"name": map[string]any{"type": "string", "pattern": spec.AgentNamePattern}}, "required": []string{"name"}},
+				"spec": map[string]any{"type": "object", "properties": properties, "required": []string{"name"}},
 			},
 			"required":             []string{"spec"},
 			"additionalProperties": false,
@@ -254,7 +352,8 @@ const MaxContinueChain = 12
 
 func continueType() Type {
 	return Type{
-		Name: "continue",
+		Name:  "continue",
+		Brief: "Be woken again after_minutes from now, with note as what your next run is told (the orbit-continuations skill says how).",
 		Description: fmt.Sprintf("Be woken again after_minutes from now (%d to %d) to carry on a longer task. "+
 			"note is what your next run is told: what you were doing and what to do next. "+
 			"At most %d continuations in a row; one waits at a time.",
@@ -319,8 +418,12 @@ type Executor struct {
 	Define func(ctx context.Context, c Call, spec json.RawMessage) (json.RawMessage, error)
 	// SkillWrite applies a skill:write for the call's run.
 	SkillWrite func(ctx context.Context, c Call, w SkillWrite) (json.RawMessage, error)
+	// PagePublish checks and records page:publish for the call's conversation.
+	PagePublish func(ctx context.Context, c Call, p PagePublish) (json.RawMessage, error)
 	// Connector calls a connector's tool for an approved connector:<conn>/<tool> action, adding the connector's credential (engine/connectors.go).
 	Connector func(ctx context.Context, c Call) (json.RawMessage, error)
+	// Google carries out a typed Gmail or Calendar write through its fixed connector mapping.
+	Google func(ctx context.Context, c Call, g GoogleCall) (json.RawMessage, error)
 	// Schedule applies a schedule action or run:now for the call's run.
 	Schedule func(ctx context.Context, c Call, p ScheduleParams) (json.RawMessage, error)
 }
@@ -329,11 +432,12 @@ type Executor struct {
 // and run that proposed it.
 type Call struct {
 	// ID is the action's own id.
-	ID     string
-	Agent  string
-	RunID  string
-	Type   string
-	Params json.RawMessage
+	ID             string
+	Agent          string
+	RunID          string
+	ConversationID string
+	Type           string
+	Params         json.RawMessage
 	// Workspace is the run's conversation's workspace, for github:clone
 	// and github:pr; nil for an agent without one.
 	Workspace Workspace
@@ -388,6 +492,15 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 		return e.publish(ctx, c)
 	case typ == CommentType:
 		return e.comment(ctx, params)
+	case typ == GmailDraftType || typ == CalendarCreateType:
+		g, err := googleCall(e.Deployment, typ, params)
+		if err != nil {
+			return nil, err
+		}
+		if e.Google == nil {
+			return nil, fmt.Errorf("%s: not available in this process", typ)
+		}
+		return e.Google(ctx, c, g)
 	case typ == store.DecisionType:
 		// A person approved it; the task it holds starts at the next
 		// reconcile. Nothing else happens here.
@@ -406,11 +519,23 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 			return nil, fmt.Errorf("skill:write: not available in this process")
 		}
 		return e.SkillWrite(ctx, c, w)
+	case typ == PagePublishType:
+		p, err := DecodePagePublish(params)
+		if err != nil {
+			return nil, err
+		}
+		if e.PagePublish == nil {
+			return nil, fmt.Errorf("page:publish: not available in this process")
+		}
+		return e.PagePublish(ctx, c, p)
 	case strings.HasPrefix(typ, spec.ConnectorActionPrefix):
 		if e.Connector == nil {
 			return nil, fmt.Errorf("%s: not available in this process", typ)
 		}
 		return e.Connector(ctx, c)
+	case typ == TemplateCreateType:
+		// Proposals of it are recorded as agent:define (engine/templates.go); one stored as itself is never run.
+		return nil, fmt.Errorf("template:create: recorded as an agent:define when proposed; nothing to execute")
 	case typ == DefineType:
 		sp, err := DecodeDefine(params)
 		if err != nil {

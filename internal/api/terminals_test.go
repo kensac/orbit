@@ -112,8 +112,8 @@ func (f *fakeSandboxd) handler(t *testing.T) http.Handler {
 	})
 	mux.HandleFunc("GET /v1/boxes/{name}/accounts/{slot}/mcp", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"servers": []sandbox.MCPServer{
-			{Name: "claude.ai Gmail", Target: "https://gmailmcp.googleapis.com/mcp/v1", Status: sandbox.MCPNeedsAuth, Connector: true},
-			{Name: "orbit", Target: "https://orbit.kanishksachdev.com/mcp", Transport: "HTTP", Status: sandbox.MCPConnected},
+			{Name: "claude.ai Gmail", Status: sandbox.MCPNeedsAuth, Connector: true},
+			{Name: "orbit", Transport: "HTTP", Status: sandbox.MCPConnected},
 		}})
 	})
 	mux.HandleFunc("GET /v1/boxes/{name}/accounts/{slot}/usage", func(w http.ResponseWriter, r *http.Request) {
@@ -134,6 +134,25 @@ func (f *fakeSandboxd) handler(t *testing.T) http.Handler {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]bool{"exists": f.sessions[r.PathValue("s")]})
+	})
+	mux.HandleFunc("GET /v1/boxes/{name}/sessions/{s}/scrollback", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("lines") == "" {
+			t.Error("scrollback request did not bound line count")
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = io.WriteString(w, "prior output\r\n")
+	})
+	mux.HandleFunc("POST /v1/boxes/{name}/sessions/{s}/resize", func(w http.ResponseWriter, r *http.Request) {
+		var size sandbox.Resize
+		if err := json.NewDecoder(r.Body).Decode(&size); err != nil || size.Validate() != nil {
+			t.Errorf("resize request %+v: %v", size, err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		f.mu.Lock()
+		f.resizes = append(f.resizes, size)
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /v1/boxes/{name}/sessions/{s}/kill", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -249,8 +268,9 @@ box: {mcp_servers: {orbit: {type: http, url: "https://orbit.kanishksachdev.com/m
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), TerminalPing: 50 * time.Millisecond,
 		Boxes: func() (*sandbox.Client, error) { return client, nil }}
 	pub := httptest.NewUnstartedServer(a.Handler())
-	// As serve's: a socket must outlive the server's WriteTimeout.
-	pub.Config.WriteTimeout = 300 * time.Millisecond
+	// Ordinary requests use the same allowance as the conversation tests so
+	// database-backed handlers can finish under -race on a loaded CI runner.
+	pub.Config.WriteTimeout = testWriteTimeout
 	pub.Start()
 	internal := httptest.NewServer(a.InternalHandler())
 	t.Cleanup(func() {
@@ -395,6 +415,9 @@ func TestTerminalSocket(t *testing.T) {
 	if term["state"] != "running" || term["title"] != "Shell" || term["created_by"] != "kanishk" {
 		t.Fatalf("terminal %v", term)
 	}
+	if code, _ := call(t, http.MethodPost, v.srv.URL+"/api/v1/terminals/"+tid+"/resize", v.person("kanishk"), `{"cols":100,"rows":30}`); code != http.StatusNoContent {
+		t.Fatalf("standalone resize: %d", code)
+	}
 
 	if code, out := call(t, http.MethodPost, v.srv.URL+"/api/v1/terminals/"+tid+"/attach", v.person("kanishk"), `{"origin":"https://evil.example"}`); code != 400 || out["check"] != "origin" {
 		t.Fatalf("a ticket for another origin: %d %v", code, out)
@@ -427,8 +450,11 @@ func TestTerminalSocket(t *testing.T) {
 		t.Fatalf("a ticket used twice: %v %v", resp, err)
 	}
 	ready := readText(t, c)
-	if ready["type"] != "ready" || ready["terminal"].(map[string]any)["clients"] != float64(1) {
+	if ready["type"] != "ready" || ready["terminal"].(map[string]any)["clients"] != float64(1) || ready["replay_bytes"] != float64(len("prior output\r\n")) {
 		t.Fatalf("ready %v", ready)
+	}
+	if got := readBinary(t, c); string(got) != "prior output\r\n" {
+		t.Fatalf("scrollback replay %q", got)
 	}
 	_ = c.Write(ctx, websocket.MessageText, []byte(`{"type":"resize","cols":132,"rows":40}`))
 	_ = c.Write(ctx, websocket.MessageBinary, []byte("ls\r"))
@@ -440,7 +466,7 @@ func TestTerminalSocket(t *testing.T) {
 		t.Fatalf("pong %v", m)
 	}
 	// Past the server's WriteTimeout, the server still pings.
-	time.Sleep(400 * time.Millisecond)
+	time.Sleep(testWriteTimeout + 100*time.Millisecond)
 	pings := 0
 	for pings < 2 {
 		typ, b, err := c.Read(ctx)
@@ -479,10 +505,10 @@ func TestTerminalSocket(t *testing.T) {
 	v.fake.mu.Lock()
 	tty, resizes := v.fake.ttys[0], v.fake.resizes
 	v.fake.mu.Unlock()
-	if tty.Preset != "shell" || tty.Cols != 80 || tty.Rows != 24 || len(tty.Env) != 0 || !strings.HasPrefix(tty.Session, "shell-") {
+	if tty.Preset != "shell" || tty.Cols != 100 || tty.Rows != 30 || len(tty.Env) != 0 || !strings.HasPrefix(tty.Session, "shell-") {
 		t.Fatalf("tty request %+v: a shell carries no credential", tty)
 	}
-	if len(resizes) != 1 || resizes[0] != (sandbox.Resize{Cols: 132, Rows: 40}) {
+	if len(resizes) != 2 || resizes[0] != (sandbox.Resize{Cols: 100, Rows: 30}) || resizes[1] != (sandbox.Resize{Cols: 132, Rows: 40}) {
 		t.Fatalf("resizes %v", resizes)
 	}
 	if code, out := call(t, http.MethodPost, v.srv.URL+"/api/v1/terminals/"+tid+"/attach", v.person("kanishk"), ""); code != 409 {

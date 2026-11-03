@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path"
@@ -35,6 +37,9 @@ import (
 // and an account's slot, and every other command is a fixed script.
 const (
 	PathBoxes = "/v1/boxes"
+	// PathChatBoxes is a separately isolated, persistent box for one chat
+	// conversation. It has no direct-terminal or account mount routes.
+	PathChatBoxes = "/v1/chatboxes"
 	// TTYUpgrade is the upgrade token of the TTY stream.
 	TTYUpgrade = "orbit-box-tty"
 	// BoxHome is the box user's HOME, a named volume of its own.
@@ -45,6 +50,23 @@ const (
 	// MaxAccounts bounds the accounts one box mounts.
 	MaxAccounts = 16
 )
+
+var conversationIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// ChatBoxName derives a stable, non-identifying sandboxd name from a
+// conversation id. Each chat gets its own container and named volumes.
+func ChatBoxName(conversationID string) (string, error) {
+	if !conversationIDRE.MatchString(conversationID) {
+		return "", fmt.Errorf("invalid conversation id %q", conversationID)
+	}
+	sum := sha256.Sum256([]byte(conversationID))
+	return "chat-" + hex.EncodeToString(sum[:16]), nil
+}
+
+var chatBoxNameRE = regexp.MustCompile(`^chat-[0-9a-f]{32}$`)
+
+// ValidChatBoxName reports whether name is an orbit-derived chat box name.
+func ValidChatBoxName(name string) bool { return chatBoxNameRE.MatchString(name) }
 
 var slotRE = regexp.MustCompile(`^[0-9a-f]{12}$`)
 

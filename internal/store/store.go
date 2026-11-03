@@ -187,6 +187,7 @@ func (s *Store) ListAgents(ctx context.Context) ([]AgentRow, error) {
 		    SELECT r.id::text, r.status, r.trigger, r.created_at, r.finished_at, r.summary
 		    FROM runs r WHERE r.agent = a.name ORDER BY r.created_at DESC LIMIT 1
 		) lr ON true
+		WHERE NOT a.task_worker
 		ORDER BY a.present DESC, a.name`)
 	if err != nil {
 		return nil, err
@@ -485,9 +486,15 @@ const waitingMessage = `m.direction = 'to_agent' AND (m.run_id IS NULL OR (
 // the one it actually ran. ErrConflict means the attempt no longer holds
 // the run.
 func (s *Store) SetRunner(ctx context.Context, runID string, attempt int, kind, model, specSHA string) error {
+	return s.SetRunnerAt(ctx, runID, attempt, kind, model, "", specSHA)
+}
+
+// SetRunnerAt is SetRunner with the effort the attempt runs at ("" for the
+// runner's default).
+func (s *Store) SetRunnerAt(ctx context.Context, runID string, attempt int, kind, model, effort, specSHA string) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE runs SET runner_kind = $3, model = NULLIF($4, ''), spec_sha = $5
-			WHERE id = $1 AND status = 'running' AND attempt = $2`, runID, attempt, kind, model, specSHA)
+		tag, err := tx.Exec(ctx, `UPDATE runs SET runner_kind = $3, model = NULLIF($4, ''), spec_sha = $5, effort = NULLIF($6, '')
+			WHERE id = $1 AND status = 'running' AND attempt = $2`, runID, attempt, kind, model, specSHA, effort)
 		if err != nil {
 			return err
 		}
@@ -549,6 +556,8 @@ type RunResult struct {
 	// Gate names what ended a skipped run without a backend call; set
 	// exactly when Status is skipped (runs_skipped_names_gate).
 	Gate string
+	// BudgetAlertKey records one attention alert per agent and budget period.
+	BudgetAlertKey string
 	// DiffPolicyFailed is a build whose diff the diff policy refused
 	// (FailBuild records it for a race's comparison).
 	DiffPolicyFailed bool
@@ -559,11 +568,16 @@ const (
 	StatusSucceeded = "succeeded"
 	StatusFailed    = "failed"
 	StatusCancelled = "cancelled"
-	// StatusSkipped is a run a gate ended without calling a backend: it
-	// finished well, and judged nothing.
+	// StatusSkipped is a run a gate ended without calling a backend.
 	StatusSkipped = "skipped"
 	// GateMissed names a schedule fire that was claimed past its grace and skipped rather than run late. Unlike a gate's skip it is no success: the agent did nothing.
 	GateMissed = "missed"
+	// GateBudget names a scheduled run refused after reaching its agent's budget.
+	GateBudget = "budget"
+	// GateQuietHours names a scheduled run suppressed by its agent's local quiet interval.
+	GateQuietHours = "quiet_hours"
+	// GateCalendarBusy names a scheduled run that overlaps a calendar event.
+	GateCalendarBusy = "calendar_busy"
 )
 
 // FinishRun records the outcome of a run that wrote nothing else (a failure,
@@ -623,6 +637,11 @@ func finishRun(ctx context.Context, tx pgx.Tx, runID string, r RunResult) error 
 			return err
 		}
 	}
+	if r.BudgetAlertKey != "" {
+		if err := newAttention(ctx, tx, AttentionBudget, r.BudgetAlertKey, runID, " budget limit reached", nil, nil, nil, nil); err != nil {
+			return err
+		}
+	}
 	if r.Attempt < 1 {
 		return nil
 	}
@@ -631,28 +650,31 @@ func finishRun(ctx context.Context, tx pgx.Tx, runID string, r RunResult) error 
 
 // Run is a run as the API reports it.
 type Run struct {
-	ID           string          `json:"id"`
-	Attempt      int             `json:"attempt"`
-	Agent        string          `json:"agent"`
-	SpecSHA      string          `json:"spec_sha"`
-	Trigger      string          `json:"trigger"`
-	TriggerIndex *int            `json:"trigger_index,omitempty"`
-	ScheduledFor *time.Time      `json:"scheduled_for,omitempty"`
-	Prompt       string          `json:"prompt"`
-	Status       string          `json:"status"`
-	RunnerKind   *string         `json:"runner_kind,omitempty"`
-	Model        *string         `json:"model,omitempty"`
-	Worker       *string         `json:"worker,omitempty"`
-	CreatedAt    time.Time       `json:"created_at"`
-	StartedAt    *time.Time      `json:"started_at,omitempty"`
-	FinishedAt   *time.Time      `json:"finished_at,omitempty"`
-	Error        *string         `json:"error,omitempty"`
-	Summary      *string         `json:"summary,omitempty"`
-	Report       *string         `json:"report,omitempty"`
-	Output       json.RawMessage `json:"output,omitempty"`
-	Usage        json.RawMessage `json:"usage,omitempty"`
-	CostUSD      *float64        `json:"cost_usd,omitempty"`
-	SessionID    *string         `json:"session_id,omitempty"`
+	ID           string     `json:"id"`
+	Attempt      int        `json:"attempt"`
+	Agent        string     `json:"agent"`
+	SpecSHA      string     `json:"spec_sha"`
+	Trigger      string     `json:"trigger"`
+	TriggerIndex *int       `json:"trigger_index,omitempty"`
+	ScheduledFor *time.Time `json:"scheduled_for,omitempty"`
+	Prompt       string     `json:"prompt"`
+	Status       string     `json:"status"`
+	RunnerKind   *string    `json:"runner_kind,omitempty"`
+	Model        *string    `json:"model,omitempty"`
+	// Effort is the effort level the latest attempt ran at (a
+	// conversation's), absent for the runner's default.
+	Effort     *string         `json:"effort,omitempty"`
+	Worker     *string         `json:"worker,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
+	StartedAt  *time.Time      `json:"started_at,omitempty"`
+	FinishedAt *time.Time      `json:"finished_at,omitempty"`
+	Error      *string         `json:"error,omitempty"`
+	Summary    *string         `json:"summary,omitempty"`
+	Report     *string         `json:"report,omitempty"`
+	Output     json.RawMessage `json:"output,omitempty"`
+	Usage      json.RawMessage `json:"usage,omitempty"`
+	CostUSD    *float64        `json:"cost_usd,omitempty"`
+	SessionID  *string         `json:"session_id,omitempty"`
 	// SessionMode is fresh, resumed or live for an agent with a session.
 	SessionMode   *string    `json:"session_mode,omitempty"`
 	SessionParent *string    `json:"session_parent,omitempty"`
@@ -672,11 +694,13 @@ type Run struct {
 	// Tokens is every attempt's token counts together; Prefix the stable prefix the latest attempt sent, against the conversation's previous run.
 	Tokens *Tokens `json:"tokens,omitempty"`
 	Prefix *Prefix `json:"prefix,omitempty"`
+	// Changes is as ThreadRun's, filled by the API.
+	Changes *ChangeSummary `json:"changes"`
 }
 
 // runCols reads a run aliased r: stepsCount names it.
 var runCols = `r.id::text, r.attempt, r.agent, r.spec_sha, r.trigger, r.trigger_index, r.scheduled_for, r.prompt, r.status,
-	r.runner_kind, r.model, r.worker, r.created_at, r.started_at, r.finished_at, r.error, r.summary, r.report,
+	r.runner_kind, r.model, r.effort, r.worker, r.created_at, r.started_at, r.finished_at, r.error, r.summary, r.report,
 	r.output, r.usage, r.cost_usd::float8, r.session_id, r.session_mode, r.session_parent, r.session_depth,
 	r.run_after, r.continues::text, r.chain, r.gate, r.hook_status,
 	EXISTS (SELECT 1 FROM messages m WHERE m.run_id = r.id AND ` + personQuestion + `),
@@ -687,7 +711,7 @@ func scanRun(row pgx.Row) (*Run, error) {
 	var prefix []byte
 	var openQ, pending bool
 	err := row.Scan(&r.ID, &r.Attempt, &r.Agent, &r.SpecSHA, &r.Trigger, &r.TriggerIndex, &r.ScheduledFor, &r.Prompt,
-		&r.Status, &r.RunnerKind, &r.Model, &r.Worker, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.Error,
+		&r.Status, &r.RunnerKind, &r.Model, &r.Effort, &r.Worker, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.Error,
 		&r.Summary, &r.Report, &r.Output, &r.Usage, &r.CostUSD, &r.SessionID, &r.SessionMode, &r.SessionParent,
 		&r.SessionDepth, &r.RunAfter, &r.Continues, &r.Chain, &r.Gate, &r.HookStatus, &openQ, &pending, &r.Steps, &r.Tokens, &prefix)
 	if err == nil {

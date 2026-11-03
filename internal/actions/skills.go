@@ -48,7 +48,8 @@ type SkillChanges struct {
 
 func skillWriteType() Type {
 	return Type{
-		Name: SkillWriteType,
+		Name:  SkillWriteType,
+		Brief: "Write (the whole SKILL.md) or retire one of your skills; every version is kept and can be restored (the orbit-actions skill says how).",
 		Description: "Write or retire one of your skills (Claude Code skills orbit keeps for you between runs). op write gives the whole SKILL.md: " +
 			"frontmatter with name and a description saying when to use it, then the steps; a skill you have keeps its other files. op retire ends one you have. " +
 			"Write one when you have worked out a procedure your person will want done the same way again, or improve one you have. Every version is kept and can be restored.",

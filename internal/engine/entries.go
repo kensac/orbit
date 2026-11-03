@@ -159,11 +159,16 @@ func topicOf(r store.EntryRef) string {
 	return ""
 }
 
-// entriesContract is the system prompt's part about writing entries.
-func entriesContract(topics []string) string {
+// entriesContract is the system prompt's part about writing entries. With the orbit-entries skill (via) it is the rule and where entries go, and the skill holds how to write each op.
+func entriesContract(topics []string, via bool) string {
 	where := "profile (about your person, read by every agent) or agent (yours alone)"
 	if len(topics) > 0 {
 		where = "profile (about your person, read by every agent), agent (yours alone), or topic/<name> for a topic you read (" + strings.Join(topics, ", ") + ")"
+	}
+	if via {
+		return `
+- entries: durable things to remember beyond this run, written straight into orbit's memory entries. Write one when your person corrects you, states a lasting preference or decision, or tells you a fact a later run would need; never a copy of your report. Where: ` + where + `. The orbit-entries skill says how to add, update and retire one. Return an empty list when there is nothing new.
+`
 	}
 	return `
 - entries: durable things to remember beyond this run, written straight into orbit's memory entries (every version is kept; your person can see, edit and revert them). Add one when your person corrects you, states a lasting preference or decision, or tells you a fact about their world a later run would need. Not for anything about this run alone, and not a copy of your report. Return an empty list when there is nothing new.

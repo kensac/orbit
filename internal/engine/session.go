@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"math"
+	"path/filepath"
 	"time"
 
 	"github.com/kensac/orbit/internal/runner"
@@ -33,6 +34,17 @@ func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.Claime
 	if err != nil {
 		return nil, false, err
 	}
+	// A fork's first run continues the session its fork point left, cut at
+	// that point, under the same rules as any earlier run's.
+	var fork *store.ForkSeed
+	if prior == nil {
+		if fork, err = e.Store.ForkSession(ctx, c.ConversationID); err != nil {
+			return nil, false, err
+		}
+		if fork != nil {
+			prior = &fork.PriorSession
+		}
+	}
 	reason := ""
 	switch {
 	case prior == nil:
@@ -55,8 +67,33 @@ func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.Claime
 			if err != nil {
 				return nil, false, err
 			}
+			if !present && fork != nil && a.Chat {
+				// A chat conversation keeps its session under its own
+				// directories; the fork's starts as a copy of the parent's.
+				if present, err = e.copySession(prior.SessionID, fork.Parent, home, workdir); err != nil {
+					return nil, false, err
+				}
+			}
 			if !present {
 				reason = "the session's transcript is gone (is " + e.DataDir + " a persistent volume?" + e.storeHint() + ")"
+			}
+		}
+	}
+	seed := ""
+	if rec == nil && (prior == nil || prior.Status != "succeeded") {
+		// A conversation started from an imported session resumes it until a run of its own succeeds.
+		if seed, err = e.Store.ConversationSeed(ctx, c.ConversationID); err != nil {
+			return nil, false, err
+		}
+		if seed != "" {
+			present, err := e.ensureSeed(ctx, home, workdir, seed)
+			if err != nil {
+				return nil, false, err
+			}
+			if present {
+				reason = ""
+			} else {
+				seed, reason = "", "the imported session's transcript could not be written under "+workdir
 			}
 		}
 	}
@@ -68,8 +105,14 @@ func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.Claime
 		Key: c.ConversationID,
 	}
 	depth := 1
-	if reason == "" {
+	switch {
+	case seed != "":
+		sess.Resume = seed
+	case reason == "":
 		sess.Resume = prior.SessionID
+		if fork != nil {
+			sess.ResumeAt = fork.ResumeAt
+		}
 		if prior.CostUSD != nil {
 			sess.BaseCostUSD = *prior.CostUSD
 		}
@@ -78,7 +121,8 @@ func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.Claime
 	recovers := 0
 	if rec != nil {
 		recovers, reason = rec.from, ""
-		sess.Resume = rec.sessionID
+		// The interrupted attempt's session already ends where it was cut.
+		sess.Resume, sess.ResumeAt = rec.sessionID, ""
 		if rec.baseKnown {
 			sess.BaseCostUSD = rec.base
 		}
@@ -93,6 +137,12 @@ func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.Claime
 		if recovers > 0 {
 			ev["recovers_attempt"] = recovers
 		}
+		if seed != "" {
+			ev["imported_session"] = seed
+		}
+		if fork != nil {
+			ev["forked_from"] = map[string]any{"conversation_id": fork.Parent, "run_id": fork.RunID, "at": fork.ResumeAt}
+		}
 		emit("orbit.session", ev)
 		return e.Store.SetSession(ctx, c.ID, c.Attempt, mode, parent, depth)
 	}
@@ -105,4 +155,23 @@ func (e *Engine) storeHint() string {
 		return " It is not in the session store either"
 	}
 	return ""
+}
+
+// copySession copies a session's transcript from a chat conversation's
+// directories into home and workdir's, for a fork of that conversation. It
+// reports whether the transcript is now there.
+func (e *Engine) copySession(id, from, home, workdir string) (bool, error) {
+	fromWork, fromHome := e.chatDirs(from)
+	archive, _, ok, err := archiveSession(fromHome, fromWork, id)
+	if err != nil || !ok {
+		return false, err
+	}
+	p, ok := runner.SessionFile(home, workdir, id)
+	if !ok {
+		return false, nil
+	}
+	if err := unpackSession(archive, filepath.Dir(p), id); err != nil {
+		return false, err
+	}
+	return true, nil
 }

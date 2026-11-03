@@ -203,3 +203,128 @@ func TestRealCLIChatSteer(t *testing.T) {
 		t.Fatalf("reply %q, steered %v: want the steer taken and answered", res.Reply, steered)
 	}
 }
+
+// TestRealCLIChatPermissionLevels moves one live chat process between levels with set_permission_mode.
+func TestRealCLIChatPermissionLevels(t *testing.T) {
+	bin := os.Getenv("ORBIT_REAL_CLAUDE")
+	if bin == "" {
+		t.Skip("ORBIT_REAL_CLAUDE is not set")
+	}
+	model := os.Getenv("ORBIT_REAL_CLAUDE_MODEL")
+	if model == "" {
+		model = "haiku"
+	}
+	r, err := newClaudeCode(spec.RunnerSpec{Kind: "claude-code", Binary: bin, Model: model},
+		func(n string) (string, bool) {
+			return map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "placeholder"}[n], n == "CLAUDE_CODE_OAUTH_TOKEN"
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	work, outside := filepath.Join(dir, "work"), filepath.Join(dir, "outside")
+	_ = os.MkdirAll(work, 0o700)
+	_ = os.MkdirAll(outside, 0o700)
+	secret := filepath.Join(outside, "word.txt")
+	_ = os.WriteFile(secret, []byte("the word is marigold\n"), 0o600)
+	live := NewLive(2)
+	defer live.Close()
+	var modes []string
+	sess := func(resume string) *Session {
+		return &Session{Home: filepath.Join(dir, "home"), KeepDays: 1, Live: live, Key: "c1", Open: true, LiveIdle: time.Minute,
+			Resume: resume, Started: func(mode, _ string) error { modes = append(modes, mode); return nil }}
+	}
+	var mu sync.Mutex
+	var asked []string
+	chat := func(level string) *Chat {
+		return &Chat{Level: level, Ceiling: spec.LevelEdits, Choice: LevelChoice{Source: "conversation"},
+			Prompt: func(_ context.Context, req claudeproto.PermissionRequest) claudeproto.Permission {
+				mu.Lock()
+				asked = append(asked, req.Tool)
+				mu.Unlock()
+				return claudeproto.Permission{Allow: true}
+			}}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	evs := &events{}
+	prompt := "Use the Read tool once on " + secret + " and reply with the word it names, or with the single word denied if you could not read it."
+	res, err := r.Run(ctx, Request{Workdir: work, System: "Answer briefly.", Session: sess(""), Chat: chat(spec.LevelLocked), Prompt: prompt}, evs.emit)
+	if err != nil {
+		t.Fatalf("turn 1: %v", err)
+	}
+	if strings.Contains(strings.ToLower(res.Reply), "marigold") || len(asked) != 0 {
+		t.Fatalf("locked: reply %q, asked %v", res.Reply, asked)
+	}
+	res2, err := r.Run(ctx, Request{Workdir: work, System: "Answer briefly.", Session: sess(res.SessionID), Chat: chat(spec.LevelAsk), Prompt: prompt}, evs.emit)
+	if err != nil {
+		t.Fatalf("turn 2: %v", err)
+	}
+	if len(modes) != 2 || modes[1] != "live" {
+		t.Fatalf("modes = %v, want the second run in the same process", modes)
+	}
+	if !strings.Contains(strings.ToLower(res2.Reply), "marigold") || len(asked) == 0 || asked[0] != "Read" {
+		t.Fatalf("ask: reply %q, asked %v", res2.Reply, asked)
+	}
+}
+
+// TestRealCLIChatPlanApproval: a plan the model presents with ExitPlanMode comes to orbit's prompt (a plan approval), and once it is allowed the session is back at the run's level.
+func TestRealCLIChatPlanApproval(t *testing.T) {
+	bin := os.Getenv("ORBIT_REAL_CLAUDE")
+	if bin == "" {
+		t.Skip("ORBIT_REAL_CLAUDE is not set")
+	}
+	model := os.Getenv("ORBIT_REAL_CLAUDE_MODEL")
+	if model == "" {
+		model = "sonnet"
+	}
+	r, err := newClaudeCode(spec.RunnerSpec{Kind: "claude-code", Binary: bin, Model: model},
+		func(n string) (string, bool) {
+			return map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "placeholder"}[n], n == "CLAUDE_CODE_OAUTH_TOKEN"
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	work := filepath.Join(dir, "work")
+	_ = os.MkdirAll(work, 0o700)
+	var mu sync.Mutex
+	var asked []string
+	chat := &Chat{Level: spec.LevelEdits, Ceiling: spec.LevelEdits, Choice: LevelChoice{Source: "agent"},
+		Prompt: func(_ context.Context, req claudeproto.PermissionRequest) claudeproto.Permission {
+			mu.Lock()
+			asked = append(asked, req.Tool)
+			mu.Unlock()
+			return claudeproto.Permission{Allow: true}
+		}}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	evs := &events{}
+	res, err := r.Run(ctx, Request{Workdir: work, System: "Answer briefly.", Tools: []string{"EnterPlanMode", "ExitPlanMode", "Write"}, Chat: chat,
+		Prompt: "This is a test of plan approval. First call EnterPlanMode. Then present a one-line plan to write plan.txt containing hi, using ExitPlanMode. Once it is approved, write the file and reply done."}, evs.emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	t.Logf("reply %q; asked %v; levels %v; status %v", res.Reply, asked, evs.of("orbit.permissions"), evs.of("system.status"))
+	if !slices.Contains(asked, "ExitPlanMode") {
+		t.Fatalf("the plan did not come to orbit's prompt: %v", asked)
+	}
+	// The CLI goes back to the mode it planned from (seen on 2.1.316: plan, then acceptEdits); orbit puts the level back itself only when it differs (a change made while planning, TestTheLevelIsPutBackWhenAPlanIsApproved).
+	var modes []string
+	for _, st := range evs.of("system.status") {
+		if m, ok := st["permissionMode"].(string); ok {
+			modes = append(modes, m)
+		}
+	}
+	after := ""
+	for _, ev := range evs.of("orbit.permissions") {
+		if ev["when"] == "plan" {
+			after = ev["mode"].(string)
+		}
+	}
+	if len(modes) == 0 || !slices.Contains(modes, "plan") || (modes[len(modes)-1] != "acceptEdits" && after != "acceptEdits") {
+		t.Fatalf("modes %v, restored %q: the session did not end the plan at its level", modes, after)
+	}
+}

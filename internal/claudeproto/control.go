@@ -26,6 +26,17 @@ type PermissionRequest struct {
 	BlockedPath    string          `json:"blocked_path"`
 	DecisionReason string          `json:"decision_reason"`
 	Suggestions    json.RawMessage `json:"permission_suggestions"`
+	// DecisionReasonType is why the ask escalated, as a word: rule, mode, workingDir, safetyCheck, classifier, ... (sdk.d.ts SDKControlPermissionRequest).
+	DecisionReasonType string `json:"decision_reason_type"`
+	// MatchedRule is the permissions.ask rule that forced the prompt, {source, tool_name, rule_content}, when one did.
+	MatchedRule json.RawMessage `json:"matched_ask_rule"`
+	Title       string          `json:"title"`
+	DisplayName string          `json:"display_name"`
+	Description string          `json:"description"`
+	// SuppressAlwaysAllow is an ask whose "don't ask again" rule would grant more than this call.
+	SuppressAlwaysAllow bool `json:"suppress_always_allow_rule"`
+	// RequiresUserInteraction is an ask a stored grant or an automatic approval must not answer (ExitPlanMode's, a classifier's block handed to a person).
+	RequiresUserInteraction bool `json:"requires_user_interaction"`
 }
 
 // Permission is the answer to a PermissionRequest (sdk.d.ts PermissionResult).
@@ -76,6 +87,8 @@ type Handler struct {
 	Hook func(ctx context.Context, req HookCallback) (json.RawMessage, error)
 	// MCP returns the server's JSON-RPC reply.
 	MCP func(ctx context.Context, req MCPMessage) (json.RawMessage, error)
+	// Observe, when set, sees every line but keep_alive on the reading goroutine, in stream order, before a control request on it is handed to CanUseTool: what the CLI reported before a request (its permission mode) is known when the request is decided, which a reader of Next, behind the queue, cannot promise.
+	Observe func(Line)
 	// Name appears in the refusal of an unhandled subtype ("orbit does not handle hook_callback requests in a build"); "orbit" when empty.
 	Name string
 }

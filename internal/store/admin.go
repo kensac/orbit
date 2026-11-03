@@ -205,7 +205,7 @@ type RunningRun struct {
 }
 
 // LastSuccess is an agent's newest run that finished well: succeeded, or
-// skipped by a gate (a quiet day is not a stale agent).
+// skipped by a gate that did not block scheduled work.
 type LastSuccess struct {
 	RunID      string    `json:"run_id"`
 	FinishedAt time.Time `json:"finished_at"`
@@ -265,7 +265,8 @@ func (s *Store) Health(ctx context.Context) (*Health, error) {
 			FROM agents a
 			JOIN LATERAL (
 			    SELECT r.id::text, r.finished_at FROM runs r
-			    WHERE r.agent = a.name AND r.status IN ('succeeded', 'skipped') AND r.gate IS DISTINCT FROM 'missed'
+			    WHERE r.agent = a.name AND r.status IN ('succeeded', 'skipped')
+			      AND r.gate IS DISTINCT FROM 'missed' AND r.gate IS DISTINCT FROM 'budget'
 			    ORDER BY r.finished_at DESC LIMIT 1
 			) ls ON true
 			WHERE a.present`) // runs_agent_last_success serves the lateral read
@@ -298,9 +299,11 @@ func (s *Store) LastSuccessTimes(ctx context.Context) (map[string]time.Time, err
 		SELECT a.name, ls.finished_at FROM agents a
 		JOIN LATERAL (
 		    SELECT r.finished_at FROM runs r
-		    WHERE r.agent = a.name AND r.status IN ('succeeded', 'skipped') AND r.gate IS DISTINCT FROM 'missed'
+		    WHERE r.agent = a.name AND r.status IN ('succeeded', 'skipped')
+		      AND r.gate IS DISTINCT FROM 'missed' AND r.gate IS DISTINCT FROM 'budget'
 		    ORDER BY r.finished_at DESC LIMIT 1
-		) ls ON true`)
+		) ls ON true
+		WHERE NOT a.task_worker`)
 	if err != nil {
 		return nil, err
 	}

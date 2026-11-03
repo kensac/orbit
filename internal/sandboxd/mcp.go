@@ -94,16 +94,16 @@ func (s *Server) accountMCP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	stdout, stderr, code, err := s.boxRun(r.Context(), c.ID, []string{"sh", "-c", mcpListScript, "orbit-account", slot}, nil, nil)
+	stdout, _, code, err := s.boxRun(r.Context(), c.ID, []string{"sh", "-c", mcpListScript, "orbit-account", slot}, nil, nil)
 	switch {
 	case err != nil:
-		writeError(w, http.StatusBadGateway, "mcp list: "+err.Error())
+		writeError(w, http.StatusBadGateway, "mcp list failed")
 		return
 	case code == exitNoAccountDir:
-		writeError(w, http.StatusConflict, scriptError("mcp list", code, stderr))
+		writeError(w, http.StatusConflict, "the account directory is unavailable")
 		return
 	case code != 0:
-		writeError(w, http.StatusBadGateway, scriptError("mcp list", code, stderr))
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("mcp list failed with exit code %d", code))
 		return
 	}
 	servers := sandbox.ParseMCPList(stdout)

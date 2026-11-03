@@ -16,6 +16,23 @@ import (
 
 func noEnv(string) (string, bool) { return "", false }
 
+func TestExtensionFetcherReceivesOnlyEarlierSources(t *testing.T) {
+	prior := map[string]*Fetched{"raw": {Name: "raw", MediaType: "application/json", Content: []byte(`[]`)}}
+	f := &Fetcher{Extension: func(_ context.Context, s spec.Source, got map[string]*Fetched) (*Fetched, error) {
+		if s.Name != "reduced" || got["raw"] != prior["raw"] || got["future"] != nil {
+			t.Fatalf("source %q received prior inputs %#v", s.Name, got)
+		}
+		return &Fetched{Name: s.Name, MediaType: "application/json", Content: []byte(`{}`)}, nil
+	}}
+	got, err := f.FetchWithInputs(context.Background(), spec.Source{Name: "reduced", Kind: "extension"}, Vars{}, prior)
+	if err != nil || got.Name != "reduced" {
+		t.Fatalf("FetchWithInputs = %#v, %v", got, err)
+	}
+	if _, err := (&Fetcher{}).Fetch(context.Background(), spec.Source{Name: "x", Kind: "extension"}, Vars{}); err == nil {
+		t.Fatal("missing extension runtime was accepted")
+	}
+}
+
 func TestPaginationMergesEveryPage(t *testing.T) {
 	var queries []url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

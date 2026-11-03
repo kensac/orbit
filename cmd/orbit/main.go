@@ -14,7 +14,7 @@
 //	orbit import claude-memory <dir> --scope <s> [--apply]   seed memory entries through the API
 //	orbit import skills <dir> [--attach <agent>] [--apply]   seed the skills library through the API
 //	orbit import claude-sessions <dir> [--apply]   import Claude Code session transcripts through the API
-//	orbit sync claude [--memory-dir <dir>] [--apply <digest>]   write orbit's skills and memory entries into Claude Code's files
+//	orbit sync claude [--memory-dir <dir>] [--bundle <tar> --claude-dir <dir>] [--apply <digest>]   sync orbit's skills and memory, or bundle local Claude instructions and skills
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
 //	orbit hook --root <dir> --state <dir> [--figures] [--status <socket>]   orbit's hook, run by Claude Code
 //	orbit agent-hook --root <dir> --def <hook>   one of an agent's own hooks, run by Claude Code
@@ -63,6 +63,7 @@ import (
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
+	"github.com/kensac/orbit/internal/telegram"
 	"github.com/kensac/orbit/internal/tickets"
 	subusage "github.com/kensac/orbit/internal/usage"
 )
@@ -102,6 +103,8 @@ func main() {
 		err = drainCmd()
 	case "import":
 		err = importCmd(ctx, os.Args[2:])
+	case "pack":
+		err = packCmd(ctx, os.Args[2:])
 	case "sync":
 		err = syncCmd(ctx, os.Args[2:], os.Stdout)
 	case "mcp", "hook":
@@ -170,7 +173,7 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | restore-check [--expect file] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills|claude-sessions <dir> | sync claude | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | restore-check [--expect file] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills|claude-sessions <dir> | pack <agent> --output <new-dir> | pack inspect <dir> | sync claude | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
 	os.Exit(2)
 }
 
@@ -508,6 +511,9 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		}
 		if pusher == nil {
 			log.Info("ORBIT_VAPID_* not set: Web Push is off (the inbox still lists what needs attention)")
+		} else {
+			pusher.Secret = eng.Secret
+			pusher.PublicURL = func() string { return eng.Current().Config.Deployment.PublicURL }
 		}
 		// reloadNow puts the files and the database's definitions in force,
 		// for the poll below and for the API after it writes a definition.
@@ -595,6 +601,18 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			(&mail.Poller{
 				Store: s, Config: func() *spec.Config { return eng.Current().Config }, Secret: []byte(token),
 				Env: os.LookupEnv, Log: log.With("component", "mail"), Wake: nudge,
+			}).Run(claimCtx)
+		}()
+
+		// Telegram is polled only when configured. Incoming updates are keyed
+		// by provider update id, so a retry or a second control instance cannot
+		// post a message twice.
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			(&telegram.Poller{
+				Store: s, Config: func() *spec.Config { return eng.Current().Config },
+				Env: os.LookupEnv, HTTP: &http.Client{}, Log: log.With("component", "telegram"), Wake: nudge,
 			}).Run(claimCtx)
 		}()
 
@@ -917,7 +935,11 @@ func definitionGeneration(ctx context.Context, s *store.Store) string {
 	if err != nil {
 		return "db?"
 	}
-	return "db" + strconv.FormatInt(n, 10)
+	catalog, err := s.ConnectorCatalogGeneration(ctx)
+	if err != nil {
+		return "db?"
+	}
+	return "db" + strconv.FormatInt(n, 10) + ":connectors" + strconv.FormatInt(catalog, 10)
 }
 
 // configHash fingerprints every file under dir. A deploy's git pull swaps

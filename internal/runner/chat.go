@@ -72,6 +72,18 @@ type Chat struct {
 	Steered func(id string)
 	// Level is the run's permission level (spec.Levels, resolved by the engine), and Ceiling the widest its conversation may set: a process whose ceiling is full is launched so that it can be raised to it.
 	Level, Ceiling string
+	// CurrentLevel reports the process's current logical level while it is live.
+	CurrentLevel func() string
+	// ConnectorPrompts keeps explicit connector approvals available at the locked level.
+	ConnectorPrompts bool
+	// BeginPlanExit defers level changes until an ExitPlanMode request completes.
+	BeginPlanExit func(toolUseID string)
+	// WaitPlanExit blocks a later tool permission until deferred level changes apply.
+	WaitPlanExit func(context.Context) bool
+	// Choice is why the run is at Level, recorded with every application of it.
+	Choice LevelChoice
+	// Changes carries a new level for the turn in progress, or nil when it cannot change.
+	Changes <-chan LevelChange
 	// Prompt answers the CLI's permission requests during the turn; nil denies each one.
 	Prompt Prompt
 	// RecordPermission persists each decision before the CLI receives it.
@@ -86,6 +98,14 @@ type SandboxClient interface {
 	Destroy(ctx context.Context, id string) error
 }
 
+// PersistentChatClient runs a chat process in its own persistent container,
+// separate from boxes that expose direct terminals or account volumes.
+type PersistentChatClient interface {
+	CreateChatBox(ctx context.Context, name, runID string, archive io.Reader) (sandbox.CreateResponse, error)
+	AttachChatBox(ctx context.Context, name string, ar sandbox.ChatBoxAttachRequest, stdin io.Reader, stdout, stderr io.Writer) (int, error)
+	ArchiveChatBox(ctx context.Context, name string) (io.ReadCloser, error)
+}
+
 // Sandbox is where a sandboxed chat run's CLI runs, and how its workspace
 // crosses the boundary. Only Env, the backend's one credential (build.SandboxEnv), enters it.
 type Sandbox struct {
@@ -96,6 +116,11 @@ type Sandbox struct {
 	// "workstation" session gets every tool and a home kept in the
 	// workspace.
 	Profile string
+	// Persistent uses a per-conversation container with retained volumes.
+	// It is never the shared box that accepts direct terminal or account mounts.
+	Persistent bool
+	// RunID scopes the chat's short-lived credential proxy grant.
+	RunID string
 	// Pack is the workspace a new sandbox starts from.
 	Pack func() ([]byte, error)
 	// PackFiles is a tar of some workdir files, for a live sandbox.
@@ -202,11 +227,7 @@ func (c *claudeCode) chatArgs(req Request, home string, keepDays int) []string {
 	if len(webDeny) > 0 {
 		args = append(args, "--disallowedTools", strings.Join(webDeny, ","))
 	}
-	mode := startMode(req.Chat.Level)
-	if mode == PermissionMode(spec.LevelLocked) && len(req.Connectors.Ask()) > 0 {
-		// dontAsk drops explicit connector asks. In default mode orbit still denies other prompts.
-		mode = PermissionMode(spec.LevelAsk)
-	}
+	mode := startModeForLevel(req.Chat.Level, len(req.Connectors.Ask()) > 0)
 	args = append(args, "--permission-mode", mode)
 	if req.Chat.Ceiling == spec.LevelFull && sandboxed {
 		// Without it the CLI refuses set_permission_mode bypassPermissions, so a conversation could not be raised to full live.
@@ -251,6 +272,9 @@ type chatProc interface {
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
+	LastLine() time.Time
+	SetModel(ctx context.Context, model string) error
+	SetEffort(ctx context.Context, level string) error
 }
 
 // chatTools routes a process's control requests to the turn in progress: a
@@ -259,18 +283,34 @@ type chatProc interface {
 //
 // The connectors of the last turn stay listed between turns (the CLI may list a server at any time, and a reused process has the same ones, its arguments name their tools), but only a turn in progress has them called.
 type chatTools struct {
-	mu     sync.Mutex
-	chat   *Chat
-	ws     Workspace
-	conns  *Connectors
-	active bool
-	push   func(context.Context, []string) error
+	mu      sync.Mutex
+	chat    *Chat
+	ws      Workspace
+	conns   *Connectors
+	active  bool
+	push    func(context.Context, []string) error
+	observe func(claudeproto.Line)
 }
 
 func (t *chatTools) set(c *Chat, ws Workspace) {
 	t.mu.Lock()
 	t.chat, t.ws = c, ws
 	t.mu.Unlock()
+}
+
+func (t *chatTools) setObserver(observe func(claudeproto.Line)) {
+	t.mu.Lock()
+	t.observe = observe
+	t.mu.Unlock()
+}
+
+func (t *chatTools) observeLine(line claudeproto.Line) {
+	t.mu.Lock()
+	observe := t.observe
+	t.mu.Unlock()
+	if observe != nil {
+		observe(line)
+	}
 }
 
 // connectors routes the turn's connectors; nil ends the turn's calls, the last ones staying listed.
@@ -331,6 +371,7 @@ func (l LocalWorkspace) Get(_ context.Context, dir string) ([]byte, error) {
 
 func (t *chatTools) handler() claudeproto.Handler {
 	return claudeproto.Handler{Name: "orbit",
+		Observe: t.observeLine,
 		MCP: func(ctx context.Context, req claudeproto.MCPMessage) (json.RawMessage, error) {
 			c, ws, conns, push := t.current()
 			if req.ServerName == ChatServer {
@@ -352,14 +393,33 @@ func (t *chatTools) handler() claudeproto.Handler {
 				}
 				return conns.permission(ctx, req)
 			}
+			if req.Tool != "ExitPlanMode" && c.WaitPlanExit != nil && !c.WaitPlanExit(ctx) {
+				return claudeproto.Permission{Message: "orbit stopped waiting for a plan approval"}, nil
+			}
 			if server, tool, ok := splitToolName(req.Tool); ok {
 				if _, found := conns.find(server, tool); found {
 					return conns.permission(ctx, req)
 				}
 			}
+			if req.Tool == "ExitPlanMode" && c.BeginPlanExit != nil {
+				c.BeginPlanExit(req.ToolUseID)
+			}
 			decide := noPrompt
-			if c.Prompt != nil && spec.LevelRank(c.Level) > spec.LevelRank(spec.LevelLocked) {
-				decide = c.Prompt
+			if c.Prompt != nil {
+				decide = func(ctx context.Context, req claudeproto.PermissionRequest) claudeproto.Permission {
+					level := c.Level
+					if c.CurrentLevel != nil {
+						level = c.CurrentLevel()
+					}
+					if spec.LevelRank(level) <= spec.LevelRank(spec.LevelLocked) {
+						return noPrompt(ctx, req)
+					}
+					permission := c.Prompt(ctx, req)
+					if c.CurrentLevel != nil && spec.LevelRank(c.CurrentLevel()) <= spec.LevelRank(spec.LevelLocked) {
+						return noPrompt(ctx, req)
+					}
+					return permission
+				}
 			}
 			return claudeproto.Recorded(decide, c.RecordPermission)(ctx, req)
 		},
@@ -439,21 +499,32 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	}
 	extra := c.chatArgs(req, home, keepDays)
 	env := c.env(home)
-	resume := ""
+	resume, resumeAt := "", ""
 	if sess != nil {
-		resume = sess.Resume
+		resume, resumeAt = sess.Resume, sess.ResumeAt
 	}
-	// Auto and ask share launch arguments but must have distinct live processes.
-	key := hashArgs(c.bin, req.Workdir, append(append([]string(nil), extra...), req.Chat.Level), env)
+	// A live process moves between permission levels with set_permission_mode.
+	key := hashArgs(c.bin, req.Workdir, withoutMode(extra), env)
+	level, choice := req.Chat.Level, req.Chat.Choice
 
 	var p *liveProc
-	started := false
 	mode, parent := "fresh", resume
 	if sess != nil && sess.Live != nil {
 		if req.Chat.Fresh {
 			sess.Live.discard(sess.Key)
 		} else if p = sess.Live.take(sess.Key, key, resume); p != nil {
 			mode = "live"
+			targetMode := modeForLevel(level, len(req.Connectors.Ask()) > 0)
+			if err := p.switchModel(ctx, req, c.rs.Model); err != nil {
+				// The process cannot take them; one started with them can.
+				sess.Live.drop(p)
+				p, mode = nil, "fresh"
+			} else if !p.lv.needs(level, targetMode) {
+				emit(levelEvent(level, p.lv.applied(), p.lv.reportedMode(), "turn", "", choice))
+			} else if err := p.lv.apply(ctx, p.proc, level, targetMode, "turn", choice, emit); err != nil {
+				sess.Live.drop(p)
+				p, mode = nil, "fresh"
+			}
 		}
 	}
 	if p == nil {
@@ -463,7 +534,8 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		tools := &chatTools{}
 		tools.connectors(req.Connectors)
 		// Every chat process has the stdio permission prompt, so a level that asks can be set without a new process; at locked or full the CLI sends none but ExitPlanMode's.
-		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, PermissionPrompt: true, Resume: resume, Ephemeral: sess == nil}, extra)
+		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, PermissionPrompt: true, Resume: resume, ResumeAt: resumeAt,
+			Ephemeral: sess == nil}, withModel(extra, req))
 		if err != nil {
 			return nil, err
 		}
@@ -481,12 +553,30 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		if err != nil {
 			return nil, err
 		}
-		p = &liveProc{proc: proc, tools: tools, busy: true}
-		started = true
+		p = &liveProc{proc: proc, tools: tools, busy: true, model: req.Model, effort: req.Effort}
 		if sess != nil {
 			p.key = sess.Key
+			if sess.Live != nil {
+				if sb, ok := proc.(*sandboxProc); ok && sb.sb.Persistent {
+					sess.Live.setHardExpiry(p, sess.LiveUntil)
+				}
+			}
 		}
 		p.hash = key
+		first := level
+		if level == spec.LevelAuto {
+			first = spec.LevelAsk
+		}
+		firstMode := modeForLevel(first, len(req.Connectors.Ask()) > 0)
+		p.lv.set(first, first, firstMode)
+		if level != first {
+			if err := p.lv.apply(ctx, p.proc, level, modeForLevel(level, len(req.Connectors.Ask()) > 0), "start", choice, emit); err != nil {
+				dropOrKill(sess, p)
+				return nil, fmt.Errorf("set the permission level: %w", err)
+			}
+		} else {
+			emit(levelEvent(level, level, firstMode, "start", "", choice))
+		}
 	} else if sb, ok := p.proc.(*sandboxProc); ok && len(req.Chat.Push) > 0 {
 		if err := sb.push(ctx, req.Chat.Push); err != nil {
 			dropOrKill(sess, p)
@@ -503,16 +593,14 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	if sb, ok := p.proc.(*sandboxProc); ok {
 		ws = sb
 	}
+	req.Chat.CurrentLevel = p.lv.safeLevel
+	req.Chat.ConnectorPrompts = len(req.Connectors.Ask()) > 0
+	req.Chat.BeginPlanExit = p.lv.beginPlanExit
+	req.Chat.WaitPlanExit = p.lv.waitPlanExitDone
+	p.tools.setObserver(p.lv.observe)
 	p.tools.set(req.Chat, ws)
 	p.tools.connectors(req.Connectors)
 	defer func() { p.tools.set(nil, nil); p.tools.connectors(nil) }()
-
-	if started && req.Chat.Level == spec.LevelAuto {
-		if _, err := applyLevel(ctx, p.proc, req.Chat.Level, emit); err != nil {
-			dropOrKill(sess, p)
-			return nil, fmt.Errorf("set the permission level: %w", err)
-		}
-	}
 
 	var (
 		imu     sync.Mutex
@@ -547,13 +635,20 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		steer = newSteering(p.proc, req.Chat, emit)
 		go steer.feed(turnCtx, req.Chat.Steer)
 	}
+	changed := watchLevel(ctx, turnCtx, p, req.Chat, emit)
+	stopWatch := req.Stall.watch(turnCtx, p.proc, func(ctx context.Context) error {
+		_, err := p.proc.Interrupt(ctx, false)
+		return err
+	})
 	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) {
 		if steer != nil {
 			steer.observe(l)
 		}
 		emit(Event{Kind: l.Kind, Payload: l.Raw})
 	})
+	stopWatch()
 	endTurn()
+	<-changed
 	imu.Lock()
 	interrupted, rec := stopped, receipt
 	imu.Unlock()
@@ -571,6 +666,11 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		if serr := sb.sync(context.WithoutCancel(ctx)); serr != nil && err == nil {
 			err = fmt.Errorf("read the workspace back from the sandbox: %w", serr)
 		}
+	}
+	if req.Stall.Fired() {
+		emit(req.Stall.event())
+		dropOrKill(sess, p)
+		return nil, stallError(req.Stall)
 	}
 	if err != nil {
 		dropOrKill(sess, p)
@@ -623,7 +723,8 @@ func hashArgs(bin, workdir string, args, env []string) string {
 }
 
 // sandboxProc is a CLI in a sandboxd container: its stdio is an attach
-// stream, and the container is destroyed when the process is closed.
+// stream. Ephemeral sandboxes are destroyed on close; a persistent chat box
+// keeps its container and volumes.
 type sandboxProc struct {
 	*claudeproto.Conn
 	sb     *Sandbox
@@ -640,9 +741,18 @@ func startSandbox(ctx context.Context, sb *Sandbox, args []string, h claudeproto
 	if err != nil {
 		return nil, fmt.Errorf("pack the workspace: %w", err)
 	}
-	cr, err := sb.Client.CreateProfile(ctx, sb.Label, sb.Profile, strings.NewReader(string(tree)))
+	var cr sandbox.CreateResponse
+	if sb.Persistent {
+		client, ok := sb.Client.(PersistentChatClient)
+		if !ok {
+			return nil, errors.New("sandboxd client does not support persistent chat boxes")
+		}
+		cr, err = client.CreateChatBox(ctx, sb.Label, sb.RunID, strings.NewReader(string(tree)))
+	} else {
+		cr, err = sb.Client.CreateProfile(ctx, sb.Label, sb.Profile, strings.NewReader(string(tree)))
+	}
 	var se *sandbox.Error
-	if errors.As(err, &se) && se.Status == 429 && sess != nil && sess.Live != nil {
+	if !sb.Persistent && errors.As(err, &se) && se.Status == 429 && sess != nil && sess.Live != nil {
 		// Every sandbox slot is taken; idle live sandboxes give theirs up.
 		sess.Live.closeIdle()
 		cr, err = sb.Client.CreateProfile(ctx, sb.Label, sb.Profile, strings.NewReader(string(tree)))
@@ -650,8 +760,15 @@ func startSandbox(ctx context.Context, sb *Sandbox, args []string, h claudeproto
 	if err != nil {
 		return nil, fmt.Errorf("create the sandbox: %w", err)
 	}
+	if sb.Persistent && sess != nil {
+		sess.LiveUntil = cr.ExpiresAt
+	}
 	if sb.Events != nil {
-		sb.Events("orbit.sandbox", map[string]any{"step": "create", "id": cr.ID, "expires_at": cr.ExpiresAt, "bytes": len(tree)})
+		if sb.Persistent {
+			sb.Events("orbit.chatbox", map[string]any{"step": "ensure", "id": cr.ID, "bytes": len(tree)})
+		} else {
+			sb.Events("orbit.sandbox", map[string]any{"step": "create", "id": cr.ID, "expires_at": cr.ExpiresAt, "bytes": len(tree)})
+		}
 	}
 	bin := sb.Binary
 	if bin == "" {
@@ -671,13 +788,24 @@ func startSandbox(ctx context.Context, sb *Sandbox, args []string, h claudeproto
 	actx, cancel := context.WithCancel(context.Background())
 	p := &sandboxProc{sb: sb, id: cr.ID, exited: make(chan struct{}), stderr: &claudeproto.Tail{}, cancel: cancel}
 	go func() {
-		_, aerr := sb.Client.Attach(actx, cr.ID, ar, inR, outW, p.stderr)
+		_, aerr := p.attach(actx, ar, inR, outW, p.stderr)
 		_ = outW.CloseWithError(aerr)
 		_ = inR.Close()
 		close(p.exited)
 	}()
 	p.Conn = claudeproto.NewConn(outR, inW, h)
 	return p, nil
+}
+
+func (p *sandboxProc) attach(ctx context.Context, ar sandbox.AttachRequest, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	if !p.sb.Persistent {
+		return p.sb.Client.Attach(ctx, p.id, ar, stdin, stdout, stderr)
+	}
+	client, ok := p.sb.Client.(PersistentChatClient)
+	if !ok {
+		return -1, errors.New("sandboxd client does not support persistent chat boxes")
+	}
+	return client.AttachChatBox(ctx, p.sb.Label, sandbox.ChatBoxAttachRequest{RunID: p.sb.RunID, Exec: ar}, stdin, stdout, stderr)
 }
 
 func (p *sandboxProc) Exited() <-chan struct{} { return p.exited }
@@ -697,7 +825,19 @@ func (p *sandboxProc) Turn(ctx context.Context, prompt string, emit func(claudep
 
 // sync reads the sandbox's workspace back.
 func (p *sandboxProc) sync(ctx context.Context) error {
-	rc, err := p.sb.Client.Archive(ctx, p.id)
+	var (
+		rc  io.ReadCloser
+		err error
+	)
+	if p.sb.Persistent {
+		client, ok := p.sb.Client.(PersistentChatClient)
+		if !ok {
+			return errors.New("sandboxd client does not support persistent chat boxes")
+		}
+		rc, err = client.ArchiveChatBox(ctx, p.sb.Label)
+	} else {
+		rc, err = p.sb.Client.Archive(ctx, p.id)
+	}
 	if err != nil {
 		return err
 	}
@@ -716,7 +856,7 @@ func (p *sandboxProc) push(ctx context.Context, paths []string) error {
 		return err
 	}
 	var stderr claudeproto.Tail
-	code, err := p.sb.Client.Attach(ctx, p.id, sandbox.AttachRequest{Argv: []string{"tar", "-xf", "-", "-C", sandbox.WorkDir}},
+	code, err := p.attach(ctx, sandbox.AttachRequest{Argv: []string{"tar", "-xf", "-", "-C", sandbox.WorkDir}},
 		strings.NewReader(string(tree)), io.Discard, &stderr)
 	if err == nil && code != 0 {
 		err = fmt.Errorf("tar exited %d: %s", code, claudeproto.LastLines(stderr.String(), 2))
@@ -727,7 +867,7 @@ func (p *sandboxProc) push(ctx context.Context, paths []string) error {
 // Put unpacks a tar under dir in the running sandbox, with tar inside it.
 func (p *sandboxProc) Put(ctx context.Context, dir string, tree []byte) error {
 	var stderr claudeproto.Tail
-	code, err := p.sb.Client.Attach(ctx, p.id, sandbox.AttachRequest{Argv: []string{"sh", "-c", `mkdir -p "$1" && tar -xf - -C "$1"`, "sh", sandbox.WorkDir + "/" + dir}},
+	code, err := p.attach(ctx, sandbox.AttachRequest{Argv: []string{"sh", "-c", `mkdir -p "$1" && tar -xf - -C "$1"`, "sh", sandbox.WorkDir + "/" + dir}},
 		strings.NewReader(string(tree)), io.Discard, &stderr)
 	if err == nil && code != 0 {
 		err = fmt.Errorf("tar exited %d: %s", code, claudeproto.LastLines(stderr.String(), 2))
@@ -739,7 +879,7 @@ func (p *sandboxProc) Put(ctx context.Context, dir string, tree []byte) error {
 func (p *sandboxProc) Get(ctx context.Context, dir string) ([]byte, error) {
 	var out strings.Builder
 	var stderr claudeproto.Tail
-	code, err := p.sb.Client.Attach(ctx, p.id, sandbox.AttachRequest{Argv: []string{"tar", "-cf", "-", "-C", sandbox.WorkDir + "/" + dir, "."}},
+	code, err := p.attach(ctx, sandbox.AttachRequest{Argv: []string{"tar", "-cf", "-", "-C", sandbox.WorkDir + "/" + dir, "."}},
 		nil, &out, &stderr)
 	if err == nil && code != 0 {
 		err = fmt.Errorf("tar exited %d: %s", code, claudeproto.LastLines(stderr.String(), 2))
@@ -764,8 +904,10 @@ func (p *sandboxProc) stop(grace time.Duration) {
 			}
 		}
 		p.cancel()
-		// A sandbox left behind ends at its lifetime and is reaped.
-		_ = p.sb.Client.Destroy(context.Background(), p.id)
+		if !p.sb.Persistent {
+			// An ephemeral sandbox left behind ends at its lifetime and is reaped.
+			_ = p.sb.Client.Destroy(context.Background(), p.id)
+		}
 	})
 	<-p.exited
 }

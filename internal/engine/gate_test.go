@@ -71,6 +71,88 @@ func TestUnchangedInputsSkipTheModel(t *testing.T) {
 	}
 }
 
+func TestBudgetSkipsScheduledRunsAndAlertsOncePerPeriod(t *testing.T) {
+	fr := &fakeRunner{output: `{"summary":"within budget","report":"done","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[]}`}
+	e, s, _ := harnessWith(t, fr, "budget: {period: month, max_cost_usd: 0.20, max_runs: 1}\n")
+	first := scheduled(t, e, s, 0)
+	if err := e.Execute(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := s.GetRun(ctx, first.ID); r.Status != store.StatusSucceeded || fr.calls != 1 {
+		t.Fatalf("first run = %s, calls %d", r.Status, fr.calls)
+	}
+	for minute := 1; minute <= 2; minute++ {
+		c := scheduled(t, e, s, minute)
+		if err := e.Execute(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		r, err := s.GetRun(ctx, c.ID)
+		if err != nil || r.Status != store.StatusSkipped || r.Gate == nil || *r.Gate != store.GateBudget {
+			t.Fatalf("budget run = %+v, %v", r, err)
+		}
+		if strings.Contains(*r.Report, "orbit did not call the model") == false {
+			t.Fatalf("budget report = %q", *r.Report)
+		}
+	}
+	if fr.calls != 1 {
+		t.Fatalf("scheduled runs called backend %d times, want once", fr.calls)
+	}
+	items, err := s.ListAttention(ctx, 100)
+	if err != nil || len(items) != 1 || items[0].Kind != store.AttentionBudget || !items[0].Push || !strings.Contains(items[0].Detail, "runs") {
+		t.Fatalf("budget attention = %+v, %v", items, err)
+	}
+	manual := claim(t, e, s)
+	if err := e.Execute(ctx, manual); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := s.GetRun(ctx, manual.ID); r.Status != store.StatusSucceeded || fr.calls != 2 {
+		t.Fatalf("manual run = %s, calls %d: a budget must not block a person's request", r.Status, fr.calls)
+	}
+	last, err := s.LastSuccessTimes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last["finance"].Before(time.Now().Add(-time.Minute)) {
+		t.Fatalf("manual success missing from staleness timestamp: %v", last)
+	}
+}
+
+func TestQuietHoursSkipScheduledRunButAllowManualRun(t *testing.T) {
+	fr := &fakeRunner{output: goodOutput}
+	e, s, h := harnessWith(t, fr, "quiet_hours: {start: \"22:00\", end: \"23:59\"}\n")
+	a := e.Current().Config.Agents["finance"]
+	idx := 0
+	local := time.Now().In(a.Location())
+	fire := time.Date(local.Year(), local.Month(), local.Day(), 22, 30, 0, 0, a.Location())
+	if _, err := s.EnqueueRun(ctx, store.NewRun{Agent: "finance", SpecSHA: a.SHA, Trigger: "schedule", TriggerIndex: &idx, ScheduledFor: &fire}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.ClaimRun(ctx, "test")
+	if err != nil || c == nil {
+		t.Fatalf("claim: %v %v", c, err)
+	}
+	if err := e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.GetRun(ctx, c.ID)
+	if err != nil || r.Status != store.StatusSkipped || r.Gate == nil || *r.Gate != store.GateQuietHours || fr.calls != 0 {
+		t.Fatalf("quiet run = %+v, %v; backend calls %d", r, err, fr.calls)
+	}
+	h.mu.Lock()
+	if len(h.messages) != 0 {
+		t.Fatalf("quiet run notified: %v", h.messages)
+	}
+	h.mu.Unlock()
+
+	manual := claim(t, e, s)
+	if err := e.Execute(ctx, manual); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := s.GetRun(ctx, manual.ID); err != nil || r.Status != store.StatusSucceeded || fr.calls != 1 {
+		t.Fatalf("manual run = %+v, %v; backend calls %d", r, err, fr.calls)
+	}
+}
+
 func TestItemsAboveSkipsAnEmptySource(t *testing.T) {
 	fr := &fakeRunner{output: goodOutput}
 	e, s, _ := harnessWith(t, fr, `

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +21,9 @@ const RequestTimeout = 30 * time.Second
 // Conn is one stream-json conversation with a CLI: lines in from its stdout, lines out to its stdin. It reads for its whole life, answering the CLI's control requests through Handler and matching the answers to requests the host sent, so neither side ever waits on a line nobody reads. Every other line is queued for Next, unbounded: between turns the CLI writes nothing, so the queue is at most one turn.
 type Conn struct {
 	h Handler
+	// last is when the CLI last wrote a line (UnixNano), keep_alive
+	// included: the sign of life a stall watchdog reads (LastLine).
+	last atomic.Int64
 
 	wmu sync.Mutex
 	w   io.WriteCloser
@@ -48,6 +52,15 @@ func NewConn(r io.Reader, w io.WriteCloser, h Handler) *Conn {
 	return c
 }
 
+// LastLine is when the CLI last wrote a line, keep_alive and blank lines included; zero before the first.
+func (c *Conn) LastLine() time.Time {
+	n := c.last.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
+}
+
 // Done is closed once the stream has ended.
 func (c *Conn) Done() <-chan struct{} { return c.done }
 
@@ -62,6 +75,9 @@ func (c *Conn) read(r io.Reader) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64<<10), MaxLine)
 	for sc.Scan() {
+		// Counted before dispatch drops a keep_alive: it is the CLI saying
+		// it is still there.
+		c.last.Store(time.Now().UnixNano())
 		raw := bytes.TrimSpace(sc.Bytes())
 		if len(raw) == 0 {
 			continue
@@ -79,9 +95,13 @@ func (c *Conn) read(r io.Reader) {
 
 // dispatch acts on one line: control traffic is handled here, keep_alive dropped, and every line but keep_alive is queued for Next, control lines included, so the transcript holds the whole exchange.
 func (c *Conn) dispatch(l Line) {
-	switch l.Type {
-	case "keep_alive":
+	if l.Type == "keep_alive" {
 		return
+	}
+	if c.h.Observe != nil {
+		c.h.Observe(l)
+	}
+	switch l.Type {
 	case "control_request":
 		var env controlEnvelope
 		if json.Unmarshal(l.Raw, &env) == nil && env.RequestID != "" {
@@ -405,6 +425,16 @@ func (c *Conn) SetModel(ctx context.Context, model string) error {
 		m = model
 	}
 	_, err := c.Request(ctx, "set_model", map[string]any{"model": m})
+	return err
+}
+
+// SetEffort changes the effort level for later turns (apply_flag_settings with effortLevel; empty sends null, the model's default). The CLI accepts an unknown level and ignores it (2.1.316), so a caller checks the level first.
+func (c *Conn) SetEffort(ctx context.Context, level string) error {
+	var l any
+	if level != "" {
+		l = level
+	}
+	_, err := c.Request(ctx, "apply_flag_settings", map[string]any{"settings": map[string]any{"effortLevel": l}})
 	return err
 }
 

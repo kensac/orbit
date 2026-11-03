@@ -41,6 +41,8 @@ type fakeRunner struct {
 	// seen, when set, is called with the request while the run's workdir
 	// exists.
 	seen func(runner.Request)
+	// stalls is how many calls end as the stall watchdog ends a turn.
+	stalls int
 	// events are emitted after the first, as the CLI's stream would (tool calls the journal records).
 	events []runner.Event
 	// said are assistant lines emitted before the output.
@@ -74,7 +76,11 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 			req.Session.Attached(sid)
 		}
 	}
-	emit(runner.Event{Kind: "assistant", Payload: []byte(`{"type":"assistant","session_id":"` + sid + `"}`)})
+	emit(runner.Event{Kind: "assistant", Payload: []byte(`{"type":"assistant","uuid":"msg-` + sid + `","session_id":"` + sid + `"}`)})
+	if f.calls <= f.stalls {
+		emit(runner.Event{Kind: "orbit.stalled", Payload: []byte(`{"idle_ms":600000,"stall_ms":600000}`)})
+		return nil, fmt.Errorf("%w: no line from the CLI for 10m0s and no tool call running", runner.ErrStalled)
+	}
 	for _, ev := range f.events {
 		emit(ev)
 	}
@@ -226,6 +232,138 @@ func claim(t *testing.T, e *engine.Engine, s *store.Store) *store.ClaimedRun {
 		t.Fatalf("claim: %v %v", c, err)
 	}
 	return c
+}
+
+func TestEvaluationReplayUsesOnlyCurrentCharterAndInput(t *testing.T) {
+	fr := &fakeRunner{output: replayOutput}
+	e, s, _ := harness(t, fr)
+	_, _, err := s.PutSkill(ctx, store.SkillWrite{Name: "eval-guide", Create: true,
+		Content: "---\nname: eval-guide\ndescription: Evaluation guide\n---\n\nCurrent saved skill."},
+		store.SkillProvenance{Source: store.SkillByPerson})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Current().Config.Agents["finance"].Skills = []string{"eval-guide"}
+	var replaySkill string
+	var prompts []string
+	charter := e.Current().Config.Agents["finance"].Charter
+	fr.seen = func(req runner.Request) {
+		prompts = append(prompts, req.Prompt)
+		if req.SkillsPlugin != "" {
+			b, err := os.ReadFile(filepath.Join(req.SkillsPlugin, "skills", "eval-guide", "SKILL.md"))
+			if err != nil {
+				t.Error(err)
+			}
+			replaySkill = string(b)
+		}
+		if fr.calls == 1 {
+			updated := *e.Current().Config
+			agents := make(map[string]*spec.Agent, len(updated.Agents))
+			for name, agent := range updated.Agents {
+				copyAgent := *agent
+				agents[name] = &copyAgent
+			}
+			agents["finance"].Charter = "changed while replaying"
+			updated.Agents = agents
+			if err := e.SetConfig(&updated); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	before, err := s.ListRuns(ctx, store.RunFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := json.RawMessage(`{"records":[{"amount":12}]}`)
+	results, err := e.Replay(ctx, "finance", []engine.EvaluationCase{{Name: "first", Input: input}, {Name: "second", Input: input}})
+	if err != nil || len(results) != 2 || string(results[1].Output) != replayOutput || results[1].CostUSD == nil || *results[1].CostUSD != 0.25 {
+		t.Fatalf("replay = %+v, %v", results, err)
+	}
+	if fr.got.Prompt == "" || !strings.Contains(fr.got.Prompt, charter) || strings.Contains(fr.got.Prompt, "changed while replaying") {
+		t.Fatalf("prompt omitted current charter: %s", fr.got.Prompt)
+	}
+	if len(prompts) != 2 || !strings.Contains(prompts[1], charter) || strings.Contains(prompts[1], "changed while replaying") {
+		t.Fatalf("replay did not pin its configuration snapshot: %+v", prompts)
+	}
+	if len(fr.got.Inputs) != 1 || string(fr.got.Inputs[0].Content) != string(input) {
+		t.Fatalf("replay inputs = %+v", fr.got.Inputs)
+	}
+	if !strings.Contains(replaySkill, "Current saved skill.") {
+		t.Fatalf("replay omitted active skill: %q", replaySkill)
+	}
+	if len(fr.got.Tools) != 0 || fr.got.Harness != nil || fr.got.Session != nil || fr.got.Connectors != nil || fr.got.SkillsPlugin == "" {
+		t.Fatalf("replay received capabilities or state: %+v", fr.got)
+	}
+	after, err := s.ListRuns(ctx, store.RunFilter{})
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("replay persisted a run: before %d, after %d, err %v", len(before), len(after), err)
+	}
+}
+
+func TestEvaluationReplayRejectsInvalidInputBeforeBackend(t *testing.T) {
+	fr := &fakeRunner{output: replayOutput}
+	e, _, _ := harness(t, fr)
+	for _, input := range []json.RawMessage{nil, json.RawMessage(`not json`), json.RawMessage(strings.Repeat("x", engine.MaxEvaluationInput+1))} {
+		if _, err := e.Replay(ctx, "finance", []engine.EvaluationCase{{Name: "invalid", Input: input}}); err == nil {
+			t.Errorf("accepted input of %d bytes", len(input))
+		}
+	}
+	if _, err := e.Replay(ctx, "finance", []engine.EvaluationCase{{Name: "valid-first", Input: json.RawMessage(`{}`)}, {Name: "invalid-second", Input: json.RawMessage(`bad`)}}); err == nil {
+		t.Fatal("accepted a suite with an invalid later case")
+	}
+	if fr.calls != 0 {
+		t.Fatalf("backend called %d times for invalid inputs", fr.calls)
+	}
+}
+
+const replayOutput = `{"summary":"ok","report":"ok","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[]}`
+
+func TestEvaluationGradeUsesIndependentConfiguredRunnerWithoutCapabilities(t *testing.T) {
+	fr := &fakeRunner{output: `{"passed":true,"reason":"output gives the requested amount"}`}
+	e, s, _ := harness(t, fr)
+	cfg := *e.Current().Config
+	grader := *cfg.Agents["finance"]
+	grader.Name, grader.Runner = "grader", "grader-backend"
+	oldRunner := cfg.Deployment.Runners[cfg.Agents["finance"].Runner]
+	graderRunner := oldRunner
+	graderRunner.Model = "independent-grader"
+	cfg.Agents = map[string]*spec.Agent{"finance": cfg.Agents["finance"], "grader": &grader}
+	cfg.Deployment.Runners = map[string]spec.RunnerSpec{grader.Runner: graderRunner, cfg.Agents["finance"].Runner: oldRunner}
+	if err := e.SetConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.ListRuns(ctx, store.RunFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := e.Grade(ctx, "grader", "finance", []engine.GradeCase{{Name: "one", Rubric: "mentions the requested amount", Output: json.RawMessage(`{"summary":"amount is 4"}`)}})
+	if err != nil || len(results) != 1 || !results[0].Passed || results[0].CostUSD == nil || *results[0].CostUSD != 0.25 {
+		t.Fatalf("grade = %+v, %v", results, err)
+	}
+	if !strings.Contains(string(fr.got.Inputs[0].Content), "mentions the requested amount") || !strings.Contains(string(fr.got.Inputs[0].Content), `"summary":"amount is 4"`) {
+		t.Fatalf("grader inputs = %+v", fr.got.Inputs)
+	}
+	if fr.got.System == grader.Charter || len(fr.got.Tools) != 0 || fr.got.Harness != nil || fr.got.Session != nil || fr.got.Connectors != nil || fr.got.SkillsPlugin != "" {
+		t.Fatalf("grader inherited charter or capabilities: %+v", fr.got)
+	}
+	if _, err := e.Grade(ctx, "grader", "grader", []engine.GradeCase{{Name: "one", Rubric: "check", Output: json.RawMessage(`{}`)}}); err == nil {
+		t.Fatal("accepted self-grader")
+	}
+	if _, err := e.Grade(ctx, "grader", "finance", []engine.GradeCase{{Name: "bad", Rubric: "", Output: json.RawMessage(`{}`)}}); err == nil {
+		t.Fatal("accepted empty rubric")
+	}
+	shared := *e.Current().Config
+	shared.Deployment.Runners = map[string]spec.RunnerSpec{grader.Runner: oldRunner, cfg.Agents["finance"].Runner: oldRunner}
+	if err := e.SetConfig(&shared); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Grade(ctx, "grader", "finance", []engine.GradeCase{{Name: "one", Rubric: "check", Output: json.RawMessage(`{}`)}}); err == nil {
+		t.Fatal("accepted identical grader backend configuration")
+	}
+	after, err := s.ListRuns(ctx, store.RunFilter{})
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("grading persisted a run: before %d after %d err %v", len(before), len(after), err)
+	}
 }
 
 const goodOutput = `{

@@ -70,7 +70,8 @@ const mcpListOut = "Checking MCP server health\u2026\n\n" +
 	"plugin:github:github: https://api.githubcopilot.com/mcp/ (HTTP) - \u2718 Failed to connect \u2014 HTTP 400: bad request\n" +
 	"owl: uv run --project /x - y serve - \u2714 Connected\n" +
 	"proj: https://p (SSE) - \u23f8 Pending approval\n" +
-	"odd: https://o - ? Something new\n"
+	"odd: https://o - ? Something new\n" +
+	"private: run-server --token sk-ant-oat01-very-secret-value - \u2718 Failed to connect \u2014 Authorization: Bearer provider-secret-value\n"
 
 func TestAccountMCPList(t *testing.T) {
 	h, dir := mcpHarness(t)
@@ -80,20 +81,43 @@ func TestAccountMCPList(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []sandbox.MCPServer{
-		{Name: "claude.ai Gmail", Target: "https://gmailmcp.googleapis.com/mcp/v1", Status: "connected", Connector: true},
-		{Name: "claude.ai Google Sheets", Target: "https://gws-mcp.kanishksachdev.com/mcp", Status: "needs_auth", Connector: true},
-		{Name: "plugin:github:github", Target: "https://api.githubcopilot.com/mcp/", Transport: "HTTP", Status: "failed", Detail: "HTTP 400: bad request"},
-		{Name: "owl", Target: "uv run --project /x - y serve", Status: "connected"},
-		{Name: "proj", Target: "https://p", Transport: "SSE", Status: "pending"},
-		{Name: "odd", Target: "https://o", Status: "unknown", Detail: "? Something new"},
+		{Name: "claude.ai Gmail", Status: "connected", Connector: true},
+		{Name: "claude.ai Google Sheets", Status: "needs_auth", Connector: true},
+		{Name: "plugin:github:github", Transport: "HTTP", Status: "failed"},
+		{Name: "owl", Status: "connected"},
+		{Name: "proj", Transport: "SSE", Status: "pending"},
+		{Name: "odd", Status: "unknown"},
+		{Name: "private", Status: "failed"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		b, _ := json.MarshalIndent(got, "", " ")
 		t.Fatalf("parsed:\n%s", b)
 	}
+	b, _ := json.Marshal(got)
+	for _, secret := range []string{"sk-ant-oat01-very-secret-value", "provider-secret-value", "Authorization"} {
+		if strings.Contains(string(b), secret) {
+			t.Fatalf("MCP metadata exposed %q: %s", secret, b)
+		}
+	}
 	cs := calls(t, logFile)
 	if len(cs) != 1 || cs[0] != dir+"||"+h.fd.home+"|mcp list" {
 		t.Fatalf("claude was run as %q", cs)
+	}
+}
+
+func TestAccountMCPListErrorHidesProviderStderr(t *testing.T) {
+	h, _ := mcpHarness(t)
+	bin := t.TempDir()
+	h.fd.bin = bin
+	h.fd.home = t.TempDir()
+	const secret = "provider-oauth-secret-value"
+	script := "#!/bin/sh\necho 'Authorization: Bearer " + secret + "' >&2\nexit 7\n"
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := h.client.AccountMCP(context.Background(), "orbit", slotA)
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("MCP failure exposed provider output: %v", err)
 	}
 }
 
@@ -145,7 +169,10 @@ func TestAccountMCPSync(t *testing.T) {
 	for name, m := range map[string]map[string]json.RawMessage{
 		"bad name":   {"a b": orbit},
 		"no type":    {"x": json.RawMessage(`{"url":"https://x"}`)},
-		"env":        {"x": json.RawMessage(`{"type":"http","url":"https://x","headers":{"Authorization":"Bearer ${CLAUDE_CODE_OAUTH_TOKEN}"}}`)},
+		"env":        {"x": json.RawMessage(`{"type":"stdio","command":"docs-mcp","env":{"API_KEY":"secret"}}`)},
+		"headers":    {"x": json.RawMessage(`{"type":"http","url":"https://x","headers":{"Authorization":"Bearer secret"}}`)},
+		"secret arg": {"x": json.RawMessage(`{"type":"stdio","command":"docs-mcp","args":["--api-key", "literal-secret"]}`)},
+		"url query":  {"x": json.RawMessage(`{"type":"http","url":"https://x/mcp?access_token=secret"}`)},
 		"not object": {"x": json.RawMessage(`[1]`)},
 	} {
 		if err := sandbox.ValidateMCPServers(m); err == nil {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -266,7 +267,7 @@ func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*R
 	args := c.baseArgs(req, home, keepDays)
 	env := c.env(home)
 	if sess == nil {
-		final, err := c.once(ctx, claudeproto.Transport{Ephemeral: true}, args, env, req, emit)
+		final, err := c.once(ctx, claudeproto.Transport{Ephemeral: true}, withModel(args, req), env, req, emit)
 		if final == nil {
 			return nil, err
 		}
@@ -322,7 +323,7 @@ func (c *claudeCode) resumed(ctx context.Context, sess *Session, args, env []str
 	if err := sess.Started(mode, sess.Resume); err != nil {
 		return nil, err
 	}
-	return c.once(ctx, claudeproto.Transport{Resume: sess.Resume}, args, env, req, emit)
+	return c.once(ctx, claudeproto.Transport{Resume: sess.Resume, ResumeAt: sess.ResumeAt}, withModel(args, req), env, req, emit)
 }
 
 // once runs one process for one turn: the prompt as plain text on stdin, or, for a run with connectors, as a stream-json message, so the control channel carries the connectors' calls and permission prompts.
@@ -441,4 +442,23 @@ func TranscriptCost(home, workdir, id string) (total float64, ok bool) {
 			return total, ok
 		}
 	}
+}
+
+// withModel adds the run's model and effort to a process's arguments. They
+// come after the runner's own --model, and the CLI takes an option's last
+// value (2.1.316: --model opus --model sonnet runs sonnet). A live process is
+// keyed by its arguments without them (hashArgs), so a conversation that
+// changes its model keeps its process (liveProc.switchModel).
+func withModel(args []string, req Request) []string {
+	if req.Model == "" && req.Effort == "" {
+		return args
+	}
+	out := slices.Clone(args)
+	if req.Model != "" {
+		out = append(out, "--model", req.Model)
+	}
+	if req.Effort != "" {
+		out = append(out, "--effort", req.Effort)
+	}
+	return out
 }

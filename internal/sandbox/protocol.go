@@ -38,12 +38,20 @@ const (
 // only writable path that outlives the process.
 const WorkDir = "/work"
 
+// ExtensionWorkDir is a separate volume target that is absent from the runner
+// image. Docker creates it root-owned, so the fixed unprivileged extension
+// identity cannot add files beside its read-only package and inputs.
+const ExtensionWorkDir = "/orbit-extension"
+
 // Limits both sides hold. MaxArchiveBytes bounds the workdir in either
 // direction: orbit's own checkout is a few MB, so 256 MiB leaves room for a
 // repository with assets and still stops a sandbox from filling sandboxd's
 // disk with its readback.
 const (
 	MaxArchiveBytes = 256 << 20
+	// MaxClaudeConfigBytes bounds the laptop-to-box Claude config bundle; it
+	// is enough for a large skill library without copying an entire home.
+	MaxClaudeConfigBytes = 32 << 20
 	// MaxArgs and MaxArgvBytes bound an attach command line: the CLI's
 	// largest argument is the output schema, tens of KB.
 	MaxArgs      = 256
@@ -127,10 +135,13 @@ func ValidID(s string) bool { return idRE.MatchString(s) }
 const (
 	ProfileBuild       = "build"
 	ProfileWorkstation = "workstation"
+	ProfileExtension   = "extension"
 )
 
 // ValidProfile reports whether p names a profile ("" is build).
-func ValidProfile(p string) bool { return p == "" || p == ProfileBuild || p == ProfileWorkstation }
+func ValidProfile(p string) bool {
+	return p == "" || p == ProfileBuild || p == ProfileWorkstation || p == ProfileExtension
+}
 
 // ValidRunID reports whether s is an acceptable run id label.
 func ValidRunID(s string) bool { return runIDRE.MatchString(s) }
