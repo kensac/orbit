@@ -84,6 +84,7 @@ is the design; the topic documents below are the rules for changing it.
   sandbox service (the only holder of a docker socket), its egress proxy, the credential proxy that keeps the backend credential out of every sandbox,
   and orbit's client for it.
 - `internal/workspace/`: packs and unpacks a chat conversation's workspace as a tar, for its sandbox and the snapshot kept after each run.
+- `internal/boxkeep/`: periodic work on running boxes, including account usage polls.
 - `deploy/`: the image (`Dockerfile`), the build sandbox's image
   (`build.Dockerfile`), an agent's workstation box image (`workstation.Dockerfile`, its files in `workstation/`) and the pinned agent CLIs (`cli/`).
 

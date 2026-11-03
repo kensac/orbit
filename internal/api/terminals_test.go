@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +43,14 @@ type fakeSandboxd struct {
 	resizes  []sandbox.Resize
 	killed   []string
 	hangups  int
+	// mounts are each box's account slots; recreates counts recreates;
+	// prepared lists prepared slots; logins are what an account's status
+	// read answers.
+	mounts    map[string][]string
+	recreates int
+	prepared  []string
+	logins    map[string]sandbox.AccountStatus
+	usage     map[string]sandbox.AccountUsage
 }
 
 func (f *fakeSandboxd) handler(t *testing.T) http.Handler {
@@ -51,7 +60,22 @@ func (f *fakeSandboxd) handler(t *testing.T) http.Handler {
 		if f.running[name] {
 			st.State, st.ID, st.Image = sandbox.BoxRunning, strings.Repeat("b", 64), "ghcr.io/kensac/orbit-workstation@sha256:"+strings.Repeat("c", 64)
 		}
+		st.Accounts = f.mounts[name]
 		_ = json.NewEncoder(w).Encode(st)
+	}
+	union := func(name string, r *http.Request) {
+		var req sandbox.EnsureRequest
+		if r.ContentLength > 0 {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Validate() != nil {
+				t.Errorf("ensure body %+v %v", req, err)
+			}
+		}
+		for _, a := range req.Accounts {
+			if !slices.Contains(f.mounts[name], a) {
+				f.mounts[name] = append(f.mounts[name], a)
+			}
+		}
+		slices.Sort(f.mounts[name])
 	}
 	mux.HandleFunc("GET /v1/boxes/{name}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -61,8 +85,44 @@ func (f *fakeSandboxd) handler(t *testing.T) http.Handler {
 	mux.HandleFunc("POST /v1/boxes/{name}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if !f.running[r.PathValue("name")] {
+			union(r.PathValue("name"), r)
+		}
 		f.running[r.PathValue("name")] = true
 		status(w, r.PathValue("name"))
+	})
+	mux.HandleFunc("POST /v1/boxes/{name}/recreate", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		union(r.PathValue("name"), r)
+		f.recreates++
+		f.sessions = map[string]bool{}
+		f.running[r.PathValue("name")] = true
+		status(w, r.PathValue("name"))
+	})
+	mux.HandleFunc("POST /v1/boxes/{name}/accounts/{slot}/prepare", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !slices.Contains(f.mounts[r.PathValue("name")], r.PathValue("slot")) {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		f.prepared = append(f.prepared, r.PathValue("slot"))
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /v1/boxes/{name}/accounts/{slot}/usage", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		u, ok := f.usage[r.PathValue("slot")]
+		if !ok {
+			u = sandbox.AccountUsage{Source: sandbox.UsageStatusline}
+		}
+		_ = json.NewEncoder(w).Encode(u)
+	})
+	mux.HandleFunc("GET /v1/boxes/{name}/accounts/{slot}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(f.logins[r.PathValue("slot")])
 	})
 	mux.HandleFunc("GET /v1/boxes/{name}/sessions/{s}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -138,7 +198,8 @@ type boxEnv struct {
 
 func newBoxEnv(t *testing.T) *boxEnv {
 	t.Helper()
-	fake := &fakeSandboxd{running: map[string]bool{}, sessions: map[string]bool{}}
+	fake := &fakeSandboxd{running: map[string]bool{}, sessions: map[string]bool{}, mounts: map[string][]string{}, logins: map[string]sandbox.AccountStatus{},
+		usage: map[string]sandbox.AccountUsage{}}
 	sb := httptest.NewServer(fake.handler(t))
 	t.Cleanup(sb.Close)
 	addr := strings.TrimPrefix(sb.URL, "http://")
@@ -181,8 +242,9 @@ sandbox: {sandboxd: "`+addr+`"}
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), TerminalPing: 50 * time.Millisecond,
 		Boxes: func() (*sandbox.Client, error) { return client, nil }}
 	pub := httptest.NewUnstartedServer(a.Handler())
-	// As serve's: a socket must outlive the server's WriteTimeout.
-	pub.Config.WriteTimeout = 300 * time.Millisecond
+	// Ordinary requests use the same allowance as the conversation tests so
+	// database-backed handlers can finish under -race on a loaded CI runner.
+	pub.Config.WriteTimeout = testWriteTimeout
 	pub.Start()
 	internal := httptest.NewServer(a.InternalHandler())
 	t.Cleanup(func() {
@@ -372,7 +434,7 @@ func TestTerminalSocket(t *testing.T) {
 		t.Fatalf("pong %v", m)
 	}
 	// Past the server's WriteTimeout, the server still pings.
-	time.Sleep(400 * time.Millisecond)
+	time.Sleep(testWriteTimeout + 100*time.Millisecond)
 	pings := 0
 	for pings < 2 {
 		typ, b, err := c.Read(ctx)
