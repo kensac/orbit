@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kensac/orbit/internal/credproxy"
 	"github.com/kensac/orbit/internal/sandbox"
 )
 
@@ -337,6 +338,70 @@ func TestBoxLifecycle(t *testing.T) {
 	}
 	if _, err := h.client.Box(ctx, "Bad/Name"); err == nil {
 		t.Fatal("a bad name was accepted")
+	}
+}
+
+func TestChatBoxIsolationAndCredentialProxy(t *testing.T) {
+	h := newHarness(t)
+	h.srv.cfg = boxConfig()
+	h.srv.cfg.WorkstationCredProxy = "orbit-credproxy:3129"
+	h.srv.cfg.CredProxyKey = strings.Repeat("c", 40)
+	h.srv.sealer, _ = credproxy.NewSealer(h.srv.cfg.CredProxyKey)
+	h.srv.cfg.Docker, h.srv.cfg.Listen = h.srv.d.sock, "unix:"+h.sock
+	ctx := context.Background()
+	name, err := sandbox.ChatBoxName("12345678-1234-1234-1234-123456789abc")
+	if err != nil || !sandbox.ValidChatBoxName(name) {
+		t.Fatalf("chat box name %q: %v", name, err)
+	}
+	if got, _ := sandbox.ChatBoxName("12345678-1234-1234-1234-123456789abc"); got != name {
+		t.Fatal("chat box name is not stable")
+	}
+	if _, err := sandbox.ChatBoxName("not-a-conversation"); err == nil {
+		t.Fatal("invalid conversation id was accepted")
+	}
+	status, err := h.client.EnsureChatBox(ctx, name)
+	if err != nil || status.State != sandbox.BoxRunning {
+		t.Fatalf("ensure chat box: %+v %v", status, err)
+	}
+	h.fd.mu.Lock()
+	created := h.fd.created[0]
+	h.fd.mu.Unlock()
+	if created.Labels[LabelChatBox] != name || len(created.HostConfig.Mounts) != 2 || created.HostConfig.Mounts[0].Target != sandbox.BoxHome || created.HostConfig.Mounts[1].Target != sandbox.WorkDir {
+		t.Fatalf("chat box has unintended identity or mounts: %+v", created)
+	}
+	if _, err := h.client.Box(ctx, name); err == nil {
+		t.Fatal("the direct-terminal box route accepted a chat box")
+	}
+	var stdout, stderr bytes.Buffer
+	code, err := h.client.AttachChatBox(ctx, name, sandbox.ChatBoxAttachRequest{RunID: "run-1", Exec: sandbox.AttachRequest{
+		Argv: []string{"cat"}, Env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "raw-subscription-token"},
+	}}, strings.NewReader("ok"), &stdout, &stderr)
+	if err != nil || code != 7 || stdout.String() != "ok" {
+		t.Fatalf("chat attach: code %d, stdout %q, stderr %q, err %v", code, stdout.String(), stderr.String(), err)
+	}
+	h.fd.mu.Lock()
+	defer h.fd.mu.Unlock()
+	if len(h.fd.execs) != 1 {
+		t.Fatalf("created %d chat execs", len(h.fd.execs))
+	}
+	for _, exec := range h.fd.execs {
+		if exec.WorkingDir != sandbox.WorkDir || exec.Tty || len(exec.Env) != 4 {
+			t.Fatalf("chat process shape %+v", exec)
+		}
+		var token string
+		for _, item := range exec.Env {
+			if strings.HasPrefix(item, "CLAUDE_CODE_OAUTH_TOKEN=") {
+				token = strings.TrimPrefix(item, "CLAUDE_CODE_OAUTH_TOKEN=")
+			}
+			if strings.Contains(item, "raw-subscription-token") {
+				t.Fatalf("raw credential reached the child environment: %v", exec.Env)
+			}
+		}
+		sealer, _ := credproxy.NewSealer(h.srv.cfg.CredProxyKey)
+		grant, err := sealer.Open(token)
+		if err != nil || grant.Credential != "raw-subscription-token" || grant.RunID != "run-1" || grant.Sandbox != status.ID || grant.Addr.String() != "10.250.251.7" {
+			t.Fatalf("chat credential grant %+v: %v", grant, err)
+		}
 	}
 }
 

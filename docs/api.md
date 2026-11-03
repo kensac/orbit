@@ -268,6 +268,28 @@ characters (400 otherwise).
 `POST /conversations/{id}/messages` takes and returns exactly what
 `POST /agents/{name}/messages` does (below), in that conversation.
 
+### Imported conversation archives
+
+`POST /agents/{name}/conversation-archives/import` stores exported thread snapshots separately from live conversations:
+
+```json
+{"dry_run": false, "archives": [{
+  "source_agent": "finance",
+  "source_conversation_id": "uuid",
+  "source_bundle_sha256": "64 lowercase hex characters",
+  "snapshot": {"conversation": {"id": "uuid", "title": "..."},
+               "pages": [{"items": [], "has_more": false, "next_before": null}]}
+}]}
+```
+
+The snapshot contains the source conversation metadata and the exact exported thread page envelopes. The importer computes `source_bundle_sha256` from the exact bounded ZIP byte snapshot it validates and reads. The API treats that hash as asserted provenance; it is not a signature and direct API callers can supply their own value. The server computes `content_sha256` over canonical JSON. The identity is the target agent, source agent and source conversation id. Reimporting the same snapshot returns `unchanged`; changed content appends a version and leaves prior versions intact. `dry_run` reports outcomes without writing ids or rows. At most 100 archives are accepted per request and each snapshot is at most 8 MiB. The endpoint never creates or changes conversations, messages, runs, questions or actions.
+
+`200 {"dry_run": false, "results": [{"source_agent": "finance", "source_conversation_id": "uuid", "outcome": "created|versioned|unchanged", "version": 1, "id": 123}]}`. `id` is absent in a dry run that would create a row. The author is the authenticated person. One invalid archive rejects the request.
+
+`GET /agents/{name}/conversation-archives?limit=<n>&before_id=<id>` lists metadata for every immutable version, newest archive id first; `limit` defaults to 50 and is at most 200. The response has `archives`, `has_more` and `next_before_id`; it omits snapshot bodies. `GET /agents/{name}/conversation-archives/{id}` reads one archived version with its snapshot body. Each archive is marked `kind: "exported_thread_snapshot"`, `read_only: true`, `coverage: "partial"`, and `coverage_details: "source conversation metadata and exported thread pages only"`.
+
+These snapshots are not live conversations or a full history restore. Portable exports exclude upload bytes, run artifacts, journals, transcripts, source inputs, workspace state and server configuration. Imported thread content is read-only data and has no execution semantics.
+
 ### Conversation permissions
 
 A conversation has a permission level for the runs its person's messages start (`trigger` `message`): one of `locked`, `ask`, `edits`, `auto`, `full`, narrowest first (docs/agents/configuration.md, Permissions), never wider than its agent's `ceiling`. Without one of its own it is at its agent's `level`. Every other run (schedule, manual, continue, task, delegation) is at the agent's level, or the conversation's when that is narrower: an unattended run never takes a raised level.
@@ -455,7 +477,7 @@ An agent with `chat: true` (the built-in `orbit` is one) is a Claude Code sessio
 
 **GitHub** (the built-in has `github:clone` auto, `github:pr` and `github:merge` approve): `github:clone {repo, dir}` puts a repository's default branch into the workspace; `github:pr {repo, dir, branch, title, body, push_only}` takes the working tree at `dir` (never its `.git`), commits it as the App's bot user on top of the default branch, holds it to the build's diff policy (no `.github/`, no credential in an added line), pushes `orbit/chat/<branch>` and opens or updates its PR; `github:merge` merges it once every required check passed. Tokens stay in orbit; the repositories are `github.repositories`.
 
-With `sandbox: workstation` (the built-in's, when sandboxd is configured) the session runs in a sandbox container with Claude Code's full tool set and the open internet; `sandbox: build` with the tools it names.
+With `sandbox: workstation` (the built-in's, when sandboxd is configured) each conversation runs in its own persistent sandbox container with Claude Code's full tool set and the open internet. It has no account credential mounts. Backend credentials are provided through a scoped proxy grant, and the CLI process is stopped when that grant expires after 55 minutes. The conversation workspace remains the snapshot workspace: the workstation restores it on attach and archives it on close. `sandbox: build` runs with the tools it names.
 
 ## A conversation's thread
 
@@ -815,7 +837,7 @@ Both types are denied unless the agent names a rule.
 
 MCP servers orbit calls for agents (orbit.yaml `connectors`, docs/agents/configuration.md, Connectors). No response carries a credential.
 
-`GET /connectors` is every configured connector; catalog entries also include `catalog_added: true` and their `default_tool_rule` (`approve`):
+`GET /connectors` is every configured connector; catalog entries also include `catalog_added: true` and their `default_tool_rule` (`approve`). A package-backed stdio connector has `transport: "stdio"`, no `url`, `auth: "none"`, and no token; its package path and digest are not returned:
 
 ```json
 {"connectors": [{"name": "housing-watch", "transport": "http", "url": "https://.../mcp", "description": "...",
@@ -826,11 +848,13 @@ MCP servers orbit calls for agents (orbit.yaml `connectors`, docs/agents/configu
 
 `auth` is `none`, `header` or `oauth`. `connected` is true for `none` and `header`, and for `oauth` once a person has signed in; `token` is the newest stored version of an `oauth` connector's grant (`reason` `authorize`, a person's sign-in, `created_by` that person; or `refresh`, by `orbit`), `null` before the first sign-in and for other kinds. `expires_at` is omitted when the server gave no expiry.
 
-`GET /connectors/{name}/tools` lists the server's tools now, `{"tools": [{"name": "find_listings", "description": "...", "inputSchema": {}, "read_only": true, "write": false}]}`; `read_only` is the server's `readOnlyHint`, `write` whether the tool is in `write_tools` (so it waits for approval unless an agent's rules say otherwise). `404` for an unknown connector, `502` when the server cannot be listed (unreachable, or not signed in).
+`GET /connectors/{name}/tools` lists the server's tools now, `{"tools": [{"name": "find_listings", "description": "...", "inputSchema": {}, "read_only": true, "write": false}]}`; `read_only` is the server's `readOnlyHint` for HTTP connectors and true for package-backed stdio tools, whose description and schema come from the pinned manifest; `write` whether the tool is in `write_tools` (so it waits for approval unless an agent's rules say otherwise). `404` for an unknown connector, `502` when the server cannot be listed (unreachable, not signed in, or the pinned package fails validation).
 
 `POST /connectors/{name}/authorize` takes no body and starts the caller's sign-in to an `oauth` connector (the operator token signs in as `operator`): orbit reads the server's protected resource and authorization server metadata, registers itself as a client unless `auth.client_id` is set, and returns `{"authorize_url": "https://..."}`, which the client opens in a browser within 15 minutes. The authorization server sends the browser to `GET /api/v1/connectors/oauth/callback`, which takes no token (its sealed `state` is the credential), stores the token as the connector's next version and shows a page saying it is connected, or why not. `404` for an unknown connector, `409` for one that is not `oauth`, `502` when discovery or registration fails or the host has no `ORBIT_CONNECTOR_KEY`.
 
 `GET /connectors/catalog` lists connector endpoint records added by a person. `POST /connectors/catalog` requires a signed-in person and takes `{"name":"acme","url":"https://service.example/mcp","description":"...","scopes":["read"]}`; `scopes` is optional and defaults to the OAuth metadata's advertised scopes. The endpoint must be a canonical HTTPS URL. Orbit checks the protected-resource and authorization-server metadata and requires support for dynamic client registration before storing it. Metadata and subsequent OAuth requests are restricted to public IP addresses and redirects are refused. The record contains the URL, description, scopes, and the person who added it, never credentials. On success the `201` response includes `connector`, and either `authorize_url`, `sign_in_error`, or `pending_reload`. Open the authorization URL to sign in. Newly added connectors are available in agent definitions; all their tools require approval unless an agent explicitly sets a tool rule. `409` means the name or URL is already registered.
+
+`POST /connectors/catalog/{name}/revoke` requires the signed-in person who added that catalog entry. It appends a revocation for the active OAuth grant version and returns `{"connector":"acme","revoked_version":1}`. Orbit retains the sealed grant and revocation record; it never deletes token history. Connector requests check the active grant version before sending authorization, so the revocation applies across instances on the next request. The catalog entry and agent configuration remain available, and the owner can sign in again through `POST /connectors/{name}/authorize`. `404` means the catalog entry is unknown, `403` means the caller is not its owner, and `409` means it has no active grant.
 
 **Calls.** A run's connector calls are events (`orbit.connector`, payload by `step`): `list` (`connector`, `tools`, `offered`, `approve`: the tools waiting for approval, `skipped`: names orbit cannot offer; or `error` when the connector was left out), `call` (`connector`, `tool`, `tool_use_id`, `rule`, `duration_ms`, `is_error`, `result`: the whole MCP result as a bounded value, `file` when it was written to the run's inputs; or `error`), `proposed` (`action_id`) and `waiting` (`action_id`, `tool_use_id`, a call waiting for its person in the chat). Each run stores the tools it was offered as the artifact `connectors/<name>.tools.json`, and each result written to a file as an artifact of that path.
 
@@ -983,7 +1007,7 @@ A workspace is a file tree a person and an agent share. Routes take the authenti
 
 ### Finding a workspace
 
-`GET /conversations/{id}/workspace` and `GET /agents/{name}/workspace` return `{"workspace": <workspace>}`, one shape over both backends. `GET /agents/{name}/workspace` is the agent's box for an agent with one (Terminals, below), and otherwise its snapshot workspace. `GET /conversations/{id}/workspace` is the conversation's snapshot workspace, also for an agent with a box until its chat turns run in the box (W10).
+`GET /conversations/{id}/workspace` and `GET /agents/{name}/workspace` return `{"workspace": <workspace>}`, one shape over both backends. `GET /agents/{name}/workspace` is the agent's shared box for an agent with one (Terminals, below), and otherwise its snapshot workspace. `GET /conversations/{id}/workspace` is the conversation's snapshot workspace. Workstation chat restores that snapshot into its dedicated conversation container and archives it back afterward; it does not use the shared agent box.
 
 ```json
 {"id": "uuid", "scope": "conversation", "conversation_id": "uuid", "agent": "orbit",
