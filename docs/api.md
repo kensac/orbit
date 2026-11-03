@@ -296,6 +296,35 @@ A conversation has a permission level for the runs its person's messages start (
 - The person is the token's; only with the operator token, `"by"` names it (default `operator`).
 - A reply being written takes the change within 2 s: orbit moves its Claude Code process with `set_permission_mode`, without restarting it, so a lowering holds from the next tool call. Raising works the same way for a run its person's message started; an unattended run takes only a lowering. A live process waiting between messages is moved before it takes the next run. Each application is a `permissions` item in the run's journal.
 
+### Approvals
+
+In a conversation at `ask`, `edits` or `auto`, what the level leaves as "ask" is put to its person: Claude Code sends orbit a permission request (`can_use_tool`) and the turn waits. orbit stores it as an approval, shows it in the run's journal (`approval` items, above), and answers the CLI with the person's decision. A plan the session presents (`ExitPlanMode`) is a plan approval; once it is allowed the session is back at its level. A request in a run nobody attends (any trigger but `message`) is denied at once, as is one at `locked`.
+
+`GET /conversations/{id}/approvals?state=&limit=` is `{"approvals": [<approval>]}`, newest first; `state` is one of the states below (400 otherwise), `limit` defaults to 50, at most 200. `GET /approvals/{id}` is `{"approval": <approval>}`:
+
+```json
+{"id": "uuid", "run_id": "uuid", "attempt": 1, "conversation_id": "uuid", "agent": "orbit",
+ "request_id": "...", "kind": "tool", "tool": "Bash", "input": {"command": "npm test"}, "level": "ask",
+ "decision_reason": "...", "decision_reason_type": "rule", "blocked_path": "", "matched_rule": null,
+ "suggestions": [{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}], "behavior": "allow", "destination": "localSettings"}],
+ "title": "", "description": "", "conversation_grant": true,
+ "state": "pending", "scope": null, "message": "", "decided_by": null, "decided_at": null,
+ "expires_at": "...", "created_at": "..."}
+```
+
+- `kind` is `tool`, or `plan` for `ExitPlanMode` (the plan is `input.plan`). `level` is the run's level when the CLI asked.
+- `decision_reason`, `decision_reason_type` (`rule`, `mode`, `workingDir`, `safetyCheck`, `classifier`, ...), `blocked_path`, `matched_rule` (the `permissions.ask` rule that forced the prompt: `{"source", "tool_name", "rule_content"}`), `suggestions` (the CLI's `permission_suggestions`), `title` and `description` are the CLI's own, as it sent them, empty or `null` when it sent none. They may carry terminal escapes: escape before display.
+- `conversation_grant` is false for an ask that may be allowed only once: a plan, or one the CLI marks as granting more than the call itself.
+- `state` is `pending`, `allowed`, `denied`, `expired` (nobody answered by `expires_at`) or `withdrawn` (the CLI gave the request up: an interrupt, the turn ended). Expired and withdrawn requests were denied. A pending approval past `expires_at` reads `expired`.
+- `expires_at` is 10 minutes after the request, or the run's deadline when that is sooner. orbit never allows a request on its own: unanswered is denied.
+
+`POST /approvals/{id}` `{"allow": true, "scope": "once", "message": "optional"}` decides it and returns `200 {"approval": ...}`.
+
+- `allow` is required. `scope` is `once` (default) or `conversation`: allow this call, and answer later requests of the same conversation that the CLI would cover with the same suggestion (or that repeat the same call) without asking, for runs its person's messages start. `conversation` with `allow: false`, or for an approval whose `conversation_grant` is false, is `400`.
+- `message` (at most 2000 bytes) is what the model is told with a deny; with an allow it is kept on the approval.
+- `409` when it was decided, expired or withdrawn first; `404` for an unknown id. The decider is the token's person; only with the operator token, `"by"` names it (default `operator`).
+- The waiting run reads the decision within a second, on whichever instance holds the CLI.
+
 ## The board
 
 Every open conversation's state at a glance, for a sidebar or a status page, without opening each thread.
@@ -505,6 +534,16 @@ token's person. Only with the operator token, an `"author"` field names it
 
 `POST /agents/{name}/runs` `{"prompt": "optional"}` starts a run without a
 message, in the default conversation: `202 {"run_id": "uuid"}`.
+`POST /agents/{name}/replay` `{"cases": [{"name", "input": <JSON>}]}`
+evaluates each saved input sequentially against one snapshot of the current
+charter and active skills, returning `{"results": [{"name", "output",
+"cost_usd"}]}` in request order. It creates no runs or artifacts and sends
+no sources, memory, messages, connectors or agent tools to the backend.
+Claude Code gets read-only file access to private temporary input and skill
+files. This is not a full run replay: behavior that depends on sources,
+memory, messages, tools, sessions or hooks is absent. Requests have at most
+32 cases, 8 MiB per input, 32 MiB total input and 512 KiB per output. Each
+case runs under the agent's configured timeout.
 `GET /agents/{name}/messages` lists the default conversation's messages.
 
 ## Streaming a run
@@ -594,7 +633,7 @@ An attempt (`store.Attempt`), oldest first:
 {"attempt": 1, "seq": 12, "at": "...", "kind": "assistant", "payload": {}}
 ```
 
-`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.stalled`, `orbit.model_skipped`, `orbit.figures_unverified`, a chat turn's `orbit.steer` (`{"message_id", "text", "author"}`: it took a steered message) and `orbit.steer_withdrawn` (`{"message_id", "confirmed"}`: a steered message written into the turn and not taken was withdrawn when it ended; `confirmed` false means the backend did not confirm it, and its process was closed), a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`, and a run's connector steps, `orbit.connector` (Connectors, below), with `orbit.permission` for each permission prompt of a connector tool.
+`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.stalled`, `orbit.model_skipped`, `orbit.figures_unverified`, a chat turn's `orbit.steer` (`{"message_id", "text", "author"}`: it took a steered message) and `orbit.steer_withdrawn` (`{"message_id", "confirmed"}`: a steered message written into the turn and not taken was withdrawn when it ended; `confirmed` false means the backend did not confirm it, and its process was closed), a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`; a chat run's `orbit.permission` (a permission request's decision), `orbit.approval` (one opened for its person and how it ended), `orbit.permissions` (its level applied; The journal, `permissions`); and connector steps, `orbit.connector` (Connectors, below), with `orbit.permission` for each permission prompt of a connector tool.
 
 ### The journal
 
@@ -647,7 +686,8 @@ A row:
 | `tool_call` | `tool:<call id>` (Claude Code's `tool_use` id; Codex: `tool:codex.<item id>`) | `{"call_id": "toolu_01", "name": "Read", "input": {...}, "summary": "inputs/a.json", "state": "running", "result": <bounded>}`. Revision 1 is the call, `state: "running"`, no `result`; the revision written when it returns has `state` `completed` or `failed` (the tool reported an error, a command exited non-zero) and `result`, the tool's output as text. `input` is the call's input, whole. `summary` is one line (a path relative to the run's directory, a pattern, a command, a URL), at most 160 characters, possibly empty. Codex's are `shell` (`{"command"}`), `web_search` (`{"query"}`), `<server>.<tool>` (`{"arguments"}`) and `edit` (`{"changes"}`). The call that returns the final answer is not a tool call. |
 | `diff` | `diff:<call id>` (Codex: `diff:codex.<item id>.<n>`) | `{"call_id": "toolu_02", "path": "notes.md", "change": "edit", "patch": <bounded>}`; a change a file tool made, once it succeeded. `path` is relative to the run's directory. `change` is `edit` or `write` (Claude Code), or Codex's `add`, `delete`, `update`. `patch` is a unified diff of the replaced text (`--- a/<path>`, `+++ b/<path>`, one `@@` hunk per replacement, without line numbers, which Claude Code does not report); absent when the backend said only that the file changed (Codex). |
 | `plan` | `plan` (one per epoch) | `{"entries": [{"text": "read the inputs", "status": "completed"}], "text": "..."}`; the agent's working plan. `entries` is its todo list (Claude Code's `TodoWrite`, Codex's `todo_list`), each `status` `pending`, `in_progress` or `completed`. `text` (when present) is a plan it presented (`ExitPlanMode`). Each update is a revision. |
-| `approval` | `approval:<request id>` | `{"request_id": "...", "tool": "Bash", "input": {...}, "state": "pending", "message": "..."}`; the backend asking orbit whether a tool call may run: a build's tool under its policy, or a connector tool that waits for approval (`mcp__<connector>__<tool>`). Revision 1 is the request (`pending`); the decision is the next, `allowed` or `denied`, with orbit's `message`. What a person approves is the run's pending `connector:` action (Connectors), not this item. |
+| `approval` | `approval:<request id>` | `{"request_id": "...", "tool": "Bash", "input": {...}, "state": "pending", "message": "...", "approval_id": "uuid", "kind": "tool", "level": "ask", "decision_reason": "...", "decision_reason_type": "rule", "blocked_path": "...", "matched_rule": {...}, "suggestions": [...], "title": "...", "description": "...", "expires_at": "...", "scope": "once", "decided_by": "kanishk", "grant": "uuid"}`; the backend asking whether a tool call may run: a build's, decided by orbit's policy, or a chat run's, put to its person (Approvals, below). Revision 1 is the request (`pending`) with the CLI's account of why it asked (every field from `decision_reason` to `description` is the CLI's, absent when it sent none). A chat run's next revision opens it for its person: `approval_id` (what `POST /approvals/{id}` takes), `kind` (`tool`, or `plan` for `ExitPlanMode`), `level`, `expires_at`. The last is how it ended: `state` `allowed` or `denied` (with `scope` and `decided_by`), `expired` or `withdrawn` (both denied), with the `message` the model was told. `grant` (instead of `approval_id`) names the earlier approval whose conversation-wide allow answered it without asking. Actions waiting for a person are a run's `actions`, not these. |
+| `permissions` | `permissions:<a>.<s>.<i>` | `{"level": "auto", "applied": "ask", "mode": "default", "when": "start", "source": "conversation", "version": 3, "set_by": "kanishk", "expires_at": "...", "reason": "..."}`; a chat run's permission level applied to its Claude Code process: `when` is `start` (a new process), `turn` (a live process taking the run) or `live` (changed during the turn, Conversation permissions). `level` is what was asked for, `applied` what the process is at (`auto` the CLI refuses is `ask`), `mode` its Claude Code mode. `source` is `conversation` (with `version`, `set_by` and `expires_at` when set) or `agent`. `reason` is the CLI's refusal, or why a change was not applied. One per application, never revised. |
 | `question` | `question:<a>.<s>.<i>` (a question tool's: `question:<call id>.<n>`) | `{"text": "Which card?", "header": "...", "options": [{"label": "...", "description": "..."}], "multi_select": true}`; something the agent asked its person: a question in its final answer (`options` empty), or a question tool's, with what it offered. The thread's question messages are the ones a person replies to. |
 | `steer` | `steer:<message id>` | `{"message_id": "uuid", "text": "...", "author": "kanishk"}`; a person's message the turn took while it worked (`delivery: "steer"`), from the point the backend started on it: what follows answers it too. `author` is absent when none was recorded. |
 | `status` | `status:<a>.<s>.0` | `{"code": "orbit.source_fetched", "detail": <bounded>}`; something that happened to the run that is not the model's output: orbit's steps (`orbit.*`, as in Events), the backend's session start (`system.init`), a rate limit report (`rate_limit_event`), a line that was not JSON (`raw`). `detail` is the event's payload. |
@@ -1026,6 +1066,34 @@ The ticket is single-use, expires in 30 s, and is bound to the terminal, the per
 Close codes: `4001` when the instance drains or shuts down: reconnect with a new ticket and the ready instance takes the terminal, which kept running. `4008` when the client took no output for 30 s: reattach. A socket closing for any reason detaches only its own tmux client; the session lives on.
 
 **Without a WebSocket** (planned, for a proxy that cannot carry one): `GET /terminals/{tid}/output` is SSE, `ready` then `data` events (`{"b64": "..."}`, id an output offset), resumable with `Last-Event-ID` (a lost offset replays the scrollback after a `ready`); `POST /terminals/{tid}/input` `{"b64": "...", "cols"?, "rows"?}` writes input, `204`.
+
+### Accounts (box only): built
+
+A box holds Claude accounts besides its own profile: each is a directory, `/home/agent/.claude-accounts/<slot>`, on its own volume, which a terminal under the account has as `CLAUDE_CONFIG_DIR`. Its login (a full `claude auth login`, which claude.ai connectors need) lives only in that directory; orbit stores what a fixed script reads of it, never a token (docs/agents/security.md, Boxes and terminals). The shared profile in `~/.claude` (`settings.json`, `CLAUDE.md`, `skills`, `commands`, `agents`) is linked into every account's directory; the rest (credentials, `.claude.json` with its user MCP servers, sessions, history) is the account's own. A terminal without an account uses the box's own profile and the subscription token, as before.
+
+```json
+{"id": "uuid", "workspace_id": "uuid", "slot": "3c9ab5742fb5", "label": "personal",
+ "dir": "/home/agent/.claude-accounts/3c9ab5742fb5", "logged_in": true,
+ "email": "k@example.com", "account_uuid": "uuid", "org_id": "uuid", "org_name": "...",
+ "subscription_type": "max", "rate_limit_tier": "default_claude_max_20x",
+ "access_expires_at": "...", "refresh_expires_at": "...", "checked_at": "...",
+ "last_used_at": "...", "created_by": "kanishk", "created_at": "..."}
+```
+
+- `slot` names the account's volume (`orbit-box-<agent>-acct-<slot>`) and directory: 12 hex digits of its `id`.
+- `logged_in`, `email`, `account_uuid`, `org_id`, `org_name`, `subscription_type`, `rate_limit_tier` and the expiries are what the account's files said when `checked_at` was: `logged_in` is whether its credentials hold a refresh token; `access_expires_at` is the access token's expiry (the CLI refreshes it itself), `refresh_expires_at` the refresh token's, past which the account needs a new login. A read that finds no login sets `logged_in` false and clears the expiries but keeps the identity fields, so a logged-out account still says whose it was. Each is `null` until read, or when the CLI did not write it.
+- `last_used_at` is the newest attach of a terminal under the account, `null` before one.
+- An account is read from the box on every list and get while the box is running (a stopped box is not started for it), and when a terminal under it ends; otherwise the fields are as last read.
+
+Routes require the workspace to be a box (`409`, `no_shell`, otherwise). Mutations and account login require membership of `ORBIT_WORKSPACE_GROUP` (`403`, `group`); account reads use the authenticated workspace access.
+
+- `GET /workspaces/{id}/accounts`: `{"accounts": [<account>]}`, oldest first.
+- `POST /workspaces/{id}/accounts` `{"label", "cols", "rows", "restart"?: false}`: records the account, mounts its volume, links the shared profile in, and opens a `login` terminal of that size under it (`claude auth login`: the person opens the URL it prints and pastes the code back). `201 {"account", "terminal"}`. `label` is 1 to 100 bytes, unique in the workspace (`409`, `exists`); at most 16 accounts a box (`409`, `limit`). A stopped box is started with the new mount. A running box gains a mount only by being recreated, which ends every session in it: with any terminal running that is `409` (`busy`, naming how many) unless `restart` is true, which records them `exited` with `end_reason` `box_restarted` and recreates the box (its volumes kept). A failure after the account is recorded is `502`; the account is kept, and the box mounts it when it next starts.
+- `GET /workspaces/{id}/accounts/{aid}`: `{"account"}`.
+- `PATCH /workspaces/{id}/accounts/{aid}` `{"label"}`: `200 {"account"}`; `exists` as above.
+- `POST /workspaces/{id}/accounts/{aid}/login` `{"cols", "rows"}`: `201 {"terminal"}`, a new `login` terminal under the account, for a login past its `refresh_expires_at` or a switch to another login. `409` (`restart`) when the running box does not mount the account yet.
+
+Accounts are never deleted. Attaching to a `login` terminal is as for any terminal; when it ends, the account is read again before the `exit` frame, so the client's next list shows the login.
 
 ### Review comments
 
