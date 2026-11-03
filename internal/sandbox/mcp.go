@@ -167,7 +167,7 @@ func ParseMCPList(out []byte) []MCPServer {
 		target, state := rest[:i], strings.TrimSpace(rest[i+3:])
 		s := MCPServer{Name: name, Connector: strings.HasPrefix(name, "claude.ai ")}
 		if m := transportRE.FindStringSubmatch(target); m != nil {
-			s.Transport, target = m[1], strings.TrimSuffix(target, m[0])
+			s.Transport = m[1]
 		}
 		if st, _, ok := strings.Cut(state, detailDash); ok {
 			state = st
