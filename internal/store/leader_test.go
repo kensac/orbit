@@ -57,3 +57,25 @@ func TestSchedulerLockGoesWithItsConnection(t *testing.T) {
 	}
 	l.Release(ctx)
 }
+
+func TestTelegramLockIsHeldOnce(t *testing.T) {
+	s := testdb.New(t)
+	other, err := store.Open(ctx, s.Pool.Config().ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	lead, err := s.TryTelegramLock(ctx)
+	if err != nil || lead == nil {
+		t.Fatalf("first lock = %v, %v", lead, err)
+	}
+	if l, err := other.TryTelegramLock(ctx); err != nil || l != nil {
+		t.Fatalf("second instance locked beside the first: %v, %v", l, err)
+	}
+	lead.Release(ctx)
+	l, err := other.TryTelegramLock(ctx)
+	if err != nil || l == nil {
+		t.Fatalf("after release = %v, %v", l, err)
+	}
+	l.Release(ctx)
+}
