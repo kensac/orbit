@@ -17,6 +17,7 @@ import (
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/claudeproto"
+	"github.com/kensac/orbit/internal/forms"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/sandbox"
@@ -292,7 +293,7 @@ func chatPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 type chatState struct {
 	mu        sync.Mutex
 	memory    *string
-	questions []string
+	questions []OutputQuestion
 	actions   []chatAction
 }
 
@@ -314,8 +315,11 @@ func (e *Engine) chatTools(snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, i
 		{Name: "remember", Description: "Replace your memory with this complete document (at most " + fmt.Sprint(memoryMax) + " bytes).",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{"content": map[string]any{"type": "string"}},
 				"required": []string{"content"}}},
-		{Name: "ask", Description: "Ask the person a question only they can answer; their reply wakes you.",
-			InputSchema: map[string]any{"type": "object", "properties": map[string]any{"question": map[string]any{"type": "string"}},
+		{Name: "ask", Description: "Ask the person a question only they can answer; their reply wakes you. " +
+			"When the answer is a few typed values, give fields: each a name, label, type (string, number, boolean, date, select, file), " +
+			"options (a select's choices), default and required. The person is shown a form, and their reply lists each answer.",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{"question": map[string]any{"type": "string"},
+				"fields": chatFieldsSchema()},
 				"required": []string{"question"}}},
 	}
 	// Search is served here, in orbit's process, with the store: a chat run has no harness tool server.
@@ -360,20 +364,35 @@ func (e *Engine) chatTools(snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, i
 			return "Memory will be replaced with this when your reply is sent.", false
 		case "ask":
 			var v struct {
-				Question string `json:"question"`
+				Question string        `json:"question"`
+				Fields   []forms.Field `json:"fields"`
 			}
 			if json.Unmarshal(args, &v) != nil || strings.TrimSpace(v.Question) == "" {
 				return "question is required", true
 			}
+			if err := forms.Validate(v.Fields); err != nil {
+				return "fields: " + err.Error(), true
+			}
 			if len(st.questions) >= maxQuestions {
 				return fmt.Sprintf("at most %d questions per reply", maxQuestions), true
 			}
-			st.questions = append(st.questions, strings.TrimSpace(v.Question))
+			st.questions = append(st.questions, OutputQuestion{Question: strings.TrimSpace(v.Question), Fields: v.Fields})
+			if len(v.Fields) > 0 {
+				return "Asked, with a form. The person's answers will come as a message.", false
+			}
 			return "Asked. The person's answer will come as a message.", false
 		}
 		return "unknown tool " + name, true
 	}
 	return &runner.Chat{Tools: tools, Call: call}
+}
+
+// chatFieldsSchema is the ask tool's fields: forms.Schema with only name and type required, since the tool's input is checked by forms.Validate rather than a strict backend schema.
+func chatFieldsSchema() map[string]any {
+	s := forms.Schema()
+	items, _ := s["items"].(map[string]any)
+	items["required"] = []string{"name", "type"}
+	return s
 }
 
 // chatOutput is a chat run's outcome in the contract's shape: the reply is
