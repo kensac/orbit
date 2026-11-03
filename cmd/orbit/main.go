@@ -62,6 +62,7 @@ import (
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
+	"github.com/kensac/orbit/internal/telegram"
 	"github.com/kensac/orbit/internal/tickets"
 	subusage "github.com/kensac/orbit/internal/usage"
 )
@@ -592,6 +593,12 @@ func serve(ctx context.Context, log *slog.Logger) error {
 				Store: s, Config: func() *spec.Config { return eng.Current().Config }, Secret: []byte(token),
 				Env: os.LookupEnv, Log: log.With("component", "mail"), Wake: nudge,
 			}).Run(claimCtx)
+		}()
+
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			(&telegram.Poller{Store: s, Config: func() *spec.Config { return eng.Current().Config }, Env: os.LookupEnv, Log: log.With("component", "telegram"), Wake: nudge}).Run(claimCtx)
 		}()
 
 		// The usage poller is best effort and off without usage_poll; it

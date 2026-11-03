@@ -77,6 +77,8 @@ type Deployment struct {
 	Extensions *ExtensionsConfig `yaml:"extensions,omitempty" json:"extensions,omitempty"`
 	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
+	// Telegram receives private bot messages and routes replies through a telegram channel.
+	Telegram *Telegram `yaml:"telegram,omitempty" json:"telegram,omitempty"`
 	// UsagePoll polls the subscription's usage windows (usage.go). Without
 	// it /usage shows only what runs' streams reported.
 	UsagePoll *UsagePoll `yaml:"usage_poll,omitempty" json:"usage_poll,omitempty"`
@@ -226,6 +228,8 @@ type Channel struct {
 	To          []string `yaml:"to,omitempty" json:"to,omitempty"`
 	// webhook
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	// telegram
+	ChatID int64 `yaml:"chat_id,omitempty" json:"chat_id,omitempty"`
 }
 
 // Endpoint is a named HTTP target a `webhook` action may call. The agent
@@ -874,7 +878,7 @@ var (
 
 	// Kinds every adapter registry must cover. Kept here so validation does
 	// not import the adapters (which import spec).
-	channelKinds = []string{"ntfy", "smtp", "webhook", "log"}
+	channelKinds = []string{"ntfy", "smtp", "telegram", "webhook", "log"}
 	sourceKinds  = []string{"http", "prometheus", "loki", "github", "lake", "file", "webhook", "extension"}
 	runnerKinds  = []string{"claude-code", "codex", "anthropic"}
 	notifyWhen   = []string{"", "always", "agent", "never"}
@@ -1032,6 +1036,7 @@ func (c *Config) applyDefaults() {
 		d.Defaults.Timeout = Duration(15 * time.Minute)
 	}
 	c.applyMailDefaults()
+	c.applyTelegramDefaults()
 	if d.Defaults.DecisionStall == 0 {
 		// A person answers within a day, or the parent should hear about it.
 		d.Defaults.DecisionStall = Duration(24 * time.Hour)
@@ -1107,6 +1112,10 @@ func (c *Config) Validate() error {
 			if ch.Host == "" || ch.Port == 0 || ch.From == "" || len(ch.To) == 0 {
 				errs = append(errs, fmt.Errorf("channel %q: smtp needs host, port, from and to", name))
 			}
+		case "telegram":
+			if ch.TokenEnv == "" {
+				errs = append(errs, fmt.Errorf("channel %q: telegram needs token_env", name))
+			}
 		case "webhook":
 			if ch.URL == "" {
 				errs = append(errs, fmt.Errorf("channel %q: webhook needs url", name))
@@ -1179,6 +1188,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("sandbox: sandboxd %q is neither host:port nor unix:/path", sb.Sandboxd))
 	}
 	errs = append(errs, c.validateMail()...)
+	errs = append(errs, c.validateTelegram()...)
 	errs = append(errs, c.validateUsage()...)
 	return errors.Join(errs...)
 }

@@ -174,6 +174,24 @@ mail:
 
 `port` defaults to 993 (implicit TLS); any other port must offer STARTTLS. `mailbox` defaults to `INBOX` and must be orbit's own: every unseen mail in it is read and marked seen. The server must deliver `local+anything@domain` to the mailbox (Postfix's `recipient_delimiter`). Without `agent`, a mail that is not a reply is recorded and ignored. `poll` is at least 10s. With the section, every mail orbit sends carries a reply address and Message-ID naming its run's conversation.
 
+## Telegram
+
+`telegram:` enables a private Telegram bot inbox. The named channel holds the bot token environment variable; user ids must come from trusted Telegram account data, and group chats are always ignored:
+
+```yaml
+channels:
+  telegram-main:
+    kind: telegram
+    token_env: ORBIT_TELEGRAM_BOT_TOKEN
+telegram:
+  channel: telegram-main
+  agent: assistant
+  allow_users: [123456789]
+  poll: 5s
+```
+
+Only private text messages from `allow_users` are acted on. Polling is idempotent by Telegram update id. The first accepted message creates a conversation, later messages continue it, and `/new` opens a separate conversation. Replies and failures go directly to the sending chat even when `notify.when` is `never`. The bot token stays in orbit's environment and is never passed to a model.
+
 ## Subscription usage and low-priority agents
 
 ```yaml

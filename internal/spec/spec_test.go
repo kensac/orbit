@@ -25,6 +25,24 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 }
 
+func TestTelegramConfigRequiresPrivateChatAllowlistAndChannel(t *testing.T) {
+	dir := write(t, map[string]string{
+		"orbit.yaml":            "defaults: {runner: r}\nrunners: {r: {kind: claude-code}}\nchannels: {tg: {kind: telegram, token_env: BOT_TOKEN}}\ntelegram: {channel: tg, agent: assistant, allow_users: [12345]}\n",
+		"agents/assistant.yaml": "name: assistant\ncharter: x\n",
+	})
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Duration(cfg.Deployment.Telegram.Poll) != DefaultTelegramPoll {
+		t.Fatalf("poll=%s", time.Duration(cfg.Deployment.Telegram.Poll))
+	}
+	cfg.Deployment.Telegram.AllowUsers = nil
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "allow_users") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestPinnedExtensionSourceRequiresDeploymentPinAndEarlierInputs(t *testing.T) {
 	packageDir, err := filepath.Abs("../extensions/testdata/reducer")
 	if err != nil {

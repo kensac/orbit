@@ -51,6 +51,8 @@ type Message struct {
 	ReplyTo, MessageID, InReplyTo, References, Subject string
 	// To, when set, replaces the channel's recipients (smtp only): a reply to a mail goes to its sender.
 	To []string `json:",omitempty"`
+	// TelegramChatID routes a direct reply to the private chat that sent the message.
+	TelegramChatID int64 `json:"telegram_chat_id,omitempty"`
 }
 
 // Channel delivers messages.
@@ -98,6 +100,12 @@ func New(name string, c spec.Channel, env Env, client *http.Client) (Channel, er
 			return nil, err
 		}
 		return &smtpChannel{host: c.Host, port: c.Port, user: user, pass: pass, from: c.From, to: c.To}, nil
+	case "telegram":
+		token, err := need("token_env", c.TokenEnv)
+		if err != nil {
+			return nil, err
+		}
+		return &telegramChannel{token: token, chatID: c.ChatID, client: client}, nil
 	case "webhook":
 		h := map[string]string{}
 		for k, v := range c.Headers {
@@ -112,6 +120,62 @@ func New(name string, c spec.Channel, env Env, client *http.Client) (Channel, er
 		return logChannel{name: name}, nil
 	}
 	return nil, fmt.Errorf("channel %q: unknown kind %q", name, c.Kind)
+}
+
+type telegramChannel struct {
+	token  string
+	chatID int64
+	client *http.Client
+	api    string
+}
+
+func (t *telegramChannel) Send(ctx context.Context, m Message) error {
+	id := m.TelegramChatID
+	if id == 0 {
+		id = t.chatID
+	}
+	if id == 0 {
+		return fmt.Errorf("telegram channel has no target chat")
+	}
+	body, err := json.Marshal(map[string]any{"chat_id": id, "text": telegramText(m)})
+	if err != nil {
+		return err
+	}
+	api := t.api
+	if api == "" {
+		api = "https://api.telegram.org"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(api, "/")+"/bot"+t.token+"/sendMessage", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("telegram send request could not be built")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("telegram send request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("telegram send: %s", resp.Status)
+	}
+	return nil
+}
+
+func telegramText(m Message) string {
+	text := m.Body
+	if text == "" {
+		text = m.Title
+	} else if m.Title != "" {
+		text = m.Title + "\n\n" + text
+	}
+	if m.Link != "" {
+		text += "\n\n" + m.Link
+	}
+	const limit = 4000
+	if len(text) > limit {
+		text = truncate(text, limit-32) + "\n\n(continued in orbit)"
+	}
+	return text
 }
 
 // ---------------------------------------------------------------- ntfy

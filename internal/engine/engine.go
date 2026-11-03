@@ -1038,10 +1038,14 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	routed := out.task != nil
 	// A person who wrote by mail is answered by mail, to them, as a reply to theirs, whatever notify.when says and however the run was triggered.
 	reply := e.mailForRun(ctx, snap, c.ID)
+	telegramReply := e.telegramForRun(ctx, snap, c.ID)
 	if reply != nil && !routed {
 		e.deliver(ctx, snap, a, &c.ID, nil, purposeMailReply, mailReply(reply, notify.Message{
 			Title: a.Name + ": " + out.Summary, Body: withQuestions(out.Report, o.Questions), Priority: pr, Link: link,
 		}))
+	}
+	if telegramReply != nil && !routed {
+		e.deliver(ctx, snap, a, &c.ID, nil, purposeTelegramReply, telegramMessage(telegramReply, notify.Message{Title: a.Name + ": " + out.Summary, Body: withQuestions(out.Report, o.Questions), Priority: pr, Link: link}))
 	}
 	if Attended(c.Trigger) {
 		// The person is reading the conversation this run answered in:
@@ -1124,6 +1128,7 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 	fillResult(&rr, r)
 	// Read before FinishRun, which hands a failed run's messages back to the inbox.
 	reply := e.mailForRun(ctx, snap, c.ID)
+	telegramReply := e.telegramForRun(ctx, snap, c.ID)
 	if err := e.Store.FinishRun(context.WithoutCancel(ctx), c.ID, rr); err != nil {
 		return err
 	}
@@ -1143,6 +1148,10 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 		}))
 		return nil
 	}
+	if telegramReply != nil {
+		e.deliver(ctx, snap, a, &c.ID, nil, purposeTelegramFailure, telegramMessage(telegramReply, notify.Message{Title: a.Name + " could not answer", Body: "The run answering your Telegram message failed: " + shortError(runErr) + "\n\nYour message is kept: send another message to try again.", Priority: notify.High, Link: snap.Config.Deployment.RunURL(c.ID)}))
+		return nil
+	}
 	if !Attended(c.Trigger) {
 		e.deliver(ctx, snap, a, &c.ID, nil, "failure", notify.Message{
 			Title: a.Name + " run failed", Body: runErr.Error(), Priority: notify.High,
@@ -1154,12 +1163,36 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 
 // Mail replies are delivered to the agent's mail channel alone (mailChannel), whatever its notify.when.
 const (
-	purposeMailReply   = "mail_reply"
-	purposeMailFailure = "mail_failure"
+	purposeMailReply       = "mail_reply"
+	purposeMailFailure     = "mail_failure"
+	purposeTelegramReply   = "telegram_reply"
+	purposeTelegramFailure = "telegram_failure"
 )
 
 func isMailReply(purpose string) bool {
 	return purpose == purposeMailReply || purpose == purposeMailFailure
+}
+
+func isTelegramReply(purpose string) bool {
+	return purpose == purposeTelegramReply || purpose == purposeTelegramFailure
+}
+
+func telegramMessage(t *store.RunTelegram, m notify.Message) notify.Message {
+	m.TelegramChatID = t.ChatID
+	m.Tags = []string{"orbit", "telegram"}
+	return m
+}
+
+func (e *Engine) telegramForRun(ctx context.Context, snap *Snapshot, runID string) *store.RunTelegram {
+	if snap.Config.Deployment.Telegram == nil {
+		return nil
+	}
+	t, err := e.Store.TelegramForRun(context.WithoutCancel(ctx), runID)
+	if err != nil {
+		e.Log.Warn("telegram message for run", "run", runID, "err", err)
+		return nil
+	}
+	return t
 }
 
 // mailForRun is the mail run c answers, or nil: orbit has no mailbox, the run read none, or the lookup failed (logged; the run is then answered as if no mail had come).
@@ -1208,6 +1241,13 @@ func mailChannel(cfg *spec.Config, a *spec.Agent) string {
 	}
 	slices.Sort(names)
 	return names[0]
+}
+
+func telegramChannel(cfg *spec.Config) string {
+	if t := cfg.Deployment.Telegram; t != nil {
+		return t.Channel
+	}
+	return ""
 }
 
 // withQuestions appends a run's questions to a body, each form as a numbered list under its question (questionText).
@@ -1275,6 +1315,14 @@ func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, run
 		name := mailChannel(snap.Config, a)
 		if name == "" {
 			e.Log.Warn("mail reply not sent: no smtp channel", "agent", a.Name, "purpose", purpose)
+			return
+		}
+		channels = []string{name}
+	}
+	if isTelegramReply(purpose) {
+		name := telegramChannel(snap.Config)
+		if name == "" {
+			e.Log.Warn("telegram reply not sent: no telegram channel", "agent", a.Name, "purpose", purpose)
 			return
 		}
 		channels = []string{name}

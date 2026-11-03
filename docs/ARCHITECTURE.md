@@ -186,6 +186,10 @@ With `mail` configured (configuration.md), a person talks to orbit by mail as we
 - **Once.** `IngestMail` writes the message, its run and the `mail_in` row in one transaction keyed by Message-ID, and the mail is marked seen only after; a database error leaves it unseen for the next poll.
 - **Attachments** are not uploads yet: the message names each (file, type, size) and the raw mail is kept in `mail_in`.
 
+## Telegram
+
+`telegram` is a private-chat surface backed by a configured bot channel (`internal/telegram`). Orbit long-polls `getUpdates`; each update id is recorded once. Only text from an explicitly allowlisted Telegram user in a private chat is accepted. The first accepted update creates a conversation for `telegram.agent`; later updates in that chat continue its latest conversation, and `/new` opens another without deleting the earlier one. The update, message, run and chat mapping commit together, so a database failure leaves the offset available for retry. Replies and failures are sent to the originating chat through the configured Telegram channel, regardless of notification preferences. The bot token stays in orbit's environment.
+
 ## Continuations
 
 An agent with the `continue` action may ask to be woken again

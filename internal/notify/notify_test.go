@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -61,5 +62,30 @@ func TestWebhookFailureIsAnError(t *testing.T) {
 	ch, _ := New("w", spec.Channel{Kind: "webhook", URL: srv.URL}, func(string) (string, bool) { return "", false }, srv.Client())
 	if err := ch.Send(context.Background(), Message{Title: "t"}); err == nil || !strings.Contains(err.Error(), "502") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestTelegramUsesPrivateReplyTargetAndBoundsText(t *testing.T) {
+	var gotPath string
+	var payload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true,"result":{}}`)
+	}))
+	defer srv.Close()
+	ch := &telegramChannel{token: "bot-secret", chatID: 42, client: srv.Client(), api: srv.URL}
+	if err := ch.Send(context.Background(), Message{Title: "reply", Body: strings.Repeat("x", 5000), TelegramChatID: 77}); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/botbot-secret/sendMessage" || payload["chat_id"] != float64(77) {
+		t.Fatalf("path=%q payload=%v", gotPath, payload)
+	}
+	text, ok := payload["text"].(string)
+	if !ok || len(text) > 4000 || !strings.Contains(text, "continued in orbit") {
+		t.Fatalf("text len=%d", len(text))
 	}
 }

@@ -17,6 +17,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
 | `extensions` | map | absent | Off-by-default, digest-pinned native source operations executed by sandboxd; package pins and explicit agent grants are below. |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
+| `telegram` | map | absent | Private Telegram bot inbox and allowlist (below). |
 | `credentials` | map of variable to credential | none | The variables sources and endpoint headers may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
 | `connectors` | map of name to connector | none | MCP servers agents may be given; orbit calls them on the agents' behalf and holds their credentials (below). |
 | `google_actions` | map | absent | Fixed connector tools for typed Gmail draft and Calendar create actions (below). |
@@ -42,7 +43,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
-| `kind` | `ntfy`, `smtp`, `webhook`, `log` | required | The adapter. `log` writes to orbit's log and takes no other field. |
+| `kind` | `ntfy`, `smtp`, `telegram`, `webhook`, `log` | required | The adapter. `log` writes to orbit's log and takes no other field. |
 | `url` | URL | required for ntfy, webhook | The ntfy server, or the URL a webhook channel POSTs to. |
 | `topic` | string | | ntfy topic. One of `topic` or `topic_env` is required for ntfy. |
 | `topic_env` | env var | | ntfy topic read from the environment, so it stays out of git. Wins over `topic`. |
@@ -54,6 +55,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `from` | address | required for smtp | Sender. |
 | `to` | list of addresses | required for smtp | Recipients; also the mail allowlist when `mail.allow` is empty. |
 | `headers` | map | none | Webhook channel headers; values may use `${VAR}`. |
+| `chat_id` | integer | none | Telegram destination for ordinary notifications. A reply to an incoming private chat uses that chat's id instead. |
 
 ### `endpoints.<name>`
 
@@ -217,6 +219,15 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `username_env` | env var | required | IMAP user. |
 | `password_env` | env var | required | IMAP password. |
 | `mailbox` | string | `INBOX` | Folder read. Every unseen mail in it is read and marked seen, so it must be orbit's own. |
+
+### `telegram`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `channel` | channel name | required | A `telegram` channel whose bot token sends replies. |
+| `agent` | agent name | required | Receives a private chat's first message. |
+| `allow_users` | list of positive Telegram user ids | required | Only these senders are acted on. |
+| `poll` | duration | `5s` | Long-poll interval; at least `1s`. |
 
 ### `board`
 
