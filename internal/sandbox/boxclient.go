@@ -15,7 +15,21 @@ import (
 )
 
 func (c *Client) boxCall(ctx context.Context, method, p string, out any) error {
-	resp, err := c.do(ctx, method, PathBoxes+p, nil, "")
+	return c.boxSend(ctx, method, p, nil, out)
+}
+
+// boxSend is boxCall with a JSON body.
+func (c *Client) boxSend(ctx context.Context, method, p string, in, out any) error {
+	var body io.Reader
+	ctype := ""
+	if in != nil {
+		b, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body, ctype = bytes.NewReader(b), "application/json"
+	}
+	resp, err := c.do(ctx, method, PathBoxes+p, body, ctype)
 	if err != nil {
 		return err
 	}
@@ -44,12 +58,60 @@ func boxPath(name string, rest ...string) (string, error) {
 }
 
 // EnsureBox creates the agent's box, or starts it when it is stopped, and
-// returns it running.
-func (c *Client) EnsureBox(ctx context.Context, name string) (BoxStatus, error) {
+// returns it running. accounts are the account slots it mounts: a box that
+// is made or recreated mounts them (and any it mounted already); a running
+// one is returned as it is, its Accounts saying what it mounts.
+func (c *Client) EnsureBox(ctx context.Context, name string, accounts []string) (BoxStatus, error) {
+	return c.ensure(ctx, name, "", accounts)
+}
+
+// RecreateBox replaces the box's container with one that mounts accounts,
+// and starts it. Its volumes stay; its processes, every tmux session
+// among them, end.
+func (c *Client) RecreateBox(ctx context.Context, name string, accounts []string) (BoxStatus, error) {
+	return c.ensure(ctx, name, "recreate", accounts)
+}
+
+func (c *Client) ensure(ctx context.Context, name, op string, accounts []string) (BoxStatus, error) {
 	var st BoxStatus
-	p, err := boxPath(name)
+	req := EnsureRequest{Accounts: accounts}
+	if err := req.Validate(); err != nil {
+		return st, err
+	}
+	var rest []string
+	if op != "" {
+		rest = append(rest, op)
+	}
+	p, err := boxPath(name, rest...)
 	if err == nil {
-		err = c.boxCall(ctx, http.MethodPost, p, &st)
+		err = c.boxSend(ctx, http.MethodPost, p, req, &st)
+	}
+	return st, err
+}
+
+// PrepareAccount makes an account's directory the box user's and links the
+// shared profile (settings, CLAUDE.md, skills, commands, agents) into it.
+// It is safe to repeat.
+func (c *Client) PrepareAccount(ctx context.Context, name, slot string) error {
+	if !ValidSlot(slot) {
+		return fmt.Errorf("invalid account slot %q", slot)
+	}
+	p, err := boxPath(name, "accounts", slot, "prepare")
+	if err != nil {
+		return err
+	}
+	return c.boxCall(ctx, http.MethodPost, p, nil)
+}
+
+// AccountStatus reads an account's login from its files in the box.
+func (c *Client) AccountStatus(ctx context.Context, name, slot string) (AccountStatus, error) {
+	var st AccountStatus
+	if !ValidSlot(slot) {
+		return st, fmt.Errorf("invalid account slot %q", slot)
+	}
+	p, err := boxPath(name, "accounts", slot)
+	if err == nil {
+		err = c.boxCall(ctx, http.MethodGet, p, &st)
 	}
 	return st, err
 }
