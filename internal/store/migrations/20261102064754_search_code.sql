@@ -43,11 +43,11 @@ CREATE INDEX search_docs_skill ON search_docs (skill) WHERE skill IS NOT NULL;
 
 ALTER TABLE search_docs DROP CONSTRAINT search_docs_kind_check;
 ALTER TABLE search_docs ADD CONSTRAINT search_docs_kind_check
-    CHECK (kind IN ('message', 'question', 'report', 'error', 'narration', 'tool_call', 'memory', 'memory_entry', 'skill'));
+    CHECK (kind IN ('message', 'question', 'report', 'error', 'narration', 'tool_call', 'memory', 'memory_entry', 'skill', 'session'));
 -- A skill, like a profile or topic memory entry, belongs to no one agent.
 ALTER TABLE search_docs DROP CONSTRAINT search_docs_check;
 ALTER TABLE search_docs ADD CONSTRAINT search_docs_agent_check
-    CHECK ((agent IS NULL) = ((kind = 'memory_entry' AND scope <> 'agent') OR kind = 'skill'));
+    CHECK ((agent IS NULL) = ((kind = 'memory_entry' AND scope <> 'agent') OR kind IN ('skill', 'session')));
 
 -- orbit_search_tool_target reads the repository and file a tool call's input
 -- names. An input that is not a JSON object (a codex command, an input clipped
@@ -193,10 +193,10 @@ $$;
 DROP FUNCTION orbit_search_tool_target(text);
 ALTER TABLE search_docs DROP CONSTRAINT search_docs_agent_check;
 ALTER TABLE search_docs ADD CONSTRAINT search_docs_check
-    CHECK ((agent IS NULL) = (kind = 'memory_entry' AND scope <> 'agent'));
+    CHECK ((agent IS NULL) = (kind = 'session' OR (kind = 'memory_entry' AND scope <> 'agent')));
 ALTER TABLE search_docs DROP CONSTRAINT search_docs_kind_check;
 ALTER TABLE search_docs ADD CONSTRAINT search_docs_kind_check
-    CHECK (kind IN ('message', 'question', 'report', 'error', 'narration', 'tool_call', 'memory', 'memory_entry'));
+    CHECK (kind IN ('message', 'question', 'report', 'error', 'narration', 'tool_call', 'memory', 'memory_entry', 'session'));
 ALTER TABLE search_docs DROP COLUMN skill_version, DROP COLUMN skill, DROP COLUMN path, DROP COLUMN repo,
     DROP COLUMN code_tsv;
 DROP FUNCTION orbit_search_code_text(text);

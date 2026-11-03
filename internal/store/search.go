@@ -10,11 +10,12 @@ import (
 
 // Full-text search over search_docs (the search and search_code
 // migrations): documents derived by triggers from messages, runs,
-// run_events, memory_versions, memory_entry_versions and skill_versions.
+// run_events, memory_versions, memory_entry_versions, skill_versions and
+// external_session_lines.
 
 // SearchKinds are the kinds of document search returns, in the order the
 // API documents them.
-var SearchKinds = []string{"message", "question", "report", "error", "narration", "tool_call", "memory", "memory_entry", "skill"}
+var SearchKinds = []string{"message", "question", "report", "error", "narration", "tool_call", "memory", "memory_entry", "skill", "session"}
 
 // MaxSearchResults bounds one page of results: each carries a snippet, and a
 // page is meant for a person or a model to read, not to export.
@@ -30,8 +31,11 @@ const maxSearchOffset = 1000
 // repo: and path: (searchquery.go). Every other field narrows it; an operator
 // and its field both apply.
 type SearchQuery struct {
-	Q              string
-	Agent          string
+	Q     string
+	Agent string
+	// EntryTopics, with Agent, widen it to the memory entries the agent reads beside its own.
+	EntryTopics    []string
+	EntryProfile   bool
 	ConversationID string
 	RunID          string
 	Kinds          []string
@@ -48,7 +52,7 @@ type SnippetPart struct {
 // SearchResult is one matching document.
 type SearchResult struct {
 	Kind string `json:"kind"`
-	// Agent is nil only for a profile or topic memory entry and a skill.
+	// Agent is nil for a profile or topic memory entry, a skill, or an imported session line.
 	Agent          *string `json:"agent"`
 	ConversationID *string `json:"conversation_id"`
 	RunID          *string `json:"run_id"`
@@ -63,6 +67,8 @@ type SearchResult struct {
 	Title          *string `json:"title"`
 	Author         *string `json:"author"`
 	Tool           *string `json:"tool"`
+	// ExternalSessionID is the imported session a session line is of; Seq is then its line.
+	ExternalSessionID *string `json:"external_session_id"`
 	// Repo and Path are what a tool call's input names.
 	Repo         *string       `json:"repo"`
 	Path         *string       `json:"path"`
@@ -169,6 +175,10 @@ func (s *Store) search(ctx context.Context, q SearchQuery, p parsedSearch) (*Sea
 	if len(q.Kinds) > 0 {
 		kinds = q.Kinds
 	}
+	entryTopics := q.EntryTopics
+	if entryTopics == nil {
+		entryTopics = []string{}
+	}
 	stop, err := s.stopWords(ctx, p)
 	if err != nil {
 		return nil, err
@@ -187,7 +197,8 @@ func (s *Store) search(ctx context.Context, q SearchQuery, p parsedSearch) (*Sea
 		    FROM search_docs d, q
 		    WHERE (d.tsv @@ q.q OR d.code_tsv @@ q.c)
 		      AND NOT d.tsv @@ q.ne AND NOT d.code_tsv @@ q.nc
-		      AND ($2 = '' OR d.agent = $2)
+		      AND ($2 = '' OR d.agent = $2 OR (d.kind = 'memory_entry' AND d.agent IS NULL AND (
+		          (d.scope = 'profile' AND $17::boolean) OR (d.scope = 'topic' AND d.owner = ANY ($18::text[])))))
 		      AND ($3 = '' OR d.conversation_id = $3::uuid)
 		      AND ($4 = '' OR d.run_id = $4::uuid)
 		      AND ($5::text[] IS NULL OR d.kind = ANY ($5))
@@ -211,14 +222,14 @@ func (s *Store) search(ctx context.Context, q SearchQuery, p parsedSearch) (*Sea
 		)
 		SELECT p.total, p.kind, p.agent, p.conversation_id::text, p.run_id::text, p.attempt, p.seq,
 		       p.message_id::text, p.memory_version_id, p.entry_id::text, p.entry_version, p.scope, p.owner, p.title,
-		       p.author, p.tool, p.repo, p.path, p.skill, p.skill_version, p.at, p.rank::float8,
+		       p.author, p.tool, p.external_session_id::text, p.repo, p.path, p.skill, p.skill_version, p.at, p.rank::float8,
 		       CASE WHEN strpos(h.e, $10) > 0 THEN h.e ELSE ts_headline('simple', b.t, q.c || q.s, `+headline+`) END
 		FROM page p CROSS JOIN q
 		CROSS JOIN LATERAL (SELECT translate(p.body, $10 || $11, '') AS t) b
 		CROSS JOIN LATERAL (SELECT ts_headline('english', b.t, q.q, `+headline+`) AS e) h
 		ORDER BY p.rank DESC, p.at DESC, p.id DESC`,
 		p.text(), q.Agent, q.ConversationID, q.RunID, kinds, q.From, q.To, limit, offset, snipStart, snipStop,
-		p.codeText(stop), neg.text(), neg.codeText(stop), p.repo, p.path)
+		p.codeText(stop), neg.text(), neg.codeText(stop), p.repo, p.path, q.EntryProfile, entryTopics)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +239,7 @@ func (s *Store) search(ctx context.Context, q SearchQuery, p parsedSearch) (*Sea
 		var headline string
 		if err := rows.Scan(&page.Total, &r.Kind, &r.Agent, &r.ConversationID, &r.RunID, &r.Attempt, &r.Seq,
 			&r.MessageID, &r.MemoryVersion, &r.EntryID, &r.EntryVersion, &r.Scope, &r.Owner, &r.Title,
-			&r.Author, &r.Tool, &r.Repo, &r.Path, &r.Skill, &r.SkillVersion, &r.At, &r.Rank, &headline); err != nil {
+			&r.Author, &r.Tool, &r.ExternalSessionID, &r.Repo, &r.Path, &r.Skill, &r.SkillVersion, &r.At, &r.Rank, &headline); err != nil {
 			rows.Close()
 			return nil, err
 		}
