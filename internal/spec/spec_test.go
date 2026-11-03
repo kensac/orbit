@@ -767,6 +767,47 @@ func TestRunURL(t *testing.T) {
 	}
 }
 
+func TestGitHubBox(t *testing.T) {
+	base := "defaults: {runner: r, channels: [c]}\nrunners: {r: {kind: claude-code}}\nchannels: {c: {kind: log}}\n"
+	agent := "name: m\ncharter: x\n"
+	load := func(box string) (*Config, error) {
+		return Load(write(t, map[string]string{"orbit.yaml": base + "github: {app_id: 7, private_key_env: K, repositories: [kensac/orbit]" + box + "}\n", "agents/m.yaml": agent}))
+	}
+	cfg, err := load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := cfg.Deployment.GitHub
+	if !g.BoxTokenOn() || g.BoxOwner() != "kensac" || !slices.Equal(g.BoxExclude(), DefaultBoxExclude) || g.BoxPermissions()["contents"] != "write" {
+		t.Fatalf("defaults: on %v owner %q exclude %v perms %v", g.BoxTokenOn(), g.BoxOwner(), g.BoxExclude(), g.BoxPermissions())
+	}
+	var none *GitHub
+	if none.BoxTokenOn() {
+		t.Fatal("a token without a github block")
+	}
+	cfg, err = load(", box: {token: false, exclude: []}")
+	if err != nil || cfg.Deployment.GitHub.BoxTokenOn() || len(cfg.Deployment.GitHub.BoxExclude()) != 0 {
+		t.Fatalf("off: %v", err)
+	}
+	cfg, err = load(", box: {repositories: [other/a, other/b], permissions: {contents: read}}")
+	if err != nil || cfg.Deployment.GitHub.BoxOwner() != "other" || cfg.Deployment.GitHub.BoxPermissions()["pull_requests"] != "" {
+		t.Fatalf("named: %v", err)
+	}
+	for box, want := range map[string]string{
+		", box: {repositories: [other/a, kensac/b]}":      "one token reaches one installation",
+		", box: {owner: kensac, repositories: [other/a]}": "one token reaches one installation",
+		", box: {repositories: [nope]}":                   "is not owner/name",
+		", box: {owner: 'a b'}":                           "is not a GitHub account name",
+		", box: {exclude: ['[']}":                         "github.box.exclude",
+		", box: {permissions: {workflows: write}}":        `"workflows" is not one of`,
+		", box: {permissions: {contents: admin}}":         "want read or write",
+	} {
+		if _, err := load(box); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", box, err, want)
+		}
+	}
+}
+
 func TestSourceByTrigger(t *testing.T) {
 	cfg, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": `
 name: a
@@ -838,6 +879,23 @@ func TestCheckModel(t *testing.T) {
 	} {
 		if err := CheckModel(c.kind, c.model, c.effort); (err == nil) != c.ok {
 			t.Errorf("%s %q %q: %v", c.kind, c.model, c.effort, err)
+		}
+	}
+}
+
+func TestPagePublishRequiresChatAgent(t *testing.T) {
+	for _, tc := range []struct {
+		agent string
+		want  string
+	}{
+		{"chat: true\nactions: {page:publish: approve}\n", ""},
+		{"actions: {page:publish: approve}\n", "requires chat: true"},
+	} {
+		_, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\n" + tc.agent}))
+		if tc.want == "" && err != nil {
+			t.Errorf("chat action rejected: %v", err)
+		} else if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+			t.Errorf("non-chat action error = %v, want %q", err, tc.want)
 		}
 	}
 }

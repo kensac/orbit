@@ -283,18 +283,34 @@ type chatProc interface {
 //
 // The connectors of the last turn stay listed between turns (the CLI may list a server at any time, and a reused process has the same ones, its arguments name their tools), but only a turn in progress has them called.
 type chatTools struct {
-	mu     sync.Mutex
-	chat   *Chat
-	ws     Workspace
-	conns  *Connectors
-	active bool
-	push   func(context.Context, []string) error
+	mu      sync.Mutex
+	chat    *Chat
+	ws      Workspace
+	conns   *Connectors
+	active  bool
+	push    func(context.Context, []string) error
+	observe func(claudeproto.Line)
 }
 
 func (t *chatTools) set(c *Chat, ws Workspace) {
 	t.mu.Lock()
 	t.chat, t.ws = c, ws
 	t.mu.Unlock()
+}
+
+func (t *chatTools) setObserver(observe func(claudeproto.Line)) {
+	t.mu.Lock()
+	t.observe = observe
+	t.mu.Unlock()
+}
+
+func (t *chatTools) observeLine(line claudeproto.Line) {
+	t.mu.Lock()
+	observe := t.observe
+	t.mu.Unlock()
+	if observe != nil {
+		observe(line)
+	}
 }
 
 // connectors routes the turn's connectors; nil ends the turn's calls, the last ones staying listed.
@@ -355,6 +371,7 @@ func (l LocalWorkspace) Get(_ context.Context, dir string) ([]byte, error) {
 
 func (t *chatTools) handler() claudeproto.Handler {
 	return claudeproto.Handler{Name: "orbit",
+		Observe: t.observeLine,
 		MCP: func(ctx context.Context, req claudeproto.MCPMessage) (json.RawMessage, error) {
 			c, ws, conns, push := t.current()
 			if req.ServerName == ChatServer {
@@ -482,9 +499,9 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	}
 	extra := c.chatArgs(req, home, keepDays)
 	env := c.env(home)
-	resume := ""
+	resume, resumeAt := "", ""
 	if sess != nil {
-		resume = sess.Resume
+		resume, resumeAt = sess.Resume, sess.ResumeAt
 	}
 	// A live process moves between permission levels with set_permission_mode.
 	key := hashArgs(c.bin, req.Workdir, withoutMode(extra), env)
@@ -517,7 +534,8 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		tools := &chatTools{}
 		tools.connectors(req.Connectors)
 		// Every chat process has the stdio permission prompt, so a level that asks can be set without a new process; at locked or full the CLI sends none but ExitPlanMode's.
-		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, PermissionPrompt: true, Resume: resume, Ephemeral: sess == nil}, withModel(extra, req))
+		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, PermissionPrompt: true, Resume: resume, ResumeAt: resumeAt,
+			Ephemeral: sess == nil}, withModel(extra, req))
 		if err != nil {
 			return nil, err
 		}
@@ -579,6 +597,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	req.Chat.ConnectorPrompts = len(req.Connectors.Ask()) > 0
 	req.Chat.BeginPlanExit = p.lv.beginPlanExit
 	req.Chat.WaitPlanExit = p.lv.waitPlanExitDone
+	p.tools.setObserver(p.lv.observe)
 	p.tools.set(req.Chat, ws)
 	p.tools.connectors(req.Connectors)
 	defer func() { p.tools.set(nil, nil); p.tools.connectors(nil) }()
@@ -625,7 +644,6 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		if steer != nil {
 			steer.observe(l)
 		}
-		p.lv.observe(l)
 		emit(Event{Kind: l.Kind, Payload: l.Raw})
 	})
 	stopWatch()

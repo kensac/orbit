@@ -326,3 +326,55 @@ func TestAccountUsage(t *testing.T) {
 		t.Fatalf("an odd token: %v", err)
 	}
 }
+
+// TestGHToken writes and clears the box's GitHub token through the real
+// scripts, and refuses anything that is not a token.
+func TestGHToken(t *testing.T) {
+	h := newHarness(t)
+	h.srv.cfg = boxConfig()
+	h.srv.cfg.Docker = h.srv.d.sock
+	h.fd.home = t.TempDir()
+	run := filepath.Join(t.TempDir(), "orbit")
+	h.fd.run = run
+	ctx := context.Background()
+	var se *sandbox.Error
+	if err := h.client.WriteGHToken(ctx, "orbit", "ghs_"+strings.Repeat("a", 36)); !errors.Is(err, sandbox.ErrNoBox) {
+		t.Fatalf("no box: %v", err)
+	}
+	if _, err := h.client.EnsureBox(ctx, "orbit", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.ClearGHToken(ctx, "orbit"); err != nil {
+		t.Fatalf("clearing what is not there: %v", err)
+	}
+	// The script makes its directory (the box's sudo is not needed here,
+	// where it is the test's own).
+	_ = os.MkdirAll(run, 0o700)
+	tok := "ghs_" + strings.Repeat("A1b", 12)
+	if err := h.client.WriteGHToken(ctx, "orbit", tok); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(run, "gh-token"))
+	fi, _ := os.Stat(filepath.Join(run, "gh-token"))
+	if err != nil || string(b) != tok || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("token file %q %v %v", b, err, fi.Mode())
+	}
+	for _, bad := range []string{"", "not a token", "ghs_short", tok + "\nrm -rf /", strings.Repeat("x", 2000)} {
+		if err := h.client.WriteGHToken(ctx, "orbit", bad); !errors.As(err, &se) || se.Status != http.StatusBadRequest {
+			t.Errorf("%.20q: %v", bad, err)
+		}
+	}
+	if err := h.client.ClearGHToken(ctx, "orbit"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(run, "gh-token")); !os.IsNotExist(err) {
+		t.Fatalf("the token is still there: %v", err)
+	}
+	h.fd.mu.Lock()
+	defer h.fd.mu.Unlock()
+	for _, e := range h.fd.execs {
+		if strings.Contains(strings.Join(append(e.Cmd, e.Env...), " "), tok) {
+			t.Fatalf("the token was in an exec's argv or env: %v", e.Cmd)
+		}
+	}
+}

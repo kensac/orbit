@@ -101,6 +101,17 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `repositories` | list of `owner/name` | required | The repositories tickets and `github:merge` may target; every token is limited to one. |
 | `read_repositories` | list of `owner/name` | none | The repositories an agent's `repos` may name: orbit mirrors them and mints read tokens for them. Reading one never permits a ticket or a merge there (configuration.md, Repositories). |
 | `comment_repositories` | list of `owner/name` | none | Where `github:comment` may post, with an `issues: write` token per comment. Commenting never permits a push, a ticket or a merge. |
+| `box` | map (below) | token on | The GitHub token orbit keeps in agents’ boxes for the person’s gh and git there (docs/workspace.md, GitHub in the box). |
+
+### `github.box`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `token` | bool | `true` | `false` writes no token into boxes and removes the one orbit wrote. |
+| `owner` | GitHub account | owner of the first configured repository | Whose installation the token is for. |
+| `repositories` | list of `owner/name` | installation repositories after exclusions | Repositories the token reaches, all under one owner. |
+| `exclude` | list of globs | `[*/*-config]` | Installation repositories excluded when `repositories` is empty. |
+| `permissions` | map of permission to `read` or `write` | contents and pull requests write, checks and statuses read | Token permissions. `workflows` is never allowed. |
 
 ### `build`
 
@@ -444,6 +455,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `agent:save` | Saves the conversation as a new agent: the model writes its name, description, charter and starters; orbit adds what the conversation did and proposes it as an `agent:define` that always waits for a person (configuration.md, Saving a conversation as an agent). | |
 | `run:now` | Starts a manual run of this agent or one in `delegates`; a run no message woke cannot start its own agent. `approve` applies directly in a run answering the person's message. | |
 | `skill:write` | Writes or retires one of the agent's skills as the next version; the approval shows the SKILL.md diff and the skill's scripts. | |
+| `page:publish` | Publishes bounded immutable HTML in the current chat conversation; it runs only while answering a person's message and returns a page id and title for the portfolio renderer. | `chat: true` |
 | `template:create` | Creates an agent from a template in the library: code renders and dry-runs it and records an `agent:define` that waits for a person whatever the rule; a `user_prompt` parameter is asked of the person with a form. | |
 
 ### `notify`

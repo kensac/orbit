@@ -53,6 +53,7 @@ import (
 	"github.com/kensac/orbit/internal/boxkeep"
 	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/engine"
+	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
@@ -577,15 +578,19 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			}).Run(claimCtx)
 		}()
 
-		// The box keeper polls accounts' usage when that is on; it stops
-		// with claims, so a draining instance leaves the boxes to the
-		// ready one.
+		// The box keeper keeps a GitHub token in every running box and
+		// polls accounts' usage when that is on; it stops with claims, so a
+		// draining instance leaves the boxes to the ready one.
 		loops.Add(1)
 		go func() {
 			defer loops.Done()
 			(&boxkeep.Keeper{
 				Store: s, Boxes: apiSrv.Boxes, PollUsage: pollUsage, Log: log.With("component", "boxes"),
 				Agents: func() []string { return boxkeep.BoxAgents(eng.Current().Config) },
+				GitHub: func() *spec.GitHub { return eng.Current().Config.Deployment.GitHub },
+				App: func(g *spec.GitHub) (*github.App, error) {
+					return github.NewApp(g, os.LookupEnv, &http.Client{Timeout: time.Minute})
+				},
 			}).Run(claimCtx)
 		}()
 

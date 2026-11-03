@@ -214,3 +214,23 @@ func deref(p *string) string {
 	}
 	return *p
 }
+
+// forkConversation serves POST /conversations/{id}/fork (docs/api.md).
+func (s *Server) forkConversation(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		MessageID       string `json:"message_id"`
+		ClientRequestID string `json:"client_request_id"`
+	}
+	if !decode(w, r, 4<<10, &body, bodyRequired) {
+		return
+	}
+	if body.MessageID == "" {
+		writeErr(w, http.StatusBadRequest, "message_id is required")
+		return
+	}
+	// A retry with the same client_request_id returns the first fork, as
+	// a retried create does.
+	c, _, err := s.Store.ForkConversation(r.Context(), store.ForkRequest{ConversationID: r.PathValue("id"),
+		MessageID: body.MessageID, ClientID: body.ClientRequestID})
+	respondStatus(w, http.StatusCreated, map[string]any{"conversation": c}, err)
+}
