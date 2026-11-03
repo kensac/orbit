@@ -126,7 +126,7 @@ func writeTarFiles(t *testing.T, root string, archive []byte) {
 	tr := tar.NewReader(bytes.NewReader(archive))
 	for {
 		h, err := tr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return
 		}
 		if err != nil {
