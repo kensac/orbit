@@ -487,7 +487,7 @@ func TestTerminalSocket(t *testing.T) {
 	v.fake.mu.Lock()
 	tty, resizes := v.fake.ttys[0], v.fake.resizes
 	v.fake.mu.Unlock()
-	if tty.Preset != "shell" || tty.Cols != 80 || tty.Rows != 24 || len(tty.Env) != 0 || !strings.HasPrefix(tty.Session, "shell-") {
+	if tty.Preset != "shell" || tty.Cols != 100 || tty.Rows != 30 || len(tty.Env) != 0 || !strings.HasPrefix(tty.Session, "shell-") {
 		t.Fatalf("tty request %+v: a shell carries no credential", tty)
 	}
 	if len(resizes) != 2 || resizes[0] != (sandbox.Resize{Cols: 100, Rows: 30}) || resizes[1] != (sandbox.Resize{Cols: 132, Rows: 40}) {
