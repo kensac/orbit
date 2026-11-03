@@ -113,6 +113,10 @@ it, a request ticket or a `github:merge` rule fails validation.
 
 `read_repositories` (optional) lists the repositories agents may read (`repos`, below). It is separate from `repositories`: reading a repository never permits a ticket or a merge there, and a repository in `repositories` is not readable unless it is listed here too.
 
+`comment_repositories` (optional) lists where `github:comment` may post: `{"repo", "number", "body"}` on an issue or a pull request, as the App, with an `issues: write` token minted for the comment and revoked after it. An agent with a `github:comment` rule fails validation without it. A comment is public to everyone who can see the repository, so give the action `approve` unless the agent's inputs are its own. The App needs the Issues write permission.
+
+`gmail:draft` and `calendar:create` are not action types: orbit holds no Google credential, and the connectors work (agents calling MCP servers through orbit, which holds the credentials) is where they belong. Until it lands, a draft or an event is a `notify` or a `webhook:<endpoint>` to something that holds the credential.
+
 ## Repositories
 
 `repos: [{repo: owner/name, ref: main}]` on an agent gives every run the tree of each repository at `ref` (a branch, a tag or a full commit sha; empty is the default branch), fetched by orbit just before the run (`internal/repos`, docs/ARCHITECTURE.md, Repositories):
@@ -294,6 +298,10 @@ fails at runtime, not at load.
 - **Limits.** `level` is at most `ceiling`. Without a `sandbox` the widest is `edits`: `auto` and `full` let a call run without a person on orbit's host, beside its secrets. A level that is not one of the five, or one the agent cannot run, resolves down at run time, never up (`Agent.ResolveLevel`); at load it is an error.
 - **A process can be raised.** Every chat process has the stdio permission prompt, and one whose ceiling is `full` is launched with `--allow-dangerously-skip-permissions` (without it the CLI refuses `set_permission_mode bypassPermissions`).
 
+## Web allowlist
+
+`web: {allow: [example.com, "*.wikipedia.org"]}` limits an agent's `WebFetch` to those hosts when it runs on orbit's host: the bare `WebFetch` in `--allowedTools` becomes one `WebFetch(domain:<d>)` rule per entry, and the private names are denied (spec-reference.md, `web`). It needs `WebFetch` in `tools`; a sandboxed agent goes through its egress profile instead and may not have one. Adding a domain, or dropping the list, widens the agent (`agent:define` waits for a person).
+
 ## Connectors
 
 `connectors:` in `orbit.yaml` names MCP servers; an agent's `connectors: [<name>, ...]` gives its runs their tools, as `mcp__<name>__<tool>` (claude-code runners only; docs/ARCHITECTURE.md, Connectors). orbit is the gateway: it lists the tools before each run and makes every call itself with the connector's credential, so neither the CLI nor a sandbox ever holds one.
@@ -357,7 +365,7 @@ Another exception is a run that read a mail (`mail:`): its report, or a short no
 
 ## Hooks
 
-`hooks` adds Claude Code hooks to an agent's runs (claude-code runners only; at most 20), beside orbit's own path guard and figure check. Each names an `event` (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `Stop`), for a tool event optionally a `matcher` (tool names joined by `|`, as Claude Code reads them), and exactly one of:
+`hooks` adds Claude Code hooks to an agent's runs (claude-code runners only; at most 20), beside orbit's own path guard, figure check and pinned entries (UserPromptSubmit). Each names an `event` (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `Stop`), for a tool event optionally a `matcher` (tool names joined by `|`, as Claude Code reads them), and exactly one of:
 
 - `say: <text>` (at most 2 KB): tells the model the text as context at that event; at `Stop`, sends the model back once with it (a second stop in the same turn passes, so it cannot loop).
 - `deny: <reason>` (`PreToolUse` only): refuses the matching tool with the reason, which the model reads.
@@ -379,7 +387,7 @@ orbit's binary runs each (`orbit agent-hook`, its definition a flag orbit writes
 
 ## Skills
 
-`skills: [monthly-close]` names skills from orbit's library the agent runs with (docs/ARCHITECTURE.md, Skills). A name no skill has is skipped at run time and shown as `missing` in `GET /agents/{name}/context`; the API attaches more.
+`skills: [monthly-close]` names skills from orbit's library the agent runs with (docs/ARCHITECTURE.md, Skills). A name no skill has is skipped at run time and shown as `missing` in `GET /agents/{name}/context`; the API attaches more. An agent writes skills only with `actions: {skill:write: approve}` (or `auto`): unnamed, it writes none.
 
 ## Learning
 

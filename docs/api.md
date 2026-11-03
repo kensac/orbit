@@ -382,10 +382,14 @@ conversation:
  ],
  "has_more": true,
  "next_before": "opaque-cursor",
- "read_through": "..."}
+ "read_through": "...",
+ "meter": {"run_id": "uuid", "session_id": "...", "context_tokens": 3182, "context_window": 200000,
+           "session_cost_usd": 0.07, "cost_usd": 0.07, "runs": 2,
+           "tokens": {"input": 17, "cache_read": 8100, "cache_creation": 500, "output": 80}}}
 ```
 
 - **Read point.** `read_through` beside `items` is the conversation's read point as it was before this request (`null` before the person first read it): a client draws its "New" divider above the first item after it. With `mark_read=1` the request also moves the read point to when the page was read (`POST /conversations/{id}/read`, The board).
+- **Meter** (on every page, of the conversation now): `run_id` is its latest finished run and `session_id` that run's backend session, the one the next run continues when it continues one; `context_tokens` is what the model held after its last call in that run (the last assistant message's input, cache read, cache creation and output tokens as the backend reported them; `null` when none reported usage); `context_window` the largest window the run's models reported (Claude Code's `modelUsage`), `null` when none did; `session_cost_usd` the backend's running total for that session. `cost_usd`, `tokens` (summed from each run's reported usage; Codex's cached input counts as `cache_read`) and `runs` are every finished run of the conversation. Before any run finished, the run and session fields are `null` and the totals 0.
 - **Order and paging.** Items are oldest first, totally ordered by (`at`, a
   run before a message at the same instant, `id`). A page is the newest
   `limit` items before `before`; omit `before` for the newest page. To page
@@ -718,7 +722,7 @@ Something waiting on a person is an **attention** row, written in the same trans
 
 ## Tickets
 
-A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /tickets` (opens its conversation; returns `ticket_id`, `conversation_id`, `message_id`, `run_id`; `stack_on` files a request on top of another, tickets.md, Stacked tickets), `GET /tickets`, `GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that reached merging carries `merge_action_id`, its `github:merge` action), `POST /tickets/{id}/plans/{version}/approve`, `POST /tickets/{id}/{abandon,retry,reopen}`, and `POST /tickets/{id}/checks/rerun` (`202`; the ticket loop reruns the PR's failed Actions jobs on its next tick, and a failed ticket goes back to review; `GET /tickets/{id}` lists every rerun in `reruns`), and review comments on its PR: `GET`/`POST /tickets/{id}/comments`, `POST /tickets/{id}/comments/{comment}/{edit,withdraw}` and `POST /tickets/{id}/review`, which sends the drafts as one message (tickets.md, Review comments). Its thread and messages are its conversation's (`/conversations/{conversation_id}/thread`, `/messages`); a message there reopens a `planned` ticket, and a `merged`, `done` or `abandoned` one refuses messages (409). A ticket's conversation carries `ticket_id` in the conversation list. Filing and approving take `client_request_id`; the author and approver are the token's person. A transition the ticket's state does not allow is 409.
+A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /tickets` (opens its conversation; returns `ticket_id`, `conversation_id`, `message_id`, `run_id`; `stack_on` files a request on top of another, tickets.md, Stacked tickets; `race` and `variants` build it two or three times, tickets.md, Races), `GET /tickets`, `GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that reached merging carries `merge_action_id`, its `github:merge` action), `POST /tickets/{id}/plans/{version}/approve`, `POST /tickets/{id}/{abandon,retry,reopen}`, and `POST /tickets/{id}/checks/rerun` (`202`; the ticket loop reruns the PR's failed Actions jobs on its next tick, and a failed ticket goes back to review; `GET /tickets/{id}` lists every rerun in `reruns`), and review comments on its PR: `GET`/`POST /tickets/{id}/comments`, `POST /tickets/{id}/comments/{comment}/{edit,withdraw}` and `POST /tickets/{id}/review`, which sends the drafts as one message (tickets.md, Review comments). Its thread and messages are its conversation's (`/conversations/{conversation_id}/thread`, `/messages`); a message there reopens a `planned` ticket, and a `merged`, `done` or `abandoned` one refuses messages (409). A ticket's conversation carries `ticket_id` in the conversation list. Filing and approving take `client_request_id`; the author and approver are the token's person. A transition the ticket's state does not allow is 409.
 
 `GET /tickets?status=&agent=&before=&limit=` is `{"tickets": [...]}`, newest first. `status` and `agent` match exactly; `before` is an RFC 3339 time and returns tickets created before it (400 if it does not parse), so the last ticket's `created_at` is the next page's cursor. `limit` defaults to 50, at most 500. Each ticket:
 
@@ -730,7 +734,28 @@ A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /t
  "created_at": "...", "updated_at": "...", "merge_action_id": "uuid"}
 ```
 
-`repo`, `author`, `approved_plan`, `base_sha`, `branch`, `pr_number`, `head_sha`, `merge_sha`, `error`, `merge_action_id` and `stack_on` are omitted when unset; `error` is set only while the ticket is `failed`. `GET /tickets/{id}` is `{"ticket": <as above>, "plans": [...], "events": [...], "reruns": [...]}`.
+`repo`, `author`, `approved_plan`, `base_sha`, `branch`, `pr_number`, `head_sha`, `merge_sha`, `error`, `merge_action_id`, `stack_on`, `race` and `picked_lane` are omitted when unset; `error` is set only while the ticket is `failed`. `GET /tickets/{id}` is `{"ticket": <as above>, "plans": [...], "events": [...], "reruns": [...]}`, and for a race also `"race": {"lanes": [<lane>], "recommended": "b", "picked": "a"}` (below).
+
+### Races
+
+`POST /tickets` with `"race": 2` or `3` and optionally `"variants": [{"model": "opus", "effort": "high"}, ...]` (at most one per lane; lane `a` takes the first; `model` matches `^[a-z0-9][a-z0-9.-]{0,62}(\[[a-z0-9]{1,8}\])?$`, `effort` is one of `low`, `medium`, `high`, `xhigh`, `max`; an unset field keeps the build agent's runner's) files a request that builds its approved plan once per lane, each on `orbit/<id>-<lane>` with its own PR. 400 for a race outside `2..3`, more variants than lanes, a bad variant, variants without a race, a race on a question, or a race with `stack_on` (and nothing may stack on a race). **409 while the subscription is nearly spent**: any usage window not yet reset above `usage.DeferLowAbove` (0.8, `GET /usage`), whether or not `defer_low_priority` is on; the error names the window, its reading and its source. A plain request is not refused.
+
+Until a person picks, the ticket has no `branch`, `pr_number` or `head_sha`; `race.lanes` is every lane, best first, each scored by code:
+
+```json
+{"lane": "b", "variant": {"effort": "high"},
+ "run_id": "uuid", "run_status": "succeeded", "branch": "orbit/1a2b3c4d-b",
+ "pr_number": 62, "base_sha": "...", "head_sha": "...",
+ "added": 30, "deleted": 4, "files": ["internal/x/x.go", "internal/x/x_test.go"],
+ "diff_policy": "passed", "cost_usd": 1.42,
+ "checks": "green", "checks_head": "...", "pr_state": "open", "checks_at": "...",
+ "delivered": true, "checks_green": true, "lines_changed": 34, "tests_touched": 1,
+ "rank": 1, "picked": false, "why": "checks green"}
+```
+
+`run_*`, `branch`, `pr_number`, `base_sha`, `head_sha`, `added`, `deleted`, `diff_policy` (`passed` or `failed`) and `cost_usd` are the lane's newest build's and omitted until it has them; `files` is always a list. `checks` (`pending`, `green`, `failed`), `checks_head`, `pr_state` (`open`, `closed`, `merged`), `checks_at` and `pr_closed_at` are the ticket loop's latest reading of the lane's PR. `why` is the reason for its place in one phrase. `recommended` is the first lane when it delivered a PR, omitted otherwise; `picked` once a person picked.
+
+`POST /tickets/{id}/pick` `{"lane": "a", "client_request_id": "..."}` is the person's pick (`by` counts only with the operator token): `{"ok": true, "action_id": "uuid"}`, the `ticket:pick` action recorded on the lane's build run with rule `approve`, approved and executed by that person in the same transaction (no rule makes it automatic and no agent is offered it). The ticket stays `review` and takes the lane's `branch`, `pr_number`, `base_sha` and `head_sha`, then goes on like any ticket (checks, fixes, revisions and the merge are that lane's); the loop closes the other lanes' PRs and keeps their branches. 400 for a lane that is not `a`, `b` or `c`; 409 unless the ticket is a race in `review` with no pick and the lane's newest build delivered a PR.
 
 ## Delegation
 
@@ -989,7 +1014,7 @@ An entry:
  "version": 2, "status": "active",
  "type": "feedback", "title": "Transfers are not spending",
  "description": "one line for the index", "body": "<markdown>",
- "why": "...", "how_to_apply": "...",
+ "why": "...", "how_to_apply": "...", "pinned": false,
  "superseded_by": null, "source": "person", "source_run_id": null,
  "source_conversation_id": null, "author": "kanishk", "note": "",
  "created_at": "...", "updated_at": "..."}
@@ -998,6 +1023,7 @@ An entry:
 - `scope` with `topic` (scope `topic`) or `agent` (scope `agent`); neither for `profile`. Topic names are spec names (`^[a-z][a-z0-9-]{0,62}$`).
 - `key` is a slug (`^[a-z0-9][a-z0-9-]{0,79}$`) unique within its scope, stable across versions; omitted on create, it is made from the title (`-2`, `-3`, ... when taken). A key once used stays the entry's, retired or not.
 - `type` is one of Claude Code's memory types: `user` (who the person is), `feedback` (how they want work done), `project` (facts about their world and work), `reference` (where to find things).
+- `pinned` (feedback only, else 400) repeats the entry to every turn of its readers' runs, so it holds however long a session runs (docs/ARCHITECTURE.md, Memory entries). An edit that makes a pinned entry another type unpins it.
 - `title` (one line, at most 200 bytes) and `body` (at most 16 KB) are required; `description` is one line of at most 400 bytes; `why` and `how_to_apply` at most 4 KB each.
 - `version` counts versions, the newest in force. `updated_at` is when it was written, `created_at` when the entry was. `status` is `active` or `retired`; `superseded_by` is the entry that replaced a retired one.
 - `source` is who wrote this version: `person` (this API), `learned` (a learning run), `import` (`POST /memory/import`). `source_run_id` and `source_conversation_id` name what it was learned from. `author` is the token's person (with the operator token, the body's `author`, if any). `note` says why this version was written.
@@ -1005,17 +1031,17 @@ An entry:
 Nothing is deleted. Every change is a new version, kept:
 
 - `GET /memory/entries?scope=&topic=&agent=&type=&status=&q=&run_id=&limit=`: `{"entries": [...]}`, current versions, by scope (profile, topics, agents), then name, then most recently changed. `topic` or `agent` (not both) selects one place. `status` is `active` (default), `retired` or `all`; `q` matches key, title, description, body, why and how_to_apply, case-insensitively. `run_id` selects entries that run wrote a version of. `limit` defaults to 200, at most 1000.
-- `POST /memory/entries` `{"scope", "topic"|"agent", "key"?, "type", "title", "description"?, "body", "why"?, "how_to_apply"?, "note"?}`: `201 {"entry": ...}`. An explicit `key` already used in the scope is 409; an `agent` that is not configured is 400.
+- `POST /memory/entries` `{"scope", "topic"|"agent", "key"?, "type", "title", "description"?, "body", "why"?, "how_to_apply"?, "pinned"?, "note"?}`: `201 {"entry": ...}`. An explicit `key` already used in the scope is 409; an `agent` that is not configured is 400.
 - `GET /memory/entries/{id}`: `{"entry": <current>, "versions": [...]}`, every version newest first.
-- `PATCH /memory/entries/{id}` `{"version"?, "type"?, "title"?, "description"?, "body"?, "why"?, "how_to_apply"?, "status"?, "note"?}`: the next version, with absent fields kept. `version` is the version the client read; another current one is 409, so two edits never silently overwrite each other (omit it to write regardless). `status: "active"` restores a retired entry (clearing `superseded_by`). An edit that changes nothing writes no version and returns the current one.
+- `PATCH /memory/entries/{id}` `{"version"?, "type"?, "title"?, "description"?, "body"?, "why"?, "how_to_apply"?, "pinned"?, "status"?, "note"?}`: the next version, with absent fields kept. `version` is the version the client read; another current one is 409, so two edits never silently overwrite each other (omit it to write regardless). `status: "active"` restores a retired entry (clearing `superseded_by`). An edit that changes nothing writes no version and returns the current one.
 - `POST /memory/entries/{id}/restore` `{"restore": <version>, "version"?, "note"?}`: the next version, a copy of an earlier one's content and status (and its `superseded_by` while that entry is still active). `restore` must be an earlier version (400); `version` is as for `PATCH`. `note` defaults to `restored version <n>`.
 - `POST /memory/entries/{id}/retire` `{"version"?, "superseded_by"?, "note"?}`: the next version, retired. `superseded_by` must be another, active entry (400 otherwise). This is how an entry is deleted.
-- `POST /memory/import` `{"dry_run": bool, "entries": [<entry as for create, key optional>], "note"?}`: matches each by scope and key. A new key creates an entry, a known one gets a new version when its content differs or it was retired, an identical one is left alone, so an import can be repeated. `{"dry_run", "results": [{"scope", "topic"|"agent", "key", "outcome": "created"|"updated"|"unchanged", "id", "version"}]}`, in request order. All of it is one transaction: one invalid entry fails the whole import (400, naming its index). `dry_run` reports and writes nothing (`id` is absent for an entry it would create). At most 500 entries. `orbit import claude-memory` calls this (deployment.md).
+- `POST /memory/import` `{"dry_run": bool, "entries": [<entry as for create, key optional>], "note"?}`: matches each by scope and key. A new key creates an entry, a known one gets a new version when its content differs or it was retired, an identical one is left alone, so an import can be repeated. An import never changes a known entry's `pinned`. `{"dry_run", "results": [{"scope", "topic"|"agent", "key", "outcome": "created"|"updated"|"unchanged", "id", "version"}]}`, in request order. All of it is one transaction: one invalid entry fails the whole import (400, naming its index). `dry_run` reports and writes nothing (`id` is absent for an entry it would create). At most 500 entries. `orbit import claude-memory` calls this (deployment.md).
 - `GET /memory/topics`: `{"topics": [{"name", "entries", "agents"}]}` by name: every topic that holds entries or is read by an agent. `entries` counts its active entries; `agents` are the agents that read it, from their spec (an agent reading every topic is on each) or attached.
 
 ### Entries agents write
 
-An agent writes entries itself, without approval: every run's output carries `entries` (docs/ARCHITECTURE.md, Memory entries), applied with the run's outcome as versions with `source: "learned"`, `source_run_id` the run and `source_conversation_id` its conversation. A person reverts one with `restore` or `retire` above. A write the store refuses (a stale version, a key taken, an invalid field, a ref the run was not shown) is skipped and the rest apply. Each run's writes and what became of them are its `entries.json` artifact (`GET /runs/{id}/artifacts`): `[{"op", "ref", "title", "result": {"outcome": "written"|"unchanged"|"refused", "error", "id", "key", "version"}}]`, in output order.
+An agent writes entries itself, without approval: every run's output carries `entries` (docs/ARCHITECTURE.md, Memory entries), applied with the run's outcome as versions with `source: "learned"` (they never pin or unpin), `source_run_id` the run and `source_conversation_id` its conversation. A person reverts one with `restore` or `retire` above. A write the store refuses (a stale version, a key taken, an invalid field, a ref the run was not shown) is skipped and the rest apply. Each run's writes and what became of them are its `entries.json` artifact (`GET /runs/{id}/artifacts`): `[{"op", "ref", "title", "result": {"outcome": "written"|"unchanged"|"refused", "error", "id", "key", "version"}}]`, in output order.
 
 ### Remembering from a conversation
 
@@ -1049,7 +1075,7 @@ After a conversation goes quiet, orbit runs a short learning pass over it (trigg
 | `create_conversation` | `agent`, `title`, `message`, `wait_seconds` | `conversation_id`, `message_id`, `run_id`, and `reply` as `send_message` |
 | `send_message` | `body`, and `agent` (its default conversation) or `conversation_id`; `reply_to`, `wait_seconds` | `message_id`, `run_id`, `reply`: the run as a thread run item (`report`, `questions`, `actions`, `status`) |
 | `wait_for_reply` | `run_id`, `wait_seconds` | `reply`, the run as a thread run item |
-| `read_thread` | `agent` or `conversation_id`, `limit` (default 20, at most 200), `before`, `unfold` | as a thread page: `items`, `has_more`, `next_before`; identical skips folded unless `unfold` (A conversation's thread, Folded skips) |
+| `read_thread` | `agent` or `conversation_id`, `limit` (default 20, at most 200), `before`, `unfold` | as a thread page: `items`, `has_more`, `next_before`, `meter`; identical skips folded unless `unfold` (A conversation's thread, Folded skips) |
 | `list_actions` | `agent`, `status` (default `pending`; `all` for every status), `run_id`, `limit`, `before` | as `GET /actions`: `actions`, `has_more`, `next_before` |
 | `approve_action`, `reject_action` | `action_id`; `approve_action` also `always` | the decided `action`; a decided one is an error. With `always: true`, as `POST /actions/{id}/approve` with `always` (Actions), plus `always` |
 | `search` | `q`, and as `GET /search`: `agent`, `conversation_id`, `run_id`, `kind`, `from`, `to`, `limit`, `offset` | as `GET /search` |
@@ -1085,7 +1111,7 @@ The access token is authentik's own (the `orbit-mcp` provider), so its issuer an
 
 ## Skills
 
-orbit keeps a library of Claude Code skills: each a `SKILL.md` (frontmatter with `name` and `description`, then the instructions) and optional files beside it (references, scripts, assets), every version kept. An agent runs with the skills its spec names (`skills`) and those attached here; a run gets each at its current version (docs/ARCHITECTURE.md, Skills). Agents also write and retire their own skills, applied directly (below).
+orbit keeps a library of Claude Code skills: each a `SKILL.md` (frontmatter with `name` and `description`, then the instructions) and optional files beside it (references, scripts, assets), every version kept. An agent runs with the skills its spec names (`skills`) and those attached here; a run gets each at its current version (docs/ARCHITECTURE.md, Skills). Agents also write and retire their own skills, with the `skill:write` action under its rule (below).
 
 A skill:
 
@@ -1115,7 +1141,7 @@ Routes:
 - `POST /skills/import` `{"dry_run", "skills": [{"name", "content", "files"?}], "note"?}`: each skill's next version where it differs from the current one (or is new, or retired); `{"dry_run", "results": [{"name", "outcome": "created"|"updated"|"unchanged", "version"}]}`, one transaction, at most 100 skills. `orbit import skills` calls it (deployment.md).
 - `PUT /agents/{name}/skills/{skill}` and `DELETE` attach and detach, as for topics; attaching an unknown skill is 404. `GET /agents/{name}/context` lists the agent's `skills`: `[{"name", "from": ["spec"|"api"], "version", "status"}]`, `status` `missing` (and `version` null) for a name no skill has.
 
-**Skills agents write.** A run's output carries `skills` (at most 3): `write` (the whole `SKILL.md` of a new skill, or of one the run has, whose files stay) and `retire` (one the run has). They apply with the run's outcome as `source: "agent"` versions, a write against the version the run was given (a newer one refuses it), and a written skill is attached to the agent. What became of each is the run's `skill-writes.json` artifact (`[{"op", "name", "result": {"outcome", "error", "key", "version"}}]`); the versions the run was given are its `skills.json` artifact. A person reverts with `restore` or `retire`.
+**Skills agents write.** A skill steers every later run it is given to, so an agent writes one with the `skill:write` action, under its rule like any action (`auto`, `approve` or `deny`; unnamed, denied and not offered; the built-in `orbit` has it under `approve`). Its params are `{"op": "write"|"retire", "name", "content", "note"}`: `write` gives the whole `SKILL.md` of a new skill, or of one the run has, whose files stay; `retire` ends one the run has. At most 3 per run. Code resolves each when proposed and adds to its params `version` (the version the run had, which the write applies against; 0 for a new skill) and `changes`: `{"from_version", "lines_added", "lines_removed", "diff", "files", "scripts"}`, where `diff` is `SKILL.md`'s change, one `+` or `-` line each (at most 16 KB, then how many lines it left out), `files` the skill's other files, and `scripts` those of them that run (under `scripts/` or `bin/`, a script's extension, a `#!` line, or an executable's header). A retire of a skill the run lacks, a `SKILL.md` without a description, or a fourth write is `denied` with the reason. The approval notification leads with the change in words, `Writes skill deploy (version 1 to 2): SKILL.md +1 -1 lines; its 3 other files stay.`, then `Scripts and executables in this skill (...): scripts/go.sh, tools/check`, then the diff. Executed, the write is a `source: "agent"` version against `version` (a newer one fails the action, naming it), a written skill is attached to the agent, and the action's `result` is `{"skill", "op", "outcome": "written"|"unchanged", "version", "changes"}`. The versions the run was given are its `skills.json` artifact. A person reverts with `restore` or `retire`.
 
 ## Search
 

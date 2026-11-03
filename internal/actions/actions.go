@@ -74,6 +74,9 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 			out = append(out, prType(d))
 		}
 	}
+	if d.GitHub != nil && len(d.GitHub.CommentRepositories) > 0 && a.RuleFor(CommentType) != spec.RuleDeny {
+		out = append(out, commentType(d))
+	}
 	if a.RuleFor(DefineType) != spec.RuleDeny {
 		out = append(out, defineType(a))
 	}
@@ -84,6 +87,9 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 		if a.RuleFor(t) != spec.RuleDeny {
 			out = append(out, scheduleType(t, a))
 		}
+	}
+	if a.RuleFor(SkillWriteType) != spec.RuleDeny {
+		out = append(out, skillWriteType())
 	}
 	return out
 }
@@ -311,6 +317,8 @@ type Executor struct {
 	Git build.Git
 	// Define applies an agent:define for the call's run.
 	Define func(ctx context.Context, c Call, spec json.RawMessage) (json.RawMessage, error)
+	// SkillWrite applies a skill:write for the call's run.
+	SkillWrite func(ctx context.Context, c Call, w SkillWrite) (json.RawMessage, error)
 	// Connector calls a connector's tool for an approved connector:<conn>/<tool> action, adding the connector's credential (engine/connectors.go).
 	Connector func(ctx context.Context, c Call) (json.RawMessage, error)
 	// Schedule applies a schedule action or run:now for the call's run.
@@ -378,6 +386,8 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 		return e.clone(ctx, c)
 	case typ == PRType:
 		return e.publish(ctx, c)
+	case typ == CommentType:
+		return e.comment(ctx, params)
 	case typ == store.DecisionType:
 		// A person approved it; the task it holds starts at the next
 		// reconcile. Nothing else happens here.
@@ -387,6 +397,15 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 			return nil, fmt.Errorf("%s: not available in this process", typ)
 		}
 		return e.executeTask(ctx, c)
+	case typ == SkillWriteType:
+		w, err := DecodeSkillWrite(params)
+		if err != nil {
+			return nil, err
+		}
+		if e.SkillWrite == nil {
+			return nil, fmt.Errorf("skill:write: not available in this process")
+		}
+		return e.SkillWrite(ctx, c, w)
 	case strings.HasPrefix(typ, spec.ConnectorActionPrefix):
 		if e.Connector == nil {
 			return nil, fmt.Errorf("%s: not available in this process", typ)

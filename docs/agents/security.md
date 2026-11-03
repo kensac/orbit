@@ -22,7 +22,7 @@ more than its agent's rules allow.
   Codex runs with `-s read-only`.
 - **Network:** whatever the agent's `tools` grant (for example `WebFetch`).
   A tool that can reach the network can exfiltrate what the run read; grant it
-  only to agents whose inputs you would be fine to see leave.
+  only to agents whose inputs you would be fine to see leave. `web: {allow: [...]}` narrows WebFetch to named domains (one `WebFetch(domain:...)` allow rule each, never the bare tool) and denies the private names (`spec.PrivateWebNames`) with `--disallowedTools`, which no allow or answer overrides. Seen on 2.1.316: an allowed domain and a `*.` subdomain were fetched, another domain and `localhost` were denied, and a WebFetch to `127.0.0.1` reached the host's loopback, so an address is never a valid entry. The rules match the URL's host, not where it resolves: an allowed public name that resolves to a private or tailnet address is still reached, which only a sandbox's egress (it never dials one) prevents. An allowed domain is still a channel out for what the run read.
 
 - **Session files are model-written state.** A session agent's transcripts
   (under its persistent HOME) hold everything earlier runs read and said,
@@ -77,7 +77,7 @@ An agent's `run` hooks are commands from its configuration files, never chosen b
 
 ## Skills
 
-A skill is instructions a run follows, and agents write their own, so a run steered by a poisoned input can write a skill that steers its later runs, and those of every agent the skill is attached to. What bounds it: a run writes at most 3 skills, only new ones or ones it was given (at the version given), and a written skill is attached to that agent only; every version is kept with its run (`source_run_id`), so a bad one is found, restored or retired. The skill tool reads only the run's own copy, inside each skill's directory after symlinks; it records nothing in the ledger, so a skill's text never backs a figure. Supporting files are stored as given and never executed by orbit; a script in a skill runs only if the agent's own `tools` let it.
+A skill is instructions a run follows, and agents write their own, so a run steered by a poisoned input can write a skill that steers its later runs, and those of every agent the skill is attached to. What bounds it: a write is the `skill:write` action, under the agent's rule (denied unless named; keep it `approve` where a person should see each one, as the built-in `orbit` has it), and the approval shows what it changes and every script or executable the skill holds, worked out by code, never the model's account; a run writes at most 3 skills, only new ones or ones it was given (at the version given), and a written skill is attached to that agent only; every version is kept with its run (`source_run_id`), so a bad one is found, restored or retired. The skill tool reads only the run's own copy, inside each skill's directory after symlinks; it records nothing in the ledger, so a skill's text never backs a figure. Supporting files are stored as given and never executed by orbit; a script in a skill runs only if the agent's own `tools` let it.
 
 ## What the model can cause
 
@@ -189,6 +189,8 @@ grants more than was asked. The repository is one of `github.repositories` for t
 merge an orbit PR whose checks are green; the executor re-checks the head
 commit, the branch and every check itself, and the rule decides whether a
 person approves first. In the fleet a merge is a deploy: keep it `approve`. A chat agent's `approve` rules are satisfied by its person's message in the conversation (`instructed_by`): a prompt injected into what the agent read during that turn can therefore get an approve-rule action executed while the person is chatting, as it could make Claude Code do anything its permissions allow. Unattended runs never get this. `github:pr` pushes only `orbit/chat/<branch>`, built by orbit from the working tree (the model's `.git` is never read or run), held to the build's diff policy; merging still needs every required check green.
+
+`github:comment` posts as the App in one of `github.comment_repositories` with a token of `issues: write` alone, minted for the comment and revoked after it; the executor re-checks the repository at execution. A compromised model can post any text (at most 20000 bytes, attribution lines scrubbed) on any issue or pull request of those repositories, under the rule, where every reader of the repository sees it: keep it `approve` for an agent whose inputs others write. `issues: write` also lets a token edit, label, close or lock issues; orbit's code posts only `POST /issues/{n}/comments` with it.
 
 `actions: write` (rerunning failed jobs) also covers dispatching and cancelling workflows; orbit mints it alone, only in the ticket loop, for `RerunJob` on the job ids of checks that failed, and no model sees it.
 

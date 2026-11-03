@@ -548,6 +548,9 @@ type RunResult struct {
 	// Gate names what ended a skipped run without a backend call; set
 	// exactly when Status is skipped (runs_skipped_names_gate).
 	Gate string
+	// DiffPolicyFailed is a build whose diff the diff policy refused
+	// (FailBuild records it for a race's comparison).
+	DiffPolicyFailed bool
 }
 
 // Run statuses that end a run.
@@ -1062,8 +1065,6 @@ type Outcome struct {
 	Plan *PlanProposal
 	// Entries are the memory entry writes the run made, applied in order; each one's Result is set (entry_writes.go).
 	Entries []*EntryWrite
-	// Skills are the skill writes the run made (skills.go), applied after its entries.
-	Skills []*AgentSkillWrite
 }
 
 // PlanProposal is a ticket plan a run proposed. RecordOutcome sets Version
@@ -1113,9 +1114,6 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 			p.Version = v
 		}
 		if err := applyEntryWrites(ctx, tx, runID, o.Entries); err != nil {
-			return err
-		}
-		if err := applySkillWrites(ctx, tx, runID, agent, o.Skills); err != nil {
 			return err
 		}
 		for _, a := range o.Actions {

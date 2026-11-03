@@ -104,9 +104,12 @@ func TestAgentSkillWrites(t *testing.T) {
 		{Name: "taken", Content: "---\nname: taken\ndescription: t\n---\n"},
 	}
 	s.PutSkill(ctx, store.SkillWrite{Name: "taken", Content: "---\nname: taken\ndescription: t\n---\nx"}, byPerson())
-	runID := finishWith(t, s, store.Outcome{Skills: writes})
+	runID := finishWith(t, s, store.Outcome{})
 	want := []string{"written", "written", "refused", "refused"}
 	for i, w := range writes {
+		if err := s.ApplySkillWrite(ctx, runID, "a", w); err != nil {
+			t.Fatal(err)
+		}
 		if w.Result.Outcome != want[i] {
 			t.Fatalf("write %d = %+v, want %s", i, w.Result, want[i])
 		}

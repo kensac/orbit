@@ -88,8 +88,8 @@ const hookTimeout = 10
 
 // harnessHooks are the hooks orbit configures, all one command: a path
 // guard on the file tools, with Figures the figure check on the structured
-// output, and with Status every hook event posted to the run's status
-// listener. One PreToolUse entry for every tool keeps it one process per
+// output, the run's pinned entries on every prompt (UserPromptSubmit), and
+// with Status every hook event posted to the run's status listener. One PreToolUse entry for every tool keeps it one process per
 // event; the hook decides by tool name. Matchers are tool names joined by
 // |, or * for all. An agent's own hooks (spec hooks) follow orbit's on
 // their event.
@@ -124,6 +124,10 @@ func harnessHooks(h *Harness, workdir, home string) map[string]any {
 			}
 			out[ev] = entry(m)
 		}
+	}
+	// Every prompt gets the run's pinned entries (harness.PinnedPath) added as context, so they hold however far the session has compacted; status mode has the event already.
+	if _, ok := out["UserPromptSubmit"]; !ok {
+		out["UserPromptSubmit"] = entry("")
 	}
 	for _, ah := range h.AgentHooks {
 		timeout := hookTimeout
@@ -212,8 +216,12 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 	if req.SkillsPlugin != "" {
 		args = append(args, "--plugin-dir", req.SkillsPlugin)
 	}
+	allowed, webDeny := webRules(allowed, req.WebAllow)
 	if len(allowed) > 0 {
 		args = append(args, "--allowedTools", strings.Join(allowed, ","))
+	}
+	if len(webDeny) > 0 {
+		args = append(args, "--disallowedTools", strings.Join(webDeny, ","))
 	}
 	if c.rs.Model != "" {
 		args = append(args, "--model", c.rs.Model)
