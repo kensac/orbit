@@ -911,6 +911,9 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 				pa.Params = p
 			}
 		}
+		if act.Type == actions.TemplateCreateType && pa.Error == "" {
+			e.templateOutcome(ctx, c.ConversationID, &pa, &o.Questions)
+		}
 		if len(pa.Params) == 0 {
 			pa.Params = json.RawMessage(`{}`)
 		}

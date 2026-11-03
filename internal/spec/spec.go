@@ -1245,7 +1245,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		switch {
 		case typ == "notify", typ == "continue", typ == "agent:define", typ == "agent:save", typ == "skill:write",
-			typ == "schedule:add", typ == "schedule:pause", typ == "schedule:resume", typ == "schedule:remove", typ == "run:now":
+			typ == "schedule:add", typ == "schedule:pause", typ == "schedule:resume", typ == "schedule:remove", typ == "run:now", typ == "template:create":
 		case typ == "delegate", typ == "task:message", typ == "task:cancel", typ == "task:retry":
 			if len(a.Delegates) == 0 {
 				at("action %q: needs delegates, the agents this one may hand tasks to", typ)
@@ -1267,7 +1267,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 		case strings.HasPrefix(typ, ConnectorActionPrefix):
 			at("action %q: a connector tool's rule is named mcp:<connector>:<tool>", typ)
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, skill:write, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr, github:comment or mcp:<connector>:<tool>)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, skill:write, template:create, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr, github:comment or mcp:<connector>:<tool>)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
