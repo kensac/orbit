@@ -231,7 +231,7 @@ func TestEvaluationGradeUsesSeparateReadOnlyBackendWithoutPersisting(t *testing.
 	if len(fr.got.Tools) != 0 || fr.got.Harness != nil || fr.got.Session != nil || fr.got.Connectors != nil || fr.got.SkillsPlugin != "" {
 		t.Fatalf("grader received capabilities: %+v", fr.got)
 	}
-	if len(fr.got.Inputs) != 1 || !strings.Contains(string(fr.got.Inputs[0].Content), "mentions the saved total") || !strings.Contains(string(fr.got.Inputs[0].Content), `"summary":"total is 4"`) || strings.Contains(fr.got.System, gradeAgent.Charter) {
+	if len(fr.got.Inputs) != 1 || !strings.Contains(string(fr.got.Inputs[0].Content), "mentions the saved total") || !strings.Contains(string(fr.got.Inputs[0].Content), `"summary":"total is 4"`) || (gradeAgent.Charter != "" && strings.Contains(fr.got.System, gradeAgent.Charter)) {
 		t.Fatalf("grader request = %+v", fr.got)
 	}
 	if code, _ := call(t, "POST", v.internal.URL+"/api/v1/agents/grader/grade", token,
