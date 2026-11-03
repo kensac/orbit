@@ -18,6 +18,7 @@ type fakeScenario struct {
 	Refuse          []string          `json:"refuse"`
 	HoldModes       []string          `json:"hold_modes"`
 	RefuseInterrupt bool              `json:"refuse_interrupt"`
+	Plan            bool              `json:"plan"`
 	PlanExit        bool              `json:"plan_exit"`
 	Ask             []json.RawMessage `json:"ask"`
 }
@@ -118,7 +119,7 @@ func fakeClaude(dir string) {
 		turn++
 		fmt.Fprintln(logf, "turn", turn, mode)
 		send(map[string]any{"type": "system", "subtype": "init", "permissionMode": mode, "session_id": "fake-1"})
-		if sc.PlanExit {
+		if sc.Plan || sc.PlanExit {
 			mode = "plan"
 			fmt.Fprintln(logf, "entered plan")
 			send(map[string]any{"type": "system", "subtype": "status", "status": nil, "permissionMode": mode, "session_id": "fake-1"})
@@ -139,7 +140,7 @@ func fakeClaude(dir string) {
 					body, _ := json.Marshal(resp["response"])
 					fmt.Fprintln(logf, "answer", resp["request_id"], string(body))
 					tool, _ := req["tool_name"].(string)
-					if sc.PlanExit && tool == "ExitPlanMode" {
+					if (sc.Plan || sc.PlanExit) && tool == "ExitPlanMode" {
 						decision, _ := resp["response"].(map[string]any)
 						if decision["behavior"] == "allow" {
 							mode = "default"
