@@ -113,6 +113,10 @@ it, a request ticket or a `github:merge` rule fails validation.
 
 `read_repositories` (optional) lists the repositories agents may read (`repos`, below). It is separate from `repositories`: reading a repository never permits a ticket or a merge there, and a repository in `repositories` is not readable unless it is listed here too.
 
+`comment_repositories` (optional) lists where `github:comment` may post: `{"repo", "number", "body"}` on an issue or a pull request, as the App, with an `issues: write` token minted for the comment and revoked after it. An agent with a `github:comment` rule fails validation without it. A comment is public to everyone who can see the repository, so give the action `approve` unless the agent's inputs are its own. The App needs the Issues write permission.
+
+`gmail:draft` and `calendar:create` are not action types: orbit holds no Google credential, and the connectors work (agents calling MCP servers through orbit, which holds the credentials) is where they belong. Until it lands, a draft or an event is a `notify` or a `webhook:<endpoint>` to something that holds the credential.
+
 ## Repositories
 
 `repos: [{repo: owner/name, ref: main}]` on an agent gives every run the tree of each repository at `ref` (a branch, a tag or a full commit sha; empty is the default branch), fetched by orbit just before the run (`internal/repos`, docs/ARCHITECTURE.md, Repositories):
@@ -375,7 +379,7 @@ orbit's binary runs each (`orbit agent-hook`, its definition a flag orbit writes
 
 ## Skills
 
-`skills: [monthly-close]` names skills from orbit's library the agent runs with (docs/ARCHITECTURE.md, Skills). A name no skill has is skipped at run time and shown as `missing` in `GET /agents/{name}/context`; the API attaches more.
+`skills: [monthly-close]` names skills from orbit's library the agent runs with (docs/ARCHITECTURE.md, Skills). A name no skill has is skipped at run time and shown as `missing` in `GET /agents/{name}/context`; the API attaches more. An agent writes skills only with `actions: {skill:write: approve}` (or `auto`): unnamed, it writes none.
 
 ## Learning
 

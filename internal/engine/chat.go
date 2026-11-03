@@ -456,6 +456,8 @@ type chatTurn struct {
 	instructor string
 	// pinned leads the prompt where no orbit hook adds the pinned entries (pinnedTurn).
 	pinned string
+	// skills are the versions the run has, which its skill:write proposals resolve against.
+	skills []store.Skill
 	// repos is what the agent's repositories add (repos.go), or nil.
 	repos *repoRun
 }
@@ -544,6 +546,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 		}
 	}
 	out := chatOutput(res.Reply, st)
+	out.skills = t.skills
 	if res.Interrupted {
 		return nil, res, cancelledRun{out: out}
 	}
