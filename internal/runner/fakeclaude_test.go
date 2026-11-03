@@ -8,16 +8,19 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A Go fake of `claude -p --input-format stream-json` for the permission tests: the test binary run again with ORBIT_FAKE_CLAUDE naming its directory, through a wrapper script (the runner's environment is an allowlist, so the variable is set by the script). It reads scenario.json there, logs what it is sent to log, and answers:
 //   - set_permission_mode: success, or an error for a mode in refuse; the mode is reported as a system.status line, as the real CLI does.
 //   - a user turn: system.init with the current mode, then one can_use_tool request per entry of ask (waiting for each answer), then a result.
 type fakeScenario struct {
-	Refuse []string          `json:"refuse"`
-	Ask    []json.RawMessage `json:"ask"`
-	// Plan puts the session in plan mode before the asks, as the model's EnterPlanMode does; an allowed ExitPlanMode leaves it for default, as the real CLI does.
-	Plan bool `json:"plan"`
+	Refuse          []string          `json:"refuse"`
+	HoldModes       []string          `json:"hold_modes"`
+	RefuseInterrupt bool              `json:"refuse_interrupt"`
+	Plan            bool              `json:"plan"`
+	PlanExit        bool              `json:"plan_exit"`
+	Ask             []json.RawMessage `json:"ask"`
 }
 
 func TestMain(m *testing.M) {
@@ -66,6 +69,19 @@ func fakeClaude(dir string) {
 			id := m["request_id"]
 			if req["subtype"] == "set_permission_mode" {
 				want, _ := req["mode"].(string)
+				for _, held := range sc.HoldModes {
+					if held != want {
+						continue
+					}
+					fmt.Fprintln(logf, "request", want)
+					for {
+						if _, err := os.Stat(filepath.Join(dir, "release-"+want)); err == nil {
+							break
+						}
+						time.Sleep(2 * time.Millisecond)
+					}
+					break
+				}
 				for _, r := range sc.Refuse {
 					if r == want {
 						fmt.Fprintln(logf, "refused", want)
@@ -80,6 +96,11 @@ func fakeClaude(dir string) {
 					send(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "success", "request_id": id, "response": map[string]any{}}})
 					send(map[string]any{"type": "system", "subtype": "status", "status": nil, "permissionMode": mode, "session_id": "fake-1"})
 				}
+				continue
+			}
+			if req["subtype"] == "interrupt" && sc.RefuseInterrupt {
+				fmt.Fprintln(logf, "interrupt refused")
+				send(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "error", "request_id": id, "error": "interrupt refused"}})
 				continue
 			}
 			send(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "success", "request_id": id, "response": map[string]any{}}})
@@ -98,7 +119,7 @@ func fakeClaude(dir string) {
 		turn++
 		fmt.Fprintln(logf, "turn", turn, mode)
 		send(map[string]any{"type": "system", "subtype": "init", "permissionMode": mode, "session_id": "fake-1"})
-		if sc.Plan {
+		if sc.Plan || sc.PlanExit {
 			mode = "plan"
 			fmt.Fprintln(logf, "entered plan")
 			send(map[string]any{"type": "system", "subtype": "status", "status": nil, "permissionMode": mode, "session_id": "fake-1"})
@@ -118,10 +139,15 @@ func fakeClaude(dir string) {
 					resp, _ := r["response"].(map[string]any)
 					body, _ := json.Marshal(resp["response"])
 					fmt.Fprintln(logf, "answer", resp["request_id"], string(body))
-					if req["tool_name"] == "ExitPlanMode" && strings.Contains(string(body), `"allow"`) {
-						mode = "default"
-						fmt.Fprintln(logf, "left plan")
-						send(map[string]any{"type": "system", "subtype": "status", "status": nil, "permissionMode": mode, "session_id": "fake-1"})
+					tool, _ := req["tool_name"].(string)
+					if (sc.Plan || sc.PlanExit) && tool == "ExitPlanMode" {
+						decision, _ := resp["response"].(map[string]any)
+						if decision["behavior"] == "allow" {
+							mode = "default"
+							fmt.Fprintln(logf, "left plan")
+							send(map[string]any{"type": "system", "subtype": "status", "status": nil, "permissionMode": mode, "session_id": "fake-1"})
+						}
+						send(map[string]any{"type": "user", "message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "tool_use_id": req["tool_use_id"], "content": "done"}}}})
 					}
 					break
 				}

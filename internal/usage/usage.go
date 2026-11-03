@@ -12,6 +12,7 @@ package usage
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"time"
 
@@ -170,4 +171,22 @@ func Over(windows []Window) *Window {
 func (w *Window) Deferral() store.Deferral {
 	return store.Deferral{Window: w.Window, Utilization: *w.Utilization, Threshold: DeferLowAbove,
 		Source: w.Source, ObservedAt: w.ObservedAt}
+}
+
+// Crossed is the fullest window above DeferLowAbove now, or nil: what a
+// race is refused under (docs/tickets.md, Races), whether or not
+// defer_low_priority is on, because a race spends two or three builds on
+// one plan.
+func Crossed(ctx context.Context, st *store.Store, now time.Time) (*Window, error) {
+	r, err := Read(ctx, st, now)
+	if err != nil {
+		return nil, err
+	}
+	return Over(r.Windows), nil
+}
+
+// Above says, for a person, which window is past the threshold.
+func (w *Window) Above() string {
+	return fmt.Sprintf("the subscription's %s window is at %.0f%% (%s, observed %s), above %.0f%%",
+		w.Window, *w.Utilization*100, w.Source, w.ObservedAt.UTC().Format(time.RFC3339), DeferLowAbove*100)
 }

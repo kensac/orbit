@@ -32,6 +32,10 @@ type Server struct {
 	// mu serializes creates, so MaxSandboxes holds between the count and
 	// the create.
 	mu sync.Mutex
+	// ready caches the last readiness answer (health.go).
+	readyMu sync.Mutex
+	ready   sandbox.Readiness
+	readyAt time.Time
 	// boxMu serializes box creates, starts and stops.
 	boxMu sync.Mutex
 	// host and arch are the docker host's, from Check, for BoxStatus.
@@ -104,7 +108,7 @@ func (s *Server) Check(ctx context.Context) error {
 	return nil
 }
 
-// Handler serves the sandbox and box operations, each behind the token.
+// Handler serves the sandbox and box operations, each behind the token, and the two probes without it (health.go).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+sandbox.PathSandboxes, s.create)
@@ -117,7 +121,21 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/tty", s.tty)
 	mux.HandleFunc("GET "+sandbox.PathBoxes+"/{name}/sessions/{session}", s.sessionExists)
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/sessions/{session}/kill", s.sessionKill)
-	return s.auth(mux)
+	authed := s.auth(mux)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			switch r.URL.Path {
+			case sandbox.PathHealthz:
+				w.Header().Set("Content-Type", "text/plain")
+				_, _ = io.WriteString(w, "ok\n")
+				return
+			case sandbox.PathReadyz:
+				s.readyz(w, r)
+				return
+			}
+		}
+		authed.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) auth(next http.Handler) http.Handler {
