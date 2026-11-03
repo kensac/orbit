@@ -205,6 +205,11 @@ func Widening(cur, next *Agent) []string {
 			out = append(out, "delegate to "+d)
 		}
 	}
+	for _, name := range next.DelegateTemplates {
+		if !slices.Contains(cur.DelegateTemplates, name) && !slices.Contains(cur.DelegateTemplates, "*") {
+			out = append(out, "delegate from template "+name)
+		}
+	}
 	for _, n := range next.Needs {
 		if !slices.Contains(cur.Needs, n) {
 			out = append(out, "need "+n)

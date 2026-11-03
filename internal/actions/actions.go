@@ -35,7 +35,7 @@ type Type struct {
 
 // Catalog returns the action types an agent's spec enables (rule auto or
 // approve), in a stable order. Denied types are not offered at all.
-func Catalog(a *spec.Agent, d spec.Deployment) []Type {
+func Catalog(a *spec.Agent, d spec.Deployment, available ...[]store.Template) []Type {
 	var out []Type
 	if r := a.RuleFor("notify"); r != spec.RuleDeny {
 		out = append(out, notifyType(a))
@@ -43,9 +43,21 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 	if r := a.RuleFor("continue"); r != spec.RuleDeny {
 		out = append(out, continueType())
 	}
-	if targets := a.DelegateTargets(); len(targets) > 0 {
+	targets := a.DelegateTargets()
+	var templates []store.Template
+	if len(available) > 0 {
+		for _, tpl := range available[0] {
+			if tpl.Status != "active" {
+				continue
+			}
+			if slices.Contains(a.DelegateTemplateTargets(), "*") || slices.Contains(a.DelegateTemplateTargets(), tpl.Name) {
+				templates = append(templates, tpl)
+			}
+		}
+	}
+	if len(targets) > 0 || len(templates) > 0 {
 		if a.RuleFor(DelegateType) != spec.RuleDeny {
-			out = append(out, delegateType(targets))
+			out = append(out, delegateType(targets, templates, a.Connectors))
 		}
 		if a.RuleFor(TaskMessageType) != spec.RuleDeny {
 			out = append(out, taskMessageType())
@@ -392,11 +404,12 @@ type Executor struct {
 // and run that proposed it.
 type Call struct {
 	// ID is the action's own id.
-	ID     string
-	Agent  string
-	RunID  string
-	Type   string
-	Params json.RawMessage
+	ID             string
+	Agent          string
+	RunID          string
+	ConversationID string
+	Type           string
+	Params         json.RawMessage
 	// Workspace is the run's conversation's workspace, for github:clone
 	// and github:pr; nil for an agent without one.
 	Workspace Workspace

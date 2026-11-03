@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
+	"github.com/kensac/orbit/internal/templates"
 	"github.com/kensac/orbit/internal/testdb"
 )
 
@@ -144,6 +146,9 @@ defaults: {runner: fake, channels: [hook]}
 runners: {fake: {kind: claude-code}}
 channels:
   hook: {kind: webhook, url: %s/notify}
+connectors:
+  drive: {url: https://drive.example/mcp}
+  calendar: {url: https://calendar.example/mcp}
 `, srv.URL))
 	write("agents/planner.yaml", planner)
 	for _, n := range []string{"researcher", "writer"} {
@@ -955,5 +960,55 @@ func TestATaskMayWaitForATaskOfAnEarlierBatch(t *testing.T) {
 	if err := d.s.Pool.QueryRow(ctx, `SELECT COALESCE(error, '') FROM actions WHERE type = 'delegate' ORDER BY created_at DESC LIMIT 1`).Scan(&failed); err != nil ||
 		!strings.Contains(failed, `depends on "nothing-here", which is neither in this delegation nor a task this conversation delegated before`) {
 		t.Fatalf("unknown dependency = %q %v", failed, err)
+	}
+}
+
+func TestADelegateInstantiatesATypedTemplateWithANarrowConnectorSet(t *testing.T) {
+	fr := &scriptRunner{scripts: map[string]func(runner.Request) string{
+		"planner": func(runner.Request) string {
+			return output("Delegated", "on it", nil, delegateAction(`[{"key":"report","template":"weekly","parameters":{"days":7},"connectors":["drive"],"brief":"Prepare a report"}]`))
+		},
+		"specialist": func(runner.Request) string { return output("Report ready", "REPORT", nil) },
+	}}
+	planner := strings.Replace(plannerSpec, "delegates: [researcher, writer]", "delegates: [researcher, writer]\ndelegate_templates: [weekly]\nconnectors: [drive, calendar]", 1)
+	d := newDelegationWith(t, fr, planner)
+	doc, err := templates.Decode([]byte(`{"name":"weekly","description":"Weekly report","parameters":[{"name":"days","type":"number","mode":"required"}],"spec":{"name":"worker","charter":"I am specialist.","connectors":["drive","calendar"]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.s.PutTemplate(ctx, store.TemplateWrite{Doc: doc, Create: true}, store.TemplateProvenance{Source: store.TemplateByPerson}); err != nil {
+		t.Fatal(err)
+	}
+	runID := d.message(t, "Prepare a weekly report")
+	ran := d.step(t)
+	if len(ran["planner"]) == 0 {
+		t.Fatal("planner did not run")
+	}
+	tasks := d.tasks(t, runID)
+	if len(tasks) != 1 || tasks[0].Template == nil || tasks[0].Template.Name != "weekly" || tasks[0].Template.Version != 1 || tasks[0].Agent != "template:weekly" || tasks[0].Status != store.TaskDone {
+		t.Fatalf("template task = %+v", tasks)
+	}
+	if got := fr.last("specialist"); !strings.Contains(got.System, "fresh worker") || !strings.Contains(got.System, "template weekly version 1") {
+		t.Fatalf("template worker prompt lacks its provenance: %s", got.System)
+	}
+	var actual string
+	if err := d.s.Pool.QueryRow(ctx, `SELECT a.agent FROM conversations a WHERE a.id = $1`, tasks[0].ConversationID).Scan(&actual); err != nil {
+		t.Fatal(err)
+	}
+	var spec []byte
+	if err := d.s.Pool.QueryRow(ctx, `SELECT spec FROM agent_specs WHERE sha = (SELECT spec_sha FROM runs WHERE id = $1)`, tasks[0].RunID).Scan(&spec); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Connectors []string `json:"connectors"`
+	}
+	if err := json.Unmarshal(spec, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got.Connectors, []string{"drive"}) {
+		t.Fatalf("worker connectors = %v, expected only the selected connector", got.Connectors)
+	}
+	if actual == "" {
+		t.Fatal("task conversation has no worker agent")
 	}
 }

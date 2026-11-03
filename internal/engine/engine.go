@@ -155,7 +155,23 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 	snap := e.Current()
 	start := time.Now()
 	log := e.Log.With("run", c.ID, "agent", c.Agent)
+	var task *store.Task
+	if c.Trigger == store.TriggerTask {
+		var err error
+		task, err = e.Store.TaskForConversation(ctx, c.ConversationID)
+		if err != nil {
+			return e.fail(ctx, snap, nil, c, start, err, nil)
+		}
+	}
 	a, ok := snap.Config.Agents[c.Agent]
+	if !ok && task != nil && task.Template != nil {
+		var err error
+		a, err = e.taskWorkerAgent(ctx, snap, c, task)
+		if err != nil {
+			return e.fail(ctx, snap, nil, c, start, err, nil)
+		}
+		ok = true
+	}
 	if !ok {
 		return e.fail(ctx, snap, nil, c, start, fmt.Errorf("agent %q is no longer configured", c.Agent), nil)
 	}
@@ -607,7 +623,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 	}
 
-	types := actions.Catalog(a, snap.Config.Deployment)
+	types, err := e.actionCatalog(ctx, a, snap.Config.Deployment)
+	if err != nil {
+		return nil, nil, err
+	}
 	schema := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, true)
 	envelope := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, false)
 	schema, envelope = withEntries(schema, true), withEntries(envelope, false)
@@ -845,7 +864,11 @@ func leafErrors(o *jsonschema.OutputUnit) string {
 
 func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, start time.Time, out *Output, res *runner.Result) error {
 	types := map[string]actions.Type{}
-	for _, t := range actions.Catalog(a, snap.Config.Deployment) {
+	catalog, err := e.actionCatalog(ctx, a, snap.Config.Deployment)
+	if err != nil {
+		return err
+	}
+	for _, t := range catalog {
 		types[t.Name] = t
 	}
 	o := store.Outcome{Questions: e.outcomeQuestions(c, out.Questions)}
@@ -1297,7 +1320,11 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 		if err != nil || act == nil {
 			return err
 		}
-		call := actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)}
+		conversationID, err := e.Store.RunConversation(ctx, act.RunID)
+		if err != nil {
+			return err
+		}
+		call := actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, ConversationID: conversationID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)}
 		var after func()
 		if a, ok := snap.Config.Agents[act.Agent]; ok && a.Chat {
 			call.Workspace, after = e.storedWorkspace(ctx, act.RunID)

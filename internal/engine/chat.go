@@ -689,7 +689,7 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return "orbit could not record the action: " + err.Error(), true
 	}
 	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ActionTimeout)
-	result, xerr := e.executor(snap).Execute(actx, actions.Call{ID: id, Agent: a.Name, RunID: c.ID, Type: v.Type, Params: v.Params, Rule: rule,
+	result, xerr := e.executor(snap).Execute(actx, actions.Call{ID: id, Agent: a.Name, RunID: c.ID, ConversationID: c.ConversationID, Type: v.Type, Params: v.Params, Rule: rule,
 		Workspace: runner.WorkspaceOf(ctx)})
 	cancel()
 	if err := e.finishAction(ctx, snap, &store.Action{ID: id, RunID: c.ID, Agent: a.Name, Type: v.Type}, result, xerr); err != nil {
