@@ -26,6 +26,8 @@ import (
 //	GET  /v1/boxes/{name}/accounts/{slot}          AccountStatus, read from the account's own files
 //	GET  /v1/boxes/{name}/accounts/{slot}/usage    AccountUsage the box's status line recorded
 //	POST /v1/boxes/{name}/accounts/{slot}/usage/poll  AccountUsage from /api/oauth/usage, asked from the box
+//	PUT  /v1/boxes/{name}/gh-token                 body: a GitHub installation token, written to /run/orbit/gh-token; 204
+//	DELETE /v1/boxes/{name}/gh-token               removes it; 204
 //
 // As for sandboxes, no request names a docker option: a TTY's argv comes
 // from a fixed preset (TTYShell, TTYClaude, TTYLogin), a tmux session name

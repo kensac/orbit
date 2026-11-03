@@ -52,20 +52,25 @@ func KeyPEM() string {
 type Server struct {
 	Srv *httptest.Server
 
-	Mu         sync.Mutex
-	Granted    map[string]string // what access_tokens answers with; nil echoes the request
-	TokenReq   map[string]any
-	Revoked    []string
-	PR         map[string]any
-	Mergeable  []any // successive values of "mergeable"; the last repeats
-	PRReads    int
-	Protection map[string]any
-	Rules      []any
-	CheckRuns  []map[string]any
-	Statuses   []map[string]any
-	Patched    []map[string]string
-	Merged     map[string]string
-	Calls      []string
+	Mu       sync.Mutex
+	Granted  map[string]string // what access_tokens answers with; nil echoes the request
+	TokenReq map[string]any
+	// TokenReqs are every access_tokens request, in order.
+	TokenReqs []map[string]any
+	// InstallationRepos are the full names GET /installation/repositories
+	// lists (the installation on kensac), paged as GitHub does.
+	InstallationRepos []string
+	Revoked           []string
+	PR                map[string]any
+	Mergeable         []any // successive values of "mergeable"; the last repeats
+	PRReads           int
+	Protection        map[string]any
+	Rules             []any
+	CheckRuns         []map[string]any
+	Statuses          []map[string]any
+	Patched           []map[string]string
+	Merged            map[string]string
+	Calls             []string
 
 	// The build delivery's side. PR nil means no PR exists yet: creating
 	// one makes it PR 7, with its head at BranchHead(ref).
@@ -162,7 +167,7 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/installation":
+	case r.Method == "GET" && (r.URL.Path == "/repos/kensac/orbit/installation" || r.URL.Path == "/users/kensac/installation"):
 		if !f.validJWT(strings.TrimPrefix(auth, "Bearer ")) {
 			f.write(w, 401, map[string]string{"message": "A JSON web token could not be decoded"})
 			return
@@ -174,7 +179,9 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			f.write(w, 401, map[string]string{"message": "bad jwt"})
 			return
 		}
+		f.TokenReq = nil
 		_ = json.NewDecoder(r.Body).Decode(&f.TokenReq)
+		f.TokenReqs = append(f.TokenReqs, f.TokenReq)
 		perms := map[string]any{"metadata": "read"}
 		if f.Granted != nil {
 			for k, v := range f.Granted {
@@ -196,6 +203,17 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "DELETE" && r.URL.Path == "/installation/token":
 		f.Revoked = append(f.Revoked, auth)
 		w.WriteHeader(204)
+	case r.Method == "GET" && r.URL.Path == "/installation/repositories":
+		var page, per int
+		_, _ = fmt.Sscan(r.URL.Query().Get("page"), &page)
+		_, _ = fmt.Sscan(r.URL.Query().Get("per_page"), &per)
+		repos := []any{}
+		for i, n := range f.InstallationRepos {
+			if i >= (page-1)*per && i < page*per {
+				repos = append(repos, map[string]any{"full_name": n})
+			}
+		}
+		f.write(w, 200, map[string]any{"total_count": len(f.InstallationRepos), "repositories": repos})
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls" && r.URL.Query().Get("head") == "":
 		// A plain list: PR and Others in the state asked for, paged.
 		f.write(w, 200, f.list(r.URL.Query()))
