@@ -133,6 +133,7 @@ A connector's tools act on a person's account at another service (internal/conne
 ## The API
 
 - **Evaluation replay** (`POST /agents/{name}/replay`, docs/api.md) is an authenticated backend call, not a stored run. One request takes a snapshot of the current agent charter and active skills, then runs each caller-provided saved input sequentially; it fetches no sources and grants no actions, custom tools, connectors, hooks or sessions. Claude Code's built-in file tools can read only the private temporary directory holding that input and the skill files. The backend receives only its own credential through the runner's environment allowlist. The response output is returned to the caller and is not written to the run journal or artifacts.
+- **Evaluation grading** (`POST /agents/{grader}/grade`, docs/api.md) is an authenticated backend call separate from replay. It requires a grader agent using a separately configured runner from the replay target, and invokes that runner without either agent's charter or skills. It sends only the bounded human rubric and candidate output; no sources, custom agent tools, action tools, connectors, hooks or sessions are available. Claude Code has built-in read-only access to the private temporary files holding the grading input. Temporary files are removed after the call, and neither grade nor candidate output is stored.
 
 - Deployed behind traefik at a public hostname. `/ui/` is behind authentik
   forward-auth; `/api/` is routed past it, and orbit verifies the authentik

@@ -152,8 +152,9 @@ func TestManualRunAndMessageWake(t *testing.T) {
 }
 
 type replayRunner struct {
-	got   runner.Request
-	calls int
+	got    runner.Request
+	calls  int
+	output json.RawMessage
 }
 
 func (r *replayRunner) Kind() string  { return "claude-code" }
@@ -162,7 +163,11 @@ func (r *replayRunner) Run(_ context.Context, req runner.Request, _ func(runner.
 	r.got = req
 	r.calls++
 	cost := 0.13
-	return &runner.Result{Output: json.RawMessage(`{"summary":"ok","report":"ok","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[]}`), CostUSD: &cost}, nil
+	output := r.output
+	if len(output) == 0 {
+		output = json.RawMessage(`{"summary":"ok","report":"ok","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[]}`)
+	}
+	return &runner.Result{Output: output, CostUSD: &cost}, nil
 }
 
 func TestEvaluationReplayUsesCurrentAgentWithoutPersisting(t *testing.T) {
@@ -193,6 +198,53 @@ func TestEvaluationReplayUsesCurrentAgentWithoutPersisting(t *testing.T) {
 	}
 	if code, _ := call(t, "POST", v.internal.URL+"/api/v1/agents/a/replay", token, `{}`); code != http.StatusBadRequest || fr.calls != 1 {
 		t.Fatalf("missing input = %d, backend calls %d", code, fr.calls)
+	}
+}
+
+func TestEvaluationGradeUsesSeparateReadOnlyBackendWithoutPersisting(t *testing.T) {
+	v := newEnv(t, nil)
+	fr := &replayRunner{output: json.RawMessage(`{"passed":true,"reason":"the output follows the rubric"}`)}
+	v.e.NewRunner = func(name string, _ spec.RunnerSpec, _ func(string) (string, bool)) (runner.Runner, error) {
+		if name != "grader-backend" {
+			t.Errorf("unexpected runner %q", name)
+		}
+		return fr, nil
+	}
+	cfg := *v.e.Current().Config
+	gradeAgent := *cfg.Agents["a"]
+	gradeAgent.Name, gradeAgent.Runner = "grader", "grader-backend"
+	cfg.Agents = map[string]*spec.Agent{"a": cfg.Agents["a"], "grader": &gradeAgent}
+	cfg.Deployment.Runners = map[string]spec.RunnerSpec{"r": {Kind: "claude-code"}, "grader-backend": {Kind: "claude-code", Model: "grader-model"}}
+	if err := v.e.SetConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	before, err := v.s.ListRuns(ctx, store.RunFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, got := call(t, "POST", v.internal.URL+"/api/v1/agents/grader/grade", token,
+		`{"target_agent":"a","cases":[{"name":"one","rubric":"mentions the saved total","output":{"summary":"total is 4"}}]}`)
+	grades, _ := got["grades"].([]any)
+	if code != http.StatusOK || len(grades) != 1 || grades[0].(map[string]any)["passed"] != true {
+		t.Fatalf("grade = %d %v", code, got)
+	}
+	if len(fr.got.Tools) != 0 || fr.got.Harness != nil || fr.got.Session != nil || fr.got.Connectors != nil || fr.got.SkillsPlugin != "" {
+		t.Fatalf("grader received capabilities: %+v", fr.got)
+	}
+	if len(fr.got.Inputs) != 1 || !strings.Contains(string(fr.got.Inputs[0].Content), "mentions the saved total") || !strings.Contains(string(fr.got.Inputs[0].Content), `"summary":"total is 4"`) || strings.Contains(fr.got.System, gradeAgent.Charter) {
+		t.Fatalf("grader request = %+v", fr.got)
+	}
+	if code, _ := call(t, "POST", v.internal.URL+"/api/v1/agents/grader/grade", token,
+		`{"target_agent":"a","unexpected":true,"cases":[]}`); code != http.StatusBadRequest {
+		t.Fatalf("unknown field = %d", code)
+	}
+	if code, _ := call(t, "POST", v.internal.URL+"/api/v1/agents/grader/grade", token,
+		`{"target_agent":"grader","cases":[{"name":"one","rubric":"check","output":{}}]}`); code != http.StatusBadRequest {
+		t.Fatalf("same grader and target accepted: %d", code)
+	}
+	after, err := v.s.ListRuns(ctx, store.RunFilter{})
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("grading persisted a run: before %d after %d err %v", len(before), len(after), err)
 	}
 }
 
