@@ -215,7 +215,7 @@ conversation is never deleted, only archived.
   "ticket_id": null, "workspace_id": null, "task_id": null, "purpose": null,
   "last_run": {"id": "uuid", "status": "running", "trigger": "message",
                "created_at": "...", "finished_at": null, "summary": null},
-  "read_through": "..."}],
+  "read_through": "...", "from_session": null}],
  "has_more": false, "next_before": null}
 ```
 
@@ -243,6 +243,8 @@ a model). `client_request_id` makes a retry return the first result, as for
 messages below.
 
 `POST /conversations` takes the same body plus `agent`, and creates the conversation with that agent, or with the built-in general agent `orbit` when `agent` is absent: what "New chat" calls. 404 when the agent is not configured.
+
+Either route also takes `from_session`: an imported session (Imported sessions, below), by orbit's `id` or by its `session_id`, to continue on the server. The conversation's runs resume that session (`--resume <id> --fork-session`) until one of them succeeds, and from then on the conversation's own session, as any session agent's do: the session's current lines are written as a transcript under a session id of orbit's (derived from the session and its `content_sha256`, never the laptop's own id) into the session store, and a run writes it back on whichever host claims it. Its `from_session` is the session's `id`. Without a `title` or `body`, the session's title (or first prompt) names it. The agent must run Claude Code with `session.resume` (the built-in `orbit` does): 400 otherwise, or for a session whose transcript is over 64 MiB compressed; 404 for an unknown session.
 
 `GET /conversations/{id}` returns `{"conversation": {...}}`, the same shape.
 
