@@ -860,7 +860,7 @@ orbit reads the PR and its files from GitHub on each request, with a token for t
 
 ## Delegation
 
-An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each task has its own conversation of its agent, which is an ordinary conversation (thread, messages, runs) whose first message is the brief, written by the delegating agent: a message's `author` of `agent:<name>` is an agent, not a person. The delegating conversation's thread shows each run's `tasks`; these routes show the rest.
+An agent hands tasks to other agents or instantiates a fresh worker from an active template (docs/ARCHITECTURE.md, Delegation). An agent names allowed targets with `delegates` and `delegate_templates` in its spec. A template task supplies typed `parameters`; `user_prompt` templates are not offered. Its connector set is the intersection of the parent agent and rendered template, optionally narrowed by the task's `connectors` list. The worker spec and template version are pinned to the task. Each task has its own conversation whose first message is the brief, written by the delegating agent: a message's `author` of `agent:<name>` is an agent, not a person. A template-backed task reports `agent` as `template:<name>` and includes `template: {name, version}`. The delegating conversation's thread shows each run's `tasks`; these routes show the rest.
 
 `GET /conversations/{id}/tasks` is `{"tasks": [<task>]}`: the tasks delegated from that conversation, oldest first. `GET /tasks/{id}` is `{"task": <task>}`:
 
