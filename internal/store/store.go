@@ -187,6 +187,7 @@ func (s *Store) ListAgents(ctx context.Context) ([]AgentRow, error) {
 		    SELECT r.id::text, r.status, r.trigger, r.created_at, r.finished_at, r.summary
 		    FROM runs r WHERE r.agent = a.name ORDER BY r.created_at DESC LIMIT 1
 		) lr ON true
+		WHERE NOT a.task_worker
 		ORDER BY a.present DESC, a.name`)
 	if err != nil {
 		return nil, err
