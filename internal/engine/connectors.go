@@ -90,7 +90,11 @@ func (e *Engine) connectorAuth(d spec.Deployment, name string, cn spec.Connector
 			}
 			secret = v
 		}
-		return &connectors.OAuthAuth{Conn: name, Store: tokenRows{e.Store}, Sealer: sealer, HTTP: e.Client, Secret: secret}, nil
+		client := e.Client
+		if cn.CatalogManaged {
+			client = connectors.PublicClient(client)
+		}
+		return &connectors.OAuthAuth{Conn: name, Store: tokenRows{e.Store}, Sealer: sealer, HTTP: client, Secret: secret}, nil
 	}
 	return connectors.NoAuth{}, nil
 }
