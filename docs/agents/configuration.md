@@ -400,7 +400,7 @@ fails at runtime, not at load.
 
 ## Connectors
 
-`connectors:` in `orbit.yaml` names MCP servers; an agent's `connectors: [<name>, ...]` gives its runs their tools, as `mcp__<name>__<tool>` (claude-code runners only; docs/ARCHITECTURE.md, Connectors). orbit is the gateway: it lists the tools before each run and makes every call itself with the connector's credential, so neither the CLI nor a sandbox ever holds one.
+`connectors:` in `orbit.yaml` names MCP servers; an agent's `connectors: [<name>, ...]` gives its runs their tools, as `mcp__<name>__<tool>` (claude-code runners only; docs/ARCHITECTURE.md, Connectors). orbit is the gateway: it lists the tools before each run and makes every call itself. HTTP credentials stay in orbit; package-backed stdio servers run without credentials in sandboxd.
 
 A signed-in person can also add a public OAuth connector by URL at `POST /api/v1/connectors/catalog` (docs/api.md). Its URL, description, scopes, and creator are stored as configuration; OAuth grants remain separately sealed in `connector_tokens`. These records join the deployment's connector map and are offered to `agent:define`. Every tool of a catalog connector defaults to `approve`; an agent must explicitly set a tool rule to change that behavior.
 
@@ -416,13 +416,26 @@ connectors:
   sheets:
     url: https://sheets.example.com/mcp
     auth: {kind: oauth}
+  local-tools:
+    transport: stdio
+    package: local-tools
+    description: Read-only tools from a reviewed local package.
 ```
+
+An stdio connector names an exact native package in `extensions.packages`; it
+has no URL or authentication. Every declared operation must be a local `tool`
+with bounded input and output schemas. Orbit checks the package digest and
+manifest, starts it in sandboxd's networkless extension profile, and takes
+the offered tool names, descriptions and schemas from the pinned manifest.
+The server's result content remains untrusted. Review package code before
+pinning it. This first slice checks package structure and integrity, but does
+not include antivirus signatures or claim malware detection.
 
 - **Auth.** `none`; `header`, whose value may carry only `credentials:` variables bound to a prefix the connector's URL starts with (the same binding as a source's, checked at load and on every call; orbit follows no redirect); or `oauth`, where a person signs in once through `POST /api/v1/connectors/{name}/authorize` (docs/api.md, Connectors) and orbit keeps the token, sealed under `ORBIT_CONNECTOR_KEY` (at least 32 characters, on every host that calls the connector), a new version per sign-in and per refresh, none deleted. An oauth connector nobody has signed in is left out of runs, and the run's prompt says so.
 - **Rules.** A tool in `write_tools` waits for a person (`approve`); any other runs when called (`auto`), the server's `readOnlyHint` notwithstanding, since the deployment says what changes the world. An agent overrides one tool with `mcp:<connector>:<tool>: auto | approve | deny` in `actions`; `deny` is not offered at all. An `approve` call in a run answering its person's message is asked for in the chat: it becomes a pending action `connector:<connector>/<tool>` the person approves or rejects (`POST /actions/{id}/approve`), and the call runs once they approve, its result going back to the model in the same turn. In any other run it is recorded as that pending action and the model is told it waits; orbit executes it at most once after approval, from the action loop, with the result on the action. An `auto` call to a `write_tools` tool also leaves an executed action as its record. Unlike an `act` action in a chat, which a run answering its person executes on their message, a connector call waits for the person to approve its exact arguments even then: they never saw them. Approving with `always` (docs/api.md, Actions) sets that tool's `mcp:<connector>:<tool>` to `auto`.
 - **Results.** A result over 32 KiB is written into the attempt's inputs (`inputs/.../connectors/<connector>-<tool>-<n>.json`) and stored as an artifact; the model is given its path. Every call is an `orbit.connector` event with its bounded result.
 - **Hosts.** A worker that runs an agent with connectors needs their credentials (`ORBIT_CONNECTOR_KEY`, the header variables, a `client_secret_env`); give such an agent a capability only those hosts advertise (docs/agents/deployment.md, Capabilities). `orbit validate` lists the variables.
-- `transport: stdio` is refused: a local server would run in sandboxd, which is not built.
+- **Stdio packages.** Set `extensions.enabled: true`, pin the package by absolute path and SHA-256 under `extensions.packages`, then set `transport: stdio` and its package ID. The package must declare only `tool` operations, without input slots or endpoint bindings. It has no credentials or network access, and is limited by the smallest declared operation memory ceiling. Calls are still subject to the agent's connector rules and `write_tools` approvals.
 
 ### Typed Google writes
 

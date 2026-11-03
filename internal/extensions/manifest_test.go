@@ -52,12 +52,43 @@ func TestManifestRejections(t *testing.T) {
 		"action without destination": changed(t, func(m map[string]any) { operation(m)["kind"] = "action" }),
 		"unknown limit":              changed(t, func(m map[string]any) { operation(m)["limits"].(map[string]any)["network"] = true }),
 		"unbounded resources":        changed(t, func(m map[string]any) { operation(m)["limits"].(map[string]any)["timeout_ms"] = 30001 }),
+		"hidden description":         changed(t, func(m map[string]any) { operation(m)["description"] = "safe\u202e text" }),
 		"oversize":                   bytes.Repeat([]byte(" "), MaxManifestBytes+1),
 	}
 	for name, b := range tests {
 		t.Run(name, func(t *testing.T) {
 			if _, e := Parse(b); e == nil {
 				t.Fatal("accepted unsafe manifest")
+			}
+		})
+	}
+}
+
+func TestStdioServerAcceptsOnlyLocalToolContracts(t *testing.T) {
+	m, err := Parse(changed(t, func(m map[string]any) { operation(m)["kind"] = "tool"; delete(operation(m), "inputs") }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateStdioServer(&Package{Manifest: m}); err != nil {
+		t.Fatalf("local tool package refused: %v", err)
+	}
+
+	for name, edit := range map[string]func(map[string]any){
+		"source operation": func(m map[string]any) { operation(m)["kind"] = "source" },
+		"input slot":       func(m map[string]any) { operation(m)["kind"] = "tool"; operation(m)["inputs"] = []any{"records"} },
+		"endpoint": func(m map[string]any) {
+			operation(m)["kind"] = "action"
+			operation(m)["endpoint"] = "write"
+			delete(operation(m), "inputs")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			manifest, err := Parse(changed(t, edit))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateStdioServer(&Package{Manifest: manifest}); err == nil {
+				t.Fatal("accepted nonlocal stdio contract")
 			}
 		})
 	}
