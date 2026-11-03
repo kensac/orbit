@@ -20,10 +20,12 @@ func TestWorkspaceSearch(t *testing.T) {
 		"src/a.go":         []byte("package a\n\nfunc Needle() {}\n// needle and needle\n"),
 		"src/b.txt":        []byte("héllo needle\r\n"),
 		"long.txt":         []byte(long + "\n"),
+		"unicode.txt":      []byte("a😀needle\n"),
 		"bin.dat":          []byte("needle\x00"),
 		"big.txt":          append(bytes.Repeat([]byte("z"), 2<<20), []byte("needle")...),
 		".gitignore":       []byte("build/\n"),
 		"build/out.txt":    []byte("needle\n"),
+		"build/nested.txt": []byte("needle\n"),
 		".orbit/claude/x":  []byte("needle"),
 		"inputs/run/a.txt": []byte("needle"),
 	})
@@ -46,10 +48,10 @@ func TestWorkspaceSearch(t *testing.T) {
 	// Case-insensitive by default, in tree order (directories first); binary,
 	// too large, ignored and orbit's own files are not searched.
 	code, r := search("q=needle")
-	if code != 200 || r["truncated"] != false || r["files_searched"] != 4.0 {
+	if code != 200 || r["truncated"] != false || r["files_searched"] != 5.0 {
 		t.Fatalf("search = %d %v", code, r)
 	}
-	if got := where(r); got != "src/a.go:3:6-12 src/a.go:4:4-10 src/a.go:4:15-21 src/b.txt:1:7-13 long.txt:1:301-307" {
+	if got := where(r); got != "src/a.go:3:6-12 src/a.go:4:4-10 src/a.go:4:15-21 src/b.txt:1:7-13 long.txt:1:301-307 unicode.txt:1:4-10" {
 		t.Fatalf("matches = %s", got)
 	}
 	ms := r["matches"].([]any)
@@ -58,9 +60,13 @@ func TestWorkspaceSearch(t *testing.T) {
 		lp["preview_column"].(float64)+float64(strings.Index(lp["preview"].(string), "needle")) != 301 {
 		t.Fatalf("long preview = %v", lp)
 	}
-	// A column counts UTF-16 units: é is one; the CR is not in the preview.
+	// A column counts UTF-16 units: é is one and the emoji is two. The CR is
+	// not in the preview.
 	if b := ms[3].(map[string]any); b["preview"] != "héllo needle" || b["preview_column"] != 1.0 {
 		t.Fatalf("b.txt = %v", b)
+	}
+	if code, r := search("q=needle&path=unicode.txt"); code != 200 || where(r) != "unicode.txt:1:4-10" {
+		t.Fatalf("UTF-16 columns = %d %v", code, r)
 	}
 	if _, r := search("q=Needle&case=1"); where(r) != "src/a.go:3:6-12" {
 		t.Fatalf("case = %s", where(r))
@@ -76,6 +82,9 @@ func TestWorkspaceSearch(t *testing.T) {
 	}
 	if _, r := search("q=needle&path=build/out.txt"); len(r["matches"].([]any)) != 1 {
 		t.Fatalf("an ignored file named directly = %v", r)
+	}
+	if _, r := search("q=needle&path=build"); r["files_searched"] != 2.0 || len(r["matches"].([]any)) != 2 {
+		t.Fatalf("an ignored directory named directly = %v", r)
 	}
 	if _, r := search("q=needle&limit=2"); len(r["matches"].([]any)) != 2 || r["truncated"] != true {
 		t.Fatalf("limit = %v", r)

@@ -53,8 +53,12 @@ type Request struct {
 	// Chat, when set, makes a claude-code run a chat run (chat.go): no
 	// OutputSchema, the reply its final message.
 	Chat *Chat
+	// WebAllow, when set, limits WebFetch to these domains (spec web.allow): each is an allow rule in place of the bare tool, and the private names are denied (web.go). Only for a run on orbit's host.
+	WebAllow []string
 	// SkillsPlugin is a plugin directory holding the run's skills (engine/skills.go), loaded with --plugin-dir; claude-code only.
 	SkillsPlugin string
+	// Connectors are the MCP servers the run reaches through orbit (connectors.go); claude-code only. A run with any talks to the CLI over stream-json, whose control channel carries their calls.
+	Connectors *Connectors
 }
 
 // Harness is orbit's own code inside the CLI's process tree.
@@ -74,6 +78,8 @@ type Harness struct {
 	// Repos is the engine's repository tools socket for the run's agent
 	// (engine/repos.go); empty offers none.
 	Repos string
+	// Prometheus is the engine's prometheus tool socket for the run's agent (engine/prometheus.go); empty offers no prometheus_query.
+	Prometheus string
 	// AgentHooks are the agent's own hooks (spec hooks), run by `orbit agent-hook` beside orbit's.
 	AgentHooks []AgentHook
 }

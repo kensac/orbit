@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"regexp"
 	"time"
-	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/kensac/orbit/internal/store"
@@ -49,7 +48,11 @@ func utf16Len(b []byte) int {
 	n := 0
 	for len(b) > 0 {
 		r, size := utf8.DecodeRune(b)
-		n += len(utf16.Encode([]rune{r}))
+		if r > 0xffff {
+			n += 2
+		} else {
+			n++
+		}
 		b = b[size:]
 	}
 	return n
@@ -125,6 +128,8 @@ func (s *Server) workspaceSearch(w http.ResponseWriter, r *http.Request, t *stor
 	deadline := time.Now().Add(searchBudget)
 	matches := []searchMatch{}
 	files, truncated := 0, false
+	expired := func() bool { return time.Now().After(deadline) || r.Context().Err() != nil }
+	includeIgnoredRoot := snap.Ignored(top)
 	// search scans one file; false stops the search.
 	search := func(e *workspace.Entry) bool {
 		data := e.Data()
@@ -133,6 +138,10 @@ func (s *Server) workspaceSearch(w http.ResponseWriter, r *http.Request, t *stor
 		}
 		files++
 		for n := 1; len(data) > 0; n++ {
+			if expired() {
+				truncated = true
+				return false
+			}
 			line := data
 			if i := bytes.IndexByte(data, '\n'); i >= 0 {
 				line, data = data[:i], data[i+1:]
@@ -140,30 +149,61 @@ func (s *Server) workspaceSearch(w http.ResponseWriter, r *http.Request, t *stor
 				data = nil
 			}
 			line = bytes.TrimSuffix(line, []byte("\r"))
-			for _, m := range re.FindAllIndex(line, -1) {
-				if m[0] == m[1] {
+			matchEnd, matchColumn := 0, 1
+			previewStart, previewColumn := 0, 1
+			for offset := 0; offset <= len(line); {
+				if expired() {
+					truncated = true
+					return false
+				}
+				m := re.FindIndex(line[offset:])
+				if expired() {
+					truncated = true
+					return false
+				}
+				if m == nil {
+					break
+				}
+				lo, hi := offset+m[0], offset+m[1]
+				if lo == hi {
+					if hi == len(line) {
+						break
+					}
+					_, size := utf8.DecodeRune(line[hi:])
+					offset = hi + size
 					continue
 				}
 				if len(matches) == limit {
 					truncated = true
 					return false
 				}
-				pv, at := preview(line, m[0], m[1])
-				col := utf16Len(line[:m[0]]) + 1
+				pv, at := preview(line, lo, hi)
+				col := matchColumn + utf16Len(line[matchEnd:lo])
+				if matchEnd == 0 {
+					col = 1 + utf16Len(line[:lo])
+				}
+				pcol := previewColumn + utf16Len(line[previewStart:at])
+				if at < previewStart {
+					pcol = 1 + utf16Len(line[:at])
+				}
+				endColumn := col + utf16Len(line[lo:hi])
 				matches = append(matches, searchMatch{Path: e.Path, Line: n, Column: col,
-					EndColumn: col + utf16Len(line[m[0]:m[1]]), Preview: string(pv), PreviewColumn: utf16Len(line[:at]) + 1})
+					EndColumn: endColumn, Preview: string(pv), PreviewColumn: pcol})
+				matchEnd, matchColumn = hi, endColumn
+				previewStart, previewColumn = at, pcol
+				offset = hi
 			}
-		}
-		if time.Now().After(deadline) || r.Context().Err() != nil {
-			truncated = true
-			return false
 		}
 		return true
 	}
 	// walk visits files in tree order, skipping what .gitignore ignores.
 	var walk func(e *workspace.Entry) bool
 	walk = func(e *workspace.Entry) bool {
-		if e.Path != "" && e.Path != root && snap.Ignored(e) {
+		if expired() {
+			truncated = true
+			return false
+		}
+		if e.Path != "" && e.Path != root && !includeIgnoredRoot && snap.Ignored(e) {
 			return true
 		}
 		switch e.Kind {
@@ -179,5 +219,8 @@ func (s *Server) workspaceSearch(w http.ResponseWriter, r *http.Request, t *stor
 		return true
 	}
 	walk(top)
+	if expired() {
+		truncated = true
+	}
 	respond(w, map[string]any{"matches": matches, "truncated": truncated, "files_searched": files}, nil)
 }
