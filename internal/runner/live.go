@@ -185,6 +185,7 @@ type liveProcess interface {
 	SendUUID(text, uuid string) error
 	CancelQueued(ctx context.Context, uuid string) (bool, error)
 	Capable(name string) bool
+	LastLine() time.Time
 	SetPermissionMode(ctx context.Context, mode string) error
 }
 
@@ -265,7 +266,17 @@ func (c *claudeCode) runLive(ctx context.Context, sess *Session, args, env []str
 		return nil, true, err
 	}
 	p.tools.connectors(req.Connectors)
+	stopWatch := req.Stall.watch(ctx, p.proc, func(ctx context.Context) error {
+		_, err := p.proc.Interrupt(ctx, false)
+		return err
+	})
 	final, err = p.turn(ctx, req.Prompt, emit)
+	stopWatch()
+	if req.Stall.Fired() {
+		emit(req.Stall.event())
+		sess.Live.drop(p)
+		return nil, true, stallError(req.Stall)
+	}
 	p.tools.connectors(nil)
 	if err != nil {
 		sess.Live.drop(p)

@@ -389,6 +389,9 @@ func (s *Server) mcpWait(ctx context.Context, req *mcp.CallToolRequest, id strin
 		}
 	}
 	run, err := s.Store.ThreadRunByID(ctx, id)
+	if err == nil {
+		err = s.withRunChanges(ctx, []store.ThreadItem{{Run: run}})
+	}
 	if err != nil {
 		return mcpErr(err)
 	}
