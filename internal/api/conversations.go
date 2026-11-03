@@ -122,9 +122,7 @@ func (s *Server) updateConversation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) conversationThread(w http.ResponseWriter, r *http.Request) {
-	s.servePage(w, r, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
-		return s.Store.ConversationThread(r.Context(), r.PathValue("id"), before, limit)
-	})
+	s.serveThread(w, r, r.PathValue("id"))
 }
 
 func (s *Server) conversationMessage(w http.ResponseWriter, r *http.Request) {

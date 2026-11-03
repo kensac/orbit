@@ -265,7 +265,7 @@ func (s *Store) Health(ctx context.Context) (*Health, error) {
 			FROM agents a
 			JOIN LATERAL (
 			    SELECT r.id::text, r.finished_at FROM runs r
-			    WHERE r.agent = a.name AND r.status IN ('succeeded', 'skipped')
+			    WHERE r.agent = a.name AND r.status IN ('succeeded', 'skipped') AND r.gate IS DISTINCT FROM 'missed'
 			    ORDER BY r.finished_at DESC LIMIT 1
 			) ls ON true
 			WHERE a.present`) // runs_agent_last_success serves the lateral read
@@ -298,7 +298,7 @@ func (s *Store) LastSuccessTimes(ctx context.Context) (map[string]time.Time, err
 		SELECT a.name, ls.finished_at FROM agents a
 		JOIN LATERAL (
 		    SELECT r.finished_at FROM runs r
-		    WHERE r.agent = a.name AND r.status IN ('succeeded', 'skipped')
+		    WHERE r.agent = a.name AND r.status IN ('succeeded', 'skipped') AND r.gate IS DISTINCT FROM 'missed'
 		    ORDER BY r.finished_at DESC LIMIT 1
 		) ls ON true`)
 	if err != nil {
