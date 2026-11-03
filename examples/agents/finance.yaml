@@ -28,6 +28,11 @@ sources:
       start_date: "{{prev_month_start}}"
       end_date: "{{today}}"
       per_page: "100"
+    # A person's question may compare months: a message run reads the last three.
+    by_trigger:
+      message:
+        query:
+          start_date: "{{months_ago_start 3}}"
     paginate:
       page_param: page
       items_path: transactions
