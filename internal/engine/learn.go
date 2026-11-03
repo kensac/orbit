@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -187,6 +188,8 @@ func (e *Engine) learn(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 	if err != nil {
 		return nil, nil, nil, nil, nil, "", err
 	}
+	// A /remember was written when it was said (remember.go); learning from it again would only duplicate it.
+	items = slices.DeleteFunc(items, func(it store.ConversationItem) bool { return it.Kind == "message" && isRemember(it.Body) })
 	said := false
 	for _, it := range items {
 		said = said || it.Kind == "message"
@@ -213,7 +216,7 @@ func (e *Engine) learn(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 	var inputs []runner.Input
 	index := "# What you know\n\n(nothing yet)\n"
 	if len(entries) > 0 {
-		if index, inputs, err = e.knownInput(ctx, c, entries, workdir, "inputs", nil); err != nil {
+		if index, inputs, err = e.knownInput(ctx, false, c, entries, workdir, "inputs", nil); err != nil {
 			return nil, nil, nil, nil, nil, "", err
 		}
 	}
@@ -237,7 +240,11 @@ func (e *Engine) learn(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 	emit := func(ev runner.Event) { events.emit(ev.Kind, ev.Payload) }
 	runCtx, cancel := context.WithTimeout(ctx, learnTimeout(a))
 	defer cancel()
-	res, err = r.Run(runCtx, runner.Request{RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs, OutputSchema: schema}, emit)
+	req := runner.Request{RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs, OutputSchema: schema}
+	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), "", req)); err != nil {
+		return nil, nil, nil, nil, nil, "", err
+	}
+	res, err = r.Run(runCtx, req, emit)
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, nil, nil, nil, res, "", fmt.Errorf("timed out after %s", learnTimeout(a))
 	}

@@ -59,10 +59,23 @@ type Chat struct {
 	// Interrupt, when closed, interrupts the turn (a person pressed stop):
 	// the CLI ends it with a result, and the run reports Interrupted.
 	Interrupt <-chan struct{}
+	// Fresh is a workspace a person changed since the last turn: a live
+	// process (its sandbox's copy of the workspace, or a cwd the restore
+	// replaced) is not reused, and the session resumes in a new one
+	// started from the workdir as it is now.
+	Fresh bool
+	// Steer carries the person's messages for the turn while it runs
+	// (steer.go); nil for none.
+	Steer <-chan SteerMessage
+	// Steered is told each steer message the turn took: from then on the
+	// turn answers it.
+	Steered func(id string)
 	// Level is the run's permission level (spec.Levels, resolved by the engine), and Ceiling the widest its conversation may set: a process whose ceiling is full is launched so that it can be raised to it.
 	Level, Ceiling string
 	// Prompt answers the CLI's permission requests during the turn; nil denies each one.
 	Prompt Prompt
+	// RecordPermission persists each decision before the CLI receives it.
+	RecordPermission func(claudeproto.PermissionRequest, claudeproto.Permission) error
 }
 
 // SandboxClient is sandboxd's four operations (*sandbox.Client).
@@ -110,15 +123,21 @@ const SandboxPlugin = sandbox.WorkDir + "/.orbit/plugin"
 const workstation = "workstation"
 
 // chatSettings are a chat run's --settings. Local runs keep orbit's deny
-// rules and the CLI's own workdir limit at every level; a sandbox is the
-// boundary for a sandboxed run, so the CLI there may do anything inside it
-// the level lets through. The mode itself is --permission-mode.
-func chatSettings(keepDays int, hooks map[string]any, sandboxed bool) string {
-	perms := map[string]any{"deny": []string{
+// rules and the CLI's own workdir limit; a sandbox is the boundary for a
+// sandboxed run, so the CLI there may do anything inside it.
+func chatSettings(keepDays int, hooks map[string]any, sandboxed bool, ask []string) string {
+	perms := map[string]any{"defaultMode": "dontAsk", "deny": []string{
 		"Read(//proc/**)", "Read(//sys/**)", "Read(//run/**)", "Read(//etc/**)", "Read(//config/**)", "Read(~/**)",
 	}}
+	if len(ask) > 0 {
+		// dontAsk would deny an ask rule unasked; in default mode it reaches orbit's prompt, which denies anything else asked about, as dontAsk does.
+		perms["defaultMode"], perms["ask"] = "default", ask
+	}
 	if sandboxed {
-		perms = map[string]any{}
+		perms = map[string]any{"defaultMode": "bypassPermissions"}
+		if len(ask) > 0 {
+			perms["ask"] = ask
+		}
 	}
 	s := map[string]any{
 		"permissions":         perms,
@@ -154,7 +173,10 @@ func (c *claudeCode) chatArgs(req Request, home string, keepDays int) []string {
 	if req.Harness != nil && !sandboxed {
 		hooks = harnessHooks(req.Harness, req.Workdir, home)
 	}
-	mcp, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{ChatServer: map[string]any{"type": "sdk", "name": ChatServer}}})
+	allowed = append(allowed, req.Connectors.Allowed()...)
+	servers := map[string]any{ChatServer: map[string]any{"type": "sdk", "name": ChatServer}}
+	req.Connectors.addServers(servers)
+	mcp, _ := json.Marshal(map[string]any{"mcpServers": servers})
 	if req.SkillsPlugin != "" && !full {
 		tools = append(tools, "Skill")
 		allowed = append(allowed, "Skill")
@@ -170,10 +192,15 @@ func (c *claudeCode) chatArgs(req Request, home string, keepDays int) []string {
 	args = append(args,
 		"--strict-mcp-config", "--mcp-config", string(mcp),
 		"--setting-sources", "",
-		"--settings", chatSettings(keepDays, hooks, sandboxed),
+		"--settings", chatSettings(keepDays, hooks, sandboxed, req.Connectors.Ask()),
 		"--allowedTools", strings.Join(allowed, ","),
 	)
-	args = append(args, "--permission-mode", startMode(req.Chat.Level))
+	mode := startMode(req.Chat.Level)
+	if mode == PermissionMode(spec.LevelLocked) && len(req.Connectors.Ask()) > 0 {
+		// dontAsk drops explicit connector asks. In default mode orbit still denies other prompts.
+		mode = PermissionMode(spec.LevelAsk)
+	}
+	args = append(args, "--permission-mode", mode)
 	if req.Chat.Ceiling == spec.LevelFull && sandboxed {
 		// Without it the CLI refuses set_permission_mode bypassPermissions, so a conversation could not be raised to full live.
 		args = append(args, "--allow-dangerously-skip-permissions")
@@ -209,27 +236,54 @@ func contains(list []string, s string) bool {
 // chatProc is a CLI a chat run talks to: on this host, or in a sandbox.
 type chatProc interface {
 	Turn(ctx context.Context, prompt string, emit func(claudeproto.Line)) (*claudeproto.Result, error)
-	Interrupt(ctx context.Context) error
+	Interrupt(ctx context.Context, cancelQueued bool) (*claudeproto.InterruptReceipt, error)
+	SendUUID(text, uuid string) error
+	CancelQueued(ctx context.Context, uuid string) (bool, error)
+	Capable(name string) bool
 	SetPermissionMode(ctx context.Context, mode string) error
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
 }
 
-// chatTools routes a process's MCP requests to the turn in progress: a
-// live process serves many runs, each with its own tools.
+// chatTools routes a process's control requests to the turn in progress: a
+// live process serves many runs, each with its own tools (orbit's, for a
+// chat run) and connectors, and push copies a file into its sandbox.
+//
+// The connectors of the last turn stay listed between turns (the CLI may list a server at any time, and a reused process has the same ones, its arguments name their tools), but only a turn in progress has them called.
 type chatTools struct {
-	mu   sync.Mutex
-	chat *Chat
-	ws   Workspace
-	// emit records the turn's events: a permission decision is one.
-	emit func(Event)
+	mu     sync.Mutex
+	chat   *Chat
+	ws     Workspace
+	conns  *Connectors
+	active bool
+	push   func(context.Context, []string) error
 }
 
-func (t *chatTools) set(c *Chat, ws Workspace, emit func(Event)) {
+func (t *chatTools) set(c *Chat, ws Workspace) {
 	t.mu.Lock()
-	t.chat, t.ws, t.emit = c, ws, emit
+	t.chat, t.ws = c, ws
 	t.mu.Unlock()
+}
+
+// connectors routes the turn's connectors; nil ends the turn's calls, the last ones staying listed.
+func (t *chatTools) connectors(conns *Connectors) {
+	t.mu.Lock()
+	t.active = conns != nil
+	if conns != nil {
+		t.conns = conns
+	}
+	t.mu.Unlock()
+}
+
+func (t *chatTools) current() (*Chat, Workspace, *Connectors, func(context.Context, []string) error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	conns := t.conns
+	if conns != nil && !t.active {
+		conns = &Connectors{Servers: conns.Servers}
+	}
+	return t.chat, t.ws, conns, t.push
 }
 
 // Workspace is the turn's workspace as orbit's tools reach it while the CLI
@@ -271,31 +325,36 @@ func (l LocalWorkspace) Get(_ context.Context, dir string) ([]byte, error) {
 func (t *chatTools) handler() claudeproto.Handler {
 	return claudeproto.Handler{Name: "orbit",
 		MCP: func(ctx context.Context, req claudeproto.MCPMessage) (json.RawMessage, error) {
-			t.mu.Lock()
-			c, ws := t.chat, t.ws
-			t.mu.Unlock()
-			if ws != nil {
-				ctx = context.WithValue(ctx, workspaceKey{}, ws)
+			c, ws, conns, push := t.current()
+			if req.ServerName == ChatServer {
+				if ws != nil {
+					ctx = context.WithValue(ctx, workspaceKey{}, ws)
+				}
+				return serveMCP(ctx, c, req)
 			}
-			return serveMCP(ctx, c, req)
+			if conns == nil {
+				return nil, fmt.Errorf("orbit serves no MCP server %q to this run", req.ServerName)
+			}
+			return conns.serve(ctx, req.ServerName, req.Message, push)
 		},
 		CanUseTool: func(ctx context.Context, req claudeproto.PermissionRequest) (claudeproto.Permission, error) {
-			t.mu.Lock()
-			c, emit := t.chat, t.emit
-			t.mu.Unlock()
-			decide := noPrompt
-			if c != nil && c.Prompt != nil {
-				decide = c.Prompt
+			c, _, conns, _ := t.current()
+			if c == nil {
+				if conns == nil {
+					return claudeproto.Permission{}, errors.New("orbit does not handle can_use_tool requests in this run")
+				}
+				return conns.permission(ctx, req)
 			}
-			// The decision is recorded as the run's orbit.permission event before it is sent; between turns there is no run to record it in, so nothing is allowed.
-			var record func(claudeproto.PermissionRequest, claudeproto.Permission) error
-			if emit != nil {
-				record = func(r claudeproto.PermissionRequest, p claudeproto.Permission) error {
-					emit(Event{Kind: "orbit.permission", Payload: permissionEvent(r, p)})
-					return nil
+			if server, tool, ok := splitToolName(req.Tool); ok {
+				if _, found := conns.find(server, tool); found {
+					return conns.permission(ctx, req)
 				}
 			}
-			return claudeproto.Recorded(decide, record)(ctx, req)
+			decide := noPrompt
+			if c.Prompt != nil && spec.LevelRank(c.Level) > spec.LevelRank(spec.LevelLocked) {
+				decide = c.Prompt
+			}
+			return claudeproto.Recorded(decide, c.RecordPermission)(ctx, req)
 		},
 	}
 }
@@ -377,13 +436,16 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	if sess != nil {
 		resume = sess.Resume
 	}
-	key := hashArgs(c.bin, req.Workdir, extra, env)
+	// Auto and ask share launch arguments but must have distinct live processes.
+	key := hashArgs(c.bin, req.Workdir, append(append([]string(nil), extra...), req.Chat.Level), env)
 
 	var p *liveProc
 	started := false
 	mode, parent := "fresh", resume
 	if sess != nil && sess.Live != nil {
-		if p = sess.Live.take(sess.Key, key, resume); p != nil {
+		if req.Chat.Fresh {
+			sess.Live.discard(sess.Key)
+		} else if p = sess.Live.take(sess.Key, key, resume); p != nil {
 			mode = "live"
 		}
 	}
@@ -392,6 +454,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			mode = "resumed"
 		}
 		tools := &chatTools{}
+		tools.connectors(req.Connectors)
 		// Every chat process has the stdio permission prompt, so a level that asks can be set without a new process; at locked or full the CLI sends none but ExitPlanMode's.
 		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, PermissionPrompt: true, Resume: resume, Ephemeral: sess == nil}, extra)
 		if err != nil {
@@ -399,7 +462,12 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		}
 		var proc chatProc
 		if req.Chat.Sandbox != nil {
-			proc, err = startSandbox(ctx, req.Chat.Sandbox, args, tools.handler(), sess)
+			var sb *sandboxProc
+			sb, err = startSandbox(ctx, req.Chat.Sandbox, args, tools.handler(), sess)
+			if sb != nil {
+				tools.push = sb.push
+				proc = sb
+			}
 		} else {
 			proc, err = claudeproto.Start(claudeproto.Command{Bin: c.bin, Args: args, Env: env, Dir: req.Workdir}, tools.handler())
 		}
@@ -428,8 +496,10 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	if sb, ok := p.proc.(*sandboxProc); ok {
 		ws = sb
 	}
-	p.tools.set(req.Chat, ws, emit)
-	defer p.tools.set(nil, nil, nil)
+	p.tools.set(req.Chat, ws)
+	p.tools.connectors(req.Connectors)
+	defer func() { p.tools.set(nil, nil); p.tools.connectors(nil) }()
+
 	if started && req.Chat.Level == spec.LevelAuto {
 		if _, err := applyLevel(ctx, p.proc, req.Chat.Level, emit); err != nil {
 			dropOrKill(sess, p)
@@ -437,25 +507,57 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		}
 	}
 
-	interrupted := false
+	var (
+		imu     sync.Mutex
+		stopped bool
+		receipt *claudeproto.InterruptReceipt
+	)
 	turnCtx, endTurn := context.WithCancel(ctx)
 	defer endTurn()
 	if req.Chat.Interrupt != nil {
 		go func() {
 			select {
 			case <-req.Chat.Interrupt:
-				interrupted = true
+				imu.Lock()
+				stopped = true
+				imu.Unlock()
 				ictx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
 				defer cancel()
-				if err := p.proc.Interrupt(ictx); err != nil {
+				// Stop means stop: steer messages still queued go with the turn.
+				r, err := p.proc.Interrupt(ictx, p.proc.Capable(claudeproto.CapInterruptCancelQueued))
+				if err != nil {
 					endTurn()
 				}
+				imu.Lock()
+				receipt = r
+				imu.Unlock()
 			case <-turnCtx.Done():
 			}
 		}()
 	}
-	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) { emit(Event{Kind: l.Kind, Payload: l.Raw}) })
+	var steer *steering
+	if req.Chat.Steer != nil {
+		steer = newSteering(p.proc, req.Chat, emit)
+		go steer.feed(turnCtx, req.Chat.Steer)
+	}
+	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) {
+		if steer != nil {
+			steer.observe(l)
+		}
+		emit(Event{Kind: l.Kind, Payload: l.Raw})
+	})
 	endTurn()
+	imu.Lock()
+	interrupted, rec := stopped, receipt
+	imu.Unlock()
+	// Every steer the turn did not take is withdrawn; one that may still
+	// run means this process cannot be kept.
+	clean := true
+	if steer != nil {
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
+		clean = err != nil || steer.finish(wctx, rec)
+		cancel()
+	}
 	if sb, ok := p.proc.(*sandboxProc); ok {
 		// The workspace comes back after every turn, a failed one too:
 		// what the agent wrote is the person's.
@@ -470,7 +572,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		}
 		return nil, err
 	}
-	out := &Result{Reply: res.Result, CostUSD: res.TotalCostUSD, SessionID: res.SessionID, Interrupted: interrupted}
+	out := &Result{Reply: res.Result, Tokens: res.Tokens(), CostUSD: res.TotalCostUSD, SessionID: res.SessionID, Interrupted: interrupted}
 	usage, _ := json.Marshal(map[string]any{"usage": res.Usage, "model_usage": res.ModelUsage, "num_turns": res.NumTurns})
 	out.Usage = usage
 	out.Output, _ = json.Marshal(map[string]any{"reply": res.Result})
@@ -480,6 +582,10 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	if res.IsError && !interrupted {
 		dropOrKill(sess, p)
 		return out, fmt.Errorf("%w: claude-code %s/%s: %s", ErrBackend, res.Subtype, res.TerminalReason, firstLine(res.Failure()))
+	}
+	if !clean {
+		dropOrKill(sess, p)
+		return out, nil
 	}
 	if interrupted || sess == nil || sess.Live == nil || res.SessionID == "" || (!sess.Open && mode != "live") {
 		p.proc.Close(claudeproto.CloseGrace)

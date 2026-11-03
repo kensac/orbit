@@ -11,11 +11,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/claudeproto"
+	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/spec"
@@ -64,6 +66,57 @@ func (e *Engine) restoreWorkspace(ctx context.Context, conversationID, workdir s
 		return fmt.Errorf("restore the workspace: %w", err)
 	}
 	return os.WriteFile(workspaceMark(workdir), []byte(w.SHA256), 0o600)
+}
+
+// maxChangeLines bounds the list of the person's changes a turn is told:
+// enough for an editing session, short beside the conversation.
+const maxChangeLines = 100
+
+// personChanges says, for the turn's prompt, which files the person
+// changed in the workspace since the agent last saw it: the newest
+// snapshot, when a person wrote it, against the newest a run stored
+// (store.PersonChanges). Code computes it; fresh reports that a person
+// wrote the newest snapshot at all, so a live process is not reused.
+func (e *Engine) personChanges(ctx context.Context, conversationID string) (note string, fresh bool, err error) {
+	latest, seen, err := e.Store.PersonChanges(ctx, conversationID)
+	if err != nil || latest == nil {
+		return "", false, err
+	}
+	after, err := workspace.Open(latest.Archive, workspaceHidden)
+	if err != nil {
+		return "", true, err
+	}
+	var before *workspace.Snapshot
+	if seen != nil {
+		if before, err = workspace.Open(seen.Archive, workspaceHidden); err != nil {
+			return "", true, err
+		}
+	}
+	return renderChanges(workspace.Diff(before, after)), true, nil
+}
+
+// renderChanges is the person's changes as the turn reads them.
+func renderChanges(changes []workspace.Change) string {
+	if len(changes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("(Since your last turn the person changed these files in the workspace; your working directory has their versions.)\n")
+	for i, c := range changes {
+		if i == maxChangeLines {
+			fmt.Fprintf(&b, "- and %d more\n", len(changes)-i)
+			break
+		}
+		switch c.Op {
+		case "renamed":
+			fmt.Fprintf(&b, "- renamed %s to %s\n", c.From, c.Path)
+		case "removed":
+			fmt.Fprintf(&b, "- removed %s (it is in the workspace's trash)\n", c.Path)
+		default:
+			fmt.Fprintf(&b, "- %s %s\n", c.Op, c.Path)
+		}
+	}
+	return b.String()
 }
 
 // snapshotWorkspace stores the workspace as the conversation's newest
@@ -175,7 +228,8 @@ func chatContract(a *spec.Agent, types []actions.Type, profile string) string {
 	fmt.Fprintf(&b, `orbit's tools:
 - %s: replace your memory, the one document every conversation of yours starts with, with the complete new content. Keep it short: facts and preferences you will need next time.
 - %s: ask the person something only they can answer, when you must stop and wait for it. Otherwise just ask in your reply.
-`, runner.ToolName("remember"), runner.ToolName("ask"))
+- %s: full-text search over your earlier conversations and work, and the memory entries you read.
+`, runner.ToolName("remember"), runner.ToolName("ask"), runner.ToolName("search"))
 	if len(types) > 0 {
 		fmt.Fprintf(&b, "- %s: do something outside this session. Each type has a rule: auto runs when your reply is sent, approve waits for the person's approval (and runs at once when they asked for it in this conversation).\n\nAction types:\n", runner.ToolName("act"))
 		for _, t := range types {
@@ -206,6 +260,9 @@ func chatPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 			b.WriteString(renderConversation(convo, now.Location()))
 		}
 		fmt.Fprintf(&b, "\nNow: %s (%s)\n\n---\n\n", now.Format("Monday 2006-01-02 15:04 MST"), a.Timezone)
+	}
+	if run.WorkspaceChanges != "" {
+		b.WriteString(run.WorkspaceChanges + "\n")
 	}
 	if len(rc.Messages) == 0 {
 		switch {
@@ -261,6 +318,8 @@ func (e *Engine) chatTools(snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, i
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{"question": map[string]any{"type": "string"}},
 				"required": []string{"question"}}},
 	}
+	// Search is served here, in orbit's process, with the store: a chat run has no harness tool server.
+	tools = append(tools, runner.ChatTool{Name: "search", Description: harness.SearchDescription, InputSchema: harness.SearchSchema})
 	if len(types) > 0 {
 		tools = append(tools, runner.ChatTool{Name: "act", Description: "Do something outside this session: one action of an enabled type, " +
 			"its params as that type's schema says (listed in your instructions).",
@@ -269,6 +328,18 @@ func (e *Engine) chatTools(snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, i
 				"reason": map[string]any{"type": "string"}}, "required": []string{"type", "params", "reason"}}})
 	}
 	call := func(ctx context.Context, name string, args json.RawMessage) (string, bool) {
+		if name == "search" {
+			req, err := harness.DecodeSearchRequest(args)
+			var res map[string]any
+			if err == nil {
+				res, err = e.searchFor(ctx, a.Name, req)
+			}
+			if err != nil {
+				return err.Error(), true
+			}
+			b, _ := json.Marshal(res)
+			return string(b), false
+		}
 		if name == "act" {
 			return e.chatAct(ctx, snap, a, c, instructor, byName, st, args)
 		}
@@ -349,12 +420,20 @@ type chatTurn struct {
 	sess                     *runner.Session
 	harness                  *runner.Harness
 	emit                     func(string, any)
+	record                   func(string, any) error
 	cancel                   <-chan struct{}
-	rec                      *recovery
+	// steer is where the attempt's poll looks for this turn's steer feed.
+	steer *atomic.Pointer[steerFeed]
+	rec   *recovery
 	// extra is the system prompt's memory-entry and skills sections.
 	extra string
 	// plugin is the skills plugin directory, when the run has skills.
 	plugin string
+	// connectors are the run's connectors (connectors.go).
+	connectors *runner.Connectors
+	// fresh is a workspace the person changed since the last turn
+	// (runner.Chat.Fresh).
+	fresh bool
 	// instructor is the person the run answers (runInstructor).
 	instructor string
 	// repos is what the agent's repositories add (repos.go), or nil.
@@ -394,8 +473,20 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	st := &chatState{}
 	chat := e.chatTools(snap, a, c, t.instructor, t.types, d.Defaults.MemoryMaxBytes, st)
 	e.repoChatTools(a, chat)
+	e.promChatTools(a, chat)
 	chat.Interrupt = t.cancel
+	chat.Fresh = t.fresh
+	if t.steer != nil {
+		feed := newSteerFeed()
+		chat.Steer = feed.ch
+		chat.Steered = func(id string) { e.steered(ctx, c, feed, id, t.emit) }
+		t.steer.Store(feed)
+		defer t.steer.Store(nil)
+	}
 	chat.Level, chat.Ceiling = a.PermissionLevel(), a.PermissionCeiling()
+	chat.RecordPermission = func(req claudeproto.PermissionRequest, p claudeproto.Permission) error {
+		return recordPermission(t.record, req, p)
+	}
 	if a.Sandbox != "" {
 		sb, err := e.sandboxPlan(d, a.Sandbox, c, t.workdir, t.home, t.plugin, t.emit)
 		if err != nil {
@@ -414,17 +505,21 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 			chat.Push = append(chat.Push, t.repos.files...)
 		}
 	}
+	req := runner.Request{
+		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
+		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin, Connectors: t.connectors,
+	}
+	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
+		return nil, nil, err
+	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
 	defer cancel()
-	res, err := r.Run(runCtx, runner.Request{
-		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
-		Tools: a.Tools, Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin,
-	}, func(ev runner.Event) { t.emit(ev.Kind, ev.Payload) })
+	res, err := r.Run(runCtx, req, func(ev runner.Event) { t.emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
 	}
 	if err != nil {
-		return nil, res, err
+		return nil, res, backendErr{err}
 	}
 	if len(res.Output) > 0 {
 		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "out", "output.json", "application/json", res.Output); err != nil {
@@ -492,6 +587,30 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err := t.Validate(v.Params); err != nil {
 		return "invalid params: " + err.Error(), true
 	}
+	// A schedule change is parsed by code now: one it cannot read is refused, and what a recorded one will do goes back to the model to confirm with the person (an executed one's result says it).
+	preview := ""
+	if actions.IsScheduleType(v.Type) && v.Type != actions.RunNowType {
+		res, err := e.PreviewSchedule(ctx, a.Name, v.Type, v.Params)
+		if err != nil {
+			return err.Error(), true
+		}
+		b, _ := json.Marshal(res)
+		preview = " It will do this; tell the person the rule and the next fires: " + string(b)
+	}
+	if v.Type == actions.SaveType {
+		// Never executed: drafted by code once the reply is sent, then held for a person (engine/save.go).
+		p, _ := actions.DecodeSave(v.Params)
+		if e.Current().Config.Agents[p.Name] != nil {
+			return fmt.Sprintf("an agent named %q exists; choose another name", p.Name), true
+		}
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if len(st.actions) >= maxActions {
+			return fmt.Sprintf("at most %d actions per reply", maxActions), true
+		}
+		st.actions = append(st.actions, v)
+		return "Recorded: when your reply is sent, orbit adds what this conversation did (tools, fetched pages, approved action types, schedules asked for) and the person reviews the whole agent before it exists. A schedule:add with agent \"" + p.Name + "\" in this reply becomes its schedule.", false
+	}
 	rule := ruleFor(a, v.Type, c.Trigger)
 	if !a.Chat {
 		instructor = ""
@@ -510,9 +629,9 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 		st.actions = append(st.actions, v)
 		if rule == spec.RuleAuto {
-			return "Recorded: it runs when your reply is sent.", false
+			return "Recorded: it runs when your reply is sent." + preview, false
 		}
-		return "Recorded: it waits for the person's approval.", false
+		return "Recorded: it waits for the person's approval." + preview, false
 	}
 	id, err := e.Store.StartActionNow(ctx, c.ID, c.Attempt, a.Name, store.ProposedAction{Type: v.Type, Params: v.Params,
 		Reason: v.Reason, Rule: string(rule), InstructedBy: instructor})

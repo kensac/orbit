@@ -69,7 +69,7 @@ Nothing about a thread is built twice. What tickets add is the lifecycle:
 
 **Scoping** is the conversation's: two tickets with the same agent never see
 each other's words, and ticket work never touches the agent's other
-conversations. Memory, schedules, rules and `runs_one_running` stay per
+conversations. Memory, schedules, rules and the running run (`runs_one_running_lane`) stay per
 agent, so an agent's tickets queue behind each other rather than race on
 its memory.
 
@@ -329,6 +329,7 @@ The permission sets are named in code, one per use:
 |---|---|
 | reading (a build's clone, a fetch into the mirror of a repository an agent reads) | `contents: read` |
 | an agent's `pr_list` and `pr_view` (docs/api.md, Repositories) | `pull_requests: read`, `checks: read`, `statuses: read` |
+| an agent's `github` source, one per fetch: `issues`, `pulls`, `checks`, `releases` | `issues: read`; `pull_requests: read`; `checks: read`, `statuses: read`; `contents: read` |
 | build delivery (push `orbit/*`, open the PR, close it on abandon) | `contents: write`, `pull_requests: write` |
 | merge (read the PR and its checks, update the body, merge) | `contents: write`, `pull_requests: write`, `checks: read`, `statuses: read` |
 | failure report (read failing checks and their job logs) | `checks: read`, `actions: read` |

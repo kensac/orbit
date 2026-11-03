@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -68,9 +69,18 @@ type Server struct {
 	WorkspaceOrigins []string
 	// TerminalPing overrides terminalPing when set; tests shorten it.
 	TerminalPing time.Duration
+	// WorkspaceGroup is ORBIT_WORKSPACE_GROUP: the group a person must be
+	// in to change a workspace. Empty is ORBIT_OIDC_GROUP's, which every
+	// verified person is in.
+	WorkspaceGroup string
+	// WorkspaceReadRate and WorkspaceWriteRate override the workspace's
+	// per-person rates (readRate, writeRate) when set; tests raise them.
+	WorkspaceReadRate, WorkspaceWriteRate float64
 
 	termMu      sync.Mutex
 	termClients map[string]int
+	wsOnce      sync.Once
+	ws          *workspaceState
 }
 
 // Handler returns the public listener's routes, the ones traefik serves.
@@ -104,6 +114,9 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/conversations/{id}", s.getConversation)
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
+	api("POST /api/v1/conversations/{id}/read", s.markRead)
+	api("GET /api/v1/board", s.board)
+	api("GET /api/v1/events", s.events)
 	api("POST /api/v1/conversations/{id}/messages", s.conversationMessage)
 	api("GET /api/v1/conversations/{id}/tasks", s.conversationTasks)
 	api("GET /api/v1/conversations/{id}/tasks/stream", s.streamTasks)
@@ -167,9 +180,15 @@ func (s *Server) routes(internal bool) http.Handler {
 	// The ticket in Sec-WebSocket-Protocol is the credential (terminals.go).
 	mux.HandleFunc("GET /api/v1/terminals/{tid}/ws", s.terminalSocket)
 	s.memoryRoutes(api)
+	s.workspaceRoutes(api)
+	s.workspaceWriteRoutes(api, mux)
 	s.skillsRoutes(api)
+	s.connectorRoutes(api, mux)
+	s.sessionRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
+	// The signature is the credential (hooks.go); traefik routes /hooks/ past forward-auth.
+	mux.HandleFunc("POST /hooks/{agent}/{trigger}", s.hook)
 
 	if internal {
 		// Only the host's rollout reaches this listener; a person cannot
@@ -293,23 +312,16 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 // thread serves an agent's default conversation, a page at a time
 // (store.Thread).
 func (s *Server) thread(w http.ResponseWriter, r *http.Request) {
-	servePage(w, r, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
-		return s.Store.Thread(r.Context(), r.PathValue("name"), before, limit)
-	})
-}
-
-// servePage is the one way a thread page is served over HTTP, whichever conversation (threadPage).
-func servePage(w http.ResponseWriter, r *http.Request, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) {
-	var limit int
-	if !queryInt(w, r, "limit", &limit) {
+	id, err := s.Store.DefaultConversationID(r.Context(), r.PathValue("name"))
+	if err != nil {
+		respond(w, nil, err)
 		return
 	}
-	resp, err := threadPage(r.URL.Query().Get("before"), limit, fetch)
-	respond(w, resp, err)
+	s.serveThread(w, r, id)
 }
 
 // threadPage reads a thread page for HTTP and MCP alike: the before cursor and limit in, items, has_more and next_before out (listPage).
-func threadPage(before string, limit int, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) (map[string]any, error) {
+func threadPage(before string, limit int, fold bool, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) (map[string]any, error) {
 	var c *store.ThreadCursor
 	if before != "" {
 		var err error
@@ -321,7 +333,12 @@ func threadPage(before string, limit int, fetch func(before *store.ThreadCursor,
 	if err != nil {
 		return nil, err
 	}
-	return listPage("items", page.Items, page.HasMore, page.NextBefore), nil
+	items := page.Items
+	if fold {
+		// limit and the cursor count every run, so paging is unchanged; a fold never crosses a page.
+		items = store.FoldSkips(items)
+	}
+	return listPage("items", items, page.HasMore, page.NextBefore), nil
 }
 
 // listPage is a page as every paged list is served, over HTTP and MCP alike: the items under key (always an array), has_more, and next_before, null exactly when has_more is false.
@@ -395,8 +412,15 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 		ClientMessageID string `json:"client_message_id"`
 		// Attachments are uploads of this conversation the message carries.
 		Attachments []string `json:"attachments"`
+		// Delivery is "queue" (the default) or "steer": into the reply
+		// being written, when one is.
+		Delivery string `json:"delivery"`
 	}
 	if !decode(w, r, 64<<10, &body, bodyRequired) {
+		return
+	}
+	if body.Delivery != "" && body.Delivery != store.DeliveryQueue && body.Delivery != store.DeliverySteer {
+		writeErr(w, http.StatusBadRequest, `delivery is "queue" or "steer"`)
 		return
 	}
 	if strings.TrimSpace(body.Body) == "" && len(body.Attachments) == 0 {
@@ -410,15 +434,16 @@ func (s *Server) postTo(w http.ResponseWriter, r *http.Request, a *spec.Agent, c
 	res, replayed, err := s.Store.PostMessageOnce(r.Context(), store.PostMessage{
 		Agent: a.Name, SpecSHA: a.SHA, Body: body.Body, Author: actor(r, body.Author), ReplyTo: body.ReplyTo,
 		Wake: wake, ClientID: body.ClientMessageID, ConversationID: conversationID, Attachments: body.Attachments,
+		Delivery: body.Delivery, Steerable: a.Chat,
 	})
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	if res.RunID != "" && !replayed {
+	if res.RunID != "" && !replayed && res.Delivered == store.DeliveredQueued {
 		s.Wake()
 	}
-	resp := map[string]any{"message_id": res.MessageID}
+	resp := map[string]any{"message_id": res.MessageID, "delivered": res.Delivered}
 	if res.RunID != "" {
 		resp["run_id"] = res.RunID
 	}
@@ -537,7 +562,17 @@ func (s *Server) actionPage(ctx context.Context, f store.ActionFilter, before st
 
 func (s *Server) getAction(w http.ResponseWriter, r *http.Request) {
 	a, err := s.Store.GetAction(r.Context(), r.PathValue("id"))
-	respond(w, map[string]any{"action": a}, err)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	out := map[string]any{"action": a}
+	if p, perr := s.Engine.PreviewAction(r.Context(), a); perr != nil {
+		out["preview_error"] = perr.Error()
+	} else if p != nil {
+		out["preview"] = p
+	}
+	respond(w, out, nil)
 }
 
 func (s *Server) decide(approve bool) http.HandlerFunc {
@@ -545,14 +580,29 @@ func (s *Server) decide(approve bool) http.HandlerFunc {
 		var body struct {
 			By              string `json:"by"`
 			ClientRequestID string `json:"client_request_id"`
+			// Always also makes the action's type auto for its agent (approve only).
+			Always bool `json:"always"`
 		}
 		if !decode(w, r, 4<<10, &body, bodyOptional) {
+			return
+		}
+		if body.Always && !approve {
+			writeErr(w, http.StatusBadRequest, "always is for approving")
 			return
 		}
 		// A person decides as themselves; by is for the operator token.
 		by := body.By
 		if p := principalOf(r); p.Person != "" {
 			by = p.Person
+		}
+		if body.Always {
+			out, err := s.approveAlways(r.Context(), r.PathValue("id"), by, body.ClientRequestID)
+			if err != nil {
+				s.respondDefine(w, http.StatusOK, nil, err)
+				return
+			}
+			respond(w, out, nil)
+			return
 		}
 		err := s.decideAction(r.Context(), r.PathValue("id"), approve, by, body.ClientRequestID)
 		respond(w, map[string]any{"ok": err == nil}, err)
@@ -569,6 +619,35 @@ func (s *Server) decideAction(ctx context.Context, id string, approve bool, by, 
 		s.Wake()
 	}
 	return err
+}
+
+// approveAlways approves an action and makes its type auto for its agent: the new version is validated before the decision, so a change that cannot be made decides nothing, and stored after it. A replayed decision changes nothing again.
+func (s *Server) approveAlways(ctx context.Context, id, by, clientRequestID string) (map[string]any, error) {
+	act, err := s.Store.GetAction(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if act.Status == "pending" {
+		if _, err := s.Engine.AlwaysAllow(ctx, act, by, true); err != nil {
+			return nil, err
+		}
+	}
+	if by == "" {
+		by = "operator"
+	}
+	replayed, err := s.Store.DecideActionOnce(ctx, id, true, by, clientRequestID)
+	if err != nil {
+		return nil, err
+	}
+	if replayed {
+		return map[string]any{"ok": true}, nil
+	}
+	s.Wake()
+	d, err := s.Engine.AlwaysAllow(ctx, act, by, false)
+	if err != nil {
+		return nil, fmt.Errorf("approved, but the rule was not changed: %w", err)
+	}
+	return map[string]any{"ok": true, "always": map[string]any{"agent": d.Definition.Name, "type": act.Type, "rule": "auto", "version": d.Definition.Version}}, nil
 }
 
 // ---------------------------------------------------------------- helpers
@@ -633,6 +712,12 @@ const (
 // what the field was for (a dropped client_request_id loses idempotency).
 // It writes the 400 itself; false means the handler returns.
 func decode(w http.ResponseWriter, r *http.Request, limit int64, into any, rule bodyRule) bool {
+	return decodeOr(w, r, limit, into, rule, func(msg string) { writeErr(w, http.StatusBadRequest, msg) })
+}
+
+// decodeOr is decode with the 400 written by fail, for routes whose errors
+// have their own shape (the workspace's carry a check).
+func decodeOr(w http.ResponseWriter, r *http.Request, limit int64, into any, rule bodyRule, fail func(msg string)) bool {
 	if rule == bodyOptional && r.ContentLength == 0 {
 		return true
 	}
@@ -644,14 +729,14 @@ func decode(w http.ResponseWriter, r *http.Request, limit int64, into any, rule 
 		// An empty body sent without a length (chunked).
 		return true
 	case errors.Is(err, io.EOF):
-		writeErr(w, http.StatusBadRequest, "a JSON body is required")
+		fail("a JSON body is required")
 		return false
 	case err != nil:
-		writeErr(w, http.StatusBadRequest, err.Error())
+		fail(err.Error())
 		return false
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		writeErr(w, http.StatusBadRequest, "the body must be one JSON value")
+		fail("the body must be one JSON value")
 		return false
 	}
 	return true

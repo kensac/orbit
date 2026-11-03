@@ -13,7 +13,7 @@ Supported recurrences, each followed by `at` and a time:
 
 The shorter `the 1st at 9am` form also means the first date of every month.
 
-Times must be unambiguous: `09:00` and `23:30` use the 24-hour clock; `9am`, `9:30pm`, `12am` and `12pm` use explicit meridiems. Bare `8`, `9:00`, abbreviations, timezone names embedded in the phrase, free-form prose and unsupported recurrences are errors. Case and whitespace are normalized. Dates such as `11st` are refused.
+Times without a meridiem are the 24-hour clock: `8` and `8:00` are 08:00, `20` and `23:30` are evening; `9am`, `9:30pm`, `12am` and `12pm` use explicit meridiems. Whoever applies the trigger echoes the compiled rule and its next fires back for confirmation (the `schedule:add` action does). Abbreviations, timezone names embedded in the phrase, free-form prose and unsupported recurrences are errors. Case and whitespace are normalized. Dates such as `11st` are refused.
 
 The emitted trigger's `start` is the anchor's local date at midnight, except for every-other-week phrases. Those find the first valid occurrence of the matching weekly rule strictly after the anchor instant, then start a fortnightly series on that occurrence's local date at midnight. For example, Sunday November 1 followed by `every other monday at 9am` starts Monday November 2, then November 16; Monday after 9am starts the following Monday. If the first candidate falls in a daylight saving gap, the next valid weekly occurrence starts the series. Monthly dates missing from a month are skipped rather than moved to another date. The anchor is not a first-fire guarantee: the preview lists only fires strictly after its instant.
 

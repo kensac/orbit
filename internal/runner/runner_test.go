@@ -14,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/status"
 )
 
 // fakeCLI writes an executable script that records its argv, environment
@@ -568,11 +570,41 @@ func TestClaudeCodeHarnessToolsAndHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 	pre := settings.Hooks["PreToolUse"]
-	if settings.DisableAllHooks || len(pre) != 2 || pre[0].Matcher != "Read|Glob|Grep" || pre[1].Matcher != "StructuredOutput" {
+	if settings.DisableAllHooks || len(settings.Hooks) != 1 || len(pre) != 1 || pre[0].Matcher != "Read|Glob|Grep|StructuredOutput" {
 		t.Fatalf("settings = %+v", settings)
 	}
-	if want := "'/opt/orbit' hook --root '" + work + "' --state '" + state + "' --figures"; pre[1].Hooks[0].Command != want {
-		t.Fatalf("hook command = %q, want %q", pre[1].Hooks[0].Command, want)
+	if want := "'/opt/orbit' hook --root '" + work + "' --state '" + state + "' --figures"; pre[0].Hooks[0].Command != want {
+		t.Fatalf("hook command = %q, want %q", pre[0].Hooks[0].Command, want)
+	}
+}
+
+// With a status socket every hook event runs the one hook command, which
+// posts it; tool events match every tool, so the guard still sees Read.
+func TestClaudeCodeHarnessStatusHooksEveryEvent(t *testing.T) {
+	work := t.TempDir()
+	home := filepath.Join(work, ".home")
+	hooks := harnessHooks(&Harness{Bin: "/opt/orbit", Status: "/tmp/orbit-hook-x.sock"}, work, home)
+	want := "'/opt/orbit' hook --root '" + work + "' --state '" + harness.StateDir(home) + "' --status '/tmp/orbit-hook-x.sock'"
+	if len(hooks) != len(status.HookEvents) {
+		t.Fatalf("%d events configured, want %d", len(hooks), len(status.HookEvents))
+	}
+	for _, ev := range status.HookEvents {
+		entries, _ := hooks[ev].([]any)
+		if len(entries) != 1 {
+			t.Fatalf("%s: %d entries", ev, len(entries))
+		}
+		e := entries[0].(map[string]any)
+		m, hasMatcher := e["matcher"]
+		if status.ToolEvents[ev] != hasMatcher || (hasMatcher && m != "*") {
+			t.Fatalf("%s: matcher %v", ev, m)
+		}
+		cmd := e["hooks"].([]any)[0].(map[string]any)
+		if cmd["command"] != want || cmd["timeout"] != hookTimeout {
+			t.Fatalf("%s: %v", ev, cmd)
+		}
+	}
+	if _, ok := hooks["TeammateIdle"]; ok {
+		t.Fatal("orbit never starts a team")
 	}
 }
 
@@ -643,5 +675,58 @@ func TestAgentHooksJoinOrbits(t *testing.T) {
 	cmd := stop["hooks"].([]any)[0].(map[string]any)["command"].(string)
 	if _, has := stop["matcher"]; has || !strings.HasPrefix(cmd, "'/orbit' agent-hook --root '/w' --def ") {
 		t.Fatalf("Stop = %v", stop)
+	}
+}
+
+func TestClaudeCodeConnectors(t *testing.T) {
+	// A run with connectors talks stream-json: a connector's tools/call and a permission prompt for its approve tool arrive as control requests and are answered by orbit's process, and the connector's credential is nowhere in the CLI's environment or arguments.
+	bin, dir := liveCLI(t, `echo '{"type":"control_request","request_id":"m1","request":{"subtype":"mcp_message","server_name":"hw","message":{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"find","arguments":{"q":"x"},"_meta":{"claudecode/toolUseId":"toolu_9"}}}}}'
+  IFS= read -r reply; printf '%s\n' "$reply" > "$(dirname "$0")/mcp"
+  echo '{"type":"control_request","request_id":"p1","request":{"subtype":"can_use_tool","tool_name":"mcp__hw__create_view","input":{"name":"a"},"tool_use_id":"toolu_10"}}'
+  IFS= read -r reply; printf '%s\n' "$reply" > "$(dirname "$0")/perm"`)
+	stripStdinCapture(t, bin)
+	env := lookup(map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-test", "HW_TOKEN": "hw-connector-secret"})
+	r, _ := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, env)
+	var gotCall, gotPermit string
+	recorded := 0
+	conns := &Connectors{
+		Servers: []ConnectorServer{{Name: "hw", Tools: []ConnectorTool{
+			{Name: "find", InputSchema: json.RawMessage(`{"type":"object"}`), ReadOnly: true},
+			{Name: "create_view", InputSchema: json.RawMessage(`{"type":"object"}`), Ask: true},
+		}}},
+		Call: func(_ context.Context, server, tool, id string, args json.RawMessage) ConnectorResult {
+			gotCall = server + "/" + tool + " " + id + " " + string(args)
+			return ConnectorResult{Content: json.RawMessage(`[{"type":"text","text":"found 3"}]`)}
+		},
+		Permit: func(_ context.Context, server, tool, id string, _ json.RawMessage) claudeproto.Permission {
+			gotPermit = server + "/" + tool + " " + id
+			return claudeproto.Permission{Allow: true}
+		},
+		Record: func(claudeproto.PermissionRequest, claudeproto.Permission) error { recorded++; return nil },
+	}
+	if _, err := r.Run(context.Background(), Request{Workdir: t.TempDir(), Prompt: "go", OutputSchema: json.RawMessage(`{}`), Connectors: conns}, func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	if gotCall != `hw/find toolu_9 {"q":"x"}` || gotPermit != "hw/create_view toolu_10" || recorded != 1 {
+		t.Fatalf("call %q, permit %q, recorded %d", gotCall, gotPermit, recorded)
+	}
+	if m := read(t, filepath.Join(dir, "mcp")); !strings.Contains(m, `"mcp_response"`) || !strings.Contains(m, "found 3") || !strings.Contains(m, `"id":5`) {
+		t.Fatalf("mcp reply = %s", m)
+	}
+	if p := read(t, filepath.Join(dir, "perm")); !strings.Contains(p, `"behavior":"allow"`) || !strings.Contains(p, `"request_id":"p1"`) {
+		t.Fatalf("permission reply = %s", p)
+	}
+	argv, envFile := read(t, filepath.Join(dir, "argv")), read(t, filepath.Join(dir, "env"))
+	if strings.Contains(argv, "hw-connector-secret") || strings.Contains(envFile, "hw-connector-secret") || strings.Contains(envFile, "HW_TOKEN") {
+		t.Fatal("the connector's credential reached the CLI")
+	}
+	for _, want := range []string{"--input-format\nstream-json", "--permission-prompt-tool\nstdio", `"hw":{"name":"hw","type":"sdk"}`,
+		"mcp__hw__find", `"ask":["mcp__hw__create_view"]`, `"defaultMode":"default"`} {
+		if !strings.Contains(argv, want) {
+			t.Errorf("argv lacks %q:\n%s", want, argv)
+		}
+	}
+	if strings.Contains(argv, "--allowedTools\nmcp__hw__create_view") || strings.Contains(argv, ",mcp__hw__create_view") {
+		t.Error("an approve tool must not be allowed unasked")
 	}
 }

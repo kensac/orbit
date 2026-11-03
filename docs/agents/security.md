@@ -39,10 +39,12 @@ more than its agent's rules allow.
   the run's own HOME (denied like any `~`), so an interrupted attempt can be
   continued; it is removed with the run's workdir, and only that run's next
   attempt reads it.
-- **Control requests:** a report run's process may ask orbit for a permission or a
-  hook decision; orbit configures none of their sources and answers any with
-  an error, recorded in the run's events. The tool grant is the spec's
-  `tools`, decided before the process starts. A chat run's process has the stdio permission prompt: what its level (Permission levels, below) leaves as "ask" comes to orbit, and orbit records each decision before it answers; one it cannot record is a deny.
+- **Control requests:** a live process may ask orbit for a permission, a
+  hook decision or an SDK MCP message; orbit configures them only for its
+  chat tools and a run's connectors (Connectors, below), and answers any
+  other with an error, recorded in the run's events. The tool grant is the
+  spec's `tools` and the connector tools its rules offer, decided before
+  the process starts. Chat processes also ask for tool permission decisions under their configured level. Orbit records a decision before answering and denies a request if it cannot record the decision.
 
 - **orbit's tools and hooks** run inside the CLI's process tree with its
   environment (no orbit secret) and are given `--root <workdir>` and
@@ -51,6 +53,10 @@ more than its agent's rules allow.
   gains no reach it lacked (it could already Read those files). The hook fails
   closed: an event it cannot parse is denied. Hooks come only from orbit's
   `--settings`; a workdir's `.claude/settings.json` is never read.
+  orbit never writes hooks or a status line into any settings file, the
+  user's `~/.claude/settings.json` least of all: they exist for one run's
+  CLI process, on its command line.
+- **The status channel** is a unix socket, mode 0600, and a spool file in the run's state directory under the CLI's HOME (which the CLI denies reading): local to the host, never a network listener. What arrives on it is the model's process tree reporting on itself, so it is data, never trusted for a decision: it sets the status a person sees and the run's `orbit.hook` events, and nothing else. A forged event can misreport a running run's status at most; the run's row decides once it is final.
 - **The search tool** (`mcp__orbit__search`) holds no database credential:
   the tool server asks the engine over a unix socket (`--search`, a 0600
   file under the temp directory) that the engine serves for one agent, and
@@ -77,7 +83,7 @@ A skill is instructions a run follows, and agents write their own, so a run stee
 
 Only actions its spec enables, through executors here, to destinations in
 configuration. `continue` can make an agent run again on its own, so it is
-bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body, never a URL or a header. `agent:define` lets a model rewrite an agent defined in the database or built in, itself included: its charter, tools, sources and rules. What such an agent may hold is limited below (What a model can define), and a change that widens one waits for a person. Never a file agent's. Every change is a version with its run, so it is seen and reverted through the API.
+bounded in delay and chain length and, like any type, denied unless named. A webhook action chooses a body and, where its endpoint's path has placeholders, their values, each checked against the endpoint's declared pattern, enum or integer type and escaped as one path segment: never a host, a route outside that template, the method or a header. A credential in an endpoint's header goes only to a URL under its `url_prefix`, and no redirect is followed, so a write is never re-sent somewhere else. What a compromised model can do with one is any write that endpoint's template and `body_schema` allow, on any value its pattern admits (every transaction, for Sure's categorize), under the action's rule. `agent:define` lets a model rewrite an agent defined in the database or built in, itself included: its charter, tools, sources and rules. What such an agent may hold is limited below (What a model can define), and a change that widens one waits for a person. Never a file agent's. Every change is a version with its run, so it is seen and reverted through the API. The schedule actions are narrower forms of it: they change only triggers (within reach, so no person is needed beyond the rule), only of the agent itself or one it delegates to, with times parsed by code. `run:now` starts a run, but a run no message woke cannot start its own agent, so it is no unbounded loop; `continue` is the bounded way.
 `deny` is the default for every type an agent does not name, and denied
 types are not even offered.
 
@@ -86,14 +92,29 @@ types are not even offered.
 A database agent is written through the API or by `agent:define`, and the built-in `orbit` is changed the same way, so a model steered by a poisoned input (a fetched page, an upload) can write either. Without a sandbox (`sandbox:`, Sandboxed chats below) their runs are in orbit's container, which holds every `ORBIT_*` secret, and their sources are fetched by orbit either way. So `spec.validateTrust` holds them (`spec.Agent.Restricted`) to what orbit.yaml offers, at load and so on every write:
 
 - **No `file` source.** It would read orbit's filesystem (`/proc/self/environ`, `/config`, `/data`); the fetcher refuses one for a restricted agent too.
+- **A webhook secret only where orbit.yaml binds it.** A webhook trigger names a variable from `webhook_secrets` whose `agents` list the agent (file agents too), so a model cannot make `ORBIT_API_TOKEN` a signing key or take another agent's deliveries.
 - **No `${VAR}` but a credential.** orbit.yaml's `credentials:` binds each variable it lists to a URL prefix; a restricted agent may reference only those, so it can never render `${ORBIT_GITHUB_APP_PRIVATE_KEY}` into a header. The fetcher sends a credential only in a request whose URL starts with its prefix and has no dot segment, and refuses a redirect outside it (Go resends custom headers to any host). The binding holds for file agents too; a file agent may still name any other variable.
 - **Without a sandbox, only `spec.UnsandboxedTools`** (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite): no Bash, Edit, Write or NotebookEdit, which would run commands or write files beside the secrets. The list is the one place to change. In a sandbox the container is the boundary and its profile decides the tools.
 - **No precheck and no `run` hook** (Prechecks and Agent hooks, below): either would run a command on orbit's host as orbit's user. `say` and `deny` hooks are allowed.
-- **A change that widens an agent waits for a person.** `spec.Widening` compares the change, loaded as it would run, with the agent's current version (nothing, for a new agent): a tool, a source added or changed, a credential, a delegate target, a need, a move to a sandbox profile, or an action type allowed more readily (deny, approve, auto). An `agent:define` that widens is recorded as `approve` whatever its rule says. One executing by rule alone is compared again against the agent as it is then, and fails if it widens, so a person's narrowing between proposal and execution holds.
+- **Connectors only from orbit.yaml.** Every agent names connectors by name; their URLs and credentials are configuration. Adding one, or raising a tool's rule (`mcp:<connector>:<tool>`), widens the agent.
+- **A change that widens an agent waits for a person.** `spec.Widening` compares the change, loaded as it would run, with the agent's current version (nothing, for a new agent): a tool, a source added or changed, a credential, a delegate target, a need, a webhook trigger, a move to a sandbox profile, or an action type allowed more readily (deny, approve, auto). An `agent:define` that widens is recorded as `approve` whatever its rule says. One executing by rule alone is compared again against the agent as it is then, and fails if it widens, so a person's narrowing between proposal and execution holds.
+
+- **"Approve and always allow" is a person's change**, made only through the API or MCP with their token (`POST /actions/{id}/approve` with `always`): a new version with that one type under `auto`, never offered to a model. It does not lift the widening check, which holds an `agent:define` for a person whatever its rule.
+- **"Save this conversation as an agent" (`agent:save`) never lets a model choose reach.** The model writes the name, description, charter and starters; the tools, sources, rules and schedules come from the conversation's record, no broader than what happened (an approved type becomes `approve`, never `auto`), and the whole agent waits for a person as an `agent:define`, whatever the rule.
 
 What is left: an agent with `WebFetch` can send what its run read to any host, and a change within the agent's current reach (its charter, its triggers, narrowing) applies without a person.
 
 A worker rebuilds agents from the database without their origin and does not repeat these checks: control validated every spec it recorded, and the credential binding is checked on every fetch.
+
+## Connectors
+
+A connector's tools act on a person's account at another service (internal/connectors, engine/connectors.go). What holds:
+
+- **No credential reaches the model's process.** Each connector is an SDK MCP server in the CLI's `--mcp-config`: its calls arrive in orbit's process over the control channel, and orbit sends them to the server with the credential. The CLI's environment stays `runner.childEnv`, and a sandbox gets nothing new; `TestClaudeCodeConnectors` fails if the credential reaches the CLI's environment or arguments.
+- **Requests go only to the connector's URL.** The URL is configuration; orbit refuses a request to another host and follows no redirect, and a header credential must be bound to a prefix the URL starts with (`credentials:`, checked at load and per call).
+- **Writes wait for a person.** A tool in `write_tools`, or one an agent's rules set to `approve`, never runs on the model's word: in a run answering its person it runs only after they approve the pending `connector:` action in the chat (one execution, claimed in the database, so the action loop and the run cannot both run it); in any other run it is only recorded. A call the CLI makes without asking first is refused, not run. A `deny` tool is not offered.
+- **What a compromised model can do:** call any `auto` tool with any arguments, as often as its turn allows: read what the person's account there can read, and, with `WebFetch`, send it anywhere. Treat an `auto` tool like a source the model chooses the query of. A server's tool descriptions and results are data written by someone else: they reach the model like any input, and a server may describe a write tool as read-only, which is why `write_tools` decides and the server's hints do not.
+- **OAuth.** A sign-in is started by an authenticated person (`POST /connectors/{name}/authorize`); its state (PKCE verifier, client, metadata, the person) is sealed under `ORBIT_CONNECTOR_KEY` with a 15-minute expiry, so the unauthenticated callback accepts only a state orbit made. Tokens are sealed in `connector_tokens` under the same key, so the database and its backups hold none in the clear; a host holding the key and the database can use them, which is why only hosts advertising `connectors` get the key. Every version is kept with who signed in; a person signs in again to replace one.
 
 ## Web Push
 
@@ -121,7 +142,7 @@ A worker rebuilds agents from the database without their origin and does not rep
   request arrived on is a property of the socket; a header saying a request
   is internal could be sent by anyone, so none is trusted. Never give the
   internal port a traefik router or a public port mapping.
-- **Every key orbit signs or seals with is derived from the operator token** by `secret.Key.Derive(purpose)` (`internal/secret`): HMAC-SHA256 of a purpose label under the token, one label per use, so no two uses share a key and rotating the token voids all of them together. The purposes are `secret.Approval(id)` (`action:<id>`, whose output is the approval link's signature), `secret.Mail(id)` (`mail:<id>`, whose first 12 hex digits sign a mail token), `secret.UploadURL` (`orbit upload url`, the key of signed upload URLs) and `secret.MCPOAuth` (`orbit mcp oauth`, the OAuth proxy's sealing key). Each is byte-identical to what orbit signed before the package existed, and golden tests (`internal/secret`, `internal/mail`, `internal/engine`, `internal/api` `derive_test.go`) hold them there: changing a label voids every approval link, reply address, upload URL and in-flight OAuth sign-in already sent. A new use gets a new label; an existing label never changes.
+- **Every key orbit signs or seals with is derived from the operator token** by `secret.Key.Derive(purpose)` (`internal/secret`): HMAC-SHA256 of a purpose label under the token, one label per use, so no two uses share a key and rotating the token voids all of them together. The purposes are `secret.Approval(id)` (`action:<id>`, whose output is the approval link's signature), `secret.Mail(id)` (`mail:<id>`, whose first 12 hex digits sign a mail token), `secret.UploadURL` (`orbit upload url`, the key of signed upload URLs), `secret.WorkspaceUploadURL` (`orbit workspace upload url`, the key of signed workspace upload URLs) and `secret.MCPOAuth` (`orbit mcp oauth`, the OAuth proxy's sealing key). Each is byte-identical to what orbit signed before the package existed, and golden tests (`internal/secret`, `internal/mail`, `internal/engine`, `internal/api` `derive_test.go`) hold them there: changing a label voids every approval link, reply address, upload URL and in-flight OAuth sign-in already sent. A new use gets a new label; an existing label never changes.
 - `POST /api/v1/drain` takes an instance out of service; it exists only on
   the internal listener, so nobody on the public one can, whatever their
   token.
@@ -134,6 +155,7 @@ A worker rebuilds agents from the database without their origin and does not rep
   preview cannot approve anything. Rotating the token invalidates every
   outstanding link.
 - **Signed upload URLs** (`PUT /api/v1/uploads/signed`, docs/api.md) are the one `/api/` route without a token: the HMAC in the URL, keyed from `ORBIT_API_TOKEN`, names one conversation, file name, type, size bound, person and a 15-minute expiry, and its nonce is unique in `uploads`, so a URL writes one file once. Anyone holding a live URL can upload that one file into that conversation; nothing else. Uploaded files are served as downloads (images inline) with `nosniff` and a CSP that runs nothing, never as pages.
+- **Webhooks** (`POST /hooks/{agent}/{trigger}`, docs/api.md) are the other route without a token, and traefik routes `/hooks/` past forward-auth: senders cannot sign in. The HMAC over the body, under a secret orbit.yaml binds to the agents that may name it (`webhook_secrets`), is the credential, compared in constant time before anything is stored; a `standard` delivery's signed timestamp must be within 5 minutes, and every delivery id acts once, so a captured request replays nothing. A trigger whose secret is unset answers `503`, never accepts unsigned. What passes is the sender's text: it reaches the model only as a `webhook` source, untrusted input like any fetched page, and a webhook run is unattended (its agent's rules apply as written). The body is bounded by `max_bytes` (at most 8 MiB) before it is read whole.
 - `/ui/runs/{id}` is read-only and relies on forward-auth. Reports can hold
   personal data; never route `/ui/` around authentik.
 - **`/mcp`** is the API as tools, with the same check: an authentik token (the person decides and authors), the operator token only on the internal listener. Its tools can do what `/api/v1` can (post, approve, reject); nothing more.
@@ -170,6 +192,10 @@ person approves first. In the fleet a merge is a deploy: keep it `approve`. A ch
 
 `actions: write` (rerunning failed jobs) also covers dispatching and cancelling workflows; orbit mints it alone, only in the ticket loop, for `RerunJob` on the job ids of checks that failed, and no model sees it.
 
+## GitHub and Loki sources
+
+A `github` source is fetched by orbit as the App with a token of one resource's read permissions (`issues: read`, `pull_requests: read`, `checks: read` with `statuses: read`, or `contents: read` for releases), minted for one repository of `github.read_repositories` for that fetch alone and revoked after it; the model sees only the projected JSON. A compromised model gains nothing it did not already read: it cannot change the repository, the resource or the permissions, which are its spec's, and an `agent:define` giving a database agent one is held to `read_repositories` and waits for a person as any added source does. Issue and pull request text is written by whoever can open one on that repository: data, like any input. A `loki` source is a GET of `query_range` with the configuration's LogQL; log lines carry whatever services logged, request paths and user agents from the internet included.
+
 ## Repositories agents read
 
 An agent's `repos` (configuration.md, Repositories) are read by orbit, never by the model with a credential (`internal/repos`, `engine/repos.go`):
@@ -179,6 +205,10 @@ An agent's `repos` (configuration.md, Repositories) are read by orbit, never by 
 - **The tools** (`git_log`, `git_show`, `git_diff`, `git_blame`, `pr_list`, `pr_view`) run in orbit's process: for a report agent the tool server asks the engine over a per-agent unix socket (as search does), for a chat agent the engine answers the SDK tool call itself. The engine reads the agent's spec in force and refuses any repository it does not name. A model's revision or path is never read as an option (a leading `-` is refused, and every command has `--end-of-options` or `--`), only reads are ever run, and an answer is at most `repos.MaxOutput`. They need no Bash, no WebFetch and no token in the model's reach.
 - **What a compromised model gains:** the contents and history of the repositories its agent names, and their pull requests and checks, which its run already reads. A repository's text is data like any input: a file can carry instructions. A network tool (`WebFetch`, a workstation's egress) could carry what it read out; give `repos` naming a private repository only to agents whose tools you would let see it leave. `agent:define` can give a database agent `repos`, but only within `github.read_repositories`.
 - **Workers** hold no App key, so an agent with `repos` must need `github`, a capability only control advertises.
+
+## The Prometheus tool
+
+`prometheus_query` (docs/api.md, Prometheus) lets a model choose a PromQL query and its times, never the URL, a header or the HTTP method: orbit sends a GET of `/api/v1/query` or `/api/v1/query_range` to the agent's prometheus source, with that source's credentials under their binding, and the engine reads the source from the agent's spec in force on every call. The query is a value, never rendered, so a model cannot make orbit expand a `${VAR}` into it. What a compromised model gains is every series that Prometheus holds, which is usually more than the source's own `expr` reads (on hetzner: every host's metrics, container names, scrape targets), and the load of the queries the bounds allow (31 days, 1000 points, 500 series, a 20 s evaluation timeout). Give a prometheus source only to agents that may read the whole Prometheus.
 
 ## The build sandbox
 
@@ -225,7 +255,7 @@ without docker):
 - **An allowed host is still a channel for anything the session read**: the Go module proxy fetches any module path a request names, from a host the path names, so a request for a crafted path is a message to whoever owns that host. Hence tickets.md's precondition (only `kensac/orbit`, whose diff is reviewed, until the credential proxy is deployed) and the diff policy's scans before anything is committed. Treat every allowlisted host as a channel for anything the sandbox holds. With the proxy deployed the build allowlist does not need `api.anthropic.com` and should not have it (deployment.md): an open route there carries data out under any API key the model brings.
 - **The kernel is shared** with the host, hetzner today. A container escape is root on hetzner,
   which holds every other secret in the fleet; `ORBIT_SANDBOX_RUNTIME=
-  runsc` (gVisor) narrows this where installed.
+  runsc` (gVisor) narrows this where installed; deployment.md, Box isolation on a host, is the planned layout (a second daemon whose only runtime is runsc, and nftables tables dropping what egress refuses).
 - **`/work` has no disk quota**: a sandbox can fill the host's docker volume
   until its lifetime ends. The readback refuses more than 256 MiB.
 - **sandboxd holds the docker socket**, so a bug in it is root on its host. Its
@@ -256,7 +286,7 @@ A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as 
 
 - **Data leaves.** The open web is the point: anything the box holds can be sent anywhere public.
 - **A non-TLS tunnel, or TLS on another port, is not inspected.** Plain HTTP over a CONNECT tunnel, or TLS to port 8443, can name a denied host in its own `Host` or server name if the address it reaches serves that host (a CDN). Denied hosts behind a CDN still enforce their own authentication (orbit's API checks an authentik token, authentik and Infisical their logins), which is what stands between a box and them there.
-- **The deny lists are configuration.** A fleet host's public address missing from `ORBIT_EGRESS_DENY_NETS` is reachable, with every public port on it (hetzner has no firewall); deployment.md lists what each host's egress must carry.
+- **The deny lists are configuration.** A fleet host's public address missing from `ORBIT_EGRESS_DENY_NETS` is reachable, with every public port on it (hetzner has no firewall); deployment.md lists what each host's egress must carry; the planned nftables tables (deployment.md, Box isolation on a host) drop the same ranges in the kernel for traffic that does not go through a proxy.
 - **Abuse from the fleet's address.** Traffic leaves from the host's public IP, so what a box sends is attributed to it.
 
 ## Permission levels

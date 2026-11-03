@@ -42,12 +42,6 @@ func noPrompt(_ context.Context, _ claudeproto.PermissionRequest) claudeproto.Pe
 	return claudeproto.Permission{Message: "orbit has no one to ask in this run, so the call is denied"}
 }
 
-// permissionEvent is what orbit.permission records for a chat run's request: the decision the journal's approval item ends with.
-func permissionEvent(req claudeproto.PermissionRequest, p claudeproto.Permission) []byte {
-	b, _ := json.Marshal(map[string]any{"request_id": req.RequestID, "tool": req.Tool, "allowed": p.Allow, "message": p.Message})
-	return b
-}
-
 // modeSetter is a process whose permission mode can change while it runs.
 type modeSetter interface {
 	SetPermissionMode(ctx context.Context, mode string) error
