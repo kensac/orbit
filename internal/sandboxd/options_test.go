@@ -141,6 +141,8 @@ func TestExtensionProfileHasNoNetworkOrCredentialEnvironment(t *testing.T) {
 	state.HostConfig.CapDrop = []string{"ALL"}
 	state.HostConfig.SecurityOpt = []string{"no-new-privileges:true"}
 	state.HostConfig.NetworkMode = "none"
+	state.HostConfig.UTSMode = ""
+	state.HostConfig.CgroupnsMode = "private"
 	state.HostConfig.Tmpfs = c.HostConfig.Tmpfs
 	for destination := range c.HostConfig.Tmpfs {
 		state.Mounts = append(state.Mounts, mountState{Type: "tmpfs", Destination: destination})
@@ -153,6 +155,16 @@ func TestExtensionProfileHasNoNetworkOrCredentialEnvironment(t *testing.T) {
 	state.HostConfig.PidsLimit = &pids
 	if err := verifyCreated(cfg, state); err != nil {
 		t.Fatalf("verify extension profile: %v", err)
+	}
+	bad := state
+	bad.HostConfig.Devices = []any{map[string]any{"PathOnHost": "/dev/kvm"}}
+	if err := verifyCreated(cfg, bad); err == nil {
+		t.Fatal("accepted a device in the extension profile")
+	}
+	bad = state
+	bad.HostConfig.SecurityOpt = []string{"no-new-privileges:true", "seccomp=unconfined"}
+	if err := verifyCreated(cfg, bad); err == nil {
+		t.Fatal("accepted a weakened seccomp profile")
 	}
 }
 

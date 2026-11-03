@@ -305,21 +305,28 @@ type containerState struct {
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
 	HostConfig struct {
-		Privileged     bool              `json:"Privileged"`
-		ReadonlyRootfs bool              `json:"ReadonlyRootfs"`
-		CapAdd         []string          `json:"CapAdd"`
-		CapDrop        []string          `json:"CapDrop"`
-		SecurityOpt    []string          `json:"SecurityOpt"`
-		NetworkMode    string            `json:"NetworkMode"`
-		Binds          []string          `json:"Binds"`
-		PidMode        string            `json:"PidMode"`
-		IpcMode        string            `json:"IpcMode"`
-		UsernsMode     string            `json:"UsernsMode"`
-		Tmpfs          map[string]string `json:"Tmpfs"`
-		Memory         int64             `json:"Memory"`
-		MemorySwap     int64             `json:"MemorySwap"`
-		NanoCpus       int64             `json:"NanoCpus"`
-		PidsLimit      *int64            `json:"PidsLimit"`
+		Privileged      bool              `json:"Privileged"`
+		ReadonlyRootfs  bool              `json:"ReadonlyRootfs"`
+		CapAdd          []string          `json:"CapAdd"`
+		CapDrop         []string          `json:"CapDrop"`
+		SecurityOpt     []string          `json:"SecurityOpt"`
+		NetworkMode     string            `json:"NetworkMode"`
+		UTSMode         string            `json:"UTSMode"`
+		CgroupnsMode    string            `json:"CgroupnsMode"`
+		Binds           []string          `json:"Binds"`
+		PidMode         string            `json:"PidMode"`
+		IpcMode         string            `json:"IpcMode"`
+		UsernsMode      string            `json:"UsernsMode"`
+		Tmpfs           map[string]string `json:"Tmpfs"`
+		Devices         []any             `json:"Devices"`
+		PublishAllPorts bool              `json:"PublishAllPorts"`
+		PortBindings    map[string]any    `json:"PortBindings"`
+		ExtraHosts      []string          `json:"ExtraHosts"`
+		Runtime         string            `json:"Runtime"`
+		Memory          int64             `json:"Memory"`
+		MemorySwap      int64             `json:"MemorySwap"`
+		NanoCpus        int64             `json:"NanoCpus"`
+		PidsLimit       *int64            `json:"PidsLimit"`
 	} `json:"HostConfig"`
 	Mounts []mountState `json:"Mounts"`
 	State  struct {
@@ -360,6 +367,9 @@ func verifyCreated(cfg Config, c containerState) error {
 		}
 		if len(c.NetworkSettings.Networks) != 0 {
 			return fmt.Errorf("extension sandbox has network attachments: %v", c.NetworkSettings.Networks)
+		}
+		if len(h.SecurityOpt) != 1 || h.SecurityOpt[0] != "no-new-privileges:true" || h.UTSMode != "" || h.CgroupnsMode != "private" || len(h.Devices) != 0 || h.PublishAllPorts || len(h.PortBindings) != 0 || len(h.ExtraHosts) != 0 {
+			return fmt.Errorf("extension host options exceed the fixed profile")
 		}
 		wantTmpfs := map[string]string{
 			"/tmp":      "rw,nosuid,nodev,size=" + strconv.Itoa(ExtensionTmpBytes) + ",mode=1777",
