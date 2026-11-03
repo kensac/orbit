@@ -291,3 +291,11 @@ func TestOnlyApprovalsAndPermissionRequestsGetButtons(t *testing.T) {
 		t.Error("only Apple's push service is skipped for close pushes")
 	}
 }
+
+func TestPushActionNonceFailureFailsClosed(t *testing.T) {
+	s := &Sender{Secret: secret.Key("root"), PublicURL: func() string { return "https://orbit.example" }}
+	a := store.Attention{Kind: store.AttentionApproval, ActionID: ptr("a1")}
+	if got := s.actionsWithNonce(a, "kanishk", time.Now(), strings.NewReader("")); got != nil {
+		t.Fatalf("nonce read failure returned action buttons: %+v", got)
+	}
+}

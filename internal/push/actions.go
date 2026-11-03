@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"time"
 
@@ -95,6 +96,10 @@ func actionMAC(key secret.Key, body string) string {
 // and Open on both. Other kinds, and a Sender without a key or public URL,
 // get none (the notification opens the app when tapped).
 func (s *Sender) actions(a store.Attention, person string, now time.Time) []Action {
+	return s.actionsWithNonce(a, person, now, rand.Reader)
+}
+
+func (s *Sender) actionsWithNonce(a store.Attention, person string, now time.Time, source io.Reader) []Action {
 	base := ""
 	if s.PublicURL != nil {
 		base = strings.TrimRight(s.PublicURL(), "/")
@@ -112,13 +117,27 @@ func (s *Sender) actions(a store.Attention, person string, now time.Time) []Acti
 	default:
 		return nil
 	}
-	n := make([]byte, 16)
-	_, _ = rand.Read(n)
-	nonce := hex.EncodeToString(n)
+	nonce, err := newActionNonce(source)
+	if err != nil {
+		if s.Log != nil {
+			s.Log.Error("make push action nonce", "err", err)
+		}
+		return nil
+	}
 	var out []Action
 	for _, b := range buttons {
 		tok := SignAction(s.Secret, ActionToken{Kind: kind, ID: id, Decision: b[0], Person: person, Nonce: nonce, Exp: now.Add(MaxAge).Unix()})
 		out = append(out, Action{Action: b[0], Title: b[1], URL: base + ActionPath + "?t=" + tok})
 	}
 	return append(out, Action{Action: "open", Title: "Open"})
+}
+
+// newActionNonce makes an unpredictable nonce for the one-use buttons on a
+// notification. Without one, no decision link may be issued.
+func newActionNonce(r io.Reader) (string, error) {
+	n := make([]byte, 16)
+	if _, err := io.ReadFull(r, n); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(n), nil
 }
