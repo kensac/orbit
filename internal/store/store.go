@@ -20,6 +20,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+
+	"github.com/kensac/orbit/internal/status"
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 //go:embed migrations/*.sql
@@ -147,6 +150,9 @@ type AgentRow struct {
 	// NeedsInput is true while the agent waits on its person: an open
 	// question or an action pending approval.
 	NeedsInput bool `json:"needs_input"`
+	// AgentStatus is the agent's status (status.Aggregate over its current
+	// run: the running one, else the newest).
+	AgentStatus status.Status `json:"agent_status"`
 	// Origin and Version are where the configuration in force defines the
 	// agent (file, database, builtin) and a database agent's version; the
 	// API fills them, empty for an agent no longer configured.
@@ -172,7 +178,8 @@ func (s *Store) ListAgents(ctx context.Context) ([]AgentRow, error) {
 		       (SELECT count(*) FROM messages m
 		         WHERE m.agent = a.name AND `+openQuestion+`
 			           AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.conversation_id = m.conversation_id)),
-		       (SELECT count(*) FROM actions x WHERE x.agent = a.name AND x.status = 'pending')
+		       (SELECT count(*) FROM actions x WHERE x.agent = a.name AND x.status = 'pending'),
+		       `+currentRun("a.name", "sr.agent = a.name")+`
 		FROM agents a
 		JOIN agent_specs sp ON sp.sha = a.spec_sha
 		LEFT JOIN LATERAL (
@@ -187,17 +194,19 @@ func (s *Store) ListAgents(ctx context.Context) ([]AgentRow, error) {
 	var out []AgentRow
 	for rows.Next() {
 		var a AgentRow
-		var id, status, trigger *string
+		var id, runStatus, trigger *string
 		var created *time.Time
 		var finished *time.Time
 		var summary *string
+		var current *RunFacts
 		if err := rows.Scan(&a.Name, &a.SpecSHA, &a.Spec, &a.Present, &a.Enabled, &a.FirstSeen, &a.UpdatedAt,
-			&id, &status, &trigger, &created, &finished, &summary, &a.Unread, &a.Pending); err != nil {
+			&id, &runStatus, &trigger, &created, &finished, &summary, &a.Unread, &a.Pending, &current); err != nil {
 			return nil, err
 		}
 		a.NeedsInput = a.Unread > 0 || a.Pending > 0
+		a.AgentStatus = StatusFacts{Run: current, OpenQuestion: a.Unread > 0, PendingAction: a.Pending > 0}.Status()
 		if id != nil {
-			a.LastRun = &RunSummary{ID: *id, Status: *status, Trigger: *trigger, CreatedAt: *created, FinishedAt: finished, Summary: summary}
+			a.LastRun = &RunSummary{ID: *id, Status: *runStatus, Trigger: *trigger, CreatedAt: *created, FinishedAt: finished, Summary: summary}
 		}
 		out = append(out, a)
 	}
@@ -217,6 +226,9 @@ type NewRun struct {
 	// ConversationID is the conversation the run answers in; empty is the
 	// agent's default conversation (schedules, manual runs).
 	ConversationID string
+	// RunAfter holds the run until then (a scheduled run deferred at
+	// enqueue, DeferRun); nil is claimable at once.
+	RunAfter *time.Time
 }
 
 // EnqueueRun inserts a queued run. For a schedule fire already recorded it
@@ -224,11 +236,11 @@ type NewRun struct {
 func (s *Store) EnqueueRun(ctx context.Context, r NewRun) (string, error) {
 	var id string
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO runs (agent, spec_sha, trigger, trigger_index, scheduled_for, prompt, conversation_id)
-		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, '')::uuid)
+		INSERT INTO runs (agent, spec_sha, trigger, trigger_index, scheduled_for, prompt, conversation_id, run_after)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, '')::uuid, $8)
 		ON CONFLICT (agent, trigger_index, scheduled_for) WHERE trigger = 'schedule' DO NOTHING
 		RETURNING id::text`,
-		r.Agent, r.SpecSHA, r.Trigger, r.TriggerIndex, r.ScheduledFor, r.Prompt, r.ConversationID).Scan(&id)
+		r.Agent, r.SpecSHA, r.Trigger, r.TriggerIndex, r.ScheduledFor, r.Prompt, r.ConversationID, r.RunAfter).Scan(&id)
 	if isForeignKeyViolation(err) {
 		return "", ErrNotFound
 	}
@@ -263,23 +275,35 @@ type ClaimedRun struct {
 	// its open questions, the thread it is shown and the session it
 	// continues are that conversation's.
 	ConversationID string
+	// TriggerIndex and ScheduledFor are which trigger fired and when, on a schedule run (a webhook run has the index only).
+	TriggerIndex *int
+	ScheduledFor *time.Time
 }
 
 // MaxAttempts bounds how often an interrupted run is claimed again. A run
 // that kills its own worker (out of memory) would otherwise loop forever.
 const MaxAttempts = 3
 
-// ClaimRun moves the oldest queued run whose agent has nothing running to
+// ClaimRun moves the oldest queued run whose lane has nothing running (laneOf) to
 // running, owned by worker, and records the claim as a new attempt. It
 // returns nil when there is nothing to claim. FOR NO KEY UPDATE SKIP
 // LOCKED gives one row to one claimer across processes, and does not skip
 // a run another transaction only references (an event or journal row of a
 // superseded attempt being written holds a KEY SHARE lock on it, which FOR
-// UPDATE would skip); runs_one_running is what makes
+// UPDATE would skip); runs_one_running_lane is what makes
 // "nothing running" true under concurrency: a second claimer for the same
-// agent fails the index and tries the next row.
+// agent (or a chat agent's same conversation) fails the index and tries the
+// next row.
 func (s *Store) ClaimRun(ctx context.Context, worker string) (*ClaimedRun, error) {
 	return s.ClaimRunFor(ctx, Claim{Worker: worker, Any: true, Builds: true})
+}
+
+// laneOf is the lane a run of table alias t claims (runs_one_running_lane):
+// its conversation for a chat agent, whose conversations run side by side,
+// else ” (one run per agent). Chat is read from the agent's recorded spec.
+func laneOf(t string) string {
+	return `COALESCE((SELECT CASE WHEN (sp.spec->>'chat')::boolean THEN ` + t + `.conversation_id::text ELSE '' END
+	    FROM agents a JOIN agent_specs sp ON sp.sha = a.spec_sha WHERE a.name = ` + t + `.agent), '')`
 }
 
 // claim is ClaimRun with filter (SQL over the candidate q, using $2 to $4)
@@ -290,19 +314,20 @@ func (s *Store) claim(ctx context.Context, worker, filter string, args ...any) (
 		err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 			if err := tx.QueryRow(ctx, `
 				UPDATE runs SET status = 'running', worker = $1, started_at = now(), heartbeat_at = now(),
-				       attempt = attempt + 1
+				       attempt = attempt + 1, lane = `+laneOf("runs")+`
 				WHERE id = (
 				    SELECT q.id FROM runs q
 				    WHERE q.status = 'queued'
 				      AND (q.run_after IS NULL OR q.run_after <= now())
-				      AND NOT EXISTS (SELECT 1 FROM runs b WHERE b.agent = q.agent AND b.status = 'running')
+				      AND NOT EXISTS (SELECT 1 FROM runs b WHERE b.agent = q.agent AND b.status = 'running'
+				                      AND COALESCE(b.lane, '') = `+laneOf("q")+`)
 				      `+filter+`
 				    ORDER BY q.created_at
 				    LIMIT 1
 				    FOR NO KEY UPDATE SKIP LOCKED
 				)
-				RETURNING id::text, attempt, agent, spec_sha, trigger, prompt, chain, conversation_id::text`, append([]any{worker}, args...)...).
-				Scan(&c.ID, &c.Attempt, &c.Agent, &c.SpecSHA, &c.Trigger, &c.Prompt, &c.Chain, &c.ConversationID); err != nil {
+				RETURNING id::text, attempt, agent, spec_sha, trigger, prompt, chain, conversation_id::text, trigger_index, scheduled_for`, append([]any{worker}, args...)...).
+				Scan(&c.ID, &c.Attempt, &c.Agent, &c.SpecSHA, &c.Trigger, &c.Prompt, &c.Chain, &c.ConversationID, &c.TriggerIndex, &c.ScheduledFor); err != nil {
 				return err
 			}
 			_, err := tx.Exec(ctx, `INSERT INTO run_attempts (run_id, attempt, worker) VALUES ($1, $2, $3)`,
@@ -474,6 +499,35 @@ func (s *Store) SetRunner(ctx context.Context, runID string, attempt int, kind, 
 	})
 }
 
+// hookSnapshot reads a stored hook_status; nil when there is none or it
+// does not parse (status then falls back to the run's row).
+func hookSnapshot(b []byte) *status.Snapshot {
+	if len(b) == 0 {
+		return nil
+	}
+	var s status.Snapshot
+	if json.Unmarshal(b, &s) != nil {
+		return nil
+	}
+	return &s
+}
+
+// SetHookStatus records what the run's hooks last reported (a
+// status.Snapshot, as JSON) while the attempt still holds the running run.
+// ErrConflict means it no longer does: a report that arrives after the run
+// finished, or from a superseded attempt, is not the run's status.
+func (s *Store) SetHookStatus(ctx context.Context, runID string, attempt int, snapshot json.RawMessage) error {
+	tag, err := s.Pool.Exec(ctx, `UPDATE runs SET hook_status = $3
+		WHERE id = $1 AND status = 'running' AND attempt = $2`, runID, attempt, snapshot)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("set hook status of run %s attempt %d: %w (no longer its claim)", runID, attempt, ErrConflict)
+	}
+	return nil
+}
+
 // RunResult is a finished run's outcome.
 type RunResult struct {
 	// Attempt is the attempt finishing the run; only the attempt holding
@@ -489,9 +543,14 @@ type RunResult struct {
 	SessionID string
 	// SessionCostUSD is the backend's cumulative total for the session.
 	SessionCostUSD *float64
+	// Tokens is this attempt's token counts, nil when the backend reported none.
+	Tokens *tokens.Usage
 	// Gate names what ended a skipped run without a backend call; set
 	// exactly when Status is skipped (runs_skipped_names_gate).
 	Gate string
+	// DiffPolicyFailed is a build whose diff the diff policy refused
+	// (FailBuild records it for a race's comparison).
+	DiffPolicyFailed bool
 }
 
 // Run statuses that end a run.
@@ -502,6 +561,8 @@ const (
 	// StatusSkipped is a run a gate ended without calling a backend: it
 	// finished well, and judged nothing.
 	StatusSkipped = "skipped"
+	// GateMissed names a schedule fire that was claimed past its grace and skipped rather than run late. Unlike a gate's skip it is no success: the agent did nothing.
+	GateMissed = "missed"
 )
 
 // FinishRun records the outcome of a run that wrote nothing else (a failure,
@@ -547,6 +608,12 @@ func finishRun(ctx context.Context, tx pgx.Tx, runID string, r RunResult) error 
 		session_id = COALESCE(NULLIF($6, ''), session_id)
 		WHERE run_id = $1 AND attempt = $2 AND outcome IS NULL`,
 		runID, r.Attempt, r.Status, r.CostUSD, r.SessionCostUSD, r.SessionID); err != nil {
+		return err
+	}
+	if err := wakeForSteers(ctx, tx, runID); err != nil {
+		return err
+	}
+	if err := recordTokens(ctx, tx, runID, r.Attempt, r.Tokens); err != nil {
 		return err
 	}
 	if r.Status == "failed" {
@@ -597,24 +664,46 @@ type Run struct {
 	Steps int `json:"steps"`
 	// Gate names what ended a skipped run.
 	Gate *string `json:"gate,omitempty"`
+	// HookStatus is what the run's hooks last reported (status.Snapshot).
+	HookStatus json.RawMessage `json:"-"`
+	// AgentStatus is the agent's status in this run (status.Derive).
+	AgentStatus status.Status `json:"agent_status"`
+	// Tokens is every attempt's token counts together; Prefix the stable prefix the latest attempt sent, against the conversation's previous run.
+	Tokens *Tokens `json:"tokens,omitempty"`
+	Prefix *Prefix `json:"prefix,omitempty"`
 }
 
 // runCols reads a run aliased r: stepsCount names it.
-const runCols = `r.id::text, r.attempt, r.agent, r.spec_sha, r.trigger, r.trigger_index, r.scheduled_for, r.prompt, r.status,
+var runCols = `r.id::text, r.attempt, r.agent, r.spec_sha, r.trigger, r.trigger_index, r.scheduled_for, r.prompt, r.status,
 	r.runner_kind, r.model, r.worker, r.created_at, r.started_at, r.finished_at, r.error, r.summary, r.report,
 	r.output, r.usage, r.cost_usd::float8, r.session_id, r.session_mode, r.session_parent, r.session_depth,
-	r.run_after, r.continues::text, r.chain, r.gate, ` + stepsCount
+	r.run_after, r.continues::text, r.chain, r.gate, r.hook_status,
+	EXISTS (SELECT 1 FROM messages m WHERE m.run_id = r.id AND ` + personQuestion + `),
+	EXISTS (SELECT 1 FROM actions pa WHERE pa.run_id = r.id AND pa.status = 'pending'), ` + stepsCount + `, ` + runTokens + `, ` + runPrefix
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
+	var prefix []byte
+	var openQ, pending bool
 	err := row.Scan(&r.ID, &r.Attempt, &r.Agent, &r.SpecSHA, &r.Trigger, &r.TriggerIndex, &r.ScheduledFor, &r.Prompt,
 		&r.Status, &r.RunnerKind, &r.Model, &r.Worker, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.Error,
 		&r.Summary, &r.Report, &r.Output, &r.Usage, &r.CostUSD, &r.SessionID, &r.SessionMode, &r.SessionParent,
-		&r.SessionDepth, &r.RunAfter, &r.Continues, &r.Chain, &r.Gate, &r.Steps)
+		&r.SessionDepth, &r.RunAfter, &r.Continues, &r.Chain, &r.Gate, &r.HookStatus, &openQ, &pending, &r.Steps, &r.Tokens, &prefix)
+	if err == nil {
+		r.AgentStatus = status.Derive(status.Run{ID: r.ID, Status: r.Status, Attempt: r.Attempt, CreatedAt: r.CreatedAt,
+			StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, Error: r.Error, OpenQuestion: openQ, PendingAction: pending,
+			Hook: hookSnapshot(r.HookStatus)})
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	return &r, err
+	if err != nil {
+		return nil, err
+	}
+	if r.Prefix, err = decodePrefix(prefix); err != nil {
+		return nil, err
+	}
+	return &r, nil
 }
 
 // GetRun returns one run.
@@ -774,15 +863,19 @@ func (s *Store) ListArtifacts(ctx context.Context, runID string) ([]Artifact, er
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[Artifact])
 }
 
-// GetArtifactContent returns one artifact's bytes and media type.
-func (s *Store) GetArtifactContent(ctx context.Context, id string) ([]byte, string, error) {
-	var b []byte
-	var mt string
-	err := s.Pool.QueryRow(ctx, `SELECT content, media_type FROM artifacts WHERE id = $1`, id).Scan(&b, &mt)
+// OpenArtifact returns one artifact and a reader of its content.
+func (s *Store) OpenArtifact(ctx context.Context, id string) (Artifact, *Blob, error) {
+	var a Artifact
+	err := s.Pool.QueryRow(ctx, `SELECT id::text, run_id::text, attempt, direction, name, media_type, sha256, bytes, created_at
+		FROM artifacts WHERE id = $1`, id).
+		Scan(&a.ID, &a.RunID, &a.Attempt, &a.Direction, &a.Name, &a.MediaType, &a.SHA256, &a.Bytes, &a.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, "", ErrNotFound
+		return a, nil, ErrNotFound
 	}
-	return b, mt, err
+	if err != nil {
+		return a, nil, err
+	}
+	return a, s.blob(ctx, blobArtifact, a.ID, a.Bytes), nil
 }
 
 // ---------------------------------------------------------------- memory
@@ -958,6 +1051,9 @@ type ProposedAction struct {
 	// Error says why the harness denied it regardless of rule (unknown
 	// type, invalid params).
 	Error string
+	// InstructedBy is the person whose message the run answered. An
+	// approve-rule action they asked for is approved by them.
+	InstructedBy string
 }
 
 // Outcome is everything a successful run writes besides its row.
@@ -969,8 +1065,6 @@ type Outcome struct {
 	Plan *PlanProposal
 	// Entries are the memory entry writes the run made, applied in order; each one's Result is set (entry_writes.go).
 	Entries []*EntryWrite
-	// Skills are the skill writes the run made (skills.go), applied after its entries.
-	Skills []*AgentSkillWrite
 }
 
 // PlanProposal is a ticket plan a run proposed. RecordOutcome sets Version
@@ -1022,9 +1116,6 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 		if err := applyEntryWrites(ctx, tx, runID, o.Entries); err != nil {
 			return err
 		}
-		if err := applySkillWrites(ctx, tx, runID, agent, o.Skills); err != nil {
-			return err
-		}
 		for _, a := range o.Actions {
 			id, err := insertAction(ctx, tx, runID, agent, a)
 			if err != nil {
@@ -1042,19 +1133,56 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 // and never executed.
 func insertAction(ctx context.Context, tx pgx.Tx, runID, agent string, a ProposedAction) (string, error) {
 	status := map[string]string{"auto": "approved", "approve": "pending", "deny": "denied"}[a.Rule]
+	decidedBy := "rule"
+	switch {
+	case a.Rule == "approve" && a.InstructedBy != "" && a.Error == "":
+		status, decidedBy = "approved", a.InstructedBy
+	case a.Rule == "approve":
+		decidedBy = ""
+	}
 	var id string
 	err := tx.QueryRow(ctx, `
-		INSERT INTO actions (run_id, agent, type, params, reason, rule, status, decided_by, decided_at, error, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7,
-		        CASE WHEN $6 = 'approve' THEN NULL ELSE 'rule' END,
-		        CASE WHEN $6 = 'approve' THEN NULL ELSE now() END,
-		        NULLIF($8, ''), clock_timestamp())
+		INSERT INTO actions (run_id, agent, type, params, reason, rule, status, decided_by, decided_at, error, created_at, instructed_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''),
+		        CASE WHEN $8 = '' THEN NULL ELSE now() END,
+		        NULLIF($9, ''), clock_timestamp(), NULLIF($10, ''))
 		RETURNING id::text`,
-		runID, agent, a.Type, []byte(a.Params), a.Reason, a.Rule, status, a.Error).Scan(&id)
+		runID, agent, a.Type, []byte(a.Params), a.Reason, a.Rule, status, decidedBy, a.Error, a.InstructedBy).Scan(&id)
 	if err != nil || status != "pending" {
 		return id, err
 	}
 	return id, newAttention(ctx, tx, AttentionApproval, "action:"+id, runID, " wants to "+a.Type, &id, nil, nil, nil)
+}
+
+// StartActionNow records an action a running chat turn executes at once
+// (its rule auto, or approve and its person asked for it): the row starts
+// executing, decided by the rule or the person, and FinishAction ends it.
+// Only the run's own running claim may do this.
+func (s *Store) StartActionNow(ctx context.Context, runID string, attempt int, agent string, a ProposedAction) (string, error) {
+	var running bool
+	if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs WHERE id = $1 AND status = 'running' AND attempt = $2)`,
+		runID, attempt).Scan(&running); err != nil {
+		return "", err
+	}
+	if !running {
+		return "", fmt.Errorf("run %s attempt %d: %w (not its running claim)", runID, attempt, ErrConflict)
+	}
+	var id string
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var err error
+		if id, err = insertAction(ctx, tx, runID, agent, a); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `UPDATE actions SET status = 'executing', executing_since = now() WHERE id = $1 AND status = 'approved'`, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("action %s was not approved: %w", id, ErrConflict)
+		}
+		return nil
+	})
+	return id, err
 }
 
 // ---------------------------------------------------------------- actions
@@ -1075,10 +1203,14 @@ type Action struct {
 	Result     json.RawMessage `json:"result,omitempty"`
 	Error      *string         `json:"error,omitempty"`
 	CreatedAt  time.Time       `json:"created_at"`
+	// InstructedBy is the person whose message the action answers: they
+	// asked for it in the conversation, which approves an action whose
+	// rule is approve.
+	InstructedBy *string `json:"instructed_by,omitempty"`
 }
 
 const actionCols = `id::text, run_id::text, agent, type, params, reason, rule, status, decided_by,
-	decided_at, executed_at, result, error, created_at`
+	decided_at, executed_at, result, error, created_at, instructed_by`
 
 // GetAction returns one action.
 func (s *Store) GetAction(ctx context.Context, id string) (*Action, error) {

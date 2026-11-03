@@ -131,6 +131,9 @@ func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) renameAccount(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWorkspaceGroup(w, r) {
+		return
+	}
 	var body struct {
 		Label string `json:"label"`
 	}
@@ -181,6 +184,9 @@ func loginTerminal(b store.Box, a store.BoxAccount, l loginBody, by string) stor
 // mount only by being recreated, which ends its terminals: with any running
 // that needs restart: true.
 func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWorkspaceGroup(w, r) {
+		return
+	}
 	var body struct {
 		Label   string `json:"label"`
 		Cols    int    `json:"cols"`
@@ -282,6 +288,9 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 // loginAccount opens a new login terminal for an existing account: a login
 // whose refresh token expired, or a switch of the account to another login.
 func (s *Server) loginAccount(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWorkspaceGroup(w, r) {
+		return
+	}
 	var body loginBody
 	if !decode(w, r, 1<<10, &body, bodyRequired) {
 		return

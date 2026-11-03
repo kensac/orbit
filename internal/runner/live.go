@@ -14,7 +14,7 @@ import (
 
 // A live process is `claude -p --input-format stream-json`: one CLI process that takes user messages on stdin, one JSON line each, and answers each with the same stream a one-shot run prints, ending in one `result` line per message. That line carries the turn's own structured_output (checked against the real CLI 2.1.316: three turns with --json-schema gave three results, each with its own structured_output and num_turns, and the second turn saw the first). The protocol is internal/claudeproto's.
 //
-// The CLI may send control requests of its own (permission prompts, hook callbacks, SDK MCP messages) and waits for a control_response. orbit configures none of their sources, so any that arrives is answered with an error at once rather than leaving the turn blocked.
+// The CLI may send control requests of its own (permission prompts, hook callbacks, SDK MCP messages) and waits for a control_response. Only a run's connectors are such a source (connectors.go); anything else that arrives is answered with an error at once rather than leaving the turn blocked.
 
 // MaxLive bounds live processes per orbit process. Each is a resident CLI
 // (about 265 MB RSS for 2.1.316 on macOS, measured idle after a turn); at
@@ -64,7 +64,7 @@ type liveProc struct {
 	hash    string
 	session string // the session the process holds, from its last result
 	proc    liveProcess
-	// tools serves a chat process's orbit tools to the turn in progress.
+	// tools serves the turn in progress its orbit tools (a chat run's) and connectors.
 	tools *chatTools
 	busy  bool
 	used  time.Time
@@ -149,6 +149,21 @@ func (l *Live) drop(p *liveProc) {
 	p.stop(true)
 }
 
+// discard closes the idle live process of key, if there is one.
+func (l *Live) discard(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	p := l.procs[key]
+	if p == nil || p.busy {
+		return
+	}
+	if p.timer != nil {
+		p.timer.Stop()
+	}
+	delete(l.procs, key)
+	l.async(func() { p.stop(false) })
+}
+
 func (l *Live) expire(p *liveProc) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -166,7 +181,11 @@ type liveProcess interface {
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
-	Interrupt(ctx context.Context) error
+	Interrupt(ctx context.Context, cancelQueued bool) (*claudeproto.InterruptReceipt, error)
+	SendUUID(text, uuid string) error
+	CancelQueued(ctx context.Context, uuid string) (bool, error)
+	Capable(name string) bool
+	SetPermissionMode(ctx context.Context, mode string) error
 }
 
 // closeIdle closes every idle live process, for a sandbox slot or memory.
@@ -190,13 +209,15 @@ func (l *Live) async(f func()) {
 	go func() { defer l.wg.Done(); f() }()
 }
 
-// startLive starts a process. Its Conn reads for the process's whole life and refuses every control request (claudeproto.Handler with no callbacks), so the CLI never waits on orbit.
-func startLive(bin string, args, env []string, dir string) (*liveProc, error) {
-	proc, err := claudeproto.Start(claudeproto.Command{Bin: bin, Args: args, Env: env, Dir: dir}, claudeproto.Handler{})
+// startLive starts a process. Its Conn reads for the process's whole life and answers every control request at once: a connector's calls and permission prompts go to the turn in progress (chatTools), and anything else is refused, so the CLI never waits on orbit.
+func startLive(bin string, args, env []string, dir string, conns *Connectors) (*liveProc, error) {
+	tools := &chatTools{}
+	tools.connectors(conns)
+	proc, err := claudeproto.Start(claudeproto.Command{Bin: bin, Args: args, Env: env, Dir: dir}, tools.handler())
 	if err != nil {
 		return nil, err
 	}
-	return &liveProc{proc: proc}, nil
+	return &liveProc{proc: proc, tools: tools}, nil
 }
 
 // turn sends one user message and returns the result line that ends its answer. It never waits past ctx: the caller drops the process on any error, which kills it.
@@ -230,11 +251,11 @@ func (c *claudeCode) runLive(ctx context.Context, sess *Session, args, env []str
 		if sess.Resume != "" {
 			mode = "resumed"
 		}
-		full, err := claudeproto.Args(claudeproto.Transport{Stream: true, Resume: sess.Resume}, args)
+		full, err := claudeproto.Args(claudeproto.Transport{Stream: true, Resume: sess.Resume, PermissionPrompt: len(req.Connectors.Ask()) > 0}, args)
 		if err != nil {
 			return nil, true, err
 		}
-		if p, err = startLive(c.bin, full, env, req.Workdir); err != nil {
+		if p, err = startLive(c.bin, full, env, req.Workdir, req.Connectors); err != nil {
 			return nil, true, err
 		}
 		p.key, p.hash, p.busy = sess.Key, hash, true
@@ -243,7 +264,9 @@ func (c *claudeCode) runLive(ctx context.Context, sess *Session, args, env []str
 		sess.Live.drop(p)
 		return nil, true, err
 	}
+	p.tools.connectors(req.Connectors)
 	final, err = p.turn(ctx, req.Prompt, emit)
+	p.tools.connectors(nil)
 	if err != nil {
 		sess.Live.drop(p)
 		return nil, true, err

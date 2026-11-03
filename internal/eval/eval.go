@@ -135,7 +135,7 @@ func Evaluate(s Suite, results []Result) (Report, error) {
 			continue
 		}
 		var output any
-		if err := Decode(bytes.NewReader(r.Output), &output); err != nil {
+		if err := decodeComparison(r.Output, &output); err != nil {
 			return report, fmt.Errorf("result %q output: %w", c.Name, err)
 		}
 		if r.CostUSD == nil {
@@ -236,7 +236,7 @@ func validate(c Check) (any, error) {
 		}
 	}
 	var v any
-	if err := Decode(bytes.NewReader(c.Value), &v); err != nil {
+	if err := decodeComparison(c.Value, &v); err != nil {
 		return nil, fmt.Errorf("value: %w", err)
 	}
 	switch c.Op {
@@ -259,6 +259,37 @@ func validate(c Check) (any, error) {
 	}
 	return v, nil
 }
+
+// decodeComparison validates every number before shape or pointer checks can hide it.
+func decodeComparison(raw json.RawMessage, v *any) error {
+	if err := Decode(bytes.NewReader(raw), v); err != nil {
+		return err
+	}
+	return validateNumbers(*v)
+}
+
+func validateNumbers(v any) error {
+	switch x := v.(type) {
+	case json.Number:
+		if _, ok := number(x.String()); !ok {
+			return errors.New("number exceeds exact comparison bounds: at most 1000 characters and an exponent between -1000 and 1000")
+		}
+	case []any:
+		for _, item := range x {
+			if err := validateNumbers(item); err != nil {
+				return err
+			}
+		}
+	case map[string]any:
+		for _, item := range x {
+			if err := validateNumbers(item); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func equal(a, b any) bool {
 	switch x := a.(type) {
 	case json.Number:
