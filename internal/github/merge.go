@@ -41,6 +41,7 @@ type PullRequest struct {
 	} `json:"head"`
 	Base struct {
 		Ref  string `json:"ref"`
+		SHA  string `json:"sha"`
 		Repo struct {
 			FullName      string `json:"full_name"`
 			DefaultBranch string `json:"default_branch"`
