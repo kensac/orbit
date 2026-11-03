@@ -27,7 +27,23 @@ func main() {
 		_ = exec.Command("/bin/sh", "-c", "sleep 60").Start()
 		time.Sleep(time.Minute)
 	}
+	if req.Parameters["memory"] == true {
+		// Keep allocating until the container's cgroup limit kills this process.
+		// The caller expects an invocation failure and verifies sandbox cleanup.
+		var held [][]byte
+		for {
+			held = append(held, make([]byte, 8<<20))
+			for i := range held[len(held)-1] {
+				held[len(held)-1][i] = 1
+			}
+		}
+	}
 	result := inspect(req.Parameters)
+	if req.Parameters["flood"] == true {
+		for key, value := range exhaustProcesses() {
+			result[key] = value
+		}
+	}
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
 		"protocol": "orbit.extension.v1", "invocation_id": req.InvocationID,
 		"status": "ok", "result": result,
@@ -74,6 +90,20 @@ func inspect(params map[string]any) map[string]any {
 	cancel()
 	_, sockErr := os.Stat("/var/run/docker.sock")
 	status := readStatus()
+	hostPathsUnreadable := true
+	for _, path := range []string{"/proc/1/root/etc/shadow", "/root/.ssh", "/run/secrets", "/home/agent/.claude", "/work/.orbit/claude", "/host", "/mnt/host"} {
+		b, readErr := os.ReadFile(path)
+		entries, dirErr := os.ReadDir(path)
+		if readErr == nil && len(b) > 0 || dirErr == nil && len(entries) > 0 {
+			hostPathsUnreadable = false
+		}
+	}
+	linkEscapeBlocked := false
+	if err := os.Symlink("/etc", "/work/out/escape"); err == nil {
+		linkEscapeBlocked = os.WriteFile("/work/out/escape/orbit-probe", []byte("x"), 0o600) != nil
+		_ = os.Remove("/work/out/escape")
+	}
+	hardlinkEscapeBlocked := os.Link(inputPath, "/work/out/input-hardlink") != nil
 	marker, _ := params["marker"].(string)
 	other, _ := params["other"].(string)
 	noCrossTmp := true
@@ -85,24 +115,44 @@ func inspect(params map[string]any) map[string]any {
 		noCrossTmp = noCrossTmp && os.WriteFile(filepath.Join("/tmp", marker), []byte(marker), 0o600) == nil
 	}
 	return map[string]any{
-		"package_read_only":     packageRO,
-		"input_present":         inputErr == nil,
-		"input_read_only":       inputRO,
-		"input_write_error":     errorText(inputWriteErr),
-		"work_root_read_only":   workRO,
-		"work_root_write_error": errorText(workWriteErr),
-		"work_root_chmod_error": errorText(workChmodErr),
-		"tmp_writable":          tmpWritable,
-		"out_writable":          outWritable,
-		"no_network":            err != nil && dnsErr != nil,
-		"proxy_absent":          proxyAbsent,
-		"secrets_absent":        secretsAbsent,
-		"environment_clean":     envClean,
-		"docker_socket_absent":  os.IsNotExist(sockErr),
-		"capabilities_zero":     status["CapEff"] == "0000000000000000" && status["CapPrm"] == "0000000000000000" && status["CapBnd"] == "0000000000000000",
-		"no_new_privileges":     status["NoNewPrivs"] == "1",
-		"seccomp_enabled":       status["Seccomp"] == "2",
-		"no_cross_tmp":          noCrossTmp,
+		"package_read_only":       packageRO,
+		"input_present":           inputErr == nil,
+		"input_read_only":         inputRO,
+		"input_write_error":       errorText(inputWriteErr),
+		"work_root_read_only":     workRO,
+		"work_root_write_error":   errorText(workWriteErr),
+		"work_root_chmod_error":   errorText(workChmodErr),
+		"tmp_writable":            tmpWritable,
+		"out_writable":            outWritable,
+		"no_network":              err != nil && dnsErr != nil,
+		"proxy_absent":            proxyAbsent,
+		"secrets_absent":          secretsAbsent,
+		"environment_clean":       envClean,
+		"docker_socket_absent":    os.IsNotExist(sockErr),
+		"capabilities_zero":       status["CapEff"] == "0000000000000000" && status["CapPrm"] == "0000000000000000" && status["CapBnd"] == "0000000000000000",
+		"no_new_privileges":       status["NoNewPrivs"] == "1",
+		"seccomp_enabled":         status["Seccomp"] == "2",
+		"host_paths_unreadable":   hostPathsUnreadable,
+		"link_escape_blocked":     linkEscapeBlocked,
+		"hardlink_escape_blocked": hardlinkEscapeBlocked,
+		"fork_limit_hit":          false,
+		"forks_before_limit":      0,
+		"no_cross_tmp":            noCrossTmp,
+	}
+}
+
+func exhaustProcesses() map[string]any {
+	var children []*exec.Cmd
+	for {
+		child := exec.Command("sleep", "30")
+		if err := child.Start(); err != nil {
+			for _, running := range children {
+				_ = running.Process.Kill()
+				_ = running.Wait()
+			}
+			return map[string]any{"forks_before_limit": len(children), "fork_limit_hit": true}
+		}
+		children = append(children, child)
 	}
 }
 
