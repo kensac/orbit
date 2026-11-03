@@ -61,6 +61,11 @@ type Request struct {
 	Connectors *Connectors
 	// Stall watches a Claude Code chat or live turn for a silent backend.
 	Stall *Stall
+	// Model and Effort, when set, replace the runner's own for this run (a
+	// conversation's, checked by spec.CheckModel). A live process takes
+	// them for its next turn (claude-code's set_model and
+	// apply_flag_settings), so changing them does not end it.
+	Model, Effort string
 }
 
 // Harness is orbit's own code inside the CLI's process tree.
