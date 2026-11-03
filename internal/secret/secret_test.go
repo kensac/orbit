@@ -25,7 +25,7 @@ func TestDeriveIsByteIdenticalToWhatOrbitAlreadySigned(t *testing.T) {
 
 func TestPurposesAndRootsSeparateKeys(t *testing.T) {
 	k := Key(goldenRoot)
-	keys := [][]byte{k.Derive(UploadURL), k.Derive(WorkspaceUploadURL), k.Derive(MCPOAuth), k.Derive(ConnectorTokens), k.Derive(PushAction), k.Derive(Approval("x")), k.Derive(Mail("x"))}
+keys := [][]byte{k.Derive(UploadURL), k.Derive(WorkspaceUploadURL), k.Derive(MCPOAuth), k.Derive(TemplateLink), k.Derive(ConnectorTokens), k.Derive(PushAction), k.Derive(Approval("x")), k.Derive(Mail("x"))}
 	for i := range keys {
 		for j := i + 1; j < len(keys); j++ {
 			if bytes.Equal(keys[i], keys[j]) {
