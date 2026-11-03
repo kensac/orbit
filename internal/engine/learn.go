@@ -45,7 +45,7 @@ func LearnEnabled(a *spec.Agent) (bool, time.Duration) {
 	return true, idle
 }
 
-// EnqueueLearning queues a learning run for every quiet conversation that has something new from its person, for every agent that learns. It only enqueues, and runs_one_learning makes it safe on every instance at once.
+// EnqueueLearning queues a learning run for every quiet conversation that has something new from its person, for every agent that learns, and for the next imported session to learn from. It only enqueues, and runs_one_learning makes it safe on every instance at once.
 func (e *Engine) EnqueueLearning(ctx context.Context) error {
 	snap := e.Current()
 	for _, a := range snap.Config.Agents {
@@ -63,26 +63,26 @@ func (e *Engine) EnqueueLearning(ctx context.Context) error {
 			}
 		}
 	}
-	return nil
+	return e.enqueueSessionLearning(ctx, snap)
 }
 
 // executeLearn runs one learning run to a final state.
 func (e *Engine) executeLearn(ctx, actx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, start time.Time, log *slog.Logger) error {
 	rs := snap.Config.Deployment.Runners[learnRunner(a)]
-	out, ops, writes, refused, res, gate, err := e.learn(actx, snap, a, c)
+	lr, err := e.learn(actx, snap, a, c)
 	if errors.Is(context.Cause(actx), errLostClaim) {
 		log.Warn("learning attempt stopped: it lost its claim on the run", "attempt", c.Attempt)
 		return nil
 	}
 	var cost *float64
-	if res != nil {
-		cost = res.CostUSD
+	if lr.res != nil {
+		cost = lr.res.CostUSD
 	}
 	if ctx.Err() != nil {
 		return e.Store.HandBack(context.WithoutCancel(ctx), c.ID, c.Attempt, cost, nil)
 	}
 	rr := store.RunResult{Attempt: c.Attempt}
-	fillResult(&rr, res)
+	fillResult(&rr, lr.res)
 	if err != nil {
 		// A learning run is background work: its failure is on the run, not a page. The next thing the person says makes a new one.
 		rr.Status, rr.Error = "failed", err.Error()
@@ -90,35 +90,51 @@ func (e *Engine) executeLearn(ctx, actx context.Context, snap *Snapshot, a *spec
 		metrics.RunFinished(a.Name, "failed", rs.Kind, time.Since(start), rr.CostUSD)
 		return e.Store.FinishRun(context.WithoutCancel(ctx), c.ID, rr)
 	}
-	if gate != "" {
-		rr.Status, rr.Gate, rr.Summary = store.StatusSkipped, gate, "Nothing new from the person to learn from."
-		metrics.RunSkipped(a.Name, gate)
+	if lr.gate != "" {
+		rr.Status, rr.Gate, rr.Summary = store.StatusSkipped, lr.gate, "Nothing new from the person to learn from."
+		metrics.RunSkipped(a.Name, lr.gate)
 		metrics.RunFinished(a.Name, store.StatusSkipped, rs.Kind, time.Since(start), nil)
 		return e.Store.FinishRun(context.WithoutCancel(ctx), c.ID, rr)
 	}
 	bad := map[int]string{}
-	for _, r := range refused {
+	for _, r := range lr.refused {
 		bad[r.Index] = r.Error
 	}
 	var lines []string
-	for i, op := range ops {
+	for i, op := range lr.out.Entries {
 		line := fmt.Sprintf("- %s %s", op.Op, firstNonEmpty(op.Title, op.Ref))
 		if msg, ok := bad[i]; ok {
 			line += ": refused: " + msg
 		}
 		lines = append(lines, line)
 	}
-	rr.Status, rr.Summary = "succeeded", out.Summary
-	rr.Report = "Nothing durable to keep."
+	rr.Status, rr.Summary = "succeeded", lr.out.Summary
+	var report []string
 	if len(lines) > 0 {
-		rr.Report = "Entry writes (outcomes in entries.json):\n\n" + strings.Join(lines, "\n")
+		report = append(report, "Entry writes (outcomes in entries.json):\n\n"+strings.Join(lines, "\n"))
 	}
-	if _, err := e.Store.RecordOutcome(context.WithoutCancel(ctx), c.ID, a.Name, rr, store.Outcome{Entries: writes}); err != nil {
+	report = append(report, lr.notes...)
+	rr.Report = "Nothing durable to keep."
+	if len(report) > 0 {
+		rr.Report = strings.Join(report, "\n\n")
+	}
+	if _, err := e.Store.RecordOutcome(context.WithoutCancel(ctx), c.ID, a.Name, rr, store.Outcome{Entries: lr.writes, Actions: lr.actions}); err != nil {
 		return err
 	}
-	e.recordEntryWrites(ctx, c, ops, writes, refused)
+	e.recordEntryWrites(ctx, c, lr.out.Entries, lr.writes, lr.refused)
 	metrics.RunFinished(a.Name, "succeeded", rs.Kind, time.Since(start), rr.CostUSD)
 	return nil
+}
+
+// learnRun is what a learning run's backend call came to: its output and entry writes, or the gate that skipped it. A session's learning run also proposes actions (skill:write) and adds report sections (notes).
+type learnRun struct {
+	out     *learnOutput
+	writes  []*store.EntryWrite
+	refused []refusedWrite
+	res     *runner.Result
+	gate    string
+	actions []store.ProposedAction
+	notes   []string
 }
 
 func firstNonEmpty(s ...string) string {
@@ -137,10 +153,12 @@ func learnRunner(a *spec.Agent) string {
 	return a.Runner
 }
 
-// learnOutput is a learning run's whole result.
+// learnOutput is a learning run's whole result. Procedures and Skills are a session learning run's only (learnsession.go).
 type learnOutput struct {
-	Summary string        `json:"summary"`
-	Entries []OutputEntry `json:"entries"`
+	Summary    string                 `json:"summary"`
+	Entries    []OutputEntry          `json:"entries"`
+	Procedures []string               `json:"procedures,omitempty"`
+	Skills     []sessionSkillProposal `json:"skills,omitempty"`
 }
 
 // learnSchema is a learning run's output: a line and its entry writes.
@@ -170,23 +188,31 @@ Rules:
 ` + entriesContract(topics)
 }
 
-// learn reads the run's window and entries, calls the backend, and resolves its writes. gate is set when there was nothing to call it for.
-func (e *Engine) learn(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun) (out *learnOutput, ops []OutputEntry, writes []*store.EntryWrite, refused []refusedWrite, res *runner.Result, gate string, err error) {
+// learn reads the run's window and entries, calls the backend, and resolves its writes. gate is set when there was nothing to call it for. A learning run of an imported session reads that session instead (learnSession).
+func (e *Engine) learn(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun) (*learnRun, error) {
+	lr := &learnRun{}
 	rs := snap.Config.Deployment.Runners[learnRunner(a)]
 	r, err := e.NewRunner(learnRunner(a), rs, e.Env)
 	if err != nil {
-		return nil, nil, nil, nil, nil, "", err
+		return lr, err
 	}
 	if err := e.Store.SetRunner(ctx, c.ID, c.Attempt, r.Kind(), r.Model(), a.SHA); err != nil {
-		return nil, nil, nil, nil, nil, "", err
+		return lr, err
+	}
+	sw, err := e.Store.SessionLearningWindowOf(ctx, c.ID)
+	switch {
+	case err == nil:
+		return e.learnSession(ctx, a, c, r, *sw)
+	case !errors.Is(err, store.ErrNotFound):
+		return lr, err
 	}
 	w, err := e.Store.LearningWindowOf(ctx, c.ID)
 	if err != nil {
-		return nil, nil, nil, nil, nil, "", err
+		return lr, err
 	}
 	items, err := e.Store.LearningItems(ctx, *w, learnRows)
 	if err != nil {
-		return nil, nil, nil, nil, nil, "", err
+		return lr, err
 	}
 	// A /remember was written when it was said (remember.go); learning from it again would only duplicate it.
 	items = slices.DeleteFunc(items, func(it store.ConversationItem) bool { return it.Kind == "message" && isRemember(it.Body) })
@@ -195,30 +221,15 @@ func (e *Engine) learn(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 		said = said || it.Kind == "message"
 	}
 	if !said {
-		return nil, nil, nil, nil, nil, gateNothingNew, nil
+		lr.gate = gateNothingNew
+		return lr, nil
 	}
 	loc := a.Location()
 	text, _ := packConversation(items, loc, learnBudget, learnItemMax)
-	topics, err := e.agentTopics(ctx, a)
-	if err != nil {
-		return nil, nil, nil, nil, nil, "", err
-	}
-	entries, err := e.Store.EntriesFor(ctx, a.Name, topics)
-	if err != nil {
-		return nil, nil, nil, nil, nil, "", err
-	}
-
-	workdir := filepath.Join(e.DataDir, "runs", fmt.Sprintf("%s-%d", c.ID, c.Attempt))
+	topics, entries, workdir, index, inputs, err := e.learnSetup(ctx, a, c)
 	defer func() { _ = os.RemoveAll(workdir) }()
-	if err := os.MkdirAll(filepath.Join(workdir, "inputs"), 0o700); err != nil {
-		return nil, nil, nil, nil, nil, "", err
-	}
-	var inputs []runner.Input
-	index := "# What you know\n\n(nothing yet)\n"
-	if len(entries) > 0 {
-		if index, inputs, err = e.knownInput(ctx, false, c, entries, workdir, "inputs", nil); err != nil {
-			return nil, nil, nil, nil, nil, "", err
-		}
+	if err != nil {
+		return lr, err
 	}
 	var p strings.Builder
 	fmt.Fprintf(&p, "# The agent\n\n%s", a.Name)
@@ -226,14 +237,42 @@ func (e *Engine) learn(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 		fmt.Fprintf(&p, ": %s", a.Description)
 	}
 	fmt.Fprintf(&p, "\n\nIts charter:\n\n%s\n\n%s\n# The conversation since the last learning pass (oldest first; \"you\" is the agent)\n\n%s", strings.TrimSpace(a.Charter), index, text)
-	prompt, system, schema := p.String(), learnSystem(topics), learnSchema()
+	lr.out, lr.res, err = e.learnCall(ctx, a, c, r, workdir, inputs, p.String(), learnSystem(topics), learnSchema())
+	if err != nil {
+		return lr, err
+	}
+	lr.writes, lr.refused = resolveEntryWrites(a.Name, topics, entries, lr.out.Entries)
+	return lr, nil
+}
+
+// learnSetup is what every learning run reads beside its window: the agent's topics and entries, and a workdir with the entries as an input (index is their prompt index). The caller removes the workdir.
+func (e *Engine) learnSetup(ctx context.Context, a *spec.Agent, c *store.ClaimedRun) (topics []string, entries []store.Entry, workdir, index string, inputs []runner.Input, err error) {
+	workdir = filepath.Join(e.DataDir, "runs", fmt.Sprintf("%s-%d", c.ID, c.Attempt))
+	if topics, err = e.agentTopics(ctx, a); err != nil {
+		return
+	}
+	if entries, err = e.Store.EntriesFor(ctx, a.Name, topics); err != nil {
+		return
+	}
+	if err = os.MkdirAll(filepath.Join(workdir, "inputs"), 0o700); err != nil {
+		return
+	}
+	index = "# What you know\n\n(nothing yet)\n"
+	if len(entries) > 0 {
+		index, inputs, err = e.knownInput(ctx, false, c, entries, workdir, "inputs", nil)
+	}
+	return
+}
+
+// learnCall is a learning run's one backend call: its prompt, system and schema stored as artifacts, the output stored and checked against the schema.
+func (e *Engine) learnCall(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, r runner.Runner, workdir string, inputs []runner.Input, prompt, system string, schema json.RawMessage) (*learnOutput, *runner.Result, error) {
 	for name, b := range map[string]string{"system.md": system, "prompt.md": prompt, "schema.json": string(schema)} {
 		mt := "text/markdown"
 		if strings.HasSuffix(name, ".json") {
 			mt = "application/json"
 		}
 		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", name, mt, []byte(b)); err != nil {
-			return nil, nil, nil, nil, nil, "", err
+			return nil, nil, err
 		}
 	}
 	events := e.events(ctx, c, e.Log, false)
@@ -242,27 +281,26 @@ func (e *Engine) learn(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 	defer cancel()
 	req := runner.Request{RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs, OutputSchema: schema}
 	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), "", req)); err != nil {
-		return nil, nil, nil, nil, nil, "", err
+		return nil, nil, err
 	}
-	res, err = r.Run(runCtx, req, emit)
+	res, err := r.Run(runCtx, req, emit)
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-		return nil, nil, nil, nil, res, "", fmt.Errorf("timed out after %s", learnTimeout(a))
+		return nil, res, fmt.Errorf("timed out after %s", learnTimeout(a))
 	}
 	if err != nil {
-		return nil, nil, nil, nil, res, "", err
+		return nil, res, err
 	}
 	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "out", "output.json", "application/json", res.Output); err != nil {
-		return nil, nil, nil, nil, res, "", err
+		return nil, res, err
 	}
 	if err := validateAgainst(schema, res.Output); err != nil {
-		return nil, nil, nil, nil, res, "", fmt.Errorf("output does not match the learning contract: %w", err)
+		return nil, res, fmt.Errorf("output does not match the learning contract: %w", err)
 	}
-	out = &learnOutput{}
+	out := &learnOutput{}
 	if err := json.Unmarshal(res.Output, out); err != nil {
-		return nil, nil, nil, nil, res, "", err
+		return nil, res, err
 	}
-	writes, refused = resolveEntryWrites(a.Name, topics, entries, out.Entries)
-	return out, out.Entries, writes, refused, res, "", nil
+	return out, res, nil
 }
 
 // learnTimeoutMax bounds a learning run: it reads one bounded prompt and writes a few entries, so minutes are ample, and the agent's own timeout applies when it is shorter.
