@@ -45,8 +45,12 @@ Deployment state is owned by the homelab configuration. Check its current image 
 
 ## In flight: owned by Claude Code agents (do not touch these areas)
 
+## In flight: owned by Codex
+
 | Area | Branch / PR | Notes |
 |---|---|---|
+| Garage S3 lake source | `codex/s3-lake` | Bounded read-only fetch of partitioned gzip NDJSON; transforms reduce it before the model sees it |
+
 | Permission levels | #155 perm-levels | Configurable chat defaults and ceilings with recorded permission decisions. Conversation overrides and approval UI follow separately. |
 | Isolation: the credential proxy (the Claude token out of build sandboxes and sandboxed chats), egress profiles (`workstation`: the open web without private ranges, orbit or SMTP), the gVisor host plan for hetzner and oci | claude-isolation: iso-spike, then credproxy, egress-profiles | spike recorded in tickets.md (Credential proxy: what the CLI does); direct terminals keep their own login by choice |
 | Laptop sessions and config: `orbit import claude-sessions` and `POST /sessions/import` (imported sessions searchable as kind `session`), continuing one on the server, learning from them, `orbit sync claude`, deterministic local bundle of `CLAUDE.md` and skills for a later box import | #129 claude-sessions-import, #132 claude-sessions-continue, #140 claude-sessions-learn, #146 claude-sync | ARCHITECTURE.md, Imported sessions; box delivery is not built |
