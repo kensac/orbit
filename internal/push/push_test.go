@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"maps"
@@ -14,7 +15,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/testdb"
 	"github.com/kensac/orbit/internal/webpush"
@@ -227,5 +230,72 @@ func TestPresenceKeepsAPushOffTheDevicesOfWhoeverIsLooking(t *testing.T) {
 	fail()
 	if hits := deliver(); hits["/kanishk-phone"] != 1 {
 		t.Fatalf("hits = %v: no conversation shown", hits)
+	}
+}
+
+func TestActionTokens(t *testing.T) {
+	key := secret.Key("root")
+	now := time.Unix(1_800_000_000, 0)
+	ok := ActionToken{Kind: "approval", ID: "x", Decision: DecideDeny, Person: "kanishk", Nonce: "n", Exp: now.Add(time.Minute).Unix()}
+	if got, err := ParseAction(key, SignAction(key, ok), now); err != nil || got != ok {
+		t.Fatalf("round trip = %+v %v", got, err)
+	}
+	if _, err := ParseAction(key, SignAction(key, ok), now.Add(time.Minute)); !errors.Is(err, ErrActionExpired) {
+		t.Fatalf("expired = %v", err)
+	}
+	if _, err := ParseAction(secret.Key("other"), SignAction(key, ok), now); !errors.Is(err, ErrActionLink) {
+		t.Fatalf("another root = %v", err)
+	}
+	if _, err := ParseAction(nil, SignAction(key, ok), now); !errors.Is(err, ErrActionLink) {
+		t.Fatalf("no key = %v", err)
+	}
+	for _, bad := range []ActionToken{
+		{Kind: "action", ID: "x", Decision: DecideDeny, Person: "p", Nonce: "n", Exp: ok.Exp},     // deny is for permission requests
+		{Kind: "approval", ID: "x", Decision: DecideReject, Person: "p", Nonce: "n", Exp: ok.Exp}, // reject is for actions
+		{Kind: "ticket", ID: "x", Decision: DecideApprove, Person: "p", Nonce: "n", Exp: ok.Exp},
+		{Kind: "action", ID: "x", Decision: DecideApprove, Nonce: "n", Exp: ok.Exp},
+	} {
+		if _, err := ParseAction(key, SignAction(key, bad), now); !errors.Is(err, ErrActionLink) {
+			t.Errorf("%+v = %v", bad, err)
+		}
+	}
+	tok := SignAction(key, ok)
+	body, mac, _ := strings.Cut(tok, ".")
+	forged := SignAction(key, ActionToken{Kind: "approval", ID: "y", Decision: DecideApprove, Person: "kanishk", Nonce: "n", Exp: ok.Exp})
+	fbody, _, _ := strings.Cut(forged, ".")
+	if _, err := ParseAction(key, fbody+"."+mac, now); !errors.Is(err, ErrActionLink) || body == fbody {
+		t.Fatalf("a swapped body = %v", err)
+	}
+}
+
+func TestOnlyApprovalsAndPermissionRequestsGetButtons(t *testing.T) {
+	s := &Sender{Secret: secret.Key("root"), PublicURL: func() string { return "https://orbit.example/" }}
+	now := time.Now()
+	ap := store.Attention{Kind: store.AttentionApproval, ActionID: ptr("a1")}
+	if got := s.actions(ap, "kanishk", now); len(got) != 3 || !strings.HasPrefix(got[0].URL, "https://orbit.example"+ActionPath+"?t=") {
+		t.Fatalf("approval = %+v", got)
+	}
+	for _, a := range []store.Attention{
+		{Kind: store.AttentionQuestion, MessageID: ptr("m")},
+		{Kind: store.AttentionFailure},
+		{Kind: store.AttentionDecision, ActionID: ptr("d")},
+	} {
+		if got := s.actions(a, "kanishk", now); got != nil {
+			t.Errorf("%s got buttons %+v", a.Kind, got)
+		}
+	}
+	if got := (&Sender{Secret: secret.Key("root")}).actions(ap, "kanishk", now); got != nil {
+		t.Errorf("without a public URL: %+v", got)
+	}
+	if !silentRevokes("https://web.push.apple.com/QH") || silentRevokes("https://fcm.googleapis.com/fcm/send/x") {
+		t.Error("only Apple's push service is skipped for close pushes")
+	}
+}
+
+func TestPushActionNonceFailureFailsClosed(t *testing.T) {
+	s := &Sender{Secret: secret.Key("root"), PublicURL: func() string { return "https://orbit.example" }}
+	a := store.Attention{Kind: store.AttentionApproval, ActionID: ptr("a1")}
+	if got := s.actionsWithNonce(a, "kanishk", time.Now(), strings.NewReader("")); got != nil {
+		t.Fatalf("nonce read failure returned action buttons: %+v", got)
 	}
 }

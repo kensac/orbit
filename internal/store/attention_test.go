@@ -335,3 +335,54 @@ func TestAttentionForAPermissionRequest(t *testing.T) {
 		t.Fatalf("closed requests were pushed: %+v", items)
 	}
 }
+
+func TestClosePushesForRowsAndSummaries(t *testing.T) {
+	s := testdb.New(t)
+	seed(t, s, "a")
+	manual(t, s, "a")
+	c, _ := s.ClaimRun(ctx, "w")
+	ids, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Attempt: 1, Status: "succeeded"}, store.Outcome{
+		Actions: []store.ProposedAction{
+			{Type: "webhook:x", Params: json.RawMessage(`{}`), Rule: "approve"},
+			{Type: "webhook:y", Params: json.RawMessage(`{}`), Rule: "approve"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	open, err := s.ListAttention(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string]string{} // action id: attention id
+	for _, a := range open {
+		rows[*a.ActionID] = a.ID
+	}
+	// kanishk got both in a summary, other got the first as itself.
+	if err := s.RecordPushSent(ctx, "kanishk", store.SummaryTag, []string{rows[ids[0]], rows[ids[1]]}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordPushSent(ctx, "other", "action:"+ids[0], []string{rows[ids[0]]}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ClaimClosedPush(ctx, time.Hour); err != nil || len(got) != 0 {
+		t.Fatalf("nothing closed yet: %+v %v", got, err)
+	}
+	if err := s.DecideAction(ctx, ids[0], true, "me"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ClaimClosedPush(ctx, time.Hour)
+	if err != nil || len(got) != 1 || got[0] != (store.PushClose{Author: "other", Tag: "action:" + ids[0]}) {
+		t.Fatalf("after one closed: %+v %v, want only other's single (kanishk's summary still shows an open row)", got, err)
+	}
+	if err := s.DecideAction(ctx, ids[1], false, "me"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.ClaimClosedPush(ctx, time.Hour)
+	if err != nil || len(got) != 1 || got[0] != (store.PushClose{Author: "kanishk", Tag: store.SummaryTag}) {
+		t.Fatalf("after both closed: %+v %v, want kanishk's summary", got, err)
+	}
+	if got, _ := s.ClaimClosedPush(ctx, time.Hour); len(got) != 0 {
+		t.Fatalf("closed twice: %+v", got)
+	}
+}
