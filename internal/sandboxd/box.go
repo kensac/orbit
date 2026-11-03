@@ -189,8 +189,7 @@ const accountScript = `unset CLAUDE_CODE_OAUTH_TOKEN; for v in $(env | sed -n 's
 // account (its slot). An account's session has CLAUDE_CONFIG_DIR set to its
 // directory and the subscription token marked removed (so windows opened in
 // it later lack it too), and its command runs through accountScript.
-func ttyArgv(tr sandbox.TTYRequest) []string {
-	preset, session, account := tr.Preset, tr.Session, tr.Account
+func ttyArgv(preset, session, account string) []string {
 	argv := []string{"sh", "-c", ttyScript, "orbit-tty", session}
 	var cmd []string
 	switch preset {
@@ -198,8 +197,6 @@ func ttyArgv(tr sandbox.TTYRequest) []string {
 		cmd = []string{"claude"}
 	case sandbox.TTYLogin:
 		cmd = []string{"claude", "auth", "login"}
-	case sandbox.TTYMCPLogin:
-		cmd = []string{"claude", "mcp", "login", "--no-browser", tr.MCPServer}
 	}
 	if account == "" {
 		return append(argv, cmd...)
@@ -215,7 +212,7 @@ func ttyArgv(tr sandbox.TTYRequest) []string {
 // ttyExecSpec is the one TTY process shape: a preset's argv, the allowed
 // environment and the terminal type, everything else fixed.
 func ttyExecSpec(tr sandbox.TTYRequest) execCreate {
-	e := execSpec(sandbox.AttachRequest{Argv: ttyArgv(tr), Env: tr.Env})
+	e := execSpec(sandbox.AttachRequest{Argv: ttyArgv(tr.Preset, tr.Session, tr.Account), Env: tr.Env})
 	e.Tty = true
 	e.AttachStderr = false
 	e.Env = append(e.Env, "TERM=xterm-256color")

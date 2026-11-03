@@ -24,11 +24,6 @@ import (
 //	GET  /v1/boxes/{name}/accounts/{slot}          AccountStatus, read from the account's own files
 //	GET  /v1/boxes/{name}/accounts/{slot}/usage    AccountUsage the box's status line recorded
 //	POST /v1/boxes/{name}/accounts/{slot}/usage/poll  AccountUsage from /api/oauth/usage, asked from the box
-//	GET  /v1/boxes/{name}/accounts/{slot}/mcp      {"servers": [MCPServer]}: the account's `claude mcp list`
-//	POST /v1/boxes/{name}/accounts/{slot}/mcp/sync body: {name: config}, the servers orbit manages, mirrored into the account's user scope; 204
-//	PUT  /v1/boxes/{name}/skills                   body: a tar of <skill>/<file>, orbit's skills library for the shared profile; 204
-//	PUT  /v1/boxes/{name}/gh-token                 body: a GitHub installation token, written to /run/orbit/gh-token; 204
-//	DELETE /v1/boxes/{name}/gh-token               removes it; 204
 //
 // As for sandboxes, no request names a docker option: a TTY's argv comes
 // from a fixed preset (TTYShell, TTYClaude, TTYLogin), a tmux session name
@@ -146,9 +141,6 @@ type TTYRequest struct {
 	// directory as CLAUDE_CONFIG_DIR and without the subscription token
 	// or any ANTHROPIC_ variable, so its own login is used.
 	Account string `json:"account,omitempty"`
-	// MCPServer is the server TTYMCPLogin logs in to (ValidMCPName),
-	// passed as one argument; empty for every other preset.
-	MCPServer string `json:"mcp_server,omitempty"`
 }
 
 // Terminal size bounds: what xterm.js sends on a phone up to a wide
@@ -184,17 +176,14 @@ func ValidCwd(c string) bool {
 
 // Validate is the check sandboxd applies; the client applies it too.
 func (r TTYRequest) Validate() error {
-	if r.Preset != TTYShell && r.Preset != TTYClaude && r.Preset != TTYLogin && r.Preset != TTYMCPLogin {
-		return fmt.Errorf("preset %q: want %s, %s, %s or %s", r.Preset, TTYShell, TTYClaude, TTYLogin, TTYMCPLogin)
-	}
-	if (r.Preset == TTYMCPLogin) != (r.MCPServer != "") || (r.MCPServer != "" && !ValidMCPName(r.MCPServer)) {
-		return fmt.Errorf("mcp_server %q: one server name, with the %s preset only", r.MCPServer, TTYMCPLogin)
+	if r.Preset != TTYShell && r.Preset != TTYClaude && r.Preset != TTYLogin {
+		return fmt.Errorf("preset %q: want %s, %s or %s", r.Preset, TTYShell, TTYClaude, TTYLogin)
 	}
 	if r.Account != "" && !ValidSlot(r.Account) {
 		return fmt.Errorf("account %q: want twelve lowercase hex digits", r.Account)
 	}
-	if (r.Preset == TTYLogin || r.Preset == TTYMCPLogin) && r.Account == "" {
-		return fmt.Errorf("the %s preset needs an account", r.Preset)
+	if r.Preset == TTYLogin && r.Account == "" {
+		return errors.New("the login preset needs an account")
 	}
 	if !ValidSession(r.Session) {
 		return fmt.Errorf("session %q: want lowercase letters, digits and dashes", r.Session)

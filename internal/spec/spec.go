@@ -15,7 +15,6 @@ import (
 	"maps"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -27,7 +26,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kensac/orbit/internal/rrule"
-	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/transforms"
 )
 
@@ -81,8 +79,6 @@ type Deployment struct {
 	DeferLowPriority bool `yaml:"defer_low_priority,omitempty" json:"defer_low_priority,omitempty"`
 	// Credentials are the variables a source or an endpoint's headers may send, keyed by name, each only to URLs under its prefix (trust.go). They are the only ${VAR} a database or built-in agent may reference.
 	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
-	// Box configures the MCP servers orbit mirrors into every Claude account in agents’ boxes.
-	Box *BoxConfig `yaml:"box,omitempty" json:"box,omitempty"`
 	// Connectors are MCP servers agents may be given (connectors.go); orbit calls them on the agents' behalf.
 	Connectors map[string]Connector `yaml:"connectors,omitempty" json:"connectors,omitempty"`
 	// Expires records when a credential orbit cannot inspect stops working (the Claude Code subscription token lasts a year), keyed by its variable, as YYYY-MM-DD (expires.go). It only feeds orbit_credential_expiry_timestamp_seconds, so an alert fires before the date.
@@ -108,32 +104,6 @@ func (d Deployment) BoardIdle() time.Duration {
 	return time.Duration(d.Board.Idle)
 }
 
-// BoxConfig is what orbit mirrors into every agent's box.
-type BoxConfig struct {
-	// MCPServers are user MCP servers orbit adds to every Claude account in
-	// a box (`claude mcp add-json -s user`), by name, each a server's JSON
-	// config with literal values: it is in git and in each account's
-	// .claude.json, so it carries no secret.
-	MCPServers map[string]map[string]any `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
-}
-
-// MCPJSON is the managed servers as JSON, by name; nil without any.
-func (b *BoxConfig) MCPJSON() map[string]json.RawMessage {
-	if b == nil || len(b.MCPServers) == 0 {
-		return nil
-	}
-	out := make(map[string]json.RawMessage, len(b.MCPServers))
-	for n, c := range b.MCPServers {
-		raw, err := json.Marshal(c)
-		if err != nil {
-			// Validate refused it at load.
-			continue
-		}
-		out[n] = raw
-	}
-	return out
-}
-
 // GitHub configures the one GitHub App orbit acts as (docs/tickets.md). The
 // private key is read by the harness from PrivateKeyEnv and never reaches a
 // model; every token minted from it is limited to one of Repositories.
@@ -153,108 +123,7 @@ type GitHub struct {
 	// there; that is Repositories alone.
 	ReadRepositories []string `yaml:"read_repositories,omitempty" json:"read_repositories,omitempty"`
 	// CommentRepositories ("owner/name") are where github:comment may post: a token of issues:write alone, minted per comment. Commenting never permits a push, a ticket or a merge.
-	CommentRepositories []string   `yaml:"comment_repositories,omitempty" json:"comment_repositories,omitempty"`
-	Box                 *GitHubBox `yaml:"box,omitempty" json:"box,omitempty"`
-}
-
-// GitHubBox is the installation token orbit keeps in every running box at
-// /run/orbit/gh-token, for the person's gh and git there.
-type GitHubBox struct {
-	// Token false writes none (and removes one orbit wrote), so a person's
-	// own `gh auth login` in the box is what gh and git use. Default true.
-	Token *bool `yaml:"token,omitempty" json:"token,omitempty"`
-	// Owner is the account whose installation the token is for; default
-	// the owner of the first of Repositories.
-	Owner string `yaml:"owner,omitempty" json:"owner,omitempty"`
-	// Repositories ("owner/name") the token reaches; when empty, every
-	// repository of the installation that Exclude does not match.
-	Repositories []string `yaml:"repositories,omitempty" json:"repositories,omitempty"`
-	// Exclude are path.Match globs on "owner/name"; default
-	// DefaultBoxExclude, the homelab host repositories.
-	Exclude []string `yaml:"exclude,omitempty" json:"exclude,omitempty"`
-	// Permissions is the token's permission set; default
-	// DefaultBoxPermissions.
-	Permissions map[string]string `yaml:"permissions,omitempty" json:"permissions,omitempty"`
-}
-
-// DefaultBoxExclude leaves out the homelab host repositories (`<host>-config`,
-// with homelab-config and dns-config): a box's token never reaches what
-// deploys to a host unless the configuration names it.
-var DefaultBoxExclude = []string{"*/*-config"}
-
-// DefaultBoxPermissions is what a person at a terminal needs of gh and git:
-// push, pull requests, and reading checks. No workflows, so GitHub refuses
-// a push that changes .github/workflows, as for builds.
-var DefaultBoxPermissions = map[string]string{"contents": "write", "pull_requests": "write", "checks": "read", "statuses": "read"}
-
-// boxPermissionKeys are the permissions a box token may name.
-var boxPermissionKeys = []string{"actions", "checks", "contents", "issues", "pull_requests", "statuses"}
-
-// BoxTokenOn reports whether orbit writes a token into boxes.
-func (g *GitHub) BoxTokenOn() bool {
-	return g != nil && (g.Box == nil || g.Box.Token == nil || *g.Box.Token)
-}
-
-// BoxOwner is the installation's owner for the box token.
-func (g *GitHub) BoxOwner() string {
-	if g.Box != nil && g.Box.Owner != "" {
-		return g.Box.Owner
-	}
-	if g.Box != nil && len(g.Box.Repositories) > 0 {
-		o, _, _ := strings.Cut(g.Box.Repositories[0], "/")
-		return o
-	}
-	if len(g.Repositories) > 0 {
-		o, _, _ := strings.Cut(g.Repositories[0], "/")
-		return o
-	}
-	return ""
-}
-
-// BoxExclude is the box token's exclusion globs.
-func (g *GitHub) BoxExclude() []string {
-	if g.Box != nil && g.Box.Exclude != nil {
-		return g.Box.Exclude
-	}
-	return DefaultBoxExclude
-}
-
-// BoxPermissions is the box token's permission set.
-func (g *GitHub) BoxPermissions() map[string]string {
-	if g.Box != nil && len(g.Box.Permissions) > 0 {
-		return g.Box.Permissions
-	}
-	return DefaultBoxPermissions
-}
-
-func (b *GitHubBox) validate() []error {
-	var errs []error
-	if b.Owner != "" && !ownerRE.MatchString(b.Owner) {
-		errs = append(errs, fmt.Errorf("github.box.owner %q is not a GitHub account name", b.Owner))
-	}
-	for _, r := range b.Repositories {
-		o, _, _ := strings.Cut(r, "/")
-		switch {
-		case !RepoRE.MatchString(r) || strings.Contains(r, ".."):
-			errs = append(errs, fmt.Errorf("github.box.repositories: %q is not owner/name", r))
-		case b.Owner != "" && o != b.Owner, o != strings.Split(b.Repositories[0], "/")[0]:
-			errs = append(errs, fmt.Errorf("github.box.repositories: %q is not the owner's: one token reaches one installation", r))
-		}
-	}
-	for _, x := range b.Exclude {
-		if _, err := path.Match(x, ""); err != nil {
-			errs = append(errs, fmt.Errorf("github.box.exclude: %q: %w", x, err))
-		}
-	}
-	for k, v := range b.Permissions {
-		if !slices.Contains(boxPermissionKeys, k) {
-			errs = append(errs, fmt.Errorf("github.box.permissions: %q is not one of %v", k, boxPermissionKeys))
-		}
-		if v != "read" && v != "write" {
-			errs = append(errs, fmt.Errorf("github.box.permissions.%s: %q, want read or write", k, v))
-		}
-	}
-	return errs
+	CommentRepositories []string `yaml:"comment_repositories,omitempty" json:"comment_repositories,omitempty"`
 }
 
 // AllowsRepo reports whether repo is one orbit may act on.
@@ -907,7 +776,6 @@ var (
 	CapabilityRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}(:[a-z0-9][a-z0-9._-]{0,62})?$`)
 	envRefRE     = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
 	// RepoRE is GitHub's owner/name shape.
-	ownerRE   = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 	RepoRE    = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
 	cronParse = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 
@@ -1132,20 +1000,6 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("runner %q: anthropic needs api_key_env", name))
 		}
 	}
-	if d.Box != nil {
-		raw := make(map[string]json.RawMessage, len(d.Box.MCPServers))
-		for n, c := range d.Box.MCPServers {
-			b, err := json.Marshal(c)
-			if err != nil {
-				errs = append(errs, fmt.Errorf("box.mcp_servers.%s: %w", n, err))
-				continue
-			}
-			raw[n] = b
-		}
-		if err := sandbox.ValidateMCPServers(raw); err != nil {
-			errs = append(errs, fmt.Errorf("box.mcp_servers: %w", err))
-		}
-	}
 	if g := d.GitHub; g != nil {
 		if g.AppID <= 0 {
 			errs = append(errs, fmt.Errorf("github: app_id is required"))
@@ -1170,9 +1024,6 @@ func (c *Config) Validate() error {
 			if !RepoRE.MatchString(r) || strings.Contains(r, "..") {
 				errs = append(errs, fmt.Errorf("github: comment_repositories: %q is not owner/name", r))
 			}
-		}
-		if g.Box != nil {
-			errs = append(errs, g.Box.validate()...)
 		}
 	}
 	if d.Board != nil && d.Board.Idle < 0 {

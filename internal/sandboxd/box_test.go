@@ -183,7 +183,7 @@ func TestTTYExecSpec(t *testing.T) {
 	for i := range tt.NumField() {
 		fields = append(fields, tt.Field(i).Name)
 	}
-	if !reflect.DeepEqual(fields, []string{"Preset", "Session", "Cwd", "Cols", "Rows", "Env", "Account", "MCPServer"}) {
+	if !reflect.DeepEqual(fields, []string{"Preset", "Session", "Cwd", "Cols", "Rows", "Env", "Account"}) {
 		t.Fatalf("TTYRequest fields %v: a new caller-controlled field is a security change", fields)
 	}
 }

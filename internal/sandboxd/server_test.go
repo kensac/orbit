@@ -18,7 +18,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -55,15 +54,12 @@ type fakeDocker struct {
 	exits    map[string]int
 	// home, when set, is the HOME a box's fixed scripts (sh -c with a
 	// $0 of runScripts) really run against on this machine; bin, when set,
-	// is put first on their PATH (fake curl, claude); run replaces the
-	// box's /run/orbit in their text; env is added to their environment
-	// (what a tmux server could have inherited).
-	home, bin, run string
-	env            []string
+	// is put first on their PATH (fake curl, claude).
+	home, bin string
 }
 
 // runScripts are the $0 names of a box's fixed scripts the fake runs.
-var runScripts = map[string]bool{"orbit-account": true, "orbit-gh": true, "orbit-skills": true}
+var runScripts = map[string]bool{"orbit-account": true}
 
 type fakeContainer struct {
 	spec    containerCreate
@@ -384,16 +380,12 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 // runScript runs a box's fixed script here, as the box would: HOME is the
 // fake's home and the exec's environment is added.
 func (f *fakeDocker) runScript(t *testing.T, e execCreate, stdin []byte) (stdout, stderr []byte, code int) {
-	argv := slices.Clone(e.Cmd)
-	if f.run != "" {
-		argv[2] = strings.ReplaceAll(argv[2], "/run/orbit", f.run)
-	}
-	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd := exec.Command(e.Cmd[0], e.Cmd[1:]...)
 	path := os.Getenv("PATH")
 	if f.bin != "" {
 		path = f.bin + string(os.PathListSeparator) + path
 	}
-	cmd.Env = append(append([]string{"HOME=" + f.home, "PATH=" + path}, f.env...), e.Env...)
+	cmd.Env = append([]string{"HOME=" + f.home, "PATH=" + path}, e.Env...)
 	cmd.Stdin = bytes.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb

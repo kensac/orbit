@@ -22,7 +22,6 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `webhook_secrets` | map of variable to webhook secret | none | The signing secrets inbound webhooks are verified with, each bound to the agents whose webhook triggers may name it (below). |
 | `usage_poll` | map: `every` (default 5m, at least 1m), `token_env` (default `CLAUDE_CODE_OAUTH_TOKEN`) | absent | Poll the subscription's usage windows (configuration.md, Subscription usage and low-priority agents). |
 | `defer_low_priority` | bool | `false` | Hold `priority: low` agents' scheduled runs while a usage window is above `usage.DeferLowAbove`. |
-| `box` | map | absent | Literal MCP servers orbit mirrors into every account in a workstation box (below). |
 | `board` | map | absent | Tunes `GET /board` (below). |
 
 ### `defaults`
@@ -98,17 +97,6 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `repositories` | list of `owner/name` | required | The repositories tickets and `github:merge` may target; every token is limited to one. |
 | `read_repositories` | list of `owner/name` | none | The repositories an agent's `repos` may name: orbit mirrors them and mints read tokens for them. Reading one never permits a ticket or a merge there (configuration.md, Repositories). |
 | `comment_repositories` | list of `owner/name` | none | Where `github:comment` may post, with an `issues: write` token per comment. Commenting never permits a push, a ticket or a merge. |
-| `box` | map (below) | token on | The GitHub token orbit keeps in agents’ boxes for the person’s gh and git there (docs/workspace.md, GitHub in the box). |
-
-### `github.box`
-
-| Field | Type | Default | What it does |
-|---|---|---|---|
-| `token` | bool | `true` | `false` writes no token into boxes and removes the one orbit wrote. |
-| `owner` | GitHub account | owner of the first configured repository | Whose installation the token is for. |
-| `repositories` | list of `owner/name` | installation repositories after exclusions | Repositories the token reaches, all under one owner. |
-| `exclude` | list of globs | `[*/*-config]` | Installation repositories excluded when `repositories` is empty. |
-| `permissions` | map of permission to `read` or `write` | contents and pull requests write, checks and statuses read | Token permissions. `workflows` is never allowed. |
 
 ### `build`
 
@@ -135,12 +123,6 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 |---|---|---|---|
 | `sandboxd` | `host:port` or `unix:/path` | `build.sandboxd` | The sandbox service for chat agents with `sandbox`. |
 | `token_env` | env var | `ORBIT_SANDBOX_TOKEN` | sandboxd's bearer token. |
-
-### `box`
-
-| Field | Type | Default | What it does |
-|---|---|---|---|
-| `mcp_servers` | map of name to server JSON config | none | User MCP servers orbit adds to each Claude account with `claude mcp add-json -s user`; orbit removes only servers it previously managed. Names and config size are bounded, only `stdio`, `http` and `sse` are accepted, and values must be literal with no `${...}` substitutions. Keep credentials out of this configuration. |
 
 ### `credentials.<VAR>`
 

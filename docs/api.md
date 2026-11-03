@@ -942,7 +942,7 @@ A diff file, here and in git diffs:
 - `GET /workspaces/{id}/git/show?repo=&rev=&path=`: the file at a revision, shaped as `GET /files`.
 - `GET /workspaces/{id}/git/branches?repo=`: `{"branches": [{"name", "sha", "upstream", "current"}]}`.
 - `POST /workspaces/{id}/git/commit` `{"repo", "message", "paths": [], "all": false}`: commits in the box as the person (author from the person's git identity), `paths` staged first, `all` as `git commit -a`. `201 {"sha"}`.
-- `POST /workspaces/{id}/git/push` `{"repo", "remote": "origin", "branch"}`: pushes in the box with the box's GitHub token (direct mode; workspace.md, GitHub in the box). `200 {"pushed": true, "output": "..."}`; git's refusal is `409` with its output.
+- `POST /workspaces/{id}/git/push` `{"repo", "remote": "origin", "branch"}`: pushes in the box with the person's terminal GitHub credential (direct mode). `200 {"pushed": true, "output": "..."}`; git's refusal is `409` with its output.
 
 Unattended agents push through the action `workspace:push`, `{"repo", "branch", "base_sha", "head_sha", "reason"}`, denied unless the agent's spec names it: orbit reads the commits from the box as a bundle, applies the build diff policy, and pushes with an App token for the repository (`github.repositories`) to `branch`, which may not be the default or a protected branch. `result` is `{"pushed": "sha", "branch"}`.
 
@@ -1155,12 +1155,6 @@ The access token is authentik's own (the `orbit-mcp` provider), so its issuer an
 | `ORBIT_MCP_REDIRECT_HOSTS` | comma list of hosts a client may redirect to (the host or a subdomain of it), default `claude.ai,claude.com`. Loopback is always allowed. |
 
 `ORBIT_OIDC_GROUP` is required with the issuer. The authentik provider needs the redirect URI `<public_url>/oauth/callback` (strict), the `openid`, `email`, `profile` and `offline_access` scope mappings (profile carries `preferred_username` and `groups`), the `authorization_code` and `refresh_token` grants, and the application bound to the group. traefik must route `/mcp`, `/.well-known/oauth-` and `/oauth/` past forward-auth, as it does `/api/`.
-
-### MCP servers and login
-
-- `GET /workspaces/{id}/accounts/{aid}/mcp` runs `claude mcp list` as the selected account and returns `{"servers": [...]}`. Each server reports `name`, `target`, `transport`, `status`, optional `detail`, whether it is a `claude.ai` connector, and whether Orbit manages it. The command runs inside the box with that account's config directory; credential contents are not returned.
-- To authenticate an MCP server, create an account-scoped terminal with `preset: "mcp-login"` and `mcp_server` set to the listed server name. The fixed command is `claude mcp login --no-browser <server>`; the server name is validated and cannot supply command options.
-- `box.mcp_servers` config is synchronized by Orbit into each mounted account with `claude mcp add-json -s user`. Orbit records its own server names and removes only those when they leave configuration.
 
 ## Skills
 

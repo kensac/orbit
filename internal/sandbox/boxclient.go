@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 )
 
@@ -303,92 +302,4 @@ func (c *Client) usage(ctx context.Context, method, name, slot string, rest ...s
 		err = c.boxCall(ctx, method, p, &u)
 	}
 	return u, err
-}
-
-// WriteGHToken puts a GitHub installation token at /run/orbit/gh-token in a
-// running box, for its gh and git.
-func (c *Client) WriteGHToken(ctx context.Context, name, token string) error {
-	return c.ghToken(ctx, http.MethodPut, name, strings.NewReader(token))
-}
-
-// ClearGHToken removes it.
-func (c *Client) ClearGHToken(ctx context.Context, name string) error {
-	return c.ghToken(ctx, http.MethodDelete, name, nil)
-}
-
-func (c *Client) ghToken(ctx context.Context, method, name string, body io.Reader) error {
-	p, err := boxPath(name, "gh-token")
-	if err != nil {
-		return err
-	}
-	ctype := ""
-	if body != nil {
-		ctype = "text/plain"
-	}
-	resp, err := c.do(ctx, method, PathBoxes+p, body, ctype)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return ErrNoBox
-	}
-	if resp.StatusCode >= 300 {
-		return readError(resp)
-	}
-	return nil
-}
-
-// AccountMCP lists an account's MCP servers and connectors, health-checked
-// in the box.
-func (c *Client) AccountMCP(ctx context.Context, name, slot string) ([]MCPServer, error) {
-	var out struct {
-		Servers []MCPServer `json:"servers"`
-	}
-	if !ValidSlot(slot) {
-		return nil, fmt.Errorf("invalid account slot %q", slot)
-	}
-	p, err := boxPath(name, "accounts", slot, "mcp")
-	if err == nil {
-		err = c.boxCall(ctx, http.MethodGet, p, &out)
-	}
-	return out.Servers, err
-}
-
-// SyncAccountMCP mirrors the servers orbit manages into an account.
-func (c *Client) SyncAccountMCP(ctx context.Context, name, slot string, servers map[string]json.RawMessage) error {
-	if !ValidSlot(slot) {
-		return fmt.Errorf("invalid account slot %q", slot)
-	}
-	if servers == nil {
-		servers = map[string]json.RawMessage{}
-	}
-	if err := ValidateMCPServers(servers); err != nil {
-		return err
-	}
-	p, err := boxPath(name, "accounts", slot, "mcp", "sync")
-	if err == nil {
-		err = c.boxSend(ctx, http.MethodPost, p, servers, nil)
-	}
-	return err
-}
-
-// SyncSkills puts a tar of <skill>/<file> into the box's shared profile.
-func (c *Client) SyncSkills(ctx context.Context, name string, tarball io.Reader) error {
-	p, err := boxPath(name, "skills")
-	if err != nil {
-		return err
-	}
-	resp, err := c.do(ctx, http.MethodPut, PathBoxes+p, tarball, "application/x-tar")
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return ErrNoBox
-	}
-	if resp.StatusCode >= 300 {
-		return readError(resp)
-	}
-	return nil
 }
