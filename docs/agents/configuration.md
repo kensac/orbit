@@ -25,6 +25,8 @@ instance is in force on all within the 30 s poll.
 
 An agent changes agents with the `agent:define` action (`internal/engine/define.go`, the API's own path): enable it per agent (`actions: {agent:define: auto}`, as the built-in `orbit` has it). Each change records the run and the person it answered; `POST /agents/{name}/definitions/{version}/revert` undoes one. A change that widens the agent (`spec.Widening`: a tool, source, credential, delegate target, need, connector or webhook trigger it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily) waits for a person's approval whatever the rule.
 
+In a conversation, `agent:define` lists the names of connectors already configured in `orbit.yaml` and accepts them in the target agent's `connectors` field. Adding one always waits for the person's approval, even when `agent:define` is `auto`. This only grants the target agent access to an existing connector; it does not add a server or start OAuth sign-in. A person signs in separately through `POST /api/v1/connectors/{name}/authorize` when that connector uses OAuth. Agents in configuration files remain read-only and must be changed in their YAML file.
+
 Database and built-in agents are held to what orbit.yaml offers (`spec.validateTrust`): no `file` source, no `${VAR}` that is not in `credentials:`, without a `sandbox`, only the tools in `spec.UnsandboxedTools` (Read, Glob, Grep, WebSearch, WebFetch, Task, TodoWrite), no precheck and no `run` hook. A spec breaking one fails validation, naming it.
 
 ### Saving a conversation as an agent

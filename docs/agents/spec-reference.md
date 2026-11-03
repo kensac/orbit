@@ -15,6 +15,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `github` | map | absent | The GitHub App orbit acts as. Without it, tickets naming a repository and `github:merge` fail validation. |
 | `build` | map | absent | How approved tickets become PRs. Without it no ticket is built. |
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
+| `extensions` | map | absent | Off-by-default, digest-pinned native source operations executed by sandboxd; package pins and explicit agent grants are below. |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `telegram` | map | absent | Two-way Telegram bot reader; updates from explicitly allowed private users start or continue conversations. |
 | `credentials` | map of variable to credential | none | The variables sources and endpoint headers may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
@@ -126,6 +127,20 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 |---|---|---|---|
 | `sandboxd` | `host:port` or `unix:/path` | `build.sandboxd` | The sandbox service for chat agents with `sandbox`. |
 | `token_env` | env var | `ORBIT_SANDBOX_TOKEN` | sandboxd's bearer token. |
+
+### `extensions`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `enabled` | bool | `false` | Enables native, pure-source extension operations; requires sandboxd. |
+| `packages` | map of package id to pin | none | Deployment-approved package directory and exact package digest. |
+
+### `extensions.packages.<id>`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `path` | absolute path | required | Directory containing the validated package bytes. |
+| `sha256` | lowercase sha256 | required | Exact package digest; no tag or floating version is accepted. |
 
 ### `credentials.<VAR>`
 
@@ -297,7 +312,8 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | Field | Type | Default | What it does |
 |---|---|---|---|
 | `name` | `^[a-z][a-z0-9-]{0,62}$` | required | The input's name; unique among sources and transforms. |
-| `kind` | `http`, `prometheus`, `loki`, `github`, `lake`, `file`, `webhook` | required | How it is fetched (below). `webhook` takes only `name` and `max_bytes`. |
+| `kind` | `http`, `prometheus`, `loki`, `github`, `lake`, `file`, `webhook`, `extension` | required | How it is fetched (below). `webhook` takes only `name` and `max_bytes`. |
+| `extension` | map | required for extension | The explicitly granted package operation and its parameter/input bindings (below). |
 | `url` | URL | required for http, prometheus, loki, lake | Target; may use `${VAR}` and `{{today}}`-style templates except for lake, which requires a fixed S3-compatible endpoint. A credential in any field of the source is sent only under its `url_prefix`. |
 | `headers` | map | none | http and loki request headers; values may use `${VAR}`. |
 | `query` | map | none | http query values; may use `${VAR}` and templates. |
@@ -320,6 +336,15 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | `max_bytes` | int | `8388608` (8 MiB) | The most one source may fetch; more fails the run. |
 | `by_trigger` | map of trigger to override | none | http only: query values for runs of one trigger (`schedule`, `manual`, `message`, `continue`, `task`, `delegation`, `webhook`) over the source's own (below). |
 
+### `sources[].extension`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `package` | pinned package id | required | Package id in `extensions.packages`. This source entry is the agent's grant. |
+| `operation` | operation name | required | A package operation declared with kind `source`. |
+| `parameters` | object | `{}` | Static JSON parameters validated against the pinned operation schema. |
+| `inputs` | map of slot to source name | none | Binds every operation input slot to an earlier source in this agent. |
+
 | Kind | Reaches | Risk |
 |---|---|---|
 | `http` | any URL with `GET`, with the headers given | Whatever the URL returns is model input, so it may carry instructions. |
@@ -329,6 +354,7 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | `lake` | S3-compatible object store with signed ListObjectsV2 and GET requests only | Objects are untrusted input. The key must be read-only and its environment variables must be declared under `credentials:` with a `url_prefix` for this endpoint; for a private HTTP endpoint, keep the service on a trusted private network. The compressed objects, decompressed rows and final JSON are all bounded by `max_bytes`. |
 | `file` | any file orbit's user can read | Exposes orbit's host files to the model: name only files meant for it. Only a file agent may have one. |
 | `webhook` | the body of the delivery that started the run, as received; absent on any other run | The sender writes it: it is untrusted input, as http's is. Needs a webhook trigger. |
+| `extension` | a derived JSON source produced by a pinned native package operation in sandboxd's network-disabled profile | Package code is untrusted. It receives only declared earlier source inputs, no credentials or network, and cannot write outside its invocation workdir. |
 
 ### `sources[].paginate`
 
