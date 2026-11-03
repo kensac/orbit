@@ -4,9 +4,9 @@
 -- per agent and local budget period when a scheduled run first hits a limit.
 ALTER TABLE attention DROP CONSTRAINT attention_kind_check;
 ALTER TABLE attention ADD CONSTRAINT attention_kind_check
-    CHECK (kind IN ('approval', 'question', 'failure', 'decision', 'budget'));
+    CHECK (kind IN ('approval', 'question', 'failure', 'decision', 'permission', 'budget'));
 
 -- +goose Down
 ALTER TABLE attention DROP CONSTRAINT attention_kind_check;
 ALTER TABLE attention ADD CONSTRAINT attention_kind_check
-    CHECK (kind IN ('approval', 'question', 'failure', 'decision'));
+    CHECK (kind IN ('approval', 'question', 'failure', 'decision', 'permission'));

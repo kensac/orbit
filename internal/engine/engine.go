@@ -674,7 +674,12 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	} else if len(a.Hooks) > 0 {
 		emit("orbit.hooks_skipped", map[string]any{"reason": "the agent's hooks need claude-code with orbit's harness binary"})
 	}
-	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, hr != nil && !chat, inputs)
+	withTool := hr != nil && !chat
+	var builtin []store.Skill
+	if withTool {
+		builtin = builtinSkills(types)
+	}
+	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, withTool, builtin, inputs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -705,13 +710,14 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached,
 				WorkspaceChanges: wsNote}, fresh: wsFresh,
 			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, steer: &st.steer, rec: rec, instructor: st.instructor,
-			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny), plugin: skillsPlugin, repos: repoRun, connectors: conns, pinned: pinned, skills: skills, record: record})
+			extra: entriesContract(topics, false) + skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny), plugin: skillsPlugin, repos: repoRun, connectors: conns, pinned: pinned, skills: skills, record: record})
 		if out != nil {
 			out.connectorCalls = gw.pendingCalls()
 		}
 		return out, res, st.sawStall(err)
 	}
-	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
+	via := len(builtin) > 0
+	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr, via)
 	if tk != nil {
 		system += ticketContract(tk, planning)
 	}
@@ -721,7 +727,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if known != "" {
 		system += knownContract
 	}
-	system += entriesContract(topics)
+	system += entriesContract(topics, via)
 	system += skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny)
 	system += connSection
 	delegated, err := e.Store.ConversationTasks(ctx, c.ConversationID, c.ID)

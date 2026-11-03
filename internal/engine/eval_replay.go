@@ -136,7 +136,7 @@ func (e *Engine) replayCase(ctx context.Context, snap *Snapshot, a *spec.Agent, 
 	}
 	clone := *a
 	clone.Notify.When = "never"
-	system := systemPrompt(&clone, nil, inputs, r.Kind() != "anthropic", nil)
+	system := systemPrompt(&clone, nil, inputs, r.Kind() != "anthropic", nil, false)
 	system += skillsContract(skills, plugin != "", false)
 	system += "\nEvaluation runs are isolated. Do not claim to have fetched sources, read memory or prior messages, used tools, or performed actions. Propose no actions.\n"
 	rc := &store.RunContext{}
