@@ -91,35 +91,35 @@ func (s *Server) boxClient(w http.ResponseWriter) (*sandbox.Client, bool) {
 	return c, true
 }
 
-// workspaceJSON is a box workspace (docs/api.md, Finding a workspace).
-func boxWorkspace(b store.Box, st sandbox.BoxStatus) map[string]any {
+// boxWorkspace is a box workspace (docs/api.md, Finding a workspace): the
+// same shape as a snapshot one, with the box's capabilities.
+func boxWorkspace(b store.Box, st sandbox.BoxStatus) *workspaceDoc {
 	state := st.State
 	if state == sandbox.BoxNone {
 		// A box that does not exist yet is made by the first terminal.
 		state = sandbox.BoxStopped
 	}
-	return map[string]any{
-		"id": b.ID, "scope": "agent", "conversation_id": nil, "agent": b.Agent,
-		"backend": "box", "cwd": "",
-		"capabilities": map[string]any{"read": false, "write": false, "terminals": true, "git": false,
-			"watch": false, "presets": []string{sandbox.TTYShell, sandbox.TTYClaude}},
-		"as_of": nil,
-		"box":   map[string]any{"host": st.Host, "arch": st.Arch, "state": state, "image": st.Image},
+	return &workspaceDoc{
+		ID: b.ID, Scope: "agent", Agent: b.Agent, Backend: backendBox, Cwd: "",
+		Capabilities: boxCapabilities,
+		Box:          map[string]any{"host": st.Host, "arch": st.Arch, "state": state, "image": st.Image},
 		// created_at is the workspace's, not the container's.
-		"created_at": b.CreatedAt,
+		CreatedAt: b.CreatedAt,
 	}
 }
 
-// agentWorkspace serves GET /agents/{name}/workspace: the agent's box, or
-// null for an agent without one.
+// agentWorkspace serves GET /agents/{name}/workspace, one route over both
+// backends: an agent with a box gets its box, any other its snapshot
+// workspace (that of its default conversation), and an agent with neither
+// gets null.
 func (s *Server) agentWorkspace(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if _, ok := s.Engine.Current().Config.Agents[name]; !ok {
-		respond(w, nil, store.ErrNotFound)
+		wsFail(w, store.ErrNotFound)
 		return
 	}
 	if _, ok := s.boxAgent(name); !ok {
-		respond(w, map[string]any{"workspace": nil}, nil)
+		s.snapshotAgentWorkspace(w, r, name)
 		return
 	}
 	c, ok := s.boxClient(w)

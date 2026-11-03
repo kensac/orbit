@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -217,4 +218,28 @@ func (l *lockedBuf) String() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.b.String()
+}
+
+// The health probe answers only an origin-form GET for egress itself; a proxied GET naming the same path on another host is still refused.
+func TestHealthz(t *testing.T) {
+	srv, _ := testProxy(t, "127.0.0.1")
+	resp, err := http.Get(srv.URL + HealthPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(b) != "ok\n" {
+		t.Fatalf("healthz = %d %q", resp.StatusCode, b)
+	}
+	proxy, _ := url.Parse(srv.URL)
+	c := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}}
+	resp, err = c.Get("http://example.org" + HealthPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("proxied GET for /healthz = %d", resp.StatusCode)
+	}
 }

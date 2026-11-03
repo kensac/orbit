@@ -28,6 +28,9 @@ import (
 // Paths and the upgrade token of the attach stream.
 const (
 	PathSandboxes = "/v1/sandboxes"
+	// PathHealthz and PathReadyz are sandboxd's probes, the only routes without the token: they reveal no sandbox and change nothing.
+	PathHealthz   = "/healthz"
+	PathReadyz    = "/readyz"
 	AttachUpgrade = "orbit-sandbox-attach"
 )
 
@@ -186,4 +189,24 @@ func ReadFrame(r io.Reader) (byte, []byte, error) {
 		return 0, nil, fmt.Errorf("truncated frame: %w", err)
 	}
 	return h[0], p, nil
+}
+
+// Readiness is sandboxd's /readyz body (200 when Ready, 503 when not). Checks maps "docker", "network" and "proxy:<host>" to "ok" or the failure.
+type Readiness struct {
+	Ready  bool              `json:"ready"`
+	Checks map[string]string `json:"checks"`
+}
+
+// ProxyCheck is the Checks key of the egress proxy at host.
+func ProxyCheck(host string) string { return "proxy:" + host }
+
+// Proxies returns each proxy check's host and whether it passed.
+func (r Readiness) Proxies() map[string]bool {
+	out := map[string]bool{}
+	for k, v := range r.Checks {
+		if host, ok := strings.CutPrefix(k, "proxy:"); ok {
+			out[host] = v == "ok"
+		}
+	}
+	return out
 }
