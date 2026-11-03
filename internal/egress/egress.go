@@ -75,6 +75,9 @@ func ParseAllowlist(s string) (map[string]bool, error) {
 	return allow, nil
 }
 
+// HealthPath is egress's own liveness probe.
+const HealthPath = "/healthz"
+
 // Profiles. A build proxy tunnels to the names on its allowlist (or any public name, "*"), on port 443, and only TLS whose server name is the name asked for. A workstation proxy is a laptop's open web: any public host on any port but SMTP's, plain HTTP forwarded too. Both never dial a private, loopback, link-local or tailnet address, nor one on the deny lists.
 const (
 	ProfileBuild       = "build"
@@ -290,6 +293,12 @@ func (p *Proxy) target(ctx context.Context, host, port string) (netip.Addr, stri
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	client := r.RemoteAddr
+	// The liveness probe (a docker healthcheck): an origin-form GET for egress itself, never a proxy request, which is absolute-form and names a host.
+	if r.Method == http.MethodGet && r.RequestURI == HealthPath {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "ok\n")
+		return
+	}
 	if r.Method != http.MethodConnect {
 		if p.pol.Profile == ProfileWorkstation && r.URL.IsAbs() && r.URL.Scheme == "http" {
 			p.forward(w, r)

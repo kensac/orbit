@@ -34,6 +34,38 @@ func manual(t *testing.T, s *store.Store, agent string) string {
 	return id
 }
 
+// oldAgent writes agent, its spec and its default conversation in SQL, for a test that migrates to an old version first: today's store code reads columns later migrations add. It returns the conversation.
+func oldAgent(t *testing.T, s *store.Store, agent string) string {
+	t.Helper()
+	var conv string
+	if err := s.Pool.QueryRow(ctx, `
+		WITH spec AS (INSERT INTO agent_specs (sha, agent, spec) VALUES ('sha-' || $1, $1, '{}')),
+		     a AS (INSERT INTO agents (name, spec_sha, enabled) VALUES ($1, 'sha-' || $1, true))
+		INSERT INTO conversations (agent, title, is_default) VALUES ($1, 'General', true) RETURNING id`, agent).Scan(&conv); err != nil {
+		t.Fatal(err)
+	}
+	return conv
+}
+
+// oldRun writes a finished run of agent in conv with its one attempt in SQL, for the same tests as oldAgent. set is an UPDATE's SET list over runs, with args from $2.
+func oldRun(t *testing.T, s *store.Store, agent, conv, set string, args ...any) string {
+	t.Helper()
+	var id string
+	if err := s.Pool.QueryRow(ctx, `INSERT INTO runs (agent, spec_sha, trigger, conversation_id, attempt, status, worker, started_at, finished_at)
+		VALUES ($1, 'sha-' || $1, 'manual', $2, 1, 'succeeded', 'w', now(), now()) RETURNING id`, agent, conv).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO run_attempts (run_id, attempt, worker) VALUES ($1, 1, 'w')`, id); err != nil {
+		t.Fatal(err)
+	}
+	if set != "" {
+		if _, err := s.Pool.Exec(ctx, `UPDATE runs SET `+set+` WHERE id = $1`, append([]any{id}, args...)...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return id
+}
+
 func TestSyncAgentsKeepsRemovedAgentsAbsent(t *testing.T) {
 	s := testdb.New(t)
 	seed(t, s, "a", "b")
@@ -170,7 +202,7 @@ func TestOutcomeAndOpenQuestions(t *testing.T) {
 	mem := "baseline: 2700"
 	ids, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Attempt: 1, Status: "succeeded", Summary: "ok"}, store.Outcome{
 		Memory:    &mem,
-		Questions: []string{"Is the Enterprise charge a deductible?"},
+		Questions: []store.Question{{Body: "Is the Enterprise charge a deductible?"}},
 		Actions: []store.ProposedAction{
 			{Type: "notify", Params: json.RawMessage(`{}`), Rule: "auto"},
 			{Type: "webhook:x", Params: json.RawMessage(`{}`), Rule: "approve"},
@@ -318,4 +350,48 @@ func defaultConv(t *testing.T, s *store.Store, agent string) string {
 		t.Fatal(err)
 	}
 	return id
+}
+
+func TestAChatAgentRunsOnePerConversation(t *testing.T) {
+	s := testdb.New(t)
+	if err := s.SyncAgents(ctx, map[string]store.AgentSpec{
+		"orbit": {SHA: "sha-orbit", JSON: []byte(`{"name":"orbit","chat":true}`), Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var convs []string
+	for i := 0; i < 2; i++ {
+		r, _, err := s.CreateConversation(ctx, store.NewConversation{Agent: "orbit", SpecSHA: "sha-orbit", Body: "hi", Wake: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		convs = append(convs, r.ConversationID)
+	}
+	// A second message in the first conversation queues behind its run.
+	if _, _, err := s.PostMessageOnce(ctx, store.PostMessage{Agent: "orbit", SpecSHA: "sha-orbit", Body: "more", Wake: true, ConversationID: convs[0]}); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	per := map[string]int{}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, err := s.ClaimRun(ctx, "w")
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if c != nil {
+				mu.Lock()
+				per[c.ConversationID]++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if per[convs[0]] != 1 || per[convs[1]] != 1 {
+		t.Fatalf("claimed per conversation = %v, want one in each", per)
+	}
 }
