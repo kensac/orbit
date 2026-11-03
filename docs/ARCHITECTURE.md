@@ -20,7 +20,7 @@ trigger (schedule: cron or RRULE | webhook | manual | message | continue | task 
   -> memory entries the agent reads: an index in the prompt, the entries in full as an input
   -> session plan: continue the agent's Claude Code session, or start fresh
   -> a fresh session: the recent thread, packed into a byte budget, as conversation.md
-  -> sources fetched by the harness, written to <workdir>/inputs/, stored as artifacts
+  -> sources fetched by the harness (templates and by_trigger windows filled in code), written to <workdir>/inputs/, stored as artifacts
   -> transforms run over sources, each output an input (a source only transforms read is withheld)
   -> repositories (repos): each fetched into orbit's mirror, its tree at the ref's commit under inputs/repos/<name>, _repos.json an input
   -> gates (scheduled and webhook runs, no message waiting): one that finds nothing to judge ends the run skipped
