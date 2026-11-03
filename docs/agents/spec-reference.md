@@ -142,6 +142,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `description` | string | none | What the server is for, shown to the model. |
 | `auth` | map | `kind: none` | How orbit signs the server's requests (below). |
 | `write_tools` | list of tool names | none | The server's tools that change the world: each waits for a person unless the agent's rules say otherwise. Every other tool runs at once. |
+| `default_tool_rule` | `auto` or `approve` | none | Internal deployment setting used for person-added connectors; an explicit agent tool rule takes precedence. |
 
 ### `connectors.<name>.auth`
 
