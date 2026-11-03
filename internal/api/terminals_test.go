@@ -249,8 +249,9 @@ box: {mcp_servers: {orbit: {type: http, url: "https://orbit.kanishksachdev.com/m
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), TerminalPing: 50 * time.Millisecond,
 		Boxes: func() (*sandbox.Client, error) { return client, nil }}
 	pub := httptest.NewUnstartedServer(a.Handler())
-	// As serve's: a socket must outlive the server's WriteTimeout.
-	pub.Config.WriteTimeout = 300 * time.Millisecond
+	// Ordinary requests use the same allowance as the conversation tests so
+	// database-backed handlers can finish under -race on a loaded CI runner.
+	pub.Config.WriteTimeout = testWriteTimeout
 	pub.Start()
 	internal := httptest.NewServer(a.InternalHandler())
 	t.Cleanup(func() {
@@ -440,7 +441,7 @@ func TestTerminalSocket(t *testing.T) {
 		t.Fatalf("pong %v", m)
 	}
 	// Past the server's WriteTimeout, the server still pings.
-	time.Sleep(400 * time.Millisecond)
+	time.Sleep(testWriteTimeout + 100*time.Millisecond)
 	pings := 0
 	for pings < 2 {
 		typ, b, err := c.Read(ctx)
