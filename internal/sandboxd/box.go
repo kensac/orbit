@@ -2,6 +2,7 @@ package sandboxd
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -446,6 +447,37 @@ func (s *Server) tmux(ctx context.Context, id string, args ...string) (int, erro
 	return s.exitCode(execID)
 }
 
+// tmuxOutput runs a fixed tmux query and bounds the bytes returned to orbit.
+func (s *Server) tmuxOutput(ctx context.Context, id string, limit int64, args ...string) ([]byte, int, error) {
+	e := execSpec(sandbox.AttachRequest{Argv: append([]string{"tmux"}, args...)})
+	e.AttachStdin = false
+	execID, err := s.d.createExec(ctx, id, e)
+	if err != nil {
+		return nil, -1, err
+	}
+	conn, br, err := s.d.startExec(ctx, execID)
+	if err != nil {
+		return nil, -1, err
+	}
+	var captured bytes.Buffer
+	readErr := demux(br, func(typ byte, p []byte) error {
+		if typ != sandbox.FrameStdout {
+			return nil
+		}
+		remaining := limit - int64(captured.Len())
+		if remaining > 0 {
+			_, _ = captured.Write(p[:min(int64(len(p)), remaining)])
+		}
+		return nil
+	})
+	_ = conn.Close()
+	if readErr != nil {
+		return nil, -1, readErr
+	}
+	code, err := s.exitCode(execID)
+	return captured.Bytes(), code, err
+}
+
 func session(w http.ResponseWriter, r *http.Request) (string, bool) {
 	ss := r.PathValue("session")
 	if !sandbox.ValidSession(ss) {
@@ -488,6 +520,71 @@ func (s *Server) sessionKill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("sandboxd: tmux session killed", "box", name, "session", ss)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) sessionScrollback(w http.ResponseWriter, r *http.Request) {
+	c, _, ok := s.runningBox(w, r)
+	if !ok {
+		return
+	}
+	ss, ok := session(w, r)
+	if !ok {
+		return
+	}
+	lines := 10000
+	if v := r.URL.Query().Get("lines"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 10000 {
+			writeError(w, http.StatusBadRequest, "lines: want 1 to 10000")
+			return
+		}
+		lines = n
+	}
+	b, code, err := s.tmuxOutput(r.Context(), c.ID, 4<<20, "capture-pane", "-p", "-e", "-S", "-"+strconv.Itoa(lines), "-t", "="+ss)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if code != 0 {
+		writeError(w, http.StatusNotFound, "no such terminal session")
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(b) //nolint:gosec // G705: this is raw terminal data, never HTML.
+}
+
+func (s *Server) sessionResize(w http.ResponseWriter, r *http.Request) {
+	c, _, ok := s.runningBox(w, r)
+	if !ok {
+		return
+	}
+	ss, ok := session(w, r)
+	if !ok {
+		return
+	}
+	var size sandbox.Resize
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&size); err != nil {
+		writeError(w, http.StatusBadRequest, "resize: "+err.Error())
+		return
+	}
+	if err := size.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	code, err := s.tmux(r.Context(), c.ID, "resize-window", "-t", "="+ss, "-x", strconv.Itoa(size.Cols), "-y", strconv.Itoa(size.Rows))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if code != 0 {
+		writeError(w, http.StatusNotFound, "no such terminal session")
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
