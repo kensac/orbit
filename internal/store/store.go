@@ -549,6 +549,8 @@ type RunResult struct {
 	// Gate names what ended a skipped run without a backend call; set
 	// exactly when Status is skipped (runs_skipped_names_gate).
 	Gate string
+	// BudgetAlertKey records one attention alert per agent and budget period.
+	BudgetAlertKey string
 	// DiffPolicyFailed is a build whose diff the diff policy refused
 	// (FailBuild records it for a race's comparison).
 	DiffPolicyFailed bool
@@ -559,11 +561,12 @@ const (
 	StatusSucceeded = "succeeded"
 	StatusFailed    = "failed"
 	StatusCancelled = "cancelled"
-	// StatusSkipped is a run a gate ended without calling a backend: it
-	// finished well, and judged nothing.
+	// StatusSkipped is a run a gate ended without calling a backend.
 	StatusSkipped = "skipped"
 	// GateMissed names a schedule fire that was claimed past its grace and skipped rather than run late. Unlike a gate's skip it is no success: the agent did nothing.
 	GateMissed = "missed"
+	// GateBudget names a scheduled run refused after reaching its agent's budget.
+	GateBudget = "budget"
 )
 
 // FinishRun records the outcome of a run that wrote nothing else (a failure,
@@ -620,6 +623,11 @@ func finishRun(ctx context.Context, tx pgx.Tx, runID string, r RunResult) error 
 	if r.Status == "failed" {
 		// Every way a run fails ends here (the engine, a build, the reaper).
 		if err := newAttention(ctx, tx, AttentionFailure, "failure:"+runID, runID, " run failed", nil, nil, nil, nil); err != nil {
+			return err
+		}
+	}
+	if r.BudgetAlertKey != "" {
+		if err := newAttention(ctx, tx, AttentionBudget, r.BudgetAlertKey, runID, " budget limit reached", nil, nil, nil, nil); err != nil {
 			return err
 		}
 	}

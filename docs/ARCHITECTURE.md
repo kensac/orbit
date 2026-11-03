@@ -343,6 +343,15 @@ Most of what a person has worked out with Claude Code lives in the CLI's transcr
   claimed past its trigger's grace (`spec.MissedGraceFor`: the time to its
   next fire, at most an hour, or `missed_grace`) ends `skipped`, gate
   `missed`, instead of running late.
+- **Agent budgets:** `budget` sets API-equivalent cost and/or runner-started
+  run limits per local calendar day, Monday-starting week or month. Before
+  reading sources, a scheduled first attempt checks its agent's period usage;
+  if either limit is reached, it ends `skipped` with gate `budget`. Manual
+  runs and messages are instructions and remain available. A stable attention
+  key raises one pushable alert per agent and period; `/usage` shows each
+  budget and an 80% alert threshold. Budget skips are not successes for
+  staleness. A run already underway can finish above a cost limit because
+  its final backend cost is not known before it ends.
 - **Webhooks:** a signed delivery to `/hooks/{agent}/{trigger}` (`internal/api/hooks.go`, verified by `internal/webhook`) is enqueued with its body in one transaction, at most once per delivery id (`webhook_deliveries_once`), so a sender's retry or a second instance starts nothing new. The body is the run's `webhook` source, read from the database, so any host can run it.
 - **Backend holds** (`internal/engine/hold.go`): a run whose backend refused orbit (an auth failure such as `Not logged in` or a 401, or a `rate_limit_event` with a rejected window before the failure) fails and holds its runner (`backend_holds`, one open per runner): every unattended run of an agent on that runner waits queued (the claim skips it), and one notification says why, instead of each run failing and notifying. A run a person started (a message, a mail, a manual run) that trips it reports its own failure as usual (the chat, a reply to the mail, a notification) and opens the hold without a second notification. Only an error the runner returned counts, never a source's 401. Control probes a held runner with one minimal call every 15 minutes, or once a rejected window resets; a probe that succeeds, or a person's message or manual run on the runner that succeeds, closes the hold and wakes the executors. Fires that waited past their grace then end `missed`.
 - **Low-priority work waits for the subscription.** With
