@@ -106,6 +106,9 @@ func Catalog(a *spec.Agent, d spec.Deployment, available ...[]store.Template) []
 	if a.RuleFor(SkillWriteType) != spec.RuleDeny {
 		out = append(out, skillWriteType())
 	}
+	if a.Chat && a.RuleFor(PagePublishType) != spec.RuleDeny {
+		out = append(out, pagePublishType())
+	}
 	if a.RuleFor(TemplateCreateType) != spec.RuleDeny {
 		out = append(out, templateCreateType())
 	}
@@ -415,6 +418,8 @@ type Executor struct {
 	Define func(ctx context.Context, c Call, spec json.RawMessage) (json.RawMessage, error)
 	// SkillWrite applies a skill:write for the call's run.
 	SkillWrite func(ctx context.Context, c Call, w SkillWrite) (json.RawMessage, error)
+	// PagePublish checks and records page:publish for the call's conversation.
+	PagePublish func(ctx context.Context, c Call, p PagePublish) (json.RawMessage, error)
 	// Connector calls a connector's tool for an approved connector:<conn>/<tool> action, adding the connector's credential (engine/connectors.go).
 	Connector func(ctx context.Context, c Call) (json.RawMessage, error)
 	// Google carries out a typed Gmail or Calendar write through its fixed connector mapping.
@@ -514,6 +519,15 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 			return nil, fmt.Errorf("skill:write: not available in this process")
 		}
 		return e.SkillWrite(ctx, c, w)
+	case typ == PagePublishType:
+		p, err := DecodePagePublish(params)
+		if err != nil {
+			return nil, err
+		}
+		if e.PagePublish == nil {
+			return nil, fmt.Errorf("page:publish: not available in this process")
+		}
+		return e.PagePublish(ctx, c, p)
 	case strings.HasPrefix(typ, spec.ConnectorActionPrefix):
 		if e.Connector == nil {
 			return nil, fmt.Errorf("%s: not available in this process", typ)

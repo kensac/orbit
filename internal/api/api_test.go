@@ -546,3 +546,49 @@ func TestApproveAndAlwaysAllow(t *testing.T) {
 		t.Fatalf("already auto = %d %v", code, got)
 	}
 }
+
+func TestConversationPageAPIRequiresExecutedPageAndMatchingConversation(t *testing.T) {
+	v := newEnv(t, nil)
+	_, err := v.s.EnqueueRun(ctx, store.NewRun{Agent: "a", SpecSHA: v.e.Current().Config.Agents["a"].SHA, Trigger: "manual"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := v.s.ClaimRun(ctx, "test")
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %+v, %v", claim, err)
+	}
+	conversationID, err := v.s.DefaultConversationID(ctx, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageID, err := v.s.StartActionNow(ctx, claim.ID, claim.Attempt, "a", store.ProposedAction{Type: "page:publish", Params: json.RawMessage(`{"title":"Report","html":"<main>hello</main>"}`), Rule: "auto"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.s.FinishAction(ctx, pageID, json.RawMessage(`{"page_id":"`+pageID+`","title":"Report"}`), nil); err != nil {
+		t.Fatal(err)
+	}
+	u := v.srv.URL + "/api/v1/conversations/" + conversationID + "/pages/" + pageID
+	if code, _ := call(t, "GET", u, "", ""); code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated = %d", code)
+	}
+	req, _ := http.NewRequest("GET", u, nil)
+	req.Header.Set("Authorization", "Bearer "+v.person("kanishk"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	page := got["page"].(map[string]any)
+	if resp.StatusCode != http.StatusOK || page["id"] != pageID || page["html"] != "<main>hello</main>" || resp.Header.Get("Cache-Control") != "private, no-store" || resp.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("page response = %d %+v headers=%v", resp.StatusCode, got, resp.Header)
+	}
+	wrong := v.srv.URL + "/api/v1/conversations/00000000-0000-0000-0000-000000000001/pages/" + pageID
+	if code, _ := call(t, "GET", wrong, v.person("kanishk"), ""); code != http.StatusNotFound {
+		t.Fatalf("cross-conversation page = %d", code)
+	}
+}
