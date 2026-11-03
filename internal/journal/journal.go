@@ -36,16 +36,17 @@ const Version = 1
 
 // Item kinds.
 const (
-	KindMessage  = "message"
-	KindThinking = "thinking"
-	KindToolCall = "tool_call"
-	KindDiff     = "diff"
-	KindPlan     = "plan"
-	KindApproval = "approval"
-	KindQuestion = "question"
-	KindSteer    = "steer"
-	KindStatus   = "status"
-	KindTurn     = "turn"
+	KindMessage     = "message"
+	KindThinking    = "thinking"
+	KindToolCall    = "tool_call"
+	KindDiff        = "diff"
+	KindPlan        = "plan"
+	KindApproval    = "approval"
+	KindQuestion    = "question"
+	KindSteer       = "steer"
+	KindPermissions = "permissions"
+	KindStatus      = "status"
+	KindTurn        = "turn"
 )
 
 // Item is one stored revision of a journal item.
@@ -199,6 +200,19 @@ type Steer struct {
 	MessageID string `json:"message_id"`
 	Text      string `json:"text"`
 	Author    string `json:"author,omitempty"`
+}
+
+// Permissions is a permission level applied to a chat run's process.
+type Permissions struct {
+	Level     string     `json:"level"`
+	Applied   string     `json:"applied"`
+	Mode      string     `json:"mode"`
+	When      string     `json:"when"`
+	Source    string     `json:"source"`
+	Version   int        `json:"version,omitempty"`
+	SetBy     string     `json:"set_by,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	Reason    string     `json:"reason,omitempty"`
 }
 
 // Question is something the agent asked its person: one of its output's

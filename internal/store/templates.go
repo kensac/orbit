@@ -303,3 +303,56 @@ func (s *Store) RestoreTemplate(ctx context.Context, name string, version, expec
 	})
 	return out, err
 }
+
+// MaxImportTemplates bounds one import.
+const MaxImportTemplates = 100
+
+// TemplateImportResult is what an import did, or would do, with one template.
+type TemplateImportResult struct {
+	Name    string `json:"name"`
+	Outcome string `json:"outcome"`
+	Version int    `json:"version,omitempty"`
+}
+
+// ImportTemplates writes each template's next version where it differs from the current one (or is new, or retired), in one transaction; dryRun reports and rolls back.
+func (s *Store) ImportTemplates(ctx context.Context, docs []*templates.Template, p TemplateProvenance, dryRun bool) ([]TemplateImportResult, error) {
+	if len(docs) > MaxImportTemplates {
+		return nil, fmt.Errorf("%w: at most %d templates per import", ErrInvalid, MaxImportTemplates)
+	}
+	seen := map[string]bool{}
+	for _, d := range docs {
+		if seen[d.Name] {
+			return nil, fmt.Errorf("%w: template %q appears twice", ErrInvalid, d.Name)
+		}
+		seen[d.Name] = true
+	}
+	var results []TemplateImportResult
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		for _, d := range docs {
+			var exists bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM templates WHERE name = $1)`, d.Name).Scan(&exists); err != nil {
+				return err
+			}
+			k, changed, err := putTemplate(ctx, tx, TemplateWrite{Doc: d}, p)
+			if err != nil {
+				return err
+			}
+			r := TemplateImportResult{Name: d.Name, Outcome: "unchanged", Version: k.Version}
+			switch {
+			case !exists:
+				r.Outcome = "created"
+			case changed:
+				r.Outcome = "updated"
+			}
+			results = append(results, r)
+		}
+		if dryRun {
+			return errDryRun
+		}
+		return nil
+	})
+	if errors.Is(err, errDryRun) {
+		err = nil
+	}
+	return results, err
+}

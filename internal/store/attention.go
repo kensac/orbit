@@ -15,6 +15,7 @@ const (
 	AttentionQuestion = "question" // a run asked something
 	AttentionFailure  = "failure"  // a run failed
 	AttentionDecision = "decision" // a ticket's plan, or a delegated task's decision, waits for a person
+	AttentionBudget   = "budget"   // a scheduled run reached an agent's period budget
 )
 
 // Attention is one thing waiting on a person (migration 20261102032140). Title is
@@ -69,6 +70,7 @@ const attentionOpen = `a.dismissed_at IS NULL AND CASE a.kind
 	                                AND l.status = 'succeeded' AND l.created_at > (SELECT f.created_at FROM runs f WHERE f.id = a.run_id))
 	                AND NOT EXISTS (SELECT 1 FROM messages p WHERE p.conversation_id = a.conversation_id AND p.direction = 'to_agent'
 	                                AND p.created_at > (SELECT COALESCE(f.finished_at, f.created_at) FROM runs f WHERE f.id = a.run_id))
+	WHEN 'budget' THEN true
 	ELSE false END`
 
 const attentionCols = `a.id::text, a.key, a.kind, a.agent, a.run_id::text, a.conversation_id::text, a.action_id::text,
@@ -84,6 +86,7 @@ func (s *Store) ListAttention(ctx context.Context, limit int) ([]Attention, erro
 		           WHEN 'approval' THEN (SELECT x.reason FROM actions x WHERE x.id = a.action_id)
 		           WHEN 'question' THEN (SELECT m.body FROM messages m WHERE m.id = a.message_id)
 		           WHEN 'failure' THEN (SELECT r.error FROM runs r WHERE r.id = a.run_id)
+	           WHEN 'budget' THEN (SELECT r.summary FROM runs r WHERE r.id = a.run_id)
 		           WHEN 'decision' THEN COALESCE((SELECT t.title FROM tickets t WHERE t.id = a.ticket_id),
 		                                         (SELECT x.reason FROM actions x WHERE x.id = a.action_id))
 		       END, ''),
