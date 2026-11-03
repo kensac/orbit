@@ -373,6 +373,8 @@ An agent with `chat: true` (the built-in `orbit` is one) is a Claude Code sessio
 
 With `sandbox: workstation` (the built-in's, when sandboxd is configured) the session runs in a sandbox container with Claude Code's full tool set and the open internet; `sandbox: build` with the tools it names.
 
+**Pages.** Chat agents may have the explicitly granted `page:publish` action (`{title, html}`; title at most 120 bytes, HTML at most 128 KiB). It is available only while answering a person's message and the built-in `orbit` grants it under `approve`. The executed action is immutable, limited to 100 pages per conversation, and returns compact JSON text `{"page_id":"<action UUID>","title":"..."}` as the tool result. The content is available only as JSON from `GET /conversations/{id}/pages/{page}`; it returns `{"page":{"id":"...","conversation_id":"...","title":"...","html":"...","created_at":"..."}}`. The route uses the API's usual authentik access token (or the operator token on the internal listener) and returns `404` for a page outside the named conversation or a page action that has not executed. Orbit does not expose a standalone HTML URL. The portfolio renders this untrusted content in an opaque-origin sandboxed iframe. Its policy blocks external resources and script network requests, and the sandbox prevents same-origin access, forms, popups and navigation of the parent page. A page may navigate its own frame.
+
 ## A conversation's thread
 
 A thread is the person's messages, the agent's questions, and every run

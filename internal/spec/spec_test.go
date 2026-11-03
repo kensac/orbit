@@ -48,6 +48,23 @@ func TestAgentBudgetsValidate(t *testing.T) {
 	}
 }
 
+func TestPagePublishRequiresChatAgent(t *testing.T) {
+	for _, tc := range []struct {
+		agent string
+		want  string
+	}{
+		{"chat: true\nactions: {page:publish: approve}\n", ""},
+		{"actions: {page:publish: approve}\n", "requires chat: true"},
+	} {
+		_, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\n" + tc.agent}))
+		if tc.want == "" && err != nil {
+			t.Errorf("chat action rejected: %v", err)
+		} else if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+			t.Errorf("non-chat action error = %v, want %q", err, tc.want)
+		}
+	}
+}
+
 func write(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()

@@ -107,7 +107,7 @@ func builtinActions(d Deployment) ActionSet {
 	// agent:save is always proposed for approval (engine/save.go). Its
 	// skill writes wait for a person: a skill steers every later run it
 	// is given to.
-	rules := ActionSet{"agent:define": RuleAuto, "skill:write": RuleApprove, "agent:save": RuleApprove, "template:create": RuleApprove, "continue": RuleAuto, "delegate": RuleApprove,
+	rules := ActionSet{"agent:define": RuleAuto, "skill:write": RuleApprove, "agent:save": RuleApprove, "template:create": RuleApprove, "page:publish": RuleApprove, "continue": RuleAuto, "delegate": RuleApprove,
 		"schedule:add": RuleApprove, "schedule:pause": RuleApprove, "schedule:resume": RuleApprove,
 		"schedule:remove": RuleApprove, "run:now": RuleApprove}
 	if d.GitHub != nil {

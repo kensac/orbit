@@ -1328,7 +1328,7 @@ func (e *Engine) executor(snap *Snapshot) *actions.Executor {
 			return e.Store.EnqueueContinuation(ctx, store.Continuation{
 				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
 		},
-		Define: e.defineAction, Schedule: e.scheduleAction, SkillWrite: e.skillWriteAction,
+		Define: e.defineAction, Schedule: e.scheduleAction, SkillWrite: e.skillWriteAction, PagePublish: e.pagePublishAction,
 		Connector: func(ctx context.Context, c actions.Call) (json.RawMessage, error) {
 			return e.executeConnector(ctx, snap, c)
 		}}

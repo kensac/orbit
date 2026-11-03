@@ -134,6 +134,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/conversations/{id}/uploads/{upload}", s.getUpload)
 	api("GET /api/v1/conversations/{id}/files", s.workspaceFiles)
 	api("GET /api/v1/conversations/{id}/files/{path...}", s.workspaceFile)
+	api("GET /api/v1/conversations/{id}/pages/{page}", s.publishedConversationPage)
 	// The signature in the URL is the credential (uploads.go).
 	mux.HandleFunc("PUT /api/v1/uploads/signed", s.signedUpload)
 	mux.HandleFunc("GET /api/v1/templates/shared/{token}", s.sharedTemplates)

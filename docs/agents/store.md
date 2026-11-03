@@ -41,6 +41,9 @@ an agent's beliefs changed.
 - message read (`message_reads`, one per attempt that read a person's message, written in `StartRunContext`'s transaction): open, then `released_at` when the attempt hands the message back (`releaseMessages`: a failure, a requeue). At most one is open per message (`message_reads_one_holder`); a message with none open waits for the next run (`waitingMessage`). `messages.run_id` names the last run that read it and is never cleared by this image. A message marked read with no read row (`giveComments`, which gives a build its review comments when it is enqueued, or the previous image during a deploy) is held, and `releaseMessages` records it as handed back; the previous image's hand-back still clears `run_id`, which `waitingMessage` treats as waiting.
 - action: `pending -> approved | rejected`, `approved -> executing ->
   executed | failed`; `denied` and rule-approved are set at creation.
+  `page:publish` keeps its bounded title and HTML in the immutable action
+  params. Its action id is the page id; the conversation pages API returns
+  only executed actions joined through their run to the requested conversation.
 - ticket: `ticketEdges` in `tickets.go` is the table (diagram in
   docs/tickets.md); into `planned` and `approved` only through
   `ProposePlan`/`ApprovePlan`, which carry the plan version. Each transition
