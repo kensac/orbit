@@ -34,7 +34,7 @@ an agent's beliefs changed.
 - run: `queued -> running -> succeeded | failed | skipped | cancelled` (cancelled: a person stopped it, `cancel_requested_at`), `queued -> cancelled`,
   `running -> queued` (a hand-back, a stalled turn or a lost worker under `MaxAttempts`).
   Every write by a running attempt also guards `attempt = <its own>`, so an
-  attempt superseded by a newer claim writes nothing. `skipped` is a run that ended without a backend call, and names what ended it in `gate` (`runs_skipped_names_gate`): an agent's gate (`unchanged`, `items_above`; configuration.md), a schedule fire claimed past its grace (`missed`; configuration.md, Triggers) or a build that delivered an earlier attempt's pushed commit (`pushed`). It counts as a success for staleness (`orbit_agent_last_success_timestamp_seconds`, `/health`'s `last_success`), except `missed`, where the agent did nothing; `orbit_runs_skipped_total` counts them by gate.
+  attempt superseded by a newer claim writes nothing. `skipped` is a run that ended without a backend call, and names what ended it in `gate` (`runs_skipped_names_gate`): an agent's gate (`unchanged`, `items_above`; configuration.md), a schedule fire claimed past its grace (`missed`; configuration.md, Triggers), a scheduled run blocked by its agent budget (`budget`), or a build that delivered an earlier attempt's pushed commit (`pushed`). It counts as a success for staleness (`orbit_agent_last_success_timestamp_seconds`, `/health`'s `last_success`), except `missed` and `budget`, where the agent did no work; `orbit_runs_skipped_total` counts them by gate.
 - attempt (`run_attempts`, one per claim, written in `ClaimRun`'s
   transaction): open, then `succeeded | failed | skipped` with its run, `handed_back`
   (`HandBack`) or `lost` (`ReapStale`).
@@ -75,6 +75,7 @@ an agent's beliefs changed.
 
 - usage samples (`usage_samples`): one row per poll of the subscription usage endpoint, `ok` with the body as received or not with the error; parsed when read (`usage.ParsePoll`), never rewritten.
 - deferral (`run_deferrals`, one per run): `DeferRun` pushes a queued schedule run's `run_after` and upserts its row (`times`, the window and reading) in one transaction, refusing a run no longer queued; `ReleaseDeferrals` clears `run_after` and sets `released_at` together. A run is held only while queued, so a claim is never blocked by anything but `run_after`.
+- agent budget usage: `BudgetUsage` sums reported API-equivalent cost and counts attempts started within the agent's period. Budget alerts use the existing append-only `attention` row, keyed once per agent and period; dismissing an alert never changes the scheduled run it identifies.
 
 A client request id (`receipts`) is written in the same transaction as the
 message or decision it records, so a retry returns the first result and a
