@@ -212,6 +212,10 @@ func (p *projector) orbit() {
 		p.write(p.local("permissions"), KindPermissions, "", body)
 		return
 	}
+	if p.ev.Kind == "orbit.approval" {
+		p.approval()
+		return
+	}
 	if p.ev.Kind == "orbit.stalled" {
 		p.stalled()
 		p.status()
@@ -245,9 +249,50 @@ func (p *projector) orbit() {
 	if !p.latest(id, &ap) {
 		ap = Approval{RequestID: ev.RequestID, Tool: ev.Tool, Input: json.RawMessage(`{}`)}
 	}
+	if ap.State != "" && ap.State != ApprovalPending {
+		// A chat run's approval already says how it ended (orbit.approval).
+		return
+	}
 	ap.State, ap.Message = ApprovalDenied, ev.Message
 	if ev.Allowed {
 		ap.State = ApprovalAllowed
+	}
+	p.write(id, KindApproval, "", ap)
+}
+
+// approval is orbit.approval: a chat run's request opened for its person, or how it ended.
+func (p *projector) approval() {
+	var ev struct {
+		RequestID  string     `json:"request_id"`
+		ApprovalID string     `json:"approval_id"`
+		Kind       string     `json:"kind"`
+		Tool       string     `json:"tool"`
+		Level      string     `json:"level"`
+		State      string     `json:"state"`
+		Scope      string     `json:"scope"`
+		Message    string     `json:"message"`
+		DecidedBy  string     `json:"decided_by"`
+		ExpiresAt  *time.Time `json:"expires_at"`
+		Grant      string     `json:"grant"`
+	}
+	if json.Unmarshal(p.ev.Payload, &ev) != nil || ev.RequestID == "" || ev.State == "" {
+		p.status()
+		return
+	}
+	id := "approval:" + ev.RequestID
+	var ap Approval
+	if !p.latest(id, &ap) {
+		ap = Approval{RequestID: ev.RequestID, Tool: ev.Tool, Input: json.RawMessage(`{}`)}
+	}
+	ap.State, ap.Kind = ev.State, ev.Kind
+	for dst, v := range map[*string]string{&ap.ApprovalID: ev.ApprovalID, &ap.Level: ev.Level, &ap.Scope: ev.Scope,
+		&ap.Message: ev.Message, &ap.DecidedBy: ev.DecidedBy, &ap.Grant: ev.Grant} {
+		if v != "" {
+			*dst = v
+		}
+	}
+	if ev.ExpiresAt != nil {
+		ap.ExpiresAt = ev.ExpiresAt
 	}
 	p.write(id, KindApproval, "", ap)
 }
@@ -553,9 +598,16 @@ func (p *projector) controlRequest() {
 	var ev struct {
 		RequestID string `json:"request_id"`
 		Request   struct {
-			Subtype  string          `json:"subtype"`
-			ToolName string          `json:"tool_name"`
-			Input    json.RawMessage `json:"input"`
+			Subtype            string          `json:"subtype"`
+			ToolName           string          `json:"tool_name"`
+			Input              json.RawMessage `json:"input"`
+			DecisionReason     string          `json:"decision_reason"`
+			DecisionReasonType string          `json:"decision_reason_type"`
+			BlockedPath        string          `json:"blocked_path"`
+			MatchedRule        json.RawMessage `json:"matched_ask_rule"`
+			Suggestions        json.RawMessage `json:"permission_suggestions"`
+			Title              string          `json:"title"`
+			Description        string          `json:"description"`
 		} `json:"request"`
 	}
 	if json.Unmarshal(p.ev.Payload, &ev) != nil || ev.Request.Subtype != "can_use_tool" || ev.RequestID == "" {
@@ -567,8 +619,22 @@ func (p *projector) controlRequest() {
 		in = json.RawMessage(`{}`)
 	}
 	p.openTurn()
-	p.write("approval:"+ev.RequestID, KindApproval, "", Approval{RequestID: ev.RequestID, Tool: ev.Request.ToolName,
-		Input: in, State: ApprovalPending})
+	id := "approval:" + ev.RequestID
+	// orbit's answer can be stored before the request line it answers (the two are written from different goroutines): what it said is kept.
+	var ap Approval
+	if !p.latest(id, &ap) {
+		ap.State = ApprovalPending
+	}
+	r := ev.Request
+	ap.RequestID, ap.Tool, ap.Input = ev.RequestID, r.ToolName, in
+	ap.DecisionReason, ap.DecisionReasonType, ap.BlockedPath, ap.Title, ap.Description = r.DecisionReason, r.DecisionReasonType, r.BlockedPath, r.Title, r.Description
+	if len(r.MatchedRule) > 0 && string(r.MatchedRule) != "null" {
+		ap.MatchedRule = r.MatchedRule
+	}
+	if len(r.Suggestions) > 0 && string(r.Suggestions) != "null" {
+		ap.Suggestions = r.Suggestions
+	}
+	p.write(id, KindApproval, "", ap)
 }
 
 // ---------------------------------------------------------------- codex
