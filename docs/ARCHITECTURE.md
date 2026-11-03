@@ -289,9 +289,9 @@ to the agent, a validator, and an executor. An agent's spec maps types to
 Today: `notify` (an extra message to one of the agent's channels),
 `continue` (wake this agent again later, above), `schedule:add`, `schedule:pause`, `schedule:resume`, `schedule:remove` and `run:now` (an agent's triggers changed from the person's words, parsed by code, each a new version; configuration.md, Changing schedules by talking), `agent:save` (the conversation as a new agent: the model writes its words, code its reach from what the conversation did, held for a person as an `agent:define`), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; a change that widens it waits for a person; docs/api.md, Defining agents), `skill:write` (write or retire a skill, Skills above), `github:clone` and `github:pr` (a chat agent's repository work: orbit clones into its workspace and commits and pushes its working tree to `orbit/chat/<branch>`, `build.Git`), `webhook:<endpoint>` (a
 JSON body to an endpoint whose URL, method and credentials are configuration, never
-chosen by the model; an endpoint's `path` may have `{name}` placeholders the action fills from params checked against the endpoint's declared types, and a `body_schema` the body must match, so a write like Sure's `PUT /transactions/{id}` is expressible without the model choosing a route; configuration.md, Endpoints), `connector:<connector>/<tool>` (a connector call that waits for approval, Connectors, above; recorded by orbit during the run, never proposed in an output), and `github:merge` (squash one of orbit's own
+chosen by the model; an endpoint's `path` may have `{name}` placeholders the action fills from params checked against the endpoint's declared types, and a `body_schema` the body must match, so a write like Sure's `PUT /transactions/{id}` is expressible without the model choosing a route; configuration.md, Endpoints), `connector:<connector>/<tool>` (a connector call that waits for approval, Connectors, above; recorded by orbit during the run, never proposed in an output), `github:merge` (squash one of orbit's own
 `orbit/*` PRs, only if its head is still the approved commit and every
-required check passed; [tickets.md](tickets.md)).
+required check passed; [tickets.md](tickets.md)), and `github:comment` (a comment on an issue or pull request of `github.comment_repositories`, as the App with an `issues: write` token per comment).
 
 Approval happens from a signed link (`/ui/actions/{id}?sig=`), the API, or
 `orbit approve`. An action is executed at most once: one interrupted during
@@ -518,4 +518,5 @@ ticket loop, every 30 s: checks green -> github:merge proposed (approve for orbi
 The direction, so changes now do not close it off:
 
 - **Tickets, what is left**: webhook events in place of the loop's polling ([tickets.md](tickets.md)); agents already take webhook triggers (Reliability, Webhooks).
+- **Gmail drafts and Calendar events** as actions (`gmail:draft`, `calendar:create`): orbit holds no Google credential, so they wait for the connectors work, where orbit holds a connector's credential and an action rule gates its writes.
 - **The workspace**: an IDE in the portfolio chat over files, terminals and git in a conversation's snapshot or an agent's box ([workspace.md](workspace.md)).
