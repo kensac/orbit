@@ -445,6 +445,8 @@ func assertExtensionIsolation(t *testing.T, ctx context.Context, c *sandbox.Clie
 		"marker": map[string]any{"type": "string", "maxLength": 32},
 		"other":  map[string]any{"type": "string", "maxLength": 32},
 		"hang":   map[string]any{"type": "boolean"},
+		"flood":  map[string]any{"type": "boolean"},
+		"memory": map[string]any{"type": "boolean"},
 	}, "additionalProperties": false}
 	operation := func(name, description string, timeout int) map[string]any {
 		return map[string]any{"name": name, "kind": "source", "description": description, "inputs": []string{"data"},
@@ -455,6 +457,8 @@ func assertExtensionIsolation(t *testing.T, ctx context.Context, c *sandbox.Clie
 		"runtime": "native", "entrypoint": "extension-probe", "operations": []any{
 			operation("inspect", "Inspect the sandbox boundary.", 15000),
 			operation("hang", "Exercise timeout cleanup.", 1500),
+			operation("flood", "Exercise the process limit.", 15000),
+			operation("memory", "Exercise the memory limit.", 15000),
 		}})
 	if err != nil {
 		t.Fatal(err)
@@ -477,7 +481,7 @@ func assertExtensionIsolation(t *testing.T, ctx context.Context, c *sandbox.Clie
 		if err := json.Unmarshal(result, &got); err != nil {
 			t.Fatalf("extension result %q: %v", result, err)
 		}
-		for _, key := range []string{"package_read_only", "input_present", "input_read_only", "work_root_read_only", "tmp_writable", "out_writable", "no_network", "proxy_absent", "secrets_absent", "environment_clean", "docker_socket_absent", "capabilities_zero", "no_new_privileges", "seccomp_enabled"} {
+		for _, key := range []string{"package_read_only", "input_present", "input_read_only", "work_root_read_only", "tmp_writable", "out_writable", "no_network", "proxy_absent", "secrets_absent", "environment_clean", "docker_socket_absent", "capabilities_zero", "no_new_privileges", "seccomp_enabled", "host_paths_unreadable", "link_escape_blocked", "hardlink_escape_blocked"} {
 			if got[key] != true {
 				t.Errorf("extension isolation %s = %v", key, got[key])
 			}
@@ -497,6 +501,25 @@ func assertExtensionIsolation(t *testing.T, ctx context.Context, c *sandbox.Clie
 		t.Fatal(err)
 	}
 	check(result, true)
+
+	result, err = invocation("flood", map[string]any{"flood": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var flood map[string]any
+	if err := json.Unmarshal(result, &flood); err != nil {
+		t.Fatal(err)
+	}
+	forks, _ := flood["forks_before_limit"].(float64)
+	if flood["fork_limit_hit"] != true || forks < 1 || forks >= ExtensionPids {
+		t.Fatalf("process limit probe = %v, want bounded fork failure below %d", flood, ExtensionPids)
+	}
+	assertNoExtensionContainers(t, ctx, d)
+
+	if _, err := invocation("memory", map[string]any{"memory": true}); err == nil || strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("memory exhaustion invocation = %v, want a bounded process failure", err)
+	}
+	assertNoExtensionContainers(t, ctx, d)
 
 	// Two overlapping invocations must have different writable tmpfs state.
 	type outcome struct {
@@ -525,6 +548,11 @@ func assertExtensionIsolation(t *testing.T, ctx context.Context, c *sandbox.Clie
 	if _, err := invocation("hang", map[string]any{"hang": true}); err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("timed-out extension error = %v", err)
 	}
+	assertNoExtensionContainers(t, ctx, d)
+}
+
+func assertNoExtensionContainers(t *testing.T, ctx context.Context, d *Docker) {
+	t.Helper()
 	containers, err := d.managed(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -546,7 +574,7 @@ func extensionMustJSON(t *testing.T, value any) json.RawMessage {
 }
 
 const extensionProbeOutputSchema = `{"type":"object","properties":{
-"package_read_only":{"type":"boolean"},"input_present":{"type":"boolean"},"input_read_only":{"type":"boolean"},"input_write_error":{"type":"string","maxLength":512},"work_root_read_only":{"type":"boolean"},"work_root_write_error":{"type":"string","maxLength":512},"work_root_chmod_error":{"type":"string","maxLength":512},"tmp_writable":{"type":"boolean"},"out_writable":{"type":"boolean"},"no_network":{"type":"boolean"},"proxy_absent":{"type":"boolean"},"secrets_absent":{"type":"boolean"},"environment_clean":{"type":"boolean"},"docker_socket_absent":{"type":"boolean"},"capabilities_zero":{"type":"boolean"},"no_new_privileges":{"type":"boolean"},"seccomp_enabled":{"type":"boolean"},"no_cross_tmp":{"type":"boolean"}},"required":["package_read_only","input_present","input_read_only","input_write_error","work_root_read_only","work_root_write_error","work_root_chmod_error","tmp_writable","out_writable","no_network","proxy_absent","secrets_absent","environment_clean","docker_socket_absent","capabilities_zero","no_new_privileges","seccomp_enabled","no_cross_tmp"],"additionalProperties":false}`
+"package_read_only":{"type":"boolean"},"input_present":{"type":"boolean"},"input_read_only":{"type":"boolean"},"input_write_error":{"type":"string","maxLength":512},"work_root_read_only":{"type":"boolean"},"work_root_write_error":{"type":"string","maxLength":512},"work_root_chmod_error":{"type":"string","maxLength":512},"tmp_writable":{"type":"boolean"},"out_writable":{"type":"boolean"},"no_network":{"type":"boolean"},"proxy_absent":{"type":"boolean"},"secrets_absent":{"type":"boolean"},"environment_clean":{"type":"boolean"},"docker_socket_absent":{"type":"boolean"},"capabilities_zero":{"type":"boolean"},"no_new_privileges":{"type":"boolean"},"seccomp_enabled":{"type":"boolean"},"host_paths_unreadable":{"type":"boolean"},"link_escape_blocked":{"type":"boolean"},"hardlink_escape_blocked":{"type":"boolean"},"fork_limit_hit":{"type":"boolean"},"forks_before_limit":{"type":"integer","minimum":0,"maximum":31},"no_cross_tmp":{"type":"boolean"}},"required":["package_read_only","input_present","input_read_only","input_write_error","work_root_read_only","work_root_write_error","work_root_chmod_error","tmp_writable","out_writable","no_network","proxy_absent","secrets_absent","environment_clean","docker_socket_absent","capabilities_zero","no_new_privileges","seccomp_enabled","host_paths_unreadable","link_escape_blocked","hardlink_escape_blocked","fork_limit_hit","forks_before_limit","no_cross_tmp"],"additionalProperties":false}`
 
 type lockedLog struct {
 	mu sync.Mutex
