@@ -324,6 +324,8 @@ fails at runtime, not at load.
 
 - **Defaults.** A chat in a `sandbox` is `full` with ceiling `full`: the container is the boundary (security.md, Sandboxed chats). Every other agent is `locked`, and an agent that is not a chat runs unattended, so it can be nothing else.
 - **Limits.** `level` is at most `ceiling`. Without a `sandbox` the widest is `edits`: `auto` and `full` let a call run without a person on orbit's host, beside its secrets. A level that is not one of the five, or one the agent cannot run, resolves down at run time, never up (`Agent.ResolveLevel`); at load it is an error.
+- **What `tools` names is allowed at every level.** A local chat's `tools` are given by name (`--allowedTools`), so no level asks for them; a level decides everything else. A workstation lists none, so only orbit's own tools are pre-allowed there.
+- **A conversation may set its own level** within the ceiling (docs/api.md, Conversation permissions), for the runs its person's messages start; unattended runs keep the agent's level, or the conversation's when it is narrower.
 - **A process can be raised.** Every chat process has the stdio permission prompt, and one whose ceiling is `full` is launched with `--allow-dangerously-skip-permissions` (without it the CLI refuses `set_permission_mode bypassPermissions`).
 
 ## Web allowlist
