@@ -59,6 +59,20 @@ func (s *Store) CatalogConnectors(ctx context.Context) ([]CatalogConnector, erro
 	return out, rows.Err()
 }
 
+// CatalogConnector returns a user-added connector, or nil when it is unknown.
+func (s *Store) CatalogConnector(ctx context.Context, name string) (*CatalogConnector, error) {
+	var c CatalogConnector
+	err := s.Pool.QueryRow(ctx, `SELECT name, url, description, scopes, created_by, created_at FROM connector_catalog WHERE name = $1`, name).
+		Scan(&c.Name, &c.URL, &c.Description, &c.Scopes, &c.CreatedBy, &c.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if c.Scopes == nil {
+		c.Scopes = []string{}
+	}
+	return &c, err
+}
+
 // ConnectorCatalogGeneration is the append-only catalog size used by
 // instances to notice additions made by another instance.
 func (s *Store) ConnectorCatalogGeneration(ctx context.Context) (int64, error) {
@@ -107,7 +121,9 @@ func (s *Store) LatestConnectorToken(ctx context.Context, conn string) (*Connect
 }
 
 func latestConnectorToken(ctx context.Context, db querier, conn string) (*ConnectorToken, error) {
-	rows, err := db.Query(ctx, `SELECT `+connectorGrantCols+` FROM connector_tokens WHERE connector = $1 ORDER BY version DESC LIMIT 1`, conn)
+	rows, err := db.Query(ctx, `SELECT `+connectorGrantCols+` FROM connector_tokens t WHERE connector = $1
+		AND NOT EXISTS (SELECT 1 FROM connector_token_revocations r WHERE r.connector = t.connector AND r.version = t.version)
+		ORDER BY version DESC LIMIT 1`, conn)
 	if err != nil {
 		return nil, err
 	}
@@ -120,8 +136,9 @@ func latestConnectorToken(ctx context.Context, db querier, conn string) (*Connec
 
 // ConnectorTokens is every connector's newest version, by connector.
 func (s *Store) ConnectorTokens(ctx context.Context) (map[string]ConnectorToken, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT DISTINCT ON (connector) `+connectorGrantCols+`
-		FROM connector_tokens ORDER BY connector, version DESC`)
+	rows, err := s.Pool.Query(ctx, `SELECT DISTINCT ON (t.connector) `+connectorGrantCols+`
+		FROM connector_tokens t WHERE NOT EXISTS (SELECT 1 FROM connector_token_revocations r WHERE r.connector = t.connector AND r.version = t.version)
+		ORDER BY connector, version DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -134,6 +151,29 @@ func (s *Store) ConnectorTokens(ctx context.Context) (map[string]ConnectorToken,
 		out[t.Connector] = t
 	}
 	return out, nil
+}
+
+// RevokeConnectorToken appends a revocation for the active grant, retaining
+// every sealed token version. The connector lock serializes revocation with
+// sign-in and refresh.
+func (s *Store) RevokeConnectorToken(ctx context.Context, conn, by string) (int, error) {
+	var version int
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := lockConnector(ctx, tx, conn); err != nil {
+			return err
+		}
+		cur, err := latestConnectorToken(ctx, tx, conn)
+		if err != nil {
+			return err
+		}
+		if cur == nil {
+			return ErrNotFound
+		}
+		version = cur.Version
+		_, err = tx.Exec(ctx, `INSERT INTO connector_token_revocations (connector, version, revoked_by) VALUES ($1, $2, $3)`, conn, version, by)
+		return err
+	})
+	return version, err
 }
 
 // RefreshConnectorToken renews a connector's grant once across instances: under the connector's lock, a version newer than seen means another refresh already happened, and it is returned as is; otherwise refresh turns the newest version into the next, stored as reason refresh.
