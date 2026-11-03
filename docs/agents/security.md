@@ -87,6 +87,15 @@ bounded in delay and chain length and, like any type, denied unless named. A web
 `deny` is the default for every type an agent does not name, and denied
 types are not even offered.
 
+Typed Google writes (`gmail:draft`, `calendar:create`) are actions, not model
+tools. `orbit.yaml` fixes each action to an authenticated connector and a tool
+listed in its `write_tools`; the agent must also name that connector. Orbit
+builds the Gmail draft or Calendar event arguments from the typed fields and
+calls the configured tool with its credential. The model cannot choose an
+account, connector, tool, calendar or URL. The action type remains denied
+unless the agent names its rule; use `approve` when a person should review
+each draft or event.
+
 ## What a model can define
 
 A database agent is written through the API or by `agent:define`, and the built-in `orbit` is changed the same way, so a model steered by a poisoned input (a fetched page, an upload) can write either. Without a sandbox (`sandbox:`, Sandboxed chats below) their runs are in orbit's container, which holds every `ORBIT_*` secret, and their sources are fetched by orbit either way. So `spec.validateTrust` holds them (`spec.Agent.Restricted`) to what orbit.yaml offers, at load and so on every write:
@@ -202,9 +211,11 @@ person approves first. In the fleet a merge is a deploy: keep it `approve`. A ch
 
 `actions: write` (rerunning failed jobs) also covers dispatching and cancelling workflows; orbit mints it alone, only in the ticket loop, for `RerunJob` on the job ids of checks that failed, and no model sees it.
 
-## GitHub and Loki sources
+## GitHub, Loki and lake sources
 
 A `github` source is fetched by orbit as the App with a token of one resource's read permissions (`issues: read`, `pull_requests: read`, `checks: read` with `statuses: read`, or `contents: read` for releases), minted for one repository of `github.read_repositories` for that fetch alone and revoked after it; the model sees only the projected JSON. A compromised model gains nothing it did not already read: it cannot change the repository, the resource or the permissions, which are its spec's, and an `agent:define` giving a database agent one is held to `read_repositories` and waits for a person as any added source does. Issue and pull request text is written by whoever can open one on that repository: data, like any input. A `loki` source is a GET of `query_range` with the configuration's LogQL; log lines carry whatever services logged, request paths and user agents from the internet included.
+
+A `lake` source signs only S3 `ListObjectsV2` and object `GET` requests. The endpoint is fixed in the source spec, and every credential reference is checked against its configured `url_prefix` before each request. Redirects are refused so a signed request cannot carry authorization headers to another host. The source reads only gzip NDJSON objects under the configured prefix, sorts keys before decoding, and fails on object, decompressed-data or output bounds instead of returning partial results. Use a read-only key; the source's HTTP methods do not write objects, but the key's server-side policy remains the authority. A model receives decoded rows only, and those rows are untrusted input.
 
 ## Repositories agents read
 
@@ -301,7 +312,7 @@ A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as 
 
 ## Permission levels
 
-A chat agent's `permissions` level (configuration.md, Permissions) decides which of its tools' calls run without a person; it never grants a tool. `full` and `auto` need a sandbox: both let a call run unasked (auto's classifier is the model's judgment, not a boundary), and on orbit's host that call is beside every `ORBIT_*` secret. Without a sandbox the widest level is `edits`, which runs only file edits inside the workspace unasked, and orbit's Read deny rules hold at every level. A level or ceiling an agent raises is a widening, so an `agent:define` that raises one waits for a person. A process whose ceiling is `full` is launched with `--allow-dangerously-skip-permissions`, which lets a set_permission_mode raise it to bypass; orbit sends that only for a level the ceiling allows, and only a sandboxed process gets the flag.
+A chat agent's `permissions` level (configuration.md, Permissions) decides which of its tools' calls run without a person; it never grants a tool. `full` and `auto` need a sandbox: both let a call run unasked (auto's classifier is the model's judgment, not a boundary), and on orbit's host that call is beside every `ORBIT_*` secret. Without a sandbox the widest level is `edits`, which runs only file edits inside the workspace unasked, and orbit's Read deny rules hold at every level. A level or ceiling an agent raises is a widening, so an `agent:define` that raises one waits for a person. Approvals (docs/api.md, Approvals) are the person's: each is a row decided once by a token's person, and the run answers the CLI only from that row, so no model output can allow a call. A request nobody answers is denied at its timeout, never allowed; one in a run nobody attends (a schedule, a continue, a task, which an injected input can trigger) is denied at once. A conversation-wide allow answers only later requests for the same tool that repeat the call or that the CLI covers with the same suggestion the person accepted, never wider; it applies to runs its person's messages start, never to unattended ones, and never to a plan or an ask the CLI marks as granting more than itself. The CLI's reason, path and rule are shown as it sent them: they can carry text an input planted, so a client escapes them. A process whose ceiling is `full` is launched with `--allow-dangerously-skip-permissions`, which lets a set_permission_mode raise it to bypass; orbit sends that only for a level the ceiling allows, and only a sandboxed process gets the flag.
 
 ## Boxes and terminals
 
