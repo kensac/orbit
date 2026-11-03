@@ -151,6 +151,12 @@ func TestAddCatalogConnectorDiscoversOAuthAndStartsSignIn(t *testing.T) {
 	oauthURL = oauthServer.URL
 	v := newEnv(t, func(a *api.Server, _ *http.Server) { a.LinkClient = oauthServer.Client() })
 	v.e.Client = oauthServer.Client()
+	v.e.Env = func(name string) (string, bool) {
+		if name == spec.ConnectorKeyEnv {
+			return token, true
+		}
+		return "", false
+	}
 	url := v.srv.URL + "/api/v1/connectors/catalog"
 	person := v.person("kanishk")
 	if code, b := call(t, "POST", url, person, `{"name":"acme","url":"`+oauthServer.URL+`/mcp","description":"Acme data","scopes":[]}`); code != http.StatusCreated {
