@@ -17,7 +17,7 @@ import (
 type connectorInfo struct {
 	Name        string                `json:"name"`
 	Transport   string                `json:"transport"`
-	URL         string                `json:"url"`
+	URL         string                `json:"url,omitempty"`
 	Description string                `json:"description"`
 	Auth        string                `json:"auth"`
 	WriteTools  []string              `json:"write_tools"`
@@ -49,7 +49,11 @@ func (s *Server) listConnectors(w http.ResponseWriter, r *http.Request) {
 	out := make([]connectorInfo, 0, len(names))
 	for _, n := range names {
 		c := cfg.Deployment.Connectors[n]
-		info := connectorInfo{Name: n, Transport: spec.ConnectorTransportHTTP, URL: c.URL, Description: c.Description,
+		transport := c.Transport
+		if transport == "" {
+			transport = spec.ConnectorTransportHTTP
+		}
+		info := connectorInfo{Name: n, Transport: transport, URL: c.URL, Description: c.Description,
 			Auth: c.AuthKind(), WriteTools: orEmpty(c.WriteTools), Agents: []string{}}
 		for name, a := range cfg.Agents {
 			if slices.Contains(a.Connectors, n) {

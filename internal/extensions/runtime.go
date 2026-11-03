@@ -199,6 +199,16 @@ func invocationArchive(bundle *Bundle, inputs map[string]Input) (io.Reader, erro
 	return bytes.NewReader(out.Bytes()), nil
 }
 
+// PackageArchive makes the validated package files available to one sandbox
+// process. The caller must verify the package digest against its deployment
+// pin before using the archive.
+func PackageArchive(bundle *Bundle) (io.Reader, error) {
+	if bundle == nil || bundle.Package == nil {
+		return nil, errors.New("extension package is missing")
+	}
+	return invocationArchive(bundle, nil)
+}
+
 type boundedBuffer struct {
 	bytes.Buffer
 	max int

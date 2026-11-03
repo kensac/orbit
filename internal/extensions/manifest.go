@@ -80,6 +80,9 @@ func Parse(data []byte) (*Manifest, error) {
 	if err := manifestKeys(raw); err != nil {
 		return nil, err
 	}
+	if err := scanManifestContent(raw, "manifest"); err != nil {
+		return nil, err
+	}
 	var m Manifest
 	d = json.NewDecoder(bytes.NewReader(data))
 	d.UseNumber()
@@ -138,6 +141,55 @@ func Parse(data []byte) (*Manifest, error) {
 		}
 	}
 	return &m, nil
+}
+
+// ValidateStdioServer accepts the bounded tool contract used by a networkless
+// MCP stdio server. It grants no network, credential or external-write access.
+func ValidateStdioServer(pkg *Package) error {
+	if pkg == nil || pkg.Manifest == nil {
+		return errors.New("stdio connector package is missing")
+	}
+	if len(pkg.Manifest.Operations) == 0 || len(pkg.Manifest.Operations) > MaxOperations {
+		return errors.New("stdio connector needs 1..32 declared tools")
+	}
+	for _, op := range pkg.Manifest.Operations {
+		if op.Kind != "tool" || len(op.Inputs) != 0 || op.Endpoint != "" {
+			return fmt.Errorf("stdio connector operation %q must be a local tool without inputs or an endpoint", op.Name)
+		}
+	}
+	return nil
+}
+
+func scanManifestContent(v any, at string) error {
+	check := func(s string) error {
+		for i, r := range s {
+			if r >= 0xE0000 && r <= 0xE007F || r == 0x061C || r == 0x200E || r == 0x200F ||
+				r >= 0x202A && r <= 0x202E || r >= 0x2066 && r <= 0x2069 {
+				return fmt.Errorf("%s: hidden Unicode character U+%04X at byte %d", at, r, i)
+			}
+		}
+		return nil
+	}
+	switch x := v.(type) {
+	case string:
+		return check(x)
+	case map[string]any:
+		for k, child := range x {
+			if err := check(k); err != nil {
+				return err
+			}
+			if err := scanManifestContent(child, at+"."+k); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for i, child := range x {
+			if err := scanManifestContent(child, fmt.Sprintf("%s[%d]", at, i)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func safePath(s string) bool {

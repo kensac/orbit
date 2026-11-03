@@ -1,12 +1,23 @@
 # Sandboxed extensions
 
-This document describes the extension design and its implementation boundary. Orbit currently supports an off-by-default first slice: deployment-pinned native pure-source operations declared explicitly in an agent's `sources`. It does not support extension tools or actions, WASM, install/update commands, or durable invocation records. Package code never runs in the service process. The design preserves the [architecture](ARCHITECTURE.md), [security boundaries](agents/security.md) and [configuration rules](agents/configuration.md).
+This document describes the extension design and its implementation boundary. Orbit supports off-by-default deployment-pinned native pure-source operations declared explicitly in an agent's `sources`, plus package-pinned read-only MCP stdio connectors. Extension tools or actions, WASM, install/update commands, durable invocation records, and antivirus signature scanning remain unimplemented. Package code never runs in the service process. The design preserves the [architecture](ARCHITECTURE.md), [security boundaries](agents/security.md) and [configuration rules](agents/configuration.md).
 
 ## Implemented first slice
 
 An operator may configure `extensions.enabled: true` and exact `{path, sha256}` package pins in `orbit.yaml`. An agent grants one pinned `source` operation by declaring a source with `kind: extension`, package, operation, static parameters and bindings from every declared input slot to an earlier source. Orbit validates the package and digest while loading configuration, validates parameters and results against the manifest's bounded schema subset, and exposes only the JSON result as that source's input artifact. An extension source is limited to eight invocations per run.
 
 Invocation uses sandboxd's fixed extension profile, not the Orbit process. The profile has no network, credential proxy, backend token, sandbox token, host socket or host mount. It runs as the fixed unprivileged user with a read-only root, no capabilities, no-new-privileges, bounded CPU, memory, process count, tmpfs and wall time. Package and input trees are root-owned and read-only; only bounded tmpfs mounts at `/work/out` and `/tmp` are writable. Each invocation's container is destroyed after completion or failure. The configured package path must remain immutable while Orbit uses it; the digest is rechecked immediately before each invocation.
+
+For an stdio connector, orbit starts the pinned package entrypoint in the same
+profile and keeps one sandbox for the connector session. The package must
+declare only tool operations, with no inputs or endpoint bindings. Its memory
+limit is the lowest declared operation limit. Orbit rejects a changed package
+digest, mismatched live tool list, invalid arguments, missing structured
+results, schema violations and oversized results. The manifest supplies the
+metadata shown to the model. Package traversal, links, file types, size, hash,
+manifest fields and hidden Unicode controls are checked; these checks do not
+detect malicious program behavior. Operators must inspect a package before
+pinning it. MCP result content remains untrusted.
 
 The remaining sections describe protocol guarantees and planned follow-up work. They are not claims that action, tool, package installation, durable audit, worker eligibility or adversarial real-container acceptance coverage exists.
 

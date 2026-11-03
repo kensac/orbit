@@ -116,16 +116,16 @@ func (e *Engine) ConnectorCallback(ctx context.Context, state, code string) (str
 
 // ConnectorTools lists connector name's tools as an agent with every default rule would see them, for a person choosing rules.
 func (e *Engine) ConnectorTools(ctx context.Context, name string) ([]connectors.Tool, error) {
-	d := e.Current().Config.Deployment
+	cfg := e.Current().Config
+	d := cfg.Deployment
 	cn, ok := d.Connectors[name]
 	if !ok {
 		return nil, store.ErrNotFound
 	}
-	auth, err := e.connectorAuth(d, name, cn)
+	cl, err := e.connectorClient(d, cfg.ExtensionPackages, name, cn)
 	if err != nil {
 		return nil, err
 	}
-	cl := connectors.New(name, cn, auth, e.Client)
 	defer cl.Close()
 	lctx, cancel := context.WithTimeout(ctx, connectorListTimeout)
 	defer cancel()
