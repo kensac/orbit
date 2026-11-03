@@ -104,7 +104,7 @@ A message and a run are in exactly one conversation of their own agent
 to the agent's default conversation (`orbit_conversation_fill`, which also
 moves `last_activity_at`). Every query that reads a thread for a run filters
 by the run's conversation. Conversations are archived, never deleted, and
-the default one cannot be archived.
+the default one cannot be archived. A fork (`ForkConversation`) is a new conversation naming its parent and message (`forked_from`, `forked_at_message`) and the point it holds the parent's thread to (`fork_cutoff`); `Conversation` reads a fork's thread on into its parents up to each one's cutoff, and the fork's workspace starts as a copy of the parent's snapshot as of then.
 
 A mail (`mail_in`, keyed by Message-ID) is recorded in the same transaction as the message and run it becomes (`IngestMail`), so a mail fetched twice, by two instances or after a crash before it was marked seen, is acted on once. An ignored mail is recorded with its reason; every row keeps the raw mail.
 

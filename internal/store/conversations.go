@@ -89,6 +89,15 @@ type Conversation struct {
 	// agent's runner's own; null is the runner's.
 	Model  *string `json:"model"`
 	Effort *string `json:"effort"`
+	// ForkedFrom names the conversation and message a fork was started at
+	// (ForkConversation); null for any other.
+	ForkedFrom *ForkPoint `json:"forked_from"`
+}
+
+// ForkPoint is where a fork was started.
+type ForkPoint struct {
+	ConversationID string `json:"conversation_id"`
+	MessageID      string `json:"message_id"`
 }
 
 // derive fills the fields computed from the scanned ones.
@@ -108,7 +117,9 @@ var conversationCols = `c.id::text, c.agent, c.title, c.is_default, c.archived, 
 	(SELECT json_build_object('id', r.id, 'status', r.status, 'trigger', r.trigger, 'created_at', r.created_at,
 	                          'finished_at', r.finished_at, 'summary', r.summary)
 	 FROM runs r WHERE r.conversation_id = c.id ORDER BY r.created_at DESC, r.id DESC LIMIT 1),
-	c.read_through, c.from_session::text, c.model, c.effort`
+	c.read_through, c.from_session::text, c.model, c.effort,
+	CASE WHEN c.forked_from IS NOT NULL
+	     THEN json_build_object('conversation_id', c.forked_from, 'message_id', c.forked_at_message) END`
 
 // GetConversation returns one conversation.
 func (s *Store) GetConversation(ctx context.Context, id string) (*Conversation, error) {
