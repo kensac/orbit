@@ -2,9 +2,12 @@ package bundle
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -69,9 +72,9 @@ func portableConversationTestBundle(t *testing.T) string {
 	t.Helper()
 	const id = "10000000-0000-4000-8000-000000000001"
 	fetch := bundleFetcher{
-		"agents/source":                                         `{"agent":{"name":"source","spec":{}}}`,
-		"agents/source/memory?limit=1":                          `{"versions":[]}`,
-		"agents/source/context":                                 `{"topics":[],"skills":[]}`,
+		"agents/source":                `{"agent":{"name":"source","spec":{}}}`,
+		"agents/source/memory?limit=1": `{"versions":[]}`,
+		"agents/source/context":        `{"topics":[],"skills":[]}`,
 		"memory/entries?limit=1000&scope=profile&status=active": `{"entries":[]}`,
 		"memory/entries?agent=source&limit=1000&status=active":  `{"entries":[]}`,
 		"agents/source/conversations?archived=false&limit=200":  `{"conversations":[],"has_more":false,"next_before":null}`,
@@ -88,9 +91,9 @@ func portableConversationTestBundle(t *testing.T) string {
 func portableTestBundle(t *testing.T) string {
 	t.Helper()
 	fetch := bundleFetcher{
-		"agents/source":                                         `{"agent":{"name":"source","spec":{}}}`,
-		"agents/source/memory?limit=1":                          `{"versions":[{"content":"memory text"}]}`,
-		"agents/source/context":                                 `{"topics":[{"name":"finance","from":["api"]}],"skills":[]}`,
+		"agents/source":                `{"agent":{"name":"source","spec":{}}}`,
+		"agents/source/memory?limit=1": `{"versions":[{"content":"memory text"}]}`,
+		"agents/source/context":        `{"topics":[{"name":"finance","from":["api"]}],"skills":[]}`,
 		"memory/entries?limit=1000&scope=profile&status=active": `{"entries":[{"scope":"profile","key":"pref","type":"user","title":"Preference","body":"tea"}]}`,
 		"memory/entries?agent=source&limit=1000&status=active":  `{"entries":[{"scope":"agent","agent":"source","key":"local","type":"project","title":"Local","body":"source-only"}]}`,
 		"memory/entries?limit=1000&status=active&topic=finance": `{"entries":[{"scope":"topic","topic":"finance","key":"topic","type":"reference","title":"Topic","body":"fact"}]}`,
@@ -132,7 +135,8 @@ func TestImportDryRunValidatesWithoutWrites(t *testing.T) {
 
 func TestImportArchivesConversationAsReadOnlySnapshot(t *testing.T) {
 	api := &importAPI{}
-	result, err := Import(context.Background(), api, portableConversationTestBundle(t), "target", false)
+	filename := portableConversationTestBundle(t)
+	result, err := Import(context.Background(), api, filename, "target", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,8 +166,13 @@ func TestImportArchivesConversationAsReadOnlySnapshot(t *testing.T) {
 			t.Fatalf("archive request body %q: %v", call.body, err)
 		}
 		archive := body.Archives[0]
+		bundleBytes, err := os.ReadFile(filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bundleDigest := sha256.Sum256(bundleBytes)
 		if archive.SourceAgent != "source" || archive.SourceConversationID != "10000000-0000-4000-8000-000000000001" ||
-			archive.SourceBundleSHA256 == "" || archive.Snapshot.Conversation.ID != archive.SourceConversationID || len(archive.Snapshot.Pages) != 1 {
+			archive.SourceBundleSHA256 != hex.EncodeToString(bundleDigest[:]) || archive.Snapshot.Conversation.ID != archive.SourceConversationID || len(archive.Snapshot.Pages) != 1 {
 			t.Fatalf("archive payload: %+v", archive)
 		}
 	}

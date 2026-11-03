@@ -58,6 +58,9 @@ func TestConversationArchiveImportsAppendReadOnlyVersions(t *testing.T) {
 	if _, err := s.Pool.Exec(ctx, `DELETE FROM conversation_archives WHERE target_agent='a'`); err == nil {
 		t.Fatal("archive delete succeeded")
 	}
+	if _, err := s.Pool.Exec(ctx, `TRUNCATE conversation_archives`); err == nil {
+		t.Fatal("archive truncate succeeded")
+	}
 	archiveVersions, more, err := s.ListConversationArchives(ctx, "a", 50, 0)
 	if err != nil || more || len(archiveVersions) != 2 || archiveVersions[0].Version != 2 || archiveVersions[1].Version != 1 {
 		t.Fatalf("archive versions = %+v, more=%v, err=%v", archiveVersions, more, err)

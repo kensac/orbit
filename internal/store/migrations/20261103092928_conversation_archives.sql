@@ -29,8 +29,12 @@ $$;
 CREATE TRIGGER conversation_archives_immutable
     BEFORE UPDATE OR DELETE ON conversation_archives
     FOR EACH ROW EXECUTE FUNCTION orbit_conversation_archive_immutable();
+CREATE TRIGGER conversation_archives_immutable_truncate
+    BEFORE TRUNCATE ON conversation_archives
+    FOR EACH STATEMENT EXECUTE FUNCTION orbit_conversation_archive_immutable();
 
 -- +goose Down
 DROP TRIGGER conversation_archives_immutable ON conversation_archives;
+DROP TRIGGER conversation_archives_immutable_truncate ON conversation_archives;
 DROP FUNCTION orbit_conversation_archive_immutable();
 DROP TABLE conversation_archives;

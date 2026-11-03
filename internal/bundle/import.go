@@ -40,8 +40,9 @@ type ImportResult struct {
 }
 
 type bundleResources struct {
-	manifest Manifest
-	values   map[string]json.RawMessage
+	manifest  Manifest
+	values    map[string]json.RawMessage
+	bundleSHA string
 }
 
 type importedEntry struct {
@@ -96,10 +97,7 @@ func Import(ctx context.Context, api Importer, filename, target string, dryRun b
 	if !r.manifest.ResourceCoverageComplete {
 		return out, errors.New("bundle has incomplete resource coverage")
 	}
-	bundleHash, err := bundleSHA256(filename)
-	if err != nil {
-		return out, err
-	}
+	bundleHash := r.bundleSHA
 	sourceSegment, err := client.Segment(r.manifest.Agent)
 	if err != nil {
 		return out, errors.New("bundle has an invalid source agent")
@@ -244,19 +242,6 @@ func Import(ctx context.Context, api Importer, filename, target string, dryRun b
 		out.ConversationArchivesImported = true
 	}
 	return out, nil
-}
-
-func bundleSHA256(filename string) (string, error) {
-	f, err := os.Open(filename)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 type importedConversationArchive struct {
@@ -405,27 +390,42 @@ func importRecords(ctx context.Context, api Importer, endpoint, field string, re
 	return json.Marshal(map[string]any{"results": results})
 }
 
-func loadBundle(filename string) (out bundleResources, retErr error) {
-	manifest, err := Inspect(filename)
+func loadBundle(filename string) (out bundleResources, err error) {
+	file, err := os.Open(filename)
 	if err != nil {
 		return out, err
 	}
-	archive, err := zip.OpenReader(filename)
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
 		return out, err
 	}
-	defer func() {
-		if err := archive.Close(); err != nil && retErr == nil {
-			retErr = err
-		}
-	}()
-	out.manifest = manifest
-	out.values = make(map[string]json.RawMessage, len(manifest.Resources))
+	maxSize := int64(maxBundleBytes + maxResponseBytes + maxResponses*1024)
+	if info.Size() < 0 || info.Size() > maxSize {
+		return out, errors.New("archive size exceeds format bounds")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxSize+1))
+	if err != nil {
+		return out, err
+	}
+	if int64(len(data)) != info.Size() {
+		return out, errors.New("archive size changed while reading")
+	}
+	if err := verifyData(data, &out.manifest); err != nil {
+		return out, err
+	}
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return out, err
+	}
+	sum := sha256.Sum256(data)
+	out.bundleSHA = hex.EncodeToString(sum[:])
+	out.values = make(map[string]json.RawMessage, len(out.manifest.Resources))
 	files := make(map[string]*zip.File, len(archive.File))
 	for _, file := range archive.File {
 		files[file.Name] = file
 	}
-	for _, resource := range manifest.Resources {
+	for _, resource := range out.manifest.Resources {
 		if resource.File == "" {
 			continue
 		}

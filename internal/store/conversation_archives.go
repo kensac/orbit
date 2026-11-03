@@ -87,7 +87,7 @@ type ConversationArchive struct {
 	Version              int             `json:"version"`
 	SourceBundleSHA256   string          `json:"source_bundle_sha256"`
 	ContentSHA256        string          `json:"content_sha256"`
-	Snapshot             json.RawMessage `json:"snapshot"`
+	Snapshot             json.RawMessage `json:"snapshot,omitempty"`
 	ImportedBy           string          `json:"imported_by"`
 	ImportedAt           string          `json:"imported_at"`
 	Kind                 string          `json:"kind"`
@@ -222,7 +222,7 @@ func (s *Store) ListConversationArchives(ctx context.Context, targetAgent string
 		limit = 50
 	}
 	rows, err := s.Pool.Query(ctx, `SELECT id, target_agent, source_agent, source_conversation_id::text, version, source_bundle_sha256,
-		content_sha256, snapshot, imported_by, imported_at::text
+		content_sha256, imported_by, imported_at::text
 	FROM conversation_archives WHERE target_agent=$1 AND ($2 = 0 OR id < $2)
 	ORDER BY id DESC LIMIT $3`, targetAgent, beforeID, limit+1)
 	if err != nil {
@@ -233,7 +233,7 @@ func (s *Store) ListConversationArchives(ctx context.Context, targetAgent string
 	for rows.Next() {
 		var a ConversationArchive
 		if err := rows.Scan(&a.ID, &a.TargetAgent, &a.SourceAgent, &a.SourceConversationID, &a.Version,
-			&a.SourceBundleSHA256, &a.ContentSHA256, &a.Snapshot, &a.ImportedBy, &a.ImportedAt); err != nil {
+			&a.SourceBundleSHA256, &a.ContentSHA256, &a.ImportedBy, &a.ImportedAt); err != nil {
 			return nil, false, err
 		}
 		setArchiveContract(&a)

@@ -89,6 +89,7 @@ version. The JSON is read-only evidence, never inbox messages or runs.
 - usage samples (`usage_samples`): one row per poll of the subscription usage endpoint, `ok` with the body as received or not with the error; parsed when read (`usage.ParsePoll`), never rewritten.
 - deferral (`run_deferrals`, one per run): `DeferRun` pushes a queued schedule run's `run_after` and upserts its row (`times`, the window and reading) in one transaction, refusing a run no longer queued; `ReleaseDeferrals` clears `run_after` and sets `released_at` together. A run is held only while queued, so a claim is never blocked by anything but `run_after`.
 - agent budget usage: `BudgetUsage` sums reported API-equivalent cost and counts attempts started within the agent's period. Budget alerts use the existing append-only `attention` row, keyed once per agent and period; dismissing an alert never changes the scheduled run it identifies.
+- imported conversation archives: read-only transcript snapshots are versioned append-only; database triggers reject UPDATE, DELETE and TRUNCATE. Their source bundle hash is provenance supplied by the importer, not a server-verifiable signature.
 
 A client request id (`receipts`) is written in the same transaction as the
 message or decision it records, so a retry returns the first result and a

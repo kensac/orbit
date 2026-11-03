@@ -118,11 +118,17 @@ func TestImportedConversationArchiveRemainsSeparateAndReadOnly(t *testing.T) {
 	if code != 200 || len(listed["archives"].([]any)) != 1 {
 		t.Fatalf("list archives = %d %v", code, listed)
 	}
+	if _, includesSnapshot := listed["archives"].([]any)[0].(map[string]any)["snapshot"]; includesSnapshot {
+		t.Fatal("archive list included the full snapshot")
+	}
 	code, archive := call(t, "GET", base+"/"+strconv.FormatInt(int64(id), 10), kanishk, "")
 	if code != 200 || archive["archive"].(map[string]any)["source_conversation_id"] != sourceID {
 		t.Fatalf("get archive = %d %v", code, archive)
 	}
 	archiveShape := archive["archive"].(map[string]any)
+	if _, includesSnapshot := archiveShape["snapshot"]; !includesSnapshot {
+		t.Fatal("archive detail omitted the snapshot")
+	}
 	if archiveShape["kind"] != "exported_thread_snapshot" || archiveShape["read_only"] != true ||
 		archiveShape["coverage"] != "partial" || archiveShape["coverage_details"] != "source conversation metadata and exported thread pages only" {
 		t.Fatalf("archive contract = %v", archiveShape)
