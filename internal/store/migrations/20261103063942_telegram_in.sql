@@ -1,3 +1,5 @@
+-- +goose Up
+
 -- Telegram updates are keyed by provider update_id so retries and concurrent
 -- control instances cannot turn one update into two messages. Raw updates are
 -- retained, including ignored ones, like mail_in.
