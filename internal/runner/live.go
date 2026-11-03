@@ -44,7 +44,15 @@ type Live struct {
 // also sheds idle processes when the host or Orbit's memory cgroup is under
 // pressure; other platforms still shed them when a sandbox slot is needed.
 func NewLive(max int) *Live {
-	return newLive(max, systemMemoryPressure, memoryPressureCheckInterval)
+	return NewLiveWithPressure(max, systemMemoryPressure, memoryPressureCheckInterval)
+}
+
+// NewLiveWithPressure returns a live-process set whose idle eviction checks
+// pressure at interval. A nil pressure function or non-positive interval
+// disables the watcher. This also lets callers with an external resource
+// manager provide their own pressure signal.
+func NewLiveWithPressure(max int, pressure func() bool, interval time.Duration) *Live {
+	return newLive(max, pressure, interval)
 }
 
 func newLive(max int, pressure func() bool, interval time.Duration) *Live {

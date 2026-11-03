@@ -54,7 +54,7 @@ session: {resume: true, idle: 24h, live: 24h}
 	e := &engine.Engine{
 		Store: s, DataDir: t.TempDir(), ConfigDir: dir, Env: env,
 		Log:       slog.New(slog.NewTextHandler(os.Stderr, nil)),
-		NewRunner: runner.New, Live: runner.NewLive(2),
+		NewRunner: runner.New, Live: runner.NewLiveWithPressure(2, nil, 0),
 		NewSandbox: func(string, string) (runner.SandboxClient, error) { return client, nil },
 	}
 	defer e.Live.Close()
