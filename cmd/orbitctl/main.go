@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -27,12 +28,19 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) error {
+	return runWith(ctx, args, client.HTTPClient(), client.Login, os.Stdout, os.Stderr)
+}
+
+type signIn func(context.Context, *http.Client, string, string, io.Writer) (string, error)
+
+func runWith(ctx context.Context, args []string, hc *http.Client, login signIn, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("orbitctl", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	endpoint := fs.String("url", os.Getenv("ORBIT_URL"), "public Orbit HTTPS URL")
 	issuer := fs.String("issuer", os.Getenv("ORBIT_OIDC_ISSUER"), "authentik device provider issuer")
 	id := fs.String("client-id", os.Getenv("ORBIT_OIDC_CLIENT_ID"), "public device provider client ID")
 	fs.Usage = func() {
-		_, _ = fmt.Fprintln(fs.Output(), "Usage: orbitctl [flags] agents | conversations AGENT | thread CONVERSATION | send CONVERSATION TEXT | send-agent AGENT TEXT | stream RUN | approve ACTION | reject ACTION\nEach invocation signs in through authentik; tokens are never saved.")
+		_, _ = fmt.Fprintln(fs.Output(), "Usage: orbitctl [flags] agents | conversations AGENT | thread CONVERSATION | send CONVERSATION TEXT | send-agent AGENT TEXT | stream RUN | approve ACTION | reject ACTION | auth-smoke\nEach invocation signs in through authentik; tokens are never saved.")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -50,20 +58,26 @@ func run(ctx context.Context, args []string) error {
 	if err := client.ValidateURL(*endpoint); err != nil {
 		return err
 	}
-	hc := client.HTTPClient()
-	token, err := client.Login(ctx, hc, *issuer, *id, os.Stderr)
+	token, err := login(ctx, hc, *issuer, *id, stderr)
 	if err != nil {
 		return err
 	}
 	c := client.Client{BaseURL: *endpoint, Token: token, HTTP: hc}
+	if a[0] == "auth-smoke" {
+		if err := c.Request(ctx, method, path, nil, io.Discard); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintln(stdout, "Authentik sign-in accepted by Orbit.")
+		return err
+	}
 	if a[0] != "send" && a[0] != "send-agent" {
-		return c.Request(ctx, method, path, strings.NewReader(body), os.Stdout)
+		return c.Request(ctx, method, path, strings.NewReader(body), stdout)
 	}
 	var reply strings.Builder
 	if err := c.Request(ctx, method, path, strings.NewReader(body), &reply); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(os.Stdout, reply.String()); err != nil {
+	if _, err := fmt.Fprintln(stdout, reply.String()); err != nil {
 		return err
 	}
 	var posted struct {
@@ -77,13 +91,16 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		return c.Request(ctx, "GET", "runs/"+run+"/stream", nil, os.Stdout)
+		return c.Request(ctx, "GET", "runs/"+run+"/stream", nil, stdout)
 	}
 	return nil
 }
 
 func command(a []string) (string, string, string, error) {
 	if len(a) == 1 && a[0] == "agents" {
+		return "GET", "agents", "", nil
+	}
+	if len(a) == 1 && a[0] == "auth-smoke" {
 		return "GET", "agents", "", nil
 	}
 	if len(a) < 2 {
