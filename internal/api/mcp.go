@@ -98,9 +98,11 @@ type mcpCreateConversationIn struct {
 type mcpSendMessageIn struct {
 	Agent          string `json:"agent,omitempty" jsonschema:"the agent's name; the message goes to its default conversation unless conversation_id is set"`
 	ConversationID string `json:"conversation_id,omitempty" jsonschema:"the conversation to post in (from list_conversations or create_conversation)"`
-	Body           string `json:"body" jsonschema:"the message, Markdown"`
+	Body           string `json:"body,omitempty" jsonschema:"the message, Markdown; may be empty when answers are given"`
 	ReplyTo        string `json:"reply_to,omitempty" jsonschema:"the id of the agent question this answers"`
 	WaitSeconds    int    `json:"wait_seconds,omitempty" jsonschema:"how long to wait for the reply (default 45, at most 300, -1 does not wait)"`
+	// Answers fill a question's form, as POST .../messages takes them.
+	Answers map[string]any `json:"answers,omitempty" jsonschema:"answers to the form of the question reply_to names, by field name (the question's fields in read_thread)"`
 }
 
 type mcpWaitIn struct {
@@ -200,8 +202,8 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 		"The reply is the run's report, any questions it asked, and any actions it proposed. If the run is still going " +
 		"when the wait ends, call wait_for_reply with the run_id."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in mcpSendMessageIn) (*mcp.CallToolResult, any, error) {
-			if strings.TrimSpace(in.Body) == "" {
-				return nil, nil, errors.New("body is required")
+			if strings.TrimSpace(in.Body) == "" && in.Answers == nil {
+				return nil, nil, errors.New("body or answers is required")
 			}
 			var a *spec.Agent
 			var err error
@@ -222,9 +224,16 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 			if in.ReplyTo != "" {
 				replyTo = &in.ReplyTo
 			}
+			var answers map[string]json.RawMessage
+			if in.Answers != nil {
+				answers = map[string]json.RawMessage{}
+				for k, v := range in.Answers {
+					answers[k], _ = json.Marshal(v)
+				}
+			}
 			res, replayed, err := s.Store.PostMessageOnce(ctx, store.PostMessage{
 				Agent: a.Name, SpecSHA: a.SHA, Body: in.Body, Author: mcpPerson(req), ReplyTo: replyTo,
-				Wake: a.MessagesTrigger, ConversationID: conv,
+				Wake: a.MessagesTrigger, ConversationID: conv, Answers: answers,
 			})
 			if err != nil {
 				return nil, nil, mcpErr(err)
