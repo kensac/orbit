@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kensac/orbit/internal/extensions"
 	"github.com/kensac/orbit/internal/sandbox"
 )
 
@@ -70,8 +71,9 @@ func buildBinaries(t *testing.T, arch string) map[string][]byte {
 	pkgDir := filepath.Dir(here)
 	out := map[string][]byte{}
 	for name, pkg := range map[string]string{
-		"orbit": filepath.Join(pkgDir, "..", "..", "cmd", "orbit"),
-		"probe": filepath.Join(pkgDir, "testdata", "probe"),
+		"orbit":           filepath.Join(pkgDir, "..", "..", "cmd", "orbit"),
+		"probe":           filepath.Join(pkgDir, "testdata", "probe"),
+		"extension-probe": filepath.Join(pkgDir, "testdata", "extension-probe"),
 	} {
 		bin := filepath.Join(dir, name)
 		cmd := exec.Command("go", "build", "-trimpath", "-o", bin, ".")
@@ -425,7 +427,126 @@ func TestIntegrationIsolation(t *testing.T) {
 	if !strings.Contains(logs.String(), "sandboxd: destroyed") {
 		t.Fatalf("logs: %s", logs.String())
 	}
+
+	assertExtensionIsolation(t, ctx, c, d, bins["extension-probe"])
 }
+
+func assertExtensionIsolation(t *testing.T, ctx context.Context, c *sandbox.Client, d *Docker, binary []byte) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "extension-probe"), binary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var outputSchema map[string]any
+	if err := json.Unmarshal([]byte(extensionProbeOutputSchema), &outputSchema); err != nil {
+		t.Fatal(err)
+	}
+	inputSchema := map[string]any{"type": "object", "properties": map[string]any{
+		"marker": map[string]any{"type": "string", "maxLength": 32},
+		"other":  map[string]any{"type": "string", "maxLength": 32},
+		"hang":   map[string]any{"type": "boolean"},
+	}, "additionalProperties": false}
+	operation := func(name, description string, timeout int) map[string]any {
+		return map[string]any{"name": name, "kind": "source", "description": description, "inputs": []string{"data"},
+			"input_schema": inputSchema, "output_schema": outputSchema,
+			"limits": map[string]any{"timeout_ms": timeout, "memory_bytes": 134217728, "input_bytes": 1024, "output_bytes": 8192}}
+	}
+	manifest, err := json.Marshal(map[string]any{"protocol": "orbit.extension.v1", "id": "isolation-probe", "version": "1.0.0",
+		"runtime": "native", "entrypoint": "extension-probe", "operations": []any{
+			operation("inspect", "Inspect the sandbox boundary.", 15000),
+			operation("hang", "Exercise timeout cleanup.", 1500),
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := extensions.ValidateDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invocation := func(operation string, params map[string]any) (json.RawMessage, error) {
+		return extensions.Invoke(ctx, c, extensions.Invocation{PackageID: pkg.Manifest.ID, Directory: dir,
+			Digest: pkg.Digest, Operation: operation, Parameters: extensionMustJSON(t, params),
+			Inputs: map[string]extensions.Input{"data": {MediaType: "text/plain", Content: []byte("probe-input")}}})
+	}
+	check := func(result json.RawMessage, wantCrossTmp bool) {
+		t.Helper()
+		var got map[string]any
+		if err := json.Unmarshal(result, &got); err != nil {
+			t.Fatalf("extension result %q: %v", result, err)
+		}
+		for _, key := range []string{"package_read_only", "input_present", "input_read_only", "work_root_read_only", "tmp_writable", "out_writable", "no_network", "proxy_absent", "secrets_absent", "environment_clean", "docker_socket_absent", "capabilities_zero", "no_new_privileges", "seccomp_enabled"} {
+			if got[key] != true {
+				t.Errorf("extension isolation %s = %v", key, got[key])
+			}
+		}
+		if !got["input_present"].(bool) {
+			t.Errorf("extension input missing; write error: %v", got["input_write_error"])
+		}
+		if !got["work_root_read_only"].(bool) {
+			t.Errorf("extension work root is writable or chmod-able; write error: %v, chmod error: %v", got["work_root_write_error"], got["work_root_chmod_error"])
+		}
+		if got["no_cross_tmp"] != wantCrossTmp {
+			t.Errorf("extension cross-invocation tmpfs isolation = %v, want %v", got["no_cross_tmp"], wantCrossTmp)
+		}
+	}
+	result, err := invocation("inspect", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(result, true)
+
+	// Two overlapping invocations must have different writable tmpfs state.
+	type outcome struct {
+		result json.RawMessage
+		err    error
+	}
+	start := make(chan struct{})
+	outcomes := make(chan outcome, 2)
+	for _, pair := range [][2]string{{"first", "second"}, {"second", "first"}} {
+		pair := pair
+		go func() {
+			<-start
+			r, err := invocation("inspect", map[string]any{"marker": pair[0], "other": pair[1]})
+			outcomes <- outcome{r, err}
+		}()
+	}
+	close(start)
+	for range 2 {
+		got := <-outcomes
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		check(got.result, true)
+	}
+
+	if _, err := invocation("hang", map[string]any{"hang": true}); err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("timed-out extension error = %v", err)
+	}
+	containers, err := d.managed(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, container := range containers {
+		if container.Labels[LabelProfile] == sandbox.ProfileExtension {
+			t.Errorf("extension container survived invocation cleanup: %s", container.ID)
+		}
+	}
+}
+
+func extensionMustJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+const extensionProbeOutputSchema = `{"type":"object","properties":{
+"package_read_only":{"type":"boolean"},"input_present":{"type":"boolean"},"input_read_only":{"type":"boolean"},"input_write_error":{"type":"string","maxLength":512},"work_root_read_only":{"type":"boolean"},"work_root_write_error":{"type":"string","maxLength":512},"work_root_chmod_error":{"type":"string","maxLength":512},"tmp_writable":{"type":"boolean"},"out_writable":{"type":"boolean"},"no_network":{"type":"boolean"},"proxy_absent":{"type":"boolean"},"secrets_absent":{"type":"boolean"},"environment_clean":{"type":"boolean"},"docker_socket_absent":{"type":"boolean"},"capabilities_zero":{"type":"boolean"},"no_new_privileges":{"type":"boolean"},"seccomp_enabled":{"type":"boolean"},"no_cross_tmp":{"type":"boolean"}},"required":["package_read_only","input_present","input_read_only","input_write_error","work_root_read_only","work_root_write_error","work_root_chmod_error","tmp_writable","out_writable","no_network","proxy_absent","secrets_absent","environment_clean","docker_socket_absent","capabilities_zero","no_new_privileges","seccomp_enabled","no_cross_tmp"],"additionalProperties":false}`
 
 type lockedLog struct {
 	mu sync.Mutex

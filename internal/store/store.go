@@ -576,6 +576,8 @@ const (
 	GateBudget = "budget"
 	// GateQuietHours names a scheduled run suppressed by its agent's local quiet interval.
 	GateQuietHours = "quiet_hours"
+	// GateCalendarBusy names a scheduled run that overlaps a calendar event.
+	GateCalendarBusy = "calendar_busy"
 )
 
 // FinishRun records the outcome of a run that wrote nothing else (a failure,
