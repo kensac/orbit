@@ -32,7 +32,7 @@ func TestLokiQueriesARangeEndingNowAndDropsStats(t *testing.T) {
 	f := &Fetcher{Client: srv.Client(), Env: func(n string) (string, bool) { return "tenant", n == "TENANT" }, Now: func() time.Time { return now },
 		Credentials: spec.Credentials{"TENANT": {URLPrefix: srv.URL + "/loki/"}}}
 	res, err := f.Fetch(context.Background(), spec.Source{Name: "logs", Kind: "loki", URL: srv.URL + "/", Expr: `{container="orbit"} |= "error"`,
-		Headers: map[string]string{"X-Scope-OrgID": "${TENANT}"}, Since: spec.Duration(30 * time.Minute), MaxBytes: 1 << 20}, Vars(now))
+		Headers: map[string]string{"X-Scope-OrgID": "${TENANT}"}, Since: spec.Duration(30 * time.Minute), MaxBytes: 1 << 20}, Vars{Now: now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestLokiQueriesARangeEndingNowAndDropsStats(t *testing.T) {
 	// A credential bound elsewhere is never sent to Loki.
 	f.Credentials = spec.Credentials{"TENANT": {URLPrefix: "https://elsewhere.example/"}}
 	if _, err := f.Fetch(context.Background(), spec.Source{Name: "logs", Kind: "loki", URL: srv.URL, Expr: `{a="b"}`,
-		Headers: map[string]string{"X-Scope-OrgID": "${TENANT}"}, MaxBytes: 1 << 20}, Vars(now)); err == nil || !strings.Contains(err.Error(), "may be sent only to") {
+		Headers: map[string]string{"X-Scope-OrgID": "${TENANT}"}, MaxBytes: 1 << 20}, Vars{Now: now}); err == nil || !strings.Contains(err.Error(), "may be sent only to") {
 		t.Fatalf("err = %v", err)
 	}
 	// A query Loki refuses fails the source with Loki's reason.
@@ -56,7 +56,7 @@ func TestLokiQueriesARangeEndingNowAndDropsStats(t *testing.T) {
 	}))
 	defer bad.Close()
 	f = &Fetcher{Client: bad.Client(), Env: noEnv}
-	if _, err := f.Fetch(context.Background(), spec.Source{Name: "logs", Kind: "loki", URL: bad.URL, Expr: `{`, MaxBytes: 1 << 20}, Vars(now)); err == nil || !strings.Contains(err.Error(), "syntax error") {
+	if _, err := f.Fetch(context.Background(), spec.Source{Name: "logs", Kind: "loki", URL: bad.URL, Expr: `{`, MaxBytes: 1 << 20}, Vars{Now: now}); err == nil || !strings.Contains(err.Error(), "syntax error") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -81,7 +81,7 @@ func TestGitHubSourceReadsWithAPerFetchTokenOfOneResource(t *testing.T) {
 			"comments": 2, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-02T00:00:00Z", "html_url": "https://github.com/kensac/orbit/issues/3", "body": long},
 		{"number": 4, "title": "A PR", "state": "open", "pull_request": map[string]any{"url": "x"}, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-02T00:00:00Z"},
 	}
-	res, err := fe.Fetch(context.Background(), spec.Source{Name: "issues", Kind: "github", Repo: "kensac/orbit", Resource: "issues", MaxBytes: 1 << 20}, nil)
+	res, err := fe.Fetch(context.Background(), spec.Source{Name: "issues", Kind: "github", Repo: "kensac/orbit", Resource: "issues", MaxBytes: 1 << 20}, Vars{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestGitHubSourceReadsWithAPerFetchTokenOfOneResource(t *testing.T) {
 		t.Fatal("the token is revoked after the fetch")
 	}
 
-	res, err = fe.Fetch(context.Background(), spec.Source{Name: "checks", Kind: "github", Repo: "kensac/orbit", Resource: "checks", Ref: githubtest.Head, MaxBytes: 1 << 20}, nil)
+	res, err = fe.Fetch(context.Background(), spec.Source{Name: "checks", Kind: "github", Repo: "kensac/orbit", Resource: "checks", Ref: githubtest.Head, MaxBytes: 1 << 20}, Vars{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,11 +103,11 @@ func TestGitHubSourceReadsWithAPerFetchTokenOfOneResource(t *testing.T) {
 		t.Fatalf("checks = %s", res.Content)
 	}
 	f.Releases = []map[string]any{{"tag_name": "v1", "name": "One", "author": map[string]any{"login": "bot"}, "created_at": "2026-11-01T00:00:00Z", "body": "notes"}}
-	res, err = fe.Fetch(context.Background(), spec.Source{Name: "rel", Kind: "github", Repo: "kensac/orbit", Resource: "releases", Limit: 5, MaxBytes: 1 << 20}, nil)
+	res, err = fe.Fetch(context.Background(), spec.Source{Name: "rel", Kind: "github", Repo: "kensac/orbit", Resource: "releases", Limit: 5, MaxBytes: 1 << 20}, Vars{})
 	if err != nil || !strings.Contains(string(res.Content), `"tag_name":"v1"`) {
 		t.Fatalf("releases = %s %v", res.Content, err)
 	}
-	if _, err := fe.Fetch(context.Background(), spec.Source{Name: "prs", Kind: "github", Repo: "kensac/orbit", Resource: "pulls", MaxBytes: 1 << 20}, nil); err != nil {
+	if _, err := fe.Fetch(context.Background(), spec.Source{Name: "prs", Kind: "github", Repo: "kensac/orbit", Resource: "pulls", MaxBytes: 1 << 20}, Vars{}); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{`kensac/orbit {"issues":"read"}`, `kensac/orbit {"checks":"read","statuses":"read"}`, `kensac/orbit {"contents":"read"}`, `kensac/orbit {"pull_requests":"read"}`}
@@ -115,7 +115,7 @@ func TestGitHubSourceReadsWithAPerFetchTokenOfOneResource(t *testing.T) {
 		t.Fatalf("minted %v, revoked %d", minted, len(f.Revoked))
 	}
 	// Too much for max_bytes fails, still revoking.
-	if _, err := fe.Fetch(context.Background(), spec.Source{Name: "issues", Kind: "github", Repo: "kensac/orbit", Resource: "issues", MaxBytes: 100}, nil); err == nil || !strings.Contains(err.Error(), "max_bytes") {
+	if _, err := fe.Fetch(context.Background(), spec.Source{Name: "issues", Kind: "github", Repo: "kensac/orbit", Resource: "issues", MaxBytes: 100}, Vars{}); err == nil || !strings.Contains(err.Error(), "max_bytes") {
 		t.Fatalf("err = %v", err)
 	}
 	if len(f.Revoked) != 5 {

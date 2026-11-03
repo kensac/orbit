@@ -75,7 +75,7 @@ func (q *PromQuery) Check() error {
 }
 
 // PromQuery runs q against s, a prometheus source of the agent, with its URL and credentials rendered as a fetch renders them. The model's query is a value, never rendered: a ${VAR} or {{template}} in it is sent as written.
-func (f *Fetcher) PromQuery(ctx context.Context, s spec.Source, vars map[string]string, q PromQuery) ([]byte, error) {
+func (f *Fetcher) PromQuery(ctx context.Context, s spec.Source, vars Vars, q PromQuery) ([]byte, error) {
 	if s.Kind != "prometheus" {
 		return nil, fmt.Errorf("source %s is not a prometheus source", s.Name)
 	}
