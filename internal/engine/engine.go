@@ -68,6 +68,8 @@ type Engine struct {
 	Harness string
 	// HeartbeatEvery overrides heartbeatEvery when set; tests shorten it.
 	HeartbeatEvery time.Duration
+	// ApprovalTimeout overrides ApprovalTimeout when set; tests shorten it.
+	ApprovalTimeout time.Duration
 	// NewSandbox is sandboxd's client for sandboxed chats; nil is
 	// sandbox.NewClient (tests replace it).
 	NewSandbox func(addr, token string) (runner.SandboxClient, error)
