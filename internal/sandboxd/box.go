@@ -2,6 +2,7 @@ package sandboxd
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -458,16 +459,23 @@ func (s *Server) tmuxOutput(ctx context.Context, id string, limit int64, args ..
 	if err != nil {
 		return nil, -1, err
 	}
-	b, readErr := io.ReadAll(io.LimitReader(br, limit+1))
+	var captured bytes.Buffer
+	readErr := demux(br, func(typ byte, p []byte) error {
+		if typ != sandbox.FrameStdout {
+			return nil
+		}
+		remaining := limit - int64(captured.Len())
+		if remaining > 0 {
+			_, _ = captured.Write(p[:min(int64(len(p)), remaining)])
+		}
+		return nil
+	})
 	_ = conn.Close()
 	if readErr != nil {
 		return nil, -1, readErr
 	}
-	if int64(len(b)) > limit {
-		b = b[:limit]
-	}
 	code, err := s.exitCode(execID)
-	return b, code, err
+	return captured.Bytes(), code, err
 }
 
 func session(w http.ResponseWriter, r *http.Request) (string, bool) {
