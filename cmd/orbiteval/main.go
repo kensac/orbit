@@ -207,8 +207,11 @@ func gradeCases(ctx context.Context, c client.Client, suite eval.Suite, results 
 	if err := c.Request(ctx, http.MethodPost, "agents/"+grader+"/grade", bytes.NewReader(body), &raw); err != nil {
 		return nil, err
 	}
-	if err := eval.Decode(&raw, &response); err != nil || len(response.Grades) != len(cases) {
-		return nil, fmt.Errorf("grade response is invalid or incomplete: %v", err)
+	if err := eval.Decode(&raw, &response); err != nil {
+		return nil, fmt.Errorf("grade response: %w", err)
+	}
+	if len(response.Grades) != len(cases) {
+		return nil, errors.New("grade response is incomplete")
 	}
 	grades := make([]eval.GradeResult, 0, len(response.Grades))
 	for i, g := range response.Grades {
