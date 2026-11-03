@@ -50,6 +50,7 @@ Deployment state is owned by the homelab configuration. Check its current image 
 
 | Area | Branch / PR | Notes |
 |---|---|---|
+| orbit pack | `codex/orbit-pack` | Package a configured agent and active library skills as a read-only Claude Code plugin; versioned `orbit.json` inspection validates grants, environment variable names, file paths, symlinks, and content digests |
 | Garage S3 lake source | `codex/s3-lake` | Bounded read-only fetch of partitioned gzip NDJSON; transforms reduce it before the model sees it |
 | Permission levels | #155 perm-levels, #157 perm-conversation, #159 perm-approvals, approval-attention (after #159), #160 perm-webfetch | Configurable chat levels, approval prompts, pending approvals in the inbox and Web Push (`permission` attention rows, `#approval-<id>` links), and the WebFetch domain allowlist. |
 | Isolation: the credential proxy (the Claude token out of build sandboxes and sandboxed chats), egress profiles (`workstation`: the open web without private ranges, orbit or SMTP), the gVisor host plan for hetzner and oci | claude-isolation: iso-spike, then credproxy, egress-profiles | spike recorded in tickets.md (Credential proxy: what the CLI does); direct terminals keep their own login by choice |
