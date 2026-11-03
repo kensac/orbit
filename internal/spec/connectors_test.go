@@ -112,6 +112,32 @@ func stdioSpecFixture(t *testing.T) string {
 	return dir
 }
 
+func TestCalendarSkipRequiresListedReadOnlyConnectorTool(t *testing.T) {
+	calendar := `calendar_skip:
+  connector: hw
+  tool: find
+  window_after: 1h
+  arguments: {from: "{{window_start}}", to: "{{window_end}}"}
+`
+	for name, tc := range map[string]struct{ listed, tool, want string }{
+		"listed read tool": {"connectors: [hw]\n", "find", ""},
+		"not listed":       {"", "find", `calendar_skip.connector "hw" must also appear in connectors`},
+		"configured write": {"connectors: [hw]\n", "create_view", `calendar_skip.tool "create_view" must not be listed in connectors.hw.write_tools`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := "name: f\ncharter: x\n" + tc.listed + strings.Replace(calendar, "tool: find", "tool: "+tc.tool, 1)
+			_, err := loadConnectors(t, connectorBase, map[string]string{"agents/f.yaml": body})
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestCatalogConnectorsLoadWithApprovalByDefault(t *testing.T) {
 	dir := write(t, map[string]string{
 		"orbit.yaml": connectorBase,

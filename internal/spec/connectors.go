@@ -317,6 +317,19 @@ func (c *Config) validateAgentConnectors(a *Agent) []error {
 			}
 		}
 	}
+	if q := a.CalendarSkip; q != nil {
+		cn, ok := c.Deployment.Connectors[q.Connector]
+		if !ok {
+			at("calendar_skip.connector %q is not a connector in orbit.yaml", q.Connector)
+		} else {
+			if !seen[q.Connector] {
+				at("calendar_skip.connector %q must also appear in connectors", q.Connector)
+			}
+			if slices.Contains(cn.WriteTools, q.Tool) {
+				at("calendar_skip.tool %q must not be listed in connectors.%s.write_tools", q.Tool, q.Connector)
+			}
+		}
+	}
 	if g := c.Deployment.GoogleActions; g != nil {
 		if b := g.GmailDraft; b != nil && a.RuleFor("gmail:draft") != RuleDeny && !seen[b.Connector] {
 			at("action %q: the agent must list connector %q", "gmail:draft", b.Connector)

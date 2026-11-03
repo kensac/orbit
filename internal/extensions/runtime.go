@@ -120,12 +120,12 @@ func Invoke(ctx context.Context, sb SandboxExecutor, in Invocation) (json.RawMes
 	}()
 	stdout := &boundedBuffer{max: extensionproto.MaxJSONBytes}
 	stderr := &boundedBuffer{max: 64 << 10}
-	exit, err := sb.Attach(callCtx, created.ID, sandbox.AttachRequest{Argv: []string{"/work/extension/" + pkg.Manifest.Entrypoint}},
+	exit, err := sb.Attach(callCtx, created.ID, sandbox.AttachRequest{Argv: []string{sandbox.ExtensionWorkDir + "/extension/" + pkg.Manifest.Entrypoint}},
 		bytes.NewReader(request), stdout, stderr)
+	if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+		return nil, fmt.Errorf("extension %s operation %s timed out", in.PackageID, in.Operation)
+	}
 	if err != nil {
-		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("extension %s operation %s timed out", in.PackageID, in.Operation)
-		}
 		return nil, fmt.Errorf("extension %s operation %s: %w", in.PackageID, in.Operation, err)
 	}
 	if exit != 0 {
@@ -170,11 +170,25 @@ func invocationArchive(bundle *Bundle, inputs map[string]Input) (io.Reader, erro
 		_, err := tw.Write(body)
 		return err
 	}
+	dirs := map[string]bool{"extension": true, "inputs": true}
 	names := make([]string, 0, len(bundle.Files))
 	for name := range bundle.Files {
 		names = append(names, name)
+		for dir := path.Dir(name); dir != "."; dir = path.Dir(dir) {
+			dirs["extension/"+dir] = true
+		}
 	}
 	sort.Strings(names)
+	dirNames := make([]string, 0, len(dirs))
+	for name := range dirs {
+		dirNames = append(dirNames, name)
+	}
+	sort.Strings(dirNames)
+	for _, name := range dirNames {
+		if err := tw.WriteHeader(&tar.Header{Name: name + "/", Mode: 0o755, Typeflag: tar.TypeDir, Uid: 0, Gid: 0, Format: tar.FormatPAX}); err != nil {
+			return nil, err
+		}
+	}
 	for _, name := range names {
 		if err := write("extension/"+name, bundle.Files[name].Content, int64(bundle.Files[name].Mode.Perm())); err != nil {
 			return nil, err

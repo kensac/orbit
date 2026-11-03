@@ -264,6 +264,26 @@ Every kind takes `prompt`, the reason for the wake. `schedule` and `rrule` go th
 
 `quiet_hours: {start: "22:00", end: "07:00"}` on an agent suppresses scheduled runs in that local wall-clock interval. The start is included, the end excluded, and an end earlier than the start crosses midnight. A run is skipped before source fetches or backend startup if its scheduled fire or first claim is during quiet hours; manual runs and messages remain available. `GET /agents/{name}` and next-fire responses show the next configured fire outside quiet hours. Quiet-hour boundaries remain local across daylight saving changes.
 
+`calendar_skip` checks a configured read-only connector before the first attempt of each scheduled run. For example, a Google Calendar MCP connector can list events in a bounded window around the scheduled fire:
+
+```yaml
+connectors: [gws]
+calendar_skip:
+  connector: gws
+  tool: list_events
+  window_before: 15m
+  window_after: 1h
+  arguments:
+    calendarId: primary
+    timeMin: "{{window_start}}"
+    timeMax: "{{window_end}}"
+    singleEvents: true
+    orderBy: startTime
+  events_path: items
+```
+
+Orbit renders both window placeholders from the scheduled fire time and calls the named MCP tool with the connector's credential in orbit's process. The tool must be advertised read-only and must not be in the connector's `write_tools`. Orbit compares event start/end in code using half-open overlap, ignores canceled and transparent events, and records only a `calendar_busy` skip and its queried window. Event details are not stored or shown to the agent. A missing connector, unavailable tool, failed call or malformed event response fails the run before sources or the backend are reached. This check is limited to scheduled first attempts; manual runs and messages are unchanged.
+
 **Missed fires.** A fire that starts too late is not run hours late: a schedule run claimed more than its trigger's `missed_grace` after its fire time (after downtime, or behind a long queue) ends `skipped` with gate `missed`, before anything is read or fetched, and notifies nothing. The default grace is the time from that fire to the trigger's next one, at most an hour (`spec.DefaultMissedGraceMax`): a five-minute trigger's fire may start up to five minutes late, a daily one's up to an hour. Set `missed_grace` (1m to 168h) for a job that must still run late, such as a monthly close. Only a run's first attempt is judged; a missed fire is no success for staleness.
 
 ## Webhooks

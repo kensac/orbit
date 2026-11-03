@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/kensac/orbit/internal/extensionproto"
 	"github.com/kensac/orbit/internal/sandbox"
@@ -16,24 +17,34 @@ import (
 type fakeExtensionSandbox struct {
 	created, destroyed bool
 	memory             int64
+	timeout            bool
+	directories        map[string]bool
 }
 
 func (f *fakeExtensionSandbox) CreateExtension(_ context.Context, _ string, memory int64, archive io.Reader) (sandbox.CreateResponse, error) {
 	f.created, f.memory = true, memory
 	tr := tar.NewReader(archive)
+	f.directories = map[string]bool{}
 	for {
-		_, err := tr.Next()
+		h, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return sandbox.CreateResponse{}, err
 		}
+		if h.Typeflag == tar.TypeDir {
+			f.directories[h.Name] = true
+		}
 	}
 	return sandbox.CreateResponse{ID: "container123"}, nil
 }
 func (f *fakeExtensionSandbox) Attach(_ context.Context, _ string, req sandbox.AttachRequest, stdin io.Reader, stdout, _ io.Writer) (int, error) {
-	if len(req.Argv) != 1 || req.Argv[0] != "/work/extension/reducer" || req.Env != nil {
+	if f.timeout {
+		time.Sleep(1100 * time.Millisecond)
+		return 137, nil
+	}
+	if len(req.Argv) != 1 || req.Argv[0] != sandbox.ExtensionWorkDir+"/extension/reducer" || req.Env != nil {
 		return 1, io.ErrUnexpectedEOF
 	}
 	request, err := extensionproto.DecodeRequest(stdin, "sum", []string{"transactions"})
@@ -69,10 +80,14 @@ func TestInvokeUsesPinnedPackageAndDestroysSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != `{"total":"3"}` || !fake.created || !fake.destroyed || fake.memory != 16<<20 {
+	if string(got) != `{"total":"3"}` || !fake.created || !fake.destroyed || fake.memory != 16<<20 || !fake.directories["extension/"] || !fake.directories["inputs/"] {
 		t.Fatalf("result %s, sandbox created=%t destroyed=%t memory=%d", got, fake.created, fake.destroyed, fake.memory)
 	}
 	if _, err := Invoke(context.Background(), fake, Invocation{PackageID: "daily-total", Directory: dir, Digest: "wrong", Operation: "sum"}); err == nil {
 		t.Fatal("accepted package digest mismatch")
+	}
+	timeoutFake := &fakeExtensionSandbox{timeout: true}
+	if _, err := Invoke(context.Background(), timeoutFake, Invocation{PackageID: "daily-total", Directory: dir, Digest: bundle.Package.Digest, Operation: "sum", Parameters: json.RawMessage(`{}`), Inputs: map[string]Input{"transactions": {MediaType: "application/json", Content: []byte(`[]`)}}}); err == nil || err.Error() != "extension daily-total operation sum timed out" {
+		t.Fatalf("late nonzero exit error = %v, want timeout", err)
 	}
 }
