@@ -48,6 +48,34 @@ func TestAgentBudgetsValidate(t *testing.T) {
 	}
 }
 
+func TestTelegramConfigurationRequiresChannelAgentAndExplicitUsers(t *testing.T) {
+	deployment := strings.Replace(base, "channels: {c: {kind: log}}", `channels:
+  c: {kind: log}
+  telegram: {kind: telegram, token_env: TELEGRAM_TOKEN, chat_id: "12345"}
+`, 1) + `
+telegram: {channel: telegram, agent: a, allow_users: [12345]}
+`
+	if _, err := Load(write(t, map[string]string{
+		"orbit.yaml":    deployment,
+		"agents/a.yaml": "name: a\ncharter: x\n",
+	})); err != nil {
+		t.Fatalf("valid Telegram config: %v", err)
+	}
+	for name, cfg := range map[string]string{
+		"channel kind":    strings.Replace(deployment, "kind: telegram, token_env", "kind: log, token_env", 1),
+		"missing token":   strings.Replace(deployment, ", token_env: TELEGRAM_TOKEN", "", 1),
+		"empty allowlist": strings.Replace(deployment, "allow_users: [12345]", "allow_users: []", 1),
+		"duplicate user":  strings.Replace(deployment, "allow_users: [12345]", "allow_users: [12345, 12345]", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(write(t, map[string]string{"orbit.yaml": cfg, "agents/a.yaml": "name: a\ncharter: x\n"}))
+			if err == nil {
+				t.Fatal("invalid Telegram config loaded")
+			}
+		})
+	}
+}
+
 func TestGoogleActionsRequireFixedAuthenticatedWriteToolsAndAgentConnector(t *testing.T) {
 	orbit := base + `
 credentials:

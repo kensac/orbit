@@ -66,6 +66,7 @@ more than its agent's rules allow.
   figure (they are kept out of the tool ledger).
 
 - **The usage poller** (`usage_poll`) is orbit's own code on control, outside any run: it reads the subscription's OAuth token from orbit's environment and sends it only to the configured URL. The token never reaches a model, a sample or a log line (an error records the status and a clipped body).
+- **Telegram** is polled by orbit's service code over HTTPS to the fixed Bot API host. The bot token comes from the configured channel's `token_env`, is present only in the service process, and is never copied to a worker, runner, prompt or log. Updates are restricted to private chats from numeric ids in `allow_users`.
 
 ## Memory entries a model writes
 

@@ -976,13 +976,18 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			Title: a.Name + ": " + out.Summary, Body: withQuestions(out.Report, o.Questions), Priority: pr, Link: link,
 		}))
 	}
+	telegramReply := e.telegramForRun(ctx, snap, c.ID)
+	if telegramReply != nil && !routed {
+		m := e.telegramReplyMessage(a.Name+": "+out.Summary, withQuestions(out.Report, o.Questions), pr, link, telegramReply)
+		e.deliver(ctx, snap, a, &c.ID, nil, purposeTelegramReply, m)
+	}
 	if Attended(c.Trigger) {
 		// The person is reading the conversation this run answered in:
 		// its reply, questions and approvals are there, not in a channel.
 		return nil
 	}
-	send := reply == nil && (a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send))
-	if !routed && (send || (reply == nil && len(o.Questions) > 0)) {
+	send := reply == nil && telegramReply == nil && (a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send))
+	if !routed && (send || (reply == nil && telegramReply == nil && len(o.Questions) > 0)) {
 		title := out.Notify.Title
 		if title == "" {
 			title = out.Summary
@@ -1057,6 +1062,7 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 	fillResult(&rr, r)
 	// Read before FinishRun, which hands a failed run's messages back to the inbox.
 	reply := e.mailForRun(ctx, snap, c.ID)
+	telegramReply := e.telegramForRun(ctx, snap, c.ID)
 	if err := e.Store.FinishRun(context.WithoutCancel(ctx), c.ID, rr); err != nil {
 		return err
 	}
@@ -1076,6 +1082,12 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 		}))
 		return nil
 	}
+	if telegramReply != nil {
+		e.deliver(ctx, snap, a, &c.ID, nil, purposeTelegramReply, e.telegramReplyMessage(
+			a.Name+" could not answer", "The run answering your Telegram message failed: "+shortError(runErr)+"\n\nYour message is kept in Orbit. Reply to try again.",
+			notify.High, snap.Config.Deployment.RunURL(c.ID), telegramReply))
+		return nil
+	}
 	if !Attended(c.Trigger) {
 		e.deliver(ctx, snap, a, &c.ID, nil, "failure", notify.Message{
 			Title: a.Name + " run failed", Body: runErr.Error(), Priority: notify.High,
@@ -1087,12 +1099,37 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 
 // Mail replies are delivered to the agent's mail channel alone (mailChannel), whatever its notify.when.
 const (
-	purposeMailReply   = "mail_reply"
-	purposeMailFailure = "mail_failure"
+	purposeMailReply     = "mail_reply"
+	purposeMailFailure   = "mail_failure"
+	purposeTelegramReply = "telegram_reply"
 )
 
 func isMailReply(purpose string) bool {
 	return purpose == purposeMailReply || purpose == purposeMailFailure
+}
+
+func (e *Engine) telegramForRun(ctx context.Context, snap *Snapshot, runID string) *store.RunTelegram {
+	if snap.Config.Deployment.Telegram == nil {
+		return nil
+	}
+	r, err := e.Store.TelegramForRun(context.WithoutCancel(ctx), runID)
+	if err != nil {
+		e.Log.Warn("telegram message for run", "run", runID, "err", err)
+		return nil
+	}
+	return r
+}
+
+func (e *Engine) telegramReplyMessage(title, body string, priority notify.Priority, link string, r *store.RunTelegram) notify.Message {
+	return notify.Message{Title: title, Body: body, Priority: priority, Link: link,
+		ConversationID: "", TelegramChatID: r.ChatID, TelegramReplyTo: r.MessageID}
+}
+
+func telegramChannel(cfg *spec.Config) string {
+	if cfg.Deployment.Telegram == nil {
+		return ""
+	}
+	return cfg.Deployment.Telegram.Channel
 }
 
 // mailForRun is the mail run c answers, or nil: orbit has no mailbox, the run read none, or the lookup failed (logged; the run is then answered as if no mail had come).
@@ -1211,6 +1248,18 @@ func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, run
 			return
 		}
 		channels = []string{name}
+	} else if purpose == purposeTelegramReply {
+		name := telegramChannel(snap.Config)
+		if name == "" {
+			e.Log.Warn("telegram reply not sent: no telegram channel", "agent", a.Name)
+			return
+		}
+		channels = []string{name}
+	}
+	if m.ConversationID == "" && runID != nil && snap.Config.Deployment.Telegram != nil {
+		if conv, err := e.Store.RunConversation(ctx, *runID); err == nil {
+			m.ConversationID = conv
+		}
 	}
 	ctx = context.WithoutCancel(ctx)
 	if e.Outbox {
@@ -1231,8 +1280,19 @@ func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, run
 	for _, name := range channels {
 		ch := snap.Channels[name]
 		sendCtx, cancel := context.WithTimeout(ctx, time.Minute)
-		err := ch.Send(sendCtx, m)
+		var receipt notify.Receipt
+		var err error
+		if rc, ok := ch.(notify.ReceiptChannel); ok {
+			receipt, err = rc.SendWithReceipt(sendCtx, m)
+		} else {
+			err = ch.Send(sendCtx, m)
+		}
 		cancel()
+		if err == nil && receipt.MessageID > 0 && m.ConversationID != "" {
+			if perr := e.Store.RecordTelegramOutbound(ctx, receipt.ChatID, receipt.MessageID, m.ConversationID); perr != nil {
+				e.Log.Warn("record telegram reply target", "channel", name, "err", perr)
+			}
+		}
 		metrics.Delivery(name, err)
 		if err != nil {
 			e.Log.Warn("delivery failed", "channel", name, "purpose", purpose, "err", err)

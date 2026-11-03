@@ -34,6 +34,7 @@ var referenceTables = map[string]any{
 	"`webhook_secrets.<VAR>`":           WebhookSecret{},
 	"`mail`":                            Mail{},
 	"`mail.imap`":                       IMAP{},
+	"`telegram`":                        Telegram{},
 	"`board`":                           Board{},
 	"Agent":                             Agent{},
 	"`budget`":                          AgentBudget{},

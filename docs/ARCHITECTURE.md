@@ -174,6 +174,10 @@ With `mail` configured (configuration.md), a person talks to orbit by mail as we
 - **Once.** `IngestMail` writes the message, its run and the `mail_in` row in one transaction keyed by Message-ID, and the mail is marked seen only after; a database error leaves it unseen for the next poll.
 - **Attachments** are not uploads yet: the message names each (file, type, size) and the raw mail is kept in `mail_in`.
 
+## Telegram
+
+`telegram:` in orbit.yaml enables the Bot API reader (`internal/telegram`). It long-polls `getUpdates` over HTTPS from the fixed Telegram API host; no public webhook route is exposed. `token_env` belongs to a configured Telegram notification channel and is read by the service only. The reader accepts private text messages from numeric ids in `allow_users`, records ignored and accepted updates in `telegram_in`, and posts accepted messages through the store. `update_id` makes ingestion idempotent. A reply to an Orbit-sent bot message resolves through `telegram_out` to its conversation; each successful outbound message records its provider id. Reports and failures for a run that read Telegram are sent back to that chat regardless of `notify.when`, as mail replies are, and never expose the bot token to a runner.
+
 ## Continuations
 
 An agent with the `continue` action may ask to be woken again
@@ -235,6 +239,8 @@ approvals and failure are in the conversation they are reading
 (`engine.Attended`). Schedule, manual, continue and build runs deliver per
 the agent's `notify.when`, and always their failures and the approvals
 they wait on.
+
+A run that read an email is answered through its SMTP reply path; a run that read a Telegram update is answered through the configured Telegram channel. Both exceptions apply even to attended message runs and ignore `notify.when`; other attended runs keep their answer, questions, approvals and failure in the conversation.
 
 Separately from channels, everything waiting on a person is an `attention`
 row (store/attention.go), written in the transaction that created it, for
