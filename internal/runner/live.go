@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -66,9 +67,12 @@ type liveProc struct {
 	proc    liveProcess
 	// tools serves the turn in progress its orbit tools (a chat run's) and connectors.
 	tools *chatTools
-	busy  bool
-	used  time.Time
-	timer *time.Timer
+	// model and effort are the run's overrides the process runs with
+	// (Request.Model, Request.Effort; "" is the runner's own).
+	model, effort string
+	busy          bool
+	used          time.Time
+	timer         *time.Timer
 }
 
 // stop ends the process: closed between turns (stdin closed, so it exits on its own, within claudeproto.CloseGrace), or killed after a failed turn.
@@ -178,6 +182,8 @@ func (l *Live) expire(p *liveProc) {
 // a sandbox (chat.go).
 type liveProcess interface {
 	Turn(ctx context.Context, prompt string, emit func(claudeproto.Line)) (*claudeproto.Result, error)
+	SetModel(ctx context.Context, model string) error
+	SetEffort(ctx context.Context, level string) error
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
@@ -221,6 +227,28 @@ func startLive(bin string, args, env []string, dir string, conns *Connectors) (*
 	return &liveProc{proc: proc, tools: tools}, nil
 }
 
+// switchModel gives a live process the run's model and effort before its
+// turn when they differ from what it runs with: set_model (a cleared model is
+// the runner's own, or the CLI's default when the runner names none) and
+// apply_flag_settings' effortLevel (null is the model's default effort;
+// verified on 2.1.316 with get_settings' applied model and effort). An error
+// means the process could not take them.
+func (p *liveProc) switchModel(ctx context.Context, req Request, runnerModel string) error {
+	if p.model != req.Model {
+		if err := p.proc.SetModel(ctx, cmp.Or(req.Model, runnerModel)); err != nil {
+			return err
+		}
+		p.model = req.Model
+	}
+	if p.effort != req.Effort {
+		if err := p.proc.SetEffort(ctx, req.Effort); err != nil {
+			return err
+		}
+		p.effort = req.Effort
+	}
+	return nil
+}
+
 // turn sends one user message and returns the result line that ends its answer. It never waits past ctx: the caller drops the process on any error, which kills it.
 func (p *liveProc) turn(ctx context.Context, prompt string, emit func(Event)) ([]byte, error) {
 	res, err := p.proc.Turn(ctx, prompt, func(l claudeproto.Line) { emit(Event{Kind: l.Kind, Payload: l.Raw}) })
@@ -244,6 +272,13 @@ func (c *claudeCode) runLive(ctx context.Context, sess *Session, args, env []str
 	hash := hex.EncodeToString(h.Sum(nil))
 	mode, parent := "live", sess.Resume
 	p := sess.Live.take(sess.Key, hash, sess.Resume)
+	if p != nil {
+		if err := p.switchModel(ctx, req, c.rs.Model); err != nil {
+			// The process cannot take them; one started with them can.
+			sess.Live.drop(p)
+			p = nil
+		}
+	}
 	if p == nil {
 		if !sess.Open {
 			return nil, false, nil
@@ -252,7 +287,7 @@ func (c *claudeCode) runLive(ctx context.Context, sess *Session, args, env []str
 		if sess.Resume != "" {
 			mode = "resumed"
 		}
-		full, err := claudeproto.Args(claudeproto.Transport{Stream: true, Resume: sess.Resume, PermissionPrompt: len(req.Connectors.Ask()) > 0}, args)
+		full, err := claudeproto.Args(claudeproto.Transport{Stream: true, Resume: sess.Resume, PermissionPrompt: len(req.Connectors.Ask()) > 0}, withModel(args, req))
 		if err != nil {
 			return nil, true, err
 		}
@@ -260,6 +295,7 @@ func (c *claudeCode) runLive(ctx context.Context, sess *Session, args, env []str
 			return nil, true, err
 		}
 		p.key, p.hash, p.busy = sess.Key, hash, true
+		p.model, p.effort = req.Model, req.Effort
 	}
 	if err := sess.Started(mode, parent); err != nil {
 		sess.Live.drop(p)
