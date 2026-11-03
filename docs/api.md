@@ -401,7 +401,7 @@ An agent with `chat: true` (the built-in `orbit` is one) is a Claude Code sessio
 
 **GitHub** (the built-in has `github:clone` auto, `github:pr` and `github:merge` approve): `github:clone {repo, dir}` puts a repository's default branch into the workspace; `github:pr {repo, dir, branch, title, body, push_only}` takes the working tree at `dir` (never its `.git`), commits it as the App's bot user on top of the default branch, holds it to the build's diff policy (no `.github/`, no credential in an added line), pushes `orbit/chat/<branch>` and opens or updates its PR; `github:merge` merges it once every required check passed. Tokens stay in orbit; the repositories are `github.repositories`.
 
-With `sandbox: workstation` (the built-in's, when sandboxd is configured) the session runs in a sandbox container with Claude Code's full tool set and the open internet; `sandbox: build` with the tools it names.
+With `sandbox: workstation` (the built-in's, when sandboxd is configured) each conversation runs in its own persistent sandbox container with Claude Code's full tool set and the open internet. It has no account credential mounts. Backend credentials are provided through a scoped proxy grant, and the CLI process is stopped when that grant expires after 55 minutes. The conversation workspace remains the snapshot workspace: the workstation restores it on attach and archives it on close. `sandbox: build` runs with the tools it names.
 
 ## A conversation's thread
 
@@ -927,7 +927,7 @@ A workspace is a file tree a person and an agent share. Routes take the authenti
 
 ### Finding a workspace
 
-`GET /conversations/{id}/workspace` and `GET /agents/{name}/workspace` return `{"workspace": <workspace>}`, one shape over both backends. `GET /agents/{name}/workspace` is the agent's box for an agent with one (Terminals, below), and otherwise its snapshot workspace. `GET /conversations/{id}/workspace` is the conversation's snapshot workspace, also for an agent with a box until its chat turns run in the box (W10).
+`GET /conversations/{id}/workspace` and `GET /agents/{name}/workspace` return `{"workspace": <workspace>}`, one shape over both backends. `GET /agents/{name}/workspace` is the agent's shared box for an agent with one (Terminals, below), and otherwise its snapshot workspace. `GET /conversations/{id}/workspace` is the conversation's snapshot workspace. Workstation chat restores that snapshot into its dedicated conversation container and archives it back afterward; it does not use the shared agent box.
 
 ```json
 {"id": "uuid", "scope": "conversation", "conversation_id": "uuid", "agent": "orbit",

@@ -128,6 +128,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+sandbox.PathBoxes+"/{name}/sessions/{session}/scrollback", s.sessionScrollback)
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/sessions/{session}/resize", s.sessionResize)
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/sessions/{session}/kill", s.sessionKill)
+	mux.HandleFunc("POST "+sandbox.PathChatBoxes+"/{name}", s.chatBoxEnsure)
+	mux.HandleFunc("GET "+sandbox.PathChatBoxes+"/{name}/archive", s.chatBoxArchive)
+	mux.HandleFunc("POST "+sandbox.PathChatBoxes+"/{name}/attach", s.chatBoxAttach)
 	authed := s.auth(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
