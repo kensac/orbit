@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -64,8 +65,8 @@ func (c *codex) Run(ctx context.Context, req Request, emit func(Event)) (*Result
 		"--output-schema", schemaPath,
 		"-o", lastPath,
 	}
-	if c.rs.Model != "" {
-		args = append(args, "-m", c.rs.Model)
+	if m := cmp.Or(req.Model, c.rs.Model); m != "" {
+		args = append(args, "-m", m)
 	}
 	args = append(args, "-")
 	// Codex has no separate system prompt flag; the contract leads the prompt.
