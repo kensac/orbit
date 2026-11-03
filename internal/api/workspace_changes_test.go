@@ -77,13 +77,16 @@ func fastChanges(a *api.Server, h *http.Server) {
 	a.ChangesPoll = 20 * time.Millisecond
 }
 
-// finishRun claims the conversation's queued run, stores files as its
-// snapshot and finishes it.
+// finishRun claims the conversation's queued run, reads its messages,
+// stores files as its snapshot and finishes it.
 func finishRun(t *testing.T, v *env, conv string, files map[string][]byte) string {
 	t.Helper()
 	c, err := v.s.ClaimRun(ctx, "w")
 	if err != nil || c == nil {
 		t.Fatalf("claim = %v %v", c, err)
+	}
+	if _, err := v.s.StartRunContext(ctx, c.ID, c.Agent); err != nil {
+		t.Fatal(err)
 	}
 	if files != nil {
 		putSnapshot(t, v, conv, c.ID, files)
