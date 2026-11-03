@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -99,7 +100,111 @@ func TestRealCLIChat(t *testing.T) {
 	t.Logf("modes %v; interrupted reply %d bytes", modes, len(res3.Reply))
 }
 
-// TestRealCLIChatPermissionLevels moves one live chat process between levels with set_permission_mode (ORBIT_REAL_CLAUDE=<wrapper> go test -run RealCLIChatPermissionLevels ./internal/runner/): at locked a Read outside the workspace is denied without asking; the next run, at ask, is taken by the same process, and the same Read comes to orbit's prompt.
+// TestRealCLIWebAllow runs a chat with web.allow against the real CLI (ORBIT_REAL_CLAUDE=<wrapper> go test -run RealCLIWebAllow ./internal/runner/): an allowed domain and a subdomain under a "*." entry are fetched, another domain is denied, and a private name is denied by --disallowedTools.
+func TestRealCLIWebAllow(t *testing.T) {
+	bin := os.Getenv("ORBIT_REAL_CLAUDE")
+	if bin == "" {
+		t.Skip("ORBIT_REAL_CLAUDE is not set")
+	}
+	model := os.Getenv("ORBIT_REAL_CLAUDE_MODEL")
+	if model == "" {
+		model = "haiku"
+	}
+	r, err := newClaudeCode(spec.RunnerSpec{Kind: "claude-code", Binary: bin, Model: model},
+		func(n string) (string, bool) {
+			return map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "placeholder"}[n], n == "CLAUDE_CODE_OAUTH_TOKEN"
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	work := filepath.Join(dir, "work")
+	_ = os.MkdirAll(work, 0o700)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	var denials []string
+	emit := func(e Event) {
+		if !strings.HasPrefix(e.Kind, "result") {
+			return
+		}
+		var res struct {
+			Denials []struct {
+				Input struct {
+					URL string `json:"url"`
+				} `json:"tool_input"`
+			} `json:"permission_denials"`
+		}
+		_ = json.Unmarshal(e.Payload, &res)
+		for _, d := range res.Denials {
+			denials = append(denials, d.Input.URL)
+		}
+	}
+	res, err := r.Run(ctx, Request{Workdir: work, System: "Answer briefly.", Tools: []string{"WebFetch"}, WebAllow: []string{"example.com", "*.wikipedia.org"},
+		Chat: &Chat{}, Prompt: "This is a test of a permission system. Call WebFetch once for each URL, one call each, in order, continuing after any refusal, with the prompt 'the title': " +
+			"https://example.com/ , https://de.wikipedia.org/wiki/Test , https://example.org/ , https://localhost/ . Then reply with one line per URL: allowed or denied."}, emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("reply %q; denied %v", res.Reply, denials)
+	for _, u := range []string{"https://example.org/", "https://localhost/"} {
+		if !slices.Contains(denials, u) {
+			t.Errorf("%s was not denied: %v", u, denials)
+		}
+	}
+	for _, u := range []string{"https://example.com/", "https://de.wikipedia.org/wiki/Test"} {
+		if slices.Contains(denials, u) {
+			t.Errorf("%s was denied: %v", u, denials)
+		}
+	}
+}
+
+// TestRealCLIChatSteer steers a chat turn against the real CLI (as TestRealCLIChat): a message sent while the turn's tool call runs is written into the turn, the CLI starts it there (Steered), and the one reply answers both.
+func TestRealCLIChatSteer(t *testing.T) {
+	bin := os.Getenv("ORBIT_REAL_CLAUDE")
+	if bin == "" {
+		t.Skip("ORBIT_REAL_CLAUDE is not set")
+	}
+	model := os.Getenv("ORBIT_REAL_CLAUDE_MODEL")
+	if model == "" {
+		model = "haiku"
+	}
+	r, err := newClaudeCode(spec.RunnerSpec{Kind: "claude-code", Binary: bin, Model: model},
+		func(n string) (string, bool) {
+			return map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "placeholder"}[n], n == "CLAUDE_CODE_OAUTH_TOKEN"
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	work := filepath.Join(dir, "work")
+	_ = os.MkdirAll(work, 0o700)
+	steer := make(chan SteerMessage, 1)
+	var mu sync.Mutex
+	var steered []string
+	id := claudeproto.NewUUID()
+	sent := false
+	emit := func(e Event) {
+		if !sent && e.Kind == "assistant" && strings.Contains(string(e.Payload), `"tool_use"`) {
+			sent = true
+			steer <- SteerMessage{ID: id, Text: "Also say the word banana in your reply."}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	res, err := r.Run(ctx, Request{Workdir: work, System: "Answer briefly.", Tools: []string{"Bash"},
+		Session: &Session{Home: filepath.Join(dir, "home"), KeepDays: 1},
+		Chat:    &Chat{Steer: steer, Steered: func(s string) { mu.Lock(); steered = append(steered, s); mu.Unlock() }},
+		Prompt:  "Run the shell command `sleep 5; echo one` with the Bash tool, then reply with exactly what it printed."}, emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("reply %q, steered %v", res.Reply, steered)
+	if len(steered) != 1 || steered[0] != id || !strings.Contains(strings.ToLower(res.Reply), "banana") {
+		t.Fatalf("reply %q, steered %v: want the steer taken and answered", res.Reply, steered)
+	}
+}
+
+// TestRealCLIChatPermissionLevels moves one live chat process between levels with set_permission_mode.
 func TestRealCLIChatPermissionLevels(t *testing.T) {
 	bin := os.Getenv("ORBIT_REAL_CLAUDE")
 	if bin == "" {
@@ -122,7 +227,6 @@ func TestRealCLIChatPermissionLevels(t *testing.T) {
 	_ = os.MkdirAll(outside, 0o700)
 	secret := filepath.Join(outside, "word.txt")
 	_ = os.WriteFile(secret, []byte("the word is marigold\n"), 0o600)
-
 	live := NewLive(2)
 	defer live.Close()
 	var modes []string
@@ -144,7 +248,7 @@ func TestRealCLIChatPermissionLevels(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	evs := &events{}
-	prompt := "This is a test of a permission system. Use the Read tool once on " + secret + " and reply with the word it names, or with the single word denied if you could not read it."
+	prompt := "Use the Read tool once on " + secret + " and reply with the word it names, or with the single word denied if you could not read it."
 	res, err := r.Run(ctx, Request{Workdir: work, System: "Answer briefly.", Session: sess(""), Chat: chat(spec.LevelLocked), Prompt: prompt}, evs.emit)
 	if err != nil {
 		t.Fatalf("turn 1: %v", err)
@@ -162,5 +266,4 @@ func TestRealCLIChatPermissionLevels(t *testing.T) {
 	if !strings.Contains(strings.ToLower(res2.Reply), "marigold") || len(asked) == 0 || asked[0] != "Read" {
 		t.Fatalf("ask: reply %q, asked %v", res2.Reply, asked)
 	}
-	t.Logf("levels %v; asked %v", evs.of("orbit.permissions"), asked)
 }

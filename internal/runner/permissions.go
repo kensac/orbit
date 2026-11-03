@@ -36,6 +36,21 @@ func startMode(level string) string {
 	return PermissionMode(level)
 }
 
+// modeForLevel selects the CLI mode for a level while preserving explicit connector prompts at locked.
+func modeForLevel(level string, connectorPrompts bool) string {
+	if level == spec.LevelLocked && connectorPrompts {
+		return PermissionMode(spec.LevelAsk)
+	}
+	return PermissionMode(level)
+}
+
+func startModeForLevel(level string, connectorPrompts bool) string {
+	if level == spec.LevelAuto {
+		return PermissionMode(spec.LevelAsk)
+	}
+	return modeForLevel(level, connectorPrompts)
+}
+
 // Prompt decides one permission request the CLI sends (a call its mode and rules leave as "ask"). It is called on its own goroutine while the turn waits; ctx ends when the CLI withdraws the request. Whatever it returns must already be recorded.
 type Prompt func(ctx context.Context, req claudeproto.PermissionRequest) claudeproto.Permission
 
@@ -44,22 +59,15 @@ func noPrompt(_ context.Context, _ claudeproto.PermissionRequest) claudeproto.Pe
 	return claudeproto.Permission{Message: "orbit has no one to ask in this run, so the call is denied"}
 }
 
-// permissionEvent is what orbit.permission records for a chat run's request: the decision the journal's approval item ends with.
-func permissionEvent(req claudeproto.PermissionRequest, p claudeproto.Permission) []byte {
-	b, _ := json.Marshal(map[string]any{"request_id": req.RequestID, "tool": req.Tool, "allowed": p.Allow, "message": p.Message})
-	return b
-}
-
-// LevelChoice is why a run is at its level, recorded with every application of it (orbit.permissions).
+// LevelChoice is why a run is at its level, recorded with every application.
 type LevelChoice struct {
-	// Source is "conversation" when the conversation's own version set the level, else "agent".
 	Source    string     `json:"source"`
 	Version   int        `json:"version,omitempty"`
 	SetBy     string     `json:"set_by,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
-// LevelChange is a new level for the turn in progress: its person changed the conversation's, or it expired.
+// LevelChange is a new level for the turn in progress.
 type LevelChange struct {
 	Level  string
 	Choice LevelChoice
@@ -70,25 +78,24 @@ type modeSetter interface {
 	SetPermissionMode(ctx context.Context, mode string) error
 }
 
-// setLevel puts a running process at level, and returns the level it is at: auto that the CLI refuses (a model without it) is ask, with the refusal as reason. An error means the process is at neither.
-func setLevel(ctx context.Context, p modeSetter, level string) (applied, reason string, err error) {
-	err = p.SetPermissionMode(ctx, PermissionMode(level))
+func setLevel(ctx context.Context, p modeSetter, level, mode string) (applied, appliedMode, reason string, err error) {
+	err = p.SetPermissionMode(ctx, mode)
 	var refused *claudeproto.ControlError
 	if err != nil && level == spec.LevelAuto && errors.As(err, &refused) {
-		if err2 := p.SetPermissionMode(ctx, PermissionMode(spec.LevelAsk)); err2 != nil {
-			return "", "", err2
+		fallbackMode := PermissionMode(spec.LevelAsk)
+		if err2 := p.SetPermissionMode(ctx, fallbackMode); err2 != nil {
+			return "", "", "", err2
 		}
-		return spec.LevelAsk, err.Error(), nil
+		return spec.LevelAsk, fallbackMode, err.Error(), nil
 	}
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return level, "", nil
+	return level, mode, "", nil
 }
 
-// levelEvent is orbit.permissions: the level a run asked for, the one its process is at, and when it was applied: "start" (a new process), "turn" (a live process taking the run) or "live" (during the turn).
-func levelEvent(level, applied, when, reason string, choice LevelChoice) Event {
-	m := map[string]any{"level": level, "applied": applied, "mode": PermissionMode(applied), "when": when, "source": choice.Source}
+func levelEvent(level, applied, mode, when, reason string, choice LevelChoice) Event {
+	m := map[string]any{"level": level, "applied": applied, "mode": mode, "when": when, "source": choice.Source}
 	if choice.Version > 0 {
 		m["version"] = choice.Version
 	}
@@ -105,23 +112,35 @@ func levelEvent(level, applied, when, reason string, choice LevelChoice) Event {
 	return Event{Kind: "orbit.permissions", Payload: b}
 }
 
-// procLevel is what a chat process's permissions are: the level last asked for, the level it is at (auto refused is ask), and the CLI mode its stream last reported (the model's EnterPlanMode moves it, an approved ExitPlanMode moves it back to default).
 type procLevel struct {
 	mu                sync.Mutex
 	want, level, mode string
+	exitPlans         map[string]*planExitState
 }
 
-func (l *procLevel) set(want, level string) {
+type planExitState struct {
+	result  chan struct{}
+	done    chan struct{}
+	seen    bool
+	pending bool
+}
+
+func (l *procLevel) set(want, level, mode string) {
 	l.mu.Lock()
-	l.want, l.level, l.mode = want, level, PermissionMode(level)
+	l.want, l.level, l.mode = want, level, mode
 	l.mu.Unlock()
 }
 
-// needs reports whether the process must be moved to take a run at level.
-func (l *procLevel) needs(level string) bool {
+func (l *procLevel) request(level string) {
+	l.mu.Lock()
+	l.want = level
+	l.mu.Unlock()
+}
+
+func (l *procLevel) needs(level, mode string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.want != level || l.mode != PermissionMode(l.level)
+	return l.want != level || l.mode != mode
 }
 
 func (l *procLevel) applied() string {
@@ -130,8 +149,131 @@ func (l *procLevel) applied() string {
 	return l.level
 }
 
-// observe reads the mode the CLI reports on its init and status lines.
+func (l *procLevel) safeLevel() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if spec.LevelRank(l.want) < spec.LevelRank(l.level) {
+		return l.want
+	}
+	return l.level
+}
+
+func (l *procLevel) reportedMode() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.mode
+}
+
+func (l *procLevel) beginPlanExit(toolUseID string) {
+	if toolUseID == "" {
+		return
+	}
+	l.mu.Lock()
+	if l.exitPlans == nil {
+		l.exitPlans = make(map[string]*planExitState)
+	}
+	if _, exists := l.exitPlans[toolUseID]; !exists {
+		l.exitPlans[toolUseID] = &planExitState{result: make(chan struct{}), done: make(chan struct{})}
+	}
+	l.mu.Unlock()
+}
+
+func (l *procLevel) finishPlanExit(toolUseID string) {
+	l.mu.Lock()
+	if state := l.exitPlans[toolUseID]; state != nil && !state.seen {
+		state.seen = true
+		close(state.result)
+		if !state.pending {
+			delete(l.exitPlans, toolUseID)
+			close(state.done)
+		}
+	}
+	l.mu.Unlock()
+}
+
+func (l *procLevel) beginChange() {
+	l.mu.Lock()
+	for _, state := range l.exitPlans {
+		state.pending = true
+	}
+	l.mu.Unlock()
+}
+
+func (l *procLevel) completeChange() {
+	l.mu.Lock()
+	for id, state := range l.exitPlans {
+		state.pending = false
+		if state.seen {
+			delete(l.exitPlans, id)
+			close(state.done)
+		}
+	}
+	l.mu.Unlock()
+}
+
+func (l *procLevel) waitPlanExit(ctx context.Context) bool {
+	for {
+		l.mu.Lock()
+		var waits []chan struct{}
+		for _, state := range l.exitPlans {
+			if !state.seen {
+				waits = append(waits, state.result)
+			}
+		}
+		l.mu.Unlock()
+		if len(waits) == 0 {
+			return true
+		}
+		for _, ch := range waits {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-ch:
+			}
+		}
+	}
+}
+
+func (l *procLevel) waitPlanExitDone(ctx context.Context) bool {
+	for {
+		l.mu.Lock()
+		var waits []chan struct{}
+		for _, state := range l.exitPlans {
+			waits = append(waits, state.done)
+		}
+		l.mu.Unlock()
+		if len(waits) == 0 {
+			return true
+		}
+		for _, ch := range waits {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-ch:
+			}
+		}
+	}
+}
+
 func (l *procLevel) observe(line claudeproto.Line) {
+	if line.Kind == "user" {
+		var ev struct {
+			Message struct {
+				Content []struct {
+					Type      string `json:"type"`
+					ToolUseID string `json:"tool_use_id"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(line.Raw, &ev) == nil {
+			for _, block := range ev.Message.Content {
+				if block.Type == "tool_result" {
+					l.finishPlanExit(block.ToolUseID)
+				}
+			}
+		}
+		return
+	}
 	if line.Kind != "system.init" && line.Kind != "system.status" {
 		return
 	}
@@ -145,18 +287,17 @@ func (l *procLevel) observe(line claudeproto.Line) {
 	}
 }
 
-// apply moves the process to level and records it.
-func (l *procLevel) apply(ctx context.Context, p modeSetter, level, when string, choice LevelChoice, emit func(Event)) error {
-	applied, reason, err := setLevel(ctx, p, level)
+func (l *procLevel) apply(ctx context.Context, p modeSetter, level, mode, when string, choice LevelChoice, emit func(Event)) error {
+	applied, appliedMode, reason, err := setLevel(ctx, p, level, mode)
 	if err != nil {
+		l.request(level)
 		return err
 	}
-	l.set(level, applied)
-	emit(levelEvent(level, applied, when, reason, choice))
+	l.set(level, applied, appliedMode)
+	emit(levelEvent(level, applied, appliedMode, when, reason, choice))
 	return nil
 }
 
-// withoutMode drops --permission-mode and its value: a live process is kept across level changes (set_permission_mode moves it), so the level is not part of what it runs.
 func withoutMode(args []string) []string {
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
@@ -169,7 +310,6 @@ func withoutMode(args []string) []string {
 	return out
 }
 
-// watchLevel applies the level changes the engine sends during the turn, until turnCtx ends; the returned channel closes once it has stopped, so nothing is recorded after the run. A change the process refuses is recorded with its reason; a lowering it refuses interrupts the turn, so nothing more runs at the wider level.
 func watchLevel(ctx, turnCtx context.Context, p *liveProc, chat *Chat, emit func(Event)) <-chan struct{} {
 	done := make(chan struct{})
 	if chat.Changes == nil {
@@ -183,14 +323,39 @@ func watchLevel(ctx, turnCtx context.Context, p *liveProc, chat *Chat, emit func
 			case <-turnCtx.Done():
 				return
 			case ch := <-chat.Changes:
-				was := p.lv.applied()
-				actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
-				if err := p.lv.apply(actx, p.proc, ch.Level, "live", ch.Choice, emit); err != nil {
-					emit(levelEvent(ch.Level, was, "live", "not applied: "+err.Error(), ch.Choice))
-					if spec.LevelRank(ch.Level) < spec.LevelRank(was) {
-						_ = p.proc.Interrupt(actx)
+				p.lv.beginChange()
+				if !p.lv.waitPlanExit(turnCtx) {
+					return
+				}
+				for {
+					select {
+					case next := <-chat.Changes:
+						ch = next
+					default:
+						goto applyChange
 					}
 				}
+			applyChange:
+				was := p.lv.applied()
+				wasMode := p.lv.reportedMode()
+				actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claudeproto.RequestTimeout)
+				mode := modeForLevel(ch.Level, chat.ConnectorPrompts)
+				// Make a lowering visible to permission prompts before the CLI starts
+				// applying it. A raise stays inactive because safeLevel reports the
+				// applied level until setLevel succeeds.
+				p.lv.request(ch.Level)
+				if err := p.lv.apply(actx, p.proc, ch.Level, mode, "live", ch.Choice, emit); err != nil {
+					reason := "not applied: " + err.Error()
+					if spec.LevelRank(ch.Level) < spec.LevelRank(was) {
+						_, interruptErr := p.proc.Interrupt(actx, p.proc.Capable(claudeproto.CapInterruptCancelQueued))
+						if interruptErr != nil {
+							reason += "; interrupt failed: " + interruptErr.Error()
+							p.proc.Kill()
+						}
+					}
+					emit(levelEvent(ch.Level, was, wasMode, "live", reason, ch.Choice))
+				}
+				p.lv.completeChange()
 				cancel()
 			}
 		}

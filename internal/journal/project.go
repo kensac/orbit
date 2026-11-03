@@ -212,6 +212,15 @@ func (p *projector) orbit() {
 		p.write(p.local("permissions"), KindPermissions, "", body)
 		return
 	}
+	if p.ev.Kind == "orbit.steer" {
+		var st Steer
+		if json.Unmarshal(p.ev.Payload, &st) != nil || st.MessageID == "" {
+			p.status()
+			return
+		}
+		p.write("steer:"+st.MessageID, KindSteer, "", st)
+		return
+	}
 	if p.ev.Kind != "orbit.permission" {
 		p.status()
 		return
@@ -365,11 +374,16 @@ func (p *projector) toolUse(b block, parent string) {
 }
 
 // outputQuestions makes the final answer's questions (the output
-// contract's questions, plain strings) into question items.
+// contract's questions: a string, or an object whose question is the text
+// and whose form the thread shows) into question items.
 func (p *projector) outputQuestions(in map[string]any, parent string) {
 	qs, _ := in["questions"].([]any)
 	for _, q := range qs {
-		if s, ok := q.(string); ok && strings.TrimSpace(s) != "" {
+		s, ok := q.(string)
+		if m, isObj := q.(map[string]any); isObj {
+			s, ok = m["question"].(string)
+		}
+		if ok && strings.TrimSpace(s) != "" {
 			p.write(p.local("question"), KindQuestion, parent, Question{Text: s, Options: []QuestionOption{}})
 		}
 	}

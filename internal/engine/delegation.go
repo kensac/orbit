@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/kensac/orbit/internal/actions"
+	"github.com/kensac/orbit/internal/forms"
+	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -21,7 +24,7 @@ import (
 // Control calls it after each run, after delegation actions, and on every
 // outbox tick, so a decision a person resolves is picked up within one.
 func (e *Engine) ReconcileTasks(ctx context.Context) error {
-	res, err := e.Store.ReconcileTasks(ctx)
+	res, err := e.Store.ReconcileTasks(ctx, time.Duration(e.Current().Config.Deployment.Defaults.DecisionStall))
 	if err != nil {
 		return err
 	}
@@ -72,19 +75,21 @@ func (o *taskOps) Delegate(ctx context.Context, c actions.Call, p actions.Delega
 	return json.Marshal(map[string]any{"tasks": made})
 }
 
+// MessageTask writes to a task: into its running reply when a chat agent's run works on it (a correction reaches the worker mid-turn), otherwise for its next run, which it wakes. The result's delivered says which.
 func (o *taskOps) MessageTask(ctx context.Context, c actions.Call, p actions.TaskMessageParams) (json.RawMessage, error) {
-	msg, run, err := o.e.Store.MessageTask(ctx, store.TaskMessage{FromRun: c.RunID, TaskID: p.TaskID, Body: strings.TrimSpace(p.Body), ReplyTo: p.ReplyTo})
+	steerable := func(agent string) bool {
+		a, ok := o.snap.Config.Agents[agent]
+		return ok && a.Chat
+	}
+	got, err := o.e.Store.MessageTask(ctx, store.TaskMessage{FromRun: c.RunID, TaskID: p.TaskID, Body: strings.TrimSpace(p.Body), ReplyTo: p.ReplyTo,
+		Steerable: steerable})
 	if err != nil {
 		return nil, err
 	}
-	if run != "" && o.e.Wake != nil {
+	if got.RunID != "" && got.Delivered == store.DeliveredQueued && o.e.Wake != nil {
 		o.e.Wake()
 	}
-	out := map[string]any{"message_id": msg}
-	if run != "" {
-		out["run_id"] = run
-	}
-	return json.Marshal(out)
+	return json.Marshal(got)
 }
 
 func (o *taskOps) CancelTask(ctx context.Context, c actions.Call, p actions.TaskCancelParams) (json.RawMessage, error) {
@@ -97,19 +102,78 @@ func (o *taskOps) CancelTask(ctx context.Context, c actions.Call, p actions.Task
 	return json.RawMessage(`{"cancelled":true}`), nil
 }
 
+func (o *taskOps) RetryTask(ctx context.Context, c actions.Call, p actions.TaskRetryParams) (json.RawMessage, error) {
+	a, ok := o.snap.Config.Agents[c.Agent]
+	if !ok {
+		return nil, fmt.Errorf("task:retry: agent %q is no longer configured", c.Agent)
+	}
+	// Checked again against the configuration in force, as delegate is.
+	p, err := actions.DecodeTaskRetry(c.Params, a.DelegateTargets())
+	if err != nil {
+		return nil, err
+	}
+	got, err := o.e.Store.RetryTask(ctx, store.TaskRetry{FromRun: c.RunID, ActionID: c.ID, TaskID: p.TaskID, Reason: p.Reason,
+		Brief: p.Brief, Agent: p.Agent, ByPerson: c.Rule == spec.RuleApprove})
+	if err != nil {
+		return nil, err
+	}
+	if err := o.e.ReconcileTasks(ctx); err != nil {
+		o.e.Log.Warn("delegation: reconcile after retry", "err", err)
+	}
+	return json.Marshal(got)
+}
+
+// retryNeedsPerson reports whether a task:retry proposal is past the
+// circuit breaker: its task failed MaxTaskFailures times, so only a
+// person's approval may reopen it, whatever the rule.
+func (e *Engine) retryNeedsPerson(ctx context.Context, params json.RawMessage) bool {
+	var p actions.TaskRetryParams
+	if json.Unmarshal(params, &p) != nil {
+		return false
+	}
+	t, err := e.Store.GetTask(ctx, p.TaskID)
+	return err == nil && t.Failures >= store.MaxTaskFailures
+}
+
 // taskContract is the system prompt's part for a run in a task's own
 // conversation.
 func taskContract(t *store.Task) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\nThis conversation is a task (key %q) that agent %s delegated to you. %s is an agent, not a person: your result goes back to it, and it integrates your report with its other tasks' and answers its own person.\n", t.Key, t.ParentAgent, t.ParentAgent)
 	b.WriteString("- Its brief is the first message from " + t.ParentAgent + " below; later messages from it add to the brief or answer you.\n")
-	b.WriteString("- report: your complete answer to the brief, self-contained (it is all " + t.ParentAgent + " reads of your work). Lead with the outcome. The task is done when a run of yours ends without an open question.\n")
+	b.WriteString("- report: your complete answer to the brief, self-contained (it is all " + t.ParentAgent + " reads of your work). Lead with the outcome. The task is done when a run of yours ends succeeded without an open question.\n")
+	b.WriteString("- outcome: succeeded when you did the work the brief asks for; failed when you could not do it and trying again as briefed would not help (the task fails, and " + t.ParentAgent + " may retry or reroute it); blocked when you cannot go on until something outside your reach changes (" + t.ParentAgent + " is told at once and may unblock you with a message). outcome_reason says why in one or two sentences; leave it empty only when you succeeded. Never report succeeded for work you did not do.\n")
 	b.WriteString("- questions: only what you cannot proceed without. They go to " + t.ParentAgent + ", which answers or asks its person; your next run gets the answer.\n")
 	b.WriteString("- notify: nothing you send here reaches a person directly; leave notify.send false.\n")
 	if t.Fresh {
 		b.WriteString("- You are a fresh worker for this task: you start with no memory, and nothing you put in memory is kept.\n")
 	}
 	return b.String()
+}
+
+// withOutcome adds outcome and outcome_reason to a task run's output
+// schema. Both are required, as withPlan's field is, so a backend whose
+// structured output needs every property listed (Codex) accepts them.
+func withOutcome(schema json.RawMessage) json.RawMessage {
+	var s map[string]any
+	if json.Unmarshal(schema, &s) != nil {
+		return schema
+	}
+	props, _ := s["properties"].(map[string]any)
+	if props == nil {
+		return schema
+	}
+	props["outcome"] = map[string]any{"type": "string", "enum": []string{store.OutcomeSucceeded, store.OutcomeFailed, store.OutcomeBlocked}}
+	props["outcome_reason"] = map[string]any{"type": "string", "maxLength": 2000}
+	req, _ := s["required"].([]any)
+	for _, f := range []string{"outcome", "outcome_reason"} {
+		if !slices.Contains(req, any(f)) {
+			req = append(req, f)
+		}
+	}
+	s["required"] = req
+	b, _ := json.Marshal(s)
+	return b
 }
 
 // tasksBudget bounds the delegated tasks a parent's prompt shows, and
@@ -141,11 +205,26 @@ func tasksSection(tasks []store.Task, loc *time.Location) string {
 		if t.Decision != nil {
 			fmt.Fprintf(&b, "decision: %q, %s\n", t.Decision.Question, t.Decision.Status)
 		}
+		if t.Outcome != nil && *t.Outcome != store.OutcomeSucceeded {
+			fmt.Fprintf(&b, "outcome: %s: %s\n", *t.Outcome, t.OutcomeReasonText())
+		}
 		if t.Error != nil {
 			fmt.Fprintf(&b, "error: %s\n", *t.Error)
 		}
+		if t.Attempt > 1 || t.Failures > 0 {
+			fmt.Fprintf(&b, "attempt: %d, failed %d of at most %d times\n", t.Attempt, t.Failures, store.MaxTaskFailures)
+		}
+		if t.StalledAt != nil {
+			b.WriteString("stalled: nothing in its batch can move without you; retry or cancel what it waits for, or ask your person about its decision\n")
+		}
+		if t.Status == store.TaskFailed && t.Failures >= store.MaxTaskFailures {
+			b.WriteString("retry: only a person's approval reopens it now\n")
+		}
 		for _, q := range t.Questions {
 			fmt.Fprintf(&b, "question (reply_to %s): %s\n", q.ID, q.Body)
+			if len(q.Fields) > 0 {
+				fmt.Fprintf(&b, "its form (answer each in your message):\n%s", forms.Describe(q.Fields))
+			}
 		}
 		if t.Report != nil {
 			fmt.Fprintf(&b, "summary: %s\n", t.Report.Summary)
@@ -166,7 +245,7 @@ func tasksSection(tasks []store.Task, loc *time.Location) string {
 	}
 	var out strings.Builder
 	out.WriteString("\n# Tasks you delegated from this conversation (oldest first)\n\n")
-	out.WriteString("Their agents worked on them in their own conversations. Integrate the reports into your answer; reply to a task's question with task:message (reply_to its id), or ask your person if only they can answer. You are woken again when tasks still open settle; do not poll.\n\n")
+	out.WriteString("Their agents worked on them in their own conversations. Integrate the reports into your answer; reply to a task's question with task:message (reply_to its id), or ask your person if only they can answer. A failed task's dependents wait for it: retry it with task:retry (a new brief or another agent when that would help), or cancel them. You are woken again when tasks still open settle, fail or ask; do not poll.\n\n")
 	for i := len(blocks) - 1; i >= 0; i-- {
 		out.WriteString(blocks[i])
 	}

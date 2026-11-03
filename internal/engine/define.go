@@ -38,6 +38,8 @@ type DefineRequest struct {
 	// database does not define it yet (agent:define).
 	Update bool
 	Upsert bool
+	// Base, when set, is the version the change was made from: a newer one is a conflict, so a change computed from a spec is never stored over a version it did not see.
+	Base int
 }
 
 // Defined is what a definition change did.
@@ -45,6 +47,11 @@ type Defined struct {
 	// Agent is the agent as it loads, defaults applied.
 	Agent      *spec.Agent
 	Definition *store.AgentDefinition
+	// PendingReload is why the stored change is not in force on this
+	// instance yet: the reload after storing it failed. The change is
+	// stored and valid, so it is a success; serve's config sync retries the
+	// reload until it is in force.
+	PendingReload string
 }
 
 func (e *Engine) reload(ctx context.Context) error {
@@ -93,6 +100,8 @@ func (e *Engine) DefineAgent(ctx context.Context, req DefineRequest) (*Defined, 
 			return nil, err
 		case prev.Archived:
 			return nil, fmt.Errorf("agent %q is archived: %w", a.Name, store.ErrNotFound)
+		case req.Base > 0 && prev.Version != req.Base:
+			return nil, fmt.Errorf("agent %q changed since version %d (now %d): %w", a.Name, req.Base, prev.Version, store.ErrConflict)
 		default:
 			after, enabled = prev.Version, prev.Enabled
 		}
@@ -119,10 +128,9 @@ func (e *Engine) DefineAgent(ctx context.Context, req DefineRequest) (*Defined, 
 		return nil, err
 	}
 	res.Definition = d
-	if err := e.reload(ctx); err != nil {
-		return nil, fmt.Errorf("stored version %d, but the reload failed: %w", d.Version, err)
+	if res.PendingReload = e.reloadAfterStore(ctx, d); res.PendingReload == "" {
+		res.Agent = e.Current().Config.Agents[a.Name]
 	}
-	res.Agent = e.Current().Config.Agents[a.Name]
 	return res, nil
 }
 
@@ -160,7 +168,8 @@ func (e *Engine) ChangeAgentState(ctx context.Context, name, change, author, run
 	if archived {
 		override = nil
 	}
-	if _, err := e.LoadConfig(ctx, map[string]*spec.Definition{name: override}); err != nil {
+	cfg, err := e.LoadConfig(ctx, map[string]*spec.Definition{name: override})
+	if err != nil {
 		return nil, fmt.Errorf("%w: %w", store.ErrInvalid, err)
 	}
 	d, err := e.Store.PutDefinition(ctx, store.NewDefinition{Name: name, Spec: specJSON, Enabled: enabled,
@@ -168,10 +177,24 @@ func (e *Engine) ChangeAgentState(ctx context.Context, name, change, author, run
 	if err != nil {
 		return nil, err
 	}
-	if err := e.reload(ctx); err != nil {
-		return nil, fmt.Errorf("stored version %d, but the reload failed: %w", d.Version, err)
+	res := &Defined{Definition: d}
+	if res.PendingReload = e.reloadAfterStore(ctx, d); res.PendingReload == "" {
+		res.Agent = e.Current().Config.Agents[name]
+	} else if override != nil {
+		res.Agent = cfg.Agents[name]
 	}
-	return &Defined{Definition: d, Agent: e.Current().Config.Agents[name]}, nil
+	return res, nil
+}
+
+// reloadAfterStore puts a stored definition in force, or returns why it is
+// pending: the change is already stored, so a failed reload is logged and
+// reported, not an error.
+func (e *Engine) reloadAfterStore(ctx context.Context, d *store.AgentDefinition) string {
+	if err := e.reload(ctx); err != nil {
+		e.Log.Warn("definition stored, reload pending", "agent", d.Name, "version", d.Version, "err", err)
+		return fmt.Sprintf("stored version %d; the reload failed and is retried: %v", d.Version, err)
+	}
+	return ""
 }
 
 func errOr(err error, s string) string {
@@ -213,5 +236,9 @@ func (e *Engine) defineAction(ctx context.Context, c actions.Call, specJSON json
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(map[string]any{"agent": d.Definition.Name, "version": d.Definition.Version, "change": d.Definition.Change})
+	out := map[string]any{"agent": d.Definition.Name, "version": d.Definition.Version, "change": d.Definition.Change}
+	if d.PendingReload != "" {
+		out["pending_reload"] = d.PendingReload
+	}
+	return json.Marshal(out)
 }

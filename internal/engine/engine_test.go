@@ -21,6 +21,7 @@ import (
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/testdb"
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 var ctx = context.Background()
@@ -40,6 +41,8 @@ type fakeRunner struct {
 	// seen, when set, is called with the request while the run's workdir
 	// exists.
 	seen func(runner.Request)
+	// events are emitted after the first, as the CLI's stream would (tool calls the journal records).
+	events []runner.Event
 	// said are assistant lines emitted before the output.
 	said []string
 }
@@ -72,6 +75,9 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 		}
 	}
 	emit(runner.Event{Kind: "assistant", Payload: []byte(`{"type":"assistant","session_id":"` + sid + `"}`)})
+	for _, ev := range f.events {
+		emit(ev)
+	}
 	for _, l := range f.said {
 		emit(runner.Event{Kind: "assistant", Payload: []byte(l)})
 	}
@@ -89,7 +95,8 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 		return nil, ctx.Err()
 	}
 	cost := 0.25
-	return &runner.Result{Output: json.RawMessage(f.output), CostUSD: &cost, SessionID: sid}, f.err
+	used := &tokens.Usage{Count: tokens.Count{Input: 10, Output: 5, CacheRead: 300, CacheCreation: 90}, Model: "claude-fake", NumTurns: 2}
+	return &runner.Result{Output: json.RawMessage(f.output), CostUSD: &cost, SessionID: sid, Tokens: used}, f.err
 }
 
 // hooks collects what the webhook channel and endpoint receive.
@@ -106,6 +113,13 @@ func harness(t *testing.T, fr *fakeRunner) (*engine.Engine, *store.Store, *hooks
 
 // harnessWith appends extra to the agent's YAML.
 func harnessWith(t *testing.T, fr *fakeRunner, extra string) (*engine.Engine, *store.Store, *hooks) {
+	t.Helper()
+	return harnessFiles(t, fr, extra, nil)
+}
+
+// harnessFiles is harnessWith plus files: "orbit.yaml" is appended to the
+// deployment, any other name is written into the configuration directory.
+func harnessFiles(t *testing.T, fr *fakeRunner, extra string, files map[string]string) (*engine.Engine, *store.Store, *hooks) {
 	t.Helper()
 	s := testdb.New(t)
 	h := &hooks{}
@@ -152,7 +166,12 @@ channels:
   hook: {kind: webhook, url: %[1]s/notify}
 endpoints:
   ep: {url: %[1]s/endpoint}
-`, srv.URL))
+%[2]s`, srv.URL, files["orbit.yaml"]))
+	for name, body := range files {
+		if name != "orbit.yaml" {
+			write(name, body)
+		}
+	}
 	write("agents/finance.yaml", fmt.Sprintf(`
 name: finance
 charter: Review my spending.
@@ -233,6 +252,15 @@ func TestRunEndToEnd(t *testing.T) {
 	run, _ := s.GetRun(ctx, c.ID)
 	if run.Status != "succeeded" || *run.Summary != "October spend was $5,914" || *run.CostUSD != 0.25 {
 		t.Fatalf("run = %s err=%v", run.Status, *run.Error)
+	}
+	// The backend's tokens are the attempt's, and the prefix it was sent is recorded with it.
+	want := runner.PrefixOf("claude-code", "fake", fr.got.Prompt[len("# Charter\n\n"):strings.Index(fr.got.Prompt, "\n\n# This run")], fr.got)
+	if tk := run.Tokens; tk == nil || tk.Input != 10 || tk.CacheRead != 300 || tk.NumTurns != 2 || tk.Model != "claude-fake" ||
+		tk.CacheHitRatio == nil || *tk.CacheHitRatio != 0.75 {
+		t.Fatalf("tokens = %+v", run.Tokens)
+	}
+	if run.Prefix == nil || run.Prefix.SHA != want.SHA || run.Prefix.Parts["charter"] != want.Parts["charter"] || run.Prefix.Changed != nil {
+		t.Fatalf("prefix = %+v, want %+v", run.Prefix, want)
 	}
 	// The source was fetched with the credential, both pages merged, and
 	// written where the prompt says it is.

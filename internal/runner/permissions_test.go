@@ -3,6 +3,8 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -86,6 +88,13 @@ func chatRun(t *testing.T, bin string, chat *Chat) *events {
 		t.Fatal(err)
 	}
 	evs := &events{}
+	if chat.RecordPermission == nil {
+		chat.RecordPermission = func(req claudeproto.PermissionRequest, p claudeproto.Permission) error {
+			b, _ := json.Marshal(map[string]any{"request_id": req.RequestID, "tool": req.Tool, "allowed": p.Allow, "message": p.Message})
+			evs.emit(Event{Kind: "orbit.permission", Payload: b})
+			return nil
+		}
+	}
 	if _, err := r.Run(context.Background(), Request{Workdir: t.TempDir(), System: "s", Prompt: "hi", Chat: chat}, evs.emit); err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +159,24 @@ func TestAutoFallsBackToAskWhereTheCLIRefusesIt(t *testing.T) {
 	}
 }
 
+func TestChatDeniesAllowWhenRecordingFails(t *testing.T) {
+	bin, dir := fakeClaudeBin(t, fakeScenario{Ask: []json.RawMessage{json.RawMessage(`{"tool_name":"Write","tool_use_id":"t1"}`)}})
+	chatRun(t, bin, &Chat{Level: spec.LevelAsk,
+		Prompt: func(context.Context, claudeproto.PermissionRequest) claudeproto.Permission {
+			return claudeproto.Permission{Allow: true}
+		},
+		RecordPermission: func(_ claudeproto.PermissionRequest, p claudeproto.Permission) error {
+			if !p.Allow {
+				t.Error("the recorder did not receive the prompt's allow decision")
+			}
+			return errors.New("write failed")
+		},
+	})
+	if log := read(t, dir+"/log"); !strings.Contains(log, `"behavior":"deny"`) || !strings.Contains(log, "could not record") {
+		t.Errorf("the CLI did not receive a recording failure denial: %s", log)
+	}
+}
+
 func TestALiveChatProcessMovesBetweenLevels(t *testing.T) {
 	bin, dir := fakeClaudeBin(t, fakeScenario{})
 	r, err := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
@@ -196,7 +223,6 @@ func TestALevelChangeDuringTheTurnReachesTheProcess(t *testing.T) {
 	changes := make(chan LevelChange, 1)
 	evs := chatRun(t, bin, &Chat{Level: spec.LevelEdits, Ceiling: spec.LevelEdits, Changes: changes,
 		Prompt: func(_ context.Context, _ claudeproto.PermissionRequest) claudeproto.Permission {
-			// The person lowers the level while the CLI waits on this request.
 			changes <- LevelChange{Level: spec.LevelLocked, Choice: LevelChoice{Source: "conversation", Version: 4}}
 			deadline := time.Now().Add(10 * time.Second)
 			for time.Now().Before(deadline) && !strings.Contains(read(t, dir+"/log"), "mode dontAsk") {
@@ -210,5 +236,215 @@ func TestALevelChangeDuringTheTurnReachesTheProcess(t *testing.T) {
 	}
 	if log := read(t, dir+"/log"); !strings.Contains(log, "turn 1 acceptEdits\nmode dontAsk\nanswer") {
 		t.Fatalf("log = %q: the mode changed before the request was answered", log)
+	}
+}
+
+func TestPendingPermissionDeniedDuringSuccessfulLiveLowering(t *testing.T) {
+	bin, dir := fakeClaudeBin(t, fakeScenario{
+		HoldModes: []string{"dontAsk"},
+		Ask:       []json.RawMessage{json.RawMessage(`{"tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"t1"}`)},
+	})
+	changes := make(chan LevelChange, 1)
+	var allowed bool
+	ev := chatRun(t, bin, &Chat{Level: spec.LevelEdits, Ceiling: spec.LevelEdits, Changes: changes,
+		Prompt: func(_ context.Context, _ claudeproto.PermissionRequest) claudeproto.Permission {
+			changes <- LevelChange{Level: spec.LevelLocked, Choice: LevelChoice{Source: "conversation", Version: 7}}
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) && !strings.Contains(read(t, dir+"/log"), "request dontAsk") {
+				time.Sleep(2 * time.Millisecond)
+			}
+			if !strings.Contains(read(t, dir+"/log"), "request dontAsk") {
+				t.Error("the CLI did not receive the lowering request")
+			}
+			return claudeproto.Permission{Allow: true}
+		},
+		RecordPermission: func(_ claudeproto.PermissionRequest, p claudeproto.Permission) error {
+			allowed = p.Allow
+			return os.WriteFile(dir+"/release-dontAsk", nil, 0o600)
+		},
+	})
+	if allowed {
+		t.Fatal("a pending permission was allowed while the CLI was lowering its mode")
+	}
+	if log := read(t, dir+"/log"); !strings.Contains(log, "request dontAsk\nmode dontAsk") {
+		t.Fatalf("the delayed permission-mode change did not succeed: %q", log)
+	}
+	if got := ev.of("orbit.permissions"); len(got) != 2 || got[1]["applied"] != spec.LevelLocked {
+		t.Fatalf("permission events = %v; want the locked level applied", got)
+	}
+}
+
+func TestPermissionPromptUsesTheLiveLevelAtDecisionTime(t *testing.T) {
+	level := spec.LevelLocked
+	promptCalls := 0
+	lowerOnPrompt := false
+	chat := &Chat{
+		Level:        spec.LevelLocked,
+		CurrentLevel: func() string { return level },
+		Prompt: func(context.Context, claudeproto.PermissionRequest) claudeproto.Permission {
+			promptCalls++
+			if lowerOnPrompt {
+				level = spec.LevelLocked
+			}
+			return claudeproto.Permission{Allow: true}
+		},
+		RecordPermission: func(claudeproto.PermissionRequest, claudeproto.Permission) error { return nil },
+	}
+	var tools chatTools
+	tools.set(chat, nil)
+	h := tools.handler()
+
+	level = spec.LevelAsk
+	p, err := h.CanUseTool(context.Background(), claudeproto.PermissionRequest{Tool: "Write"})
+	if err != nil || !p.Allow || promptCalls != 1 {
+		t.Fatalf("locked to ask: got %+v, %v, prompts=%d; want an ask prompt", p, err, promptCalls)
+	}
+
+	level = spec.LevelAsk
+	lowerOnPrompt = true
+	p, err = h.CanUseTool(context.Background(), claudeproto.PermissionRequest{Tool: "Write"})
+	if err != nil || p.Allow || promptCalls != 2 {
+		t.Fatalf("ask to locked while pending: got %+v, %v, prompts=%d; want a denial", p, err, promptCalls)
+	}
+}
+
+func TestLockedConnectorRunRecordsItsActualCLIMode(t *testing.T) {
+	bin, _ := fakeClaudeBin(t, fakeScenario{})
+	r, err := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := &events{}
+	conns := &Connectors{Servers: []ConnectorServer{{Name: "docs", Tools: []ConnectorTool{{Name: "write", Ask: true}}}}}
+	_, err = r.Run(context.Background(), Request{Workdir: t.TempDir(), Prompt: "hi", Connectors: conns,
+		Chat: &Chat{Level: spec.LevelLocked, Ceiling: spec.LevelLocked}}, evs.emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := evs.of("orbit.permissions")
+	if len(got) != 1 || got[0]["applied"] != spec.LevelLocked || got[0]["mode"] != "default" {
+		t.Fatalf("permissions event = %v; want locked applied with CLI mode default for connector prompts", got)
+	}
+}
+
+func TestFailedLoweringAndInterruptKillTheProcess(t *testing.T) {
+	bin, dir := fakeClaudeBin(t, fakeScenario{
+		Refuse:          []string{"dontAsk"},
+		RefuseInterrupt: true,
+		Ask:             []json.RawMessage{json.RawMessage(`{"tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"t1"}`)},
+	})
+	r, err := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := NewLive(2)
+	defer live.Close()
+	changes := make(chan LevelChange, 1)
+	decisions := make(chan bool, 1)
+	sess := &Session{Home: t.TempDir(), KeepDays: 1, Live: live, Key: "c1", Open: true, LiveIdle: time.Minute}
+	readLog := func() string {
+		b, _ := os.ReadFile(dir + "/log")
+		return string(b)
+	}
+	chat := &Chat{Level: spec.LevelEdits, Ceiling: spec.LevelEdits, Changes: changes,
+		Prompt: func(_ context.Context, _ claudeproto.PermissionRequest) claudeproto.Permission {
+			changes <- LevelChange{Level: spec.LevelLocked, Choice: LevelChoice{Source: "conversation", Version: 5}}
+			deadline := time.Now().Add(10 * time.Second)
+			for time.Now().Before(deadline) && !strings.Contains(readLog(), "interrupt refused") {
+				time.Sleep(10 * time.Millisecond)
+			}
+			return claudeproto.Permission{Allow: true}
+		},
+		RecordPermission: func(_ claudeproto.PermissionRequest, p claudeproto.Permission) error {
+			decisions <- p.Allow
+			return nil
+		}}
+	_, err = r.Run(context.Background(), Request{Workdir: t.TempDir(), Prompt: "run ls", Session: sess, Chat: chat}, func(Event) {})
+	if err == nil {
+		t.Fatal("turn succeeded after both lowering and interrupt were refused")
+	}
+	select {
+	case allowed := <-decisions:
+		if allowed {
+			t.Fatal("a pending prompt was allowed after the level was lowered")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the pending prompt was not recorded")
+	}
+	if live.Len() != 0 {
+		t.Fatalf("%d live processes remain after an uninterruptible failed lowering", live.Len())
+	}
+	if log := read(t, dir+"/log"); !strings.Contains(log, "refused dontAsk") || !strings.Contains(log, "interrupt refused") {
+		t.Fatalf("mode/interrupt refusal not observed: %q", log)
+	}
+}
+
+func TestLevelChangeWaitsForExitPlanModeResult(t *testing.T) {
+	bin, dir := fakeClaudeBin(t, fakeScenario{PlanExit: true, Ask: []json.RawMessage{
+		json.RawMessage(`{"tool_name":"ExitPlanMode","input":{"plan":"write a.txt"},"tool_use_id":"t1"}`),
+		json.RawMessage(`{"tool_name":"Write","input":{"file_path":"a.txt","content":"ok"},"tool_use_id":"t2"}`),
+	}})
+	r, err := New("c", spec.RunnerSpec{Kind: "claude-code", Binary: bin}, orbitEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := make(chan LevelChange, 1)
+	chat := &Chat{Level: spec.LevelEdits, Ceiling: spec.LevelEdits, Changes: changes,
+		Prompt: func(_ context.Context, req claudeproto.PermissionRequest) claudeproto.Permission {
+			if req.Tool == "ExitPlanMode" {
+				changes <- LevelChange{Level: spec.LevelAsk, Choice: LevelChoice{Source: "conversation", Version: 9}}
+				time.Sleep(100 * time.Millisecond)
+			}
+			return claudeproto.Permission{Allow: true}
+		},
+		RecordPermission: func(claudeproto.PermissionRequest, claudeproto.Permission) error { return nil }}
+	if _, err := r.Run(context.Background(), Request{Workdir: t.TempDir(), Prompt: "write a file", Chat: chat}, func(ev Event) {
+		t.Logf("%s %s", ev.Kind, ev.Payload)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	log := read(t, dir+"/log")
+	plan := strings.Index(log, "entered plan")
+	exitAnswer := strings.Index(log, `answer ask-1-0 {"behavior":"allow"`)
+	leftPlan := strings.Index(log, "left plan")
+	modeDefault := strings.Index(log, "mode default")
+	writeAnswer := strings.Index(log, `answer ask-1-1 {"behavior":"allow"`)
+	if plan < 0 || exitAnswer < plan || leftPlan < exitAnswer || modeDefault < leftPlan || writeAnswer < modeDefault {
+		t.Fatalf("level change crossed ExitPlanMode's permission response: %q", log)
+	}
+}
+
+func TestLockedChatRoutesConnectorApprovals(t *testing.T) {
+	conns := &Connectors{
+		Servers: []ConnectorServer{{Name: "docs", Tools: []ConnectorTool{{Name: "write", Ask: true}}}},
+		Permit: func(_ context.Context, server, tool, id string, _ json.RawMessage) claudeproto.Permission {
+			if server != "docs" || tool != "write" || id != "t1" {
+				t.Errorf("connector approval routed with wrong identifiers: %s %s %s", server, tool, id)
+			}
+			return claudeproto.Permission{Allow: true}
+		},
+		Record: func(claudeproto.PermissionRequest, claudeproto.Permission) error { return nil },
+	}
+	c := &claudeCode{bin: "claude"}
+	chat := &Chat{Level: spec.LevelLocked,
+		Prompt: func(context.Context, claudeproto.PermissionRequest) claudeproto.Permission {
+			t.Error("a locked chat must deny ordinary prompts")
+			return claudeproto.Permission{Allow: true}
+		},
+		RecordPermission: conns.Record,
+	}
+	args := c.chatArgs(Request{Chat: chat, Connectors: conns}, t.TempDir(), 1)
+	if flagValue(args, "--permission-mode") != "default" || !strings.Contains(flagValue(args, "--settings"), "mcp__docs__write") {
+		t.Errorf("connector ask rules are not active: %v", args)
+	}
+	var tools chatTools
+	tools.set(chat, nil)
+	tools.connectors(conns)
+	h := tools.handler()
+	for tool, allow := range map[string]bool{"mcp__docs__write": true, "Write": false} {
+		p, err := h.CanUseTool(context.Background(), claudeproto.PermissionRequest{Tool: tool, ToolUseID: "t1"})
+		if err != nil || p.Allow != allow {
+			t.Errorf("%s: got %+v (%v), want allow=%v", tool, p, err, allow)
+		}
 	}
 }
