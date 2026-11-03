@@ -4,8 +4,11 @@ import (
 	"errors"
 	"html"
 	"net/http"
+	"net/url"
 	"slices"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/kensac/orbit/internal/connectors"
 	"github.com/kensac/orbit/internal/engine"
@@ -15,19 +18,23 @@ import (
 
 // connectorInfo is one connector as GET /connectors shows it: its configuration (never a credential), which agents have it, and for an oauth one whether a person has signed it in.
 type connectorInfo struct {
-	Name        string                `json:"name"`
-	Transport   string                `json:"transport"`
-	URL         string                `json:"url,omitempty"`
-	Description string                `json:"description"`
-	Auth        string                `json:"auth"`
-	WriteTools  []string              `json:"write_tools"`
-	Agents      []string              `json:"agents"`
-	Connected   bool                  `json:"connected"`
-	Token       *store.ConnectorToken `json:"token"`
+	Name         string                `json:"name"`
+	Transport    string                `json:"transport"`
+	URL          string                `json:"url,omitempty"`
+	Description  string                `json:"description"`
+	Auth         string                `json:"auth"`
+	WriteTools   []string              `json:"write_tools"`
+	Agents       []string              `json:"agents"`
+	Connected    bool                  `json:"connected"`
+	Token        *store.ConnectorToken `json:"token"`
+	CatalogAdded bool                  `json:"catalog_added,omitempty"`
+	DefaultRule  string                `json:"default_tool_rule,omitempty"`
 }
 
 func (s *Server) connectorRoutes(api func(string, http.HandlerFunc), mux *http.ServeMux) {
 	api("GET /api/v1/connectors", s.listConnectors)
+	api("GET /api/v1/connectors/catalog", s.listConnectorCatalog)
+	api("POST /api/v1/connectors/catalog", s.addConnectorCatalog)
 	api("GET /api/v1/connectors/{name}/tools", s.connectorTools)
 	api("POST /api/v1/connectors/{name}/authorize", s.authorizeConnector)
 	// The sealed state is the credential: the authorization server sends the person's browser here.
@@ -54,7 +61,8 @@ func (s *Server) listConnectors(w http.ResponseWriter, r *http.Request) {
 			transport = spec.ConnectorTransportHTTP
 		}
 		info := connectorInfo{Name: n, Transport: transport, URL: c.URL, Description: c.Description,
-			Auth: c.AuthKind(), WriteTools: orEmpty(c.WriteTools), Agents: []string{}}
+			Auth: c.AuthKind(), WriteTools: orEmpty(c.WriteTools), Agents: []string{}, CatalogAdded: c.CatalogManaged,
+			DefaultRule: string(c.DefaultToolRule)}
 		for name, a := range cfg.Agents {
 			if slices.Contains(a.Connectors, n) {
 				info.Agents = append(info.Agents, name)
@@ -70,6 +78,152 @@ func (s *Server) listConnectors(w http.ResponseWriter, r *http.Request) {
 		out = append(out, info)
 	}
 	respond(w, map[string]any{"connectors": out}, nil)
+}
+
+func (s *Server) listConnectorCatalog(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.Store.CatalogConnectors(r.Context())
+	respond(w, map[string]any{"connectors": rows}, err)
+}
+
+type addConnectorCatalogRequest struct {
+	Name        string   `json:"name"`
+	URL         string   `json:"url"`
+	Description string   `json:"description"`
+	Scopes      []string `json:"scopes"`
+}
+
+type addConnectorCatalogResponse struct {
+	Connector     store.CatalogConnector `json:"connector"`
+	AuthorizeURL  string                 `json:"authorize_url,omitempty"`
+	SignInError   string                 `json:"sign_in_error,omitempty"`
+	PendingReload string                 `json:"pending_reload,omitempty"`
+}
+
+// addConnectorCatalog discovers an OAuth-protected MCP server, then records
+// its public endpoint without storing credentials. Every offered tool asks
+// for approval until an agent names a narrower rule.
+func (s *Server) addConnectorCatalog(w http.ResponseWriter, r *http.Request) {
+	var body addConnectorCatalogRequest
+	if !decode(w, r, 16<<10, &body, bodyRequired) {
+		return
+	}
+	person := principalOf(r).Person
+	if person == "" {
+		writeErr(w, http.StatusForbidden, "adding a connector requires a signed-in person")
+		return
+	}
+	if !spec.ConnectorNameRE.MatchString(body.Name) || slices.Contains(spec.ReservedConnectorNames, body.Name) {
+		writeErr(w, http.StatusBadRequest, "name must be a non-reserved connector name")
+		return
+	}
+	if len(body.Description) > 500 || strings.ContainsAny(body.Description, "\r\n\x00") {
+		writeErr(w, http.StatusBadRequest, "description must be at most 500 bytes without line breaks")
+		return
+	}
+	if err := validateCatalogScopes(body.Scopes); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, exists := s.Engine.Current().Config.Deployment.Connectors[body.Name]; exists {
+		writeErr(w, http.StatusConflict, "a connector with that name is already configured")
+		return
+	}
+	if err := validateCatalogURL(body.URL); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	hc := connectors.PublicClient(&http.Client{Timeout: 15 * time.Second})
+	if s.LinkClient != nil {
+		hc = s.LinkClient
+	}
+	md, err := connectors.Discover(r.Context(), hc, body.URL)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "OAuth discovery failed: "+err.Error())
+		return
+	}
+	if err := validateCatalogMetadata(md); err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if md.Registration == "" {
+		writeErr(w, http.StatusBadRequest, "the authorization server does not support dynamic client registration")
+		return
+	}
+	scopes := body.Scopes
+	if len(scopes) == 0 {
+		scopes = md.Scopes
+	}
+	if err := validateCatalogScopes(scopes); err != nil {
+		writeErr(w, http.StatusBadGateway, "OAuth metadata has invalid scopes: "+err.Error())
+		return
+	}
+	entry := store.CatalogConnector{Name: body.Name, URL: body.URL, Description: body.Description, Scopes: scopes, CreatedBy: person}
+	created, err := s.Store.AddCatalogConnector(r.Context(), entry)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeErr(w, http.StatusConflict, err.Error())
+		} else {
+			respond(w, nil, err)
+		}
+		return
+	}
+	entry = *created
+	if s.Engine.Reloader != nil {
+		err = s.Engine.Reloader(r.Context())
+	} else {
+		err = s.Engine.Reload(r.Context())
+	}
+	out := addConnectorCatalogResponse{Connector: entry}
+	if err != nil {
+		out.PendingReload = "connector stored; this instance will retry the config reload: " + err.Error()
+	} else if u, authErr := s.Engine.ConnectorAuthorize(r.Context(), body.Name, person); authErr != nil {
+		out.SignInError = authErr.Error()
+	} else {
+		out.AuthorizeURL = u
+	}
+	respondStatus(w, http.StatusCreated, out, nil)
+}
+
+func validateCatalogURL(raw string) error {
+	if len(raw) > 2048 {
+		return errors.New("url is over 2048 bytes")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.String() != raw {
+		return errors.New("url must be a canonical HTTPS MCP endpoint without userinfo, query or fragment")
+	}
+	return nil
+}
+
+func validateCatalogMetadata(md *connectors.Metadata) error {
+	for label, raw := range map[string]string{"issuer": md.Issuer, "resource": md.Resource, "authorization endpoint": md.Authorization,
+		"token endpoint": md.Token, "registration endpoint": md.Registration} {
+		if raw == "" && label == "registration endpoint" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
+			return errors.New("OAuth metadata has an invalid public HTTPS " + label)
+		}
+	}
+	return nil
+}
+
+func validateCatalogScopes(scopes []string) error {
+	if len(scopes) > 32 {
+		return errors.New("scopes must contain at most 32 values")
+	}
+	seen := map[string]bool{}
+	for _, scope := range scopes {
+		if scope == "" || len(scope) > 128 || strings.ContainsAny(scope, " \t\r\n\x00\"\\") {
+			return errors.New("each OAuth scope must be 1 to 128 printable non-space characters")
+		}
+		if seen[scope] {
+			return errors.New("OAuth scopes must be unique")
+		}
+		seen[scope] = true
+	}
+	return nil
 }
 
 func (s *Server) connectorTools(w http.ResponseWriter, r *http.Request) {

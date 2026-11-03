@@ -509,6 +509,9 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		}
 		if pusher == nil {
 			log.Info("ORBIT_VAPID_* not set: Web Push is off (the inbox still lists what needs attention)")
+		} else {
+			pusher.Secret = eng.Secret
+			pusher.PublicURL = func() string { return eng.Current().Config.Deployment.PublicURL }
 		}
 		// reloadNow puts the files and the database's definitions in force,
 		// for the poll below and for the API after it writes a definition.
@@ -913,7 +916,11 @@ func definitionGeneration(ctx context.Context, s *store.Store) string {
 	if err != nil {
 		return "db?"
 	}
-	return "db" + strconv.FormatInt(n, 10)
+	catalog, err := s.ConnectorCatalogGeneration(ctx)
+	if err != nil {
+		return "db?"
+	}
+	return "db" + strconv.FormatInt(n, 10) + ":connectors" + strconv.FormatInt(catalog, 10)
 }
 
 // configHash fingerprints every file under dir. A deploy's git pull swaps

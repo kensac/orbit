@@ -3,10 +3,69 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+// CatalogConnector is the non-secret configuration a person added by URL.
+type CatalogConnector struct {
+	Name        string    `json:"name"`
+	URL         string    `json:"url"`
+	Description string    `json:"description"`
+	Scopes      []string  `json:"scopes"`
+	CreatedBy   string    `json:"created_by"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// AddCatalogConnector records a validated OAuth connector. Names and URLs are
+// unique so stored token versions have one unambiguous connector key.
+func (s *Store) AddCatalogConnector(ctx context.Context, c CatalogConnector) (*CatalogConnector, error) {
+	scopes := slices.Clone(c.Scopes)
+	if scopes == nil {
+		scopes = []string{}
+	}
+	err := s.Pool.QueryRow(ctx, `INSERT INTO connector_catalog (name, url, description, scopes, created_by)
+		VALUES ($1, $2, $3, $4, $5) RETURNING created_at`, c.Name, c.URL, c.Description, scopes, c.CreatedBy).Scan(&c.CreatedAt)
+	var pgerr *pgconn.PgError
+	if errors.As(err, &pgerr) && pgerr.Code == "23505" {
+		return nil, fmt.Errorf("%w: connector name or URL is already registered", ErrConflict)
+	}
+	c.Scopes = scopes
+	return &c, err
+}
+
+// CatalogConnectors lists user-added connector configuration in stable order.
+func (s *Store) CatalogConnectors(ctx context.Context) ([]CatalogConnector, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT name, url, description, scopes, created_by, created_at FROM connector_catalog ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CatalogConnector{}
+	for rows.Next() {
+		var c CatalogConnector
+		if err := rows.Scan(&c.Name, &c.URL, &c.Description, &c.Scopes, &c.CreatedBy, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		if c.Scopes == nil {
+			c.Scopes = []string{}
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// ConnectorCatalogGeneration is the append-only catalog size used by
+// instances to notice additions made by another instance.
+func (s *Store) ConnectorCatalogGeneration(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM connector_catalog`).Scan(&n)
+	return n, err
+}
 
 // ConnectorToken is one stored version of a connector's OAuth grant; Sealed is the token encrypted by internal/connectors, never readable here.
 type ConnectorToken struct {

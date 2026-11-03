@@ -99,6 +99,9 @@ type Client struct {
 
 // New returns a client for connector name. hc's transport carries the requests; its redirects are never followed, so a credential goes only to the connector's own URL.
 func New(name string, c spec.Connector, auth Authorizer, hc *http.Client) *Client {
+	if c.CatalogManaged {
+		hc = PublicClient(hc)
+	}
 	if hc == nil {
 		hc = http.DefaultClient
 	}

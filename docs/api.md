@@ -368,6 +368,60 @@ Every open conversation's state at a glance, for a sidebar or a status page, wit
 - Records are written by database triggers, so every writer is covered; a record appears once its transaction is older than every transaction still open, so one committed late is delivered late, never skipped. The feed is read every second; `: ping` every 15 s. It never ends on its own; reconnect after a deploy.
 - A record carries no content: a client reads the board, a thread or a run's stream for that.
 
+## Attention and push
+
+Something waiting on a person is an **attention** row, written in the same transaction as the thing itself, one per thing (`key`): a pending approval (`approval`, key `action:<id>`), a run's question (`question`, `question:<message id>`), a failed run (`failure`, `failure:<run id>`) and a decision: a ticket plan to approve (`decision`, `plan:<ticket id>:<version>`) or a delegated task blocked on a person (`decision`, `action:<task:decision action id>`), and a chat run's permission request (`permission`, `approval:<approval id>`; Approvals). Whether it is still open is read from the thing at query time: the action still `pending`, the question unanswered, the plan the ticket's newest while it is `planned`, a task's decision action still `pending`, a failure until a later run of its conversation succeeds or the person writes there, a permission request while its approval is `pending` and before its `expires_at` (a decision, a withdrawal or a timeout closes it). Dismissing closes any of them for the inbox only (a dismissed approval stays pending).
+
+`GET /attention?limit=<n>` is everything open, newest first (`limit` defaults to and is at most 500):
+
+```json
+{"items": [{
+  "id": "uuid", "key": "action:uuid", "kind": "approval", "agent": "finance",
+  "run_id": "uuid", "conversation_id": "uuid", "action_id": "uuid",
+  "message_id": null, "ticket_id": null, "plan_version": null, "approval_id": null,
+  "title": "finance wants to webhook:pay", "detail": "<the action's reason>",
+  "push": true, "created_at": "...", "link": "/orbit/c/<conversation_id>#action-<action_id>"}]}
+```
+
+`title` is the agent's name and a fixed phrase, never anything a run wrote (a permission request: `<agent> needs permission`, or `<agent> has a plan to approve` for a plan; never the tool or its input). `detail` is the question, the action's reason, the run's error, the ticket's title or the permission request's tool, for a signed-in inbox only. `approval_id` is set on a permission request, `null` otherwise. `push` is false for a run a person's message woke (`engine.Attended`): listed, not pushed. A permission request is the exception, `push: true` although only such a run asks one: its turn waits until the person answers, so it is pushed unless the person is looking at the conversation (Presence, below). `link` is where to act, under `ORBIT_PUSH_LINK_BASE`: the conversation, with `#action-<id>` for an approval or a task's decision, `#message-<id>` for a question, `#approval-<approval id>` for a permission request. `POST /attention/{id}/dismiss` is `{"ok": true}` (repeating it is fine; 404 for an unknown id).
+
+**Web Push.** Control sends each attention row with `push` set to every registered device, except those of a person looking at its conversation (Presence, below), straight to the browser's push service (RFC 8291 encryption, RFC 8292 VAPID; `internal/webpush`). The payload is only `{"title", "url", "tag", "kind", "count"}`, plus `actions` on a single pending action or permission request (Push actions, below): the title above and the link. Rows that arrive within 20 s of the previous push (`push.Gap`) wait and go out together as one summary (`"3 things need you: finance, ops"`, url `<base>/inbox`, tag `orbit-inbox`); a row that closed before its turn, or waited more than a day (`push.MaxAge`), is not sent. `tag` and the `Topic` header are the row's key, so a device and the push service each keep one notification per thing. A send that fails is not retried; the inbox still lists it.
+
+**Push actions.** A push of one pending action (`kind: "approval"`) or one permission request (`kind: "permission"`) carries buttons; a summary, a question, a failure or a decision carries none:
+
+```json
+{"title": "finance wants to webhook:pay", "url": "/orbit/c/<conversation_id>#action-<action_id>", "tag": "action:<action_id>",
+ "kind": "approval", "count": 1,
+ "actions": [{"action": "approve", "title": "Approve", "url": "https://orbit.kanishksachdev.com/api/v1/push/act?t=<token>"},
+             {"action": "reject", "title": "Reject", "url": "https://orbit.kanishksachdev.com/api/v1/push/act?t=<token>"},
+             {"action": "open", "title": "Open"}]}
+```
+
+A permission request's buttons are `approve` (Approve: allowed once, `scope: "once"`), `deny` (Deny) and `open`. The service worker shows them as `showNotification(title, {tag, data: payload, actions: payload.actions.map(({action, title}) => ({action, title}))})`; on `notificationclick`, for `open` or a click on the body it opens `url`, and for any other action it POSTs to that action's `url` with no body and no headers (a CORS simple request: no preflight, and the response carries `Access-Control-Allow-Origin: *`), with no session or bearer token, then closes the notification. Buttons are absent when `public_url` is unset.
+
+- `POST /api/v1/push/act?t=<token>` decides as the person whose device was pushed (the subscription's `author`): `200 {"ok": true, "decision": "approve" | "reject" | "deny"}`. The token is signed (keyed from the operator token, `secret.PushAction`), names one action or approval, the decision, the person and an expiry a day after the push (`push.MaxAge`), and carries a nonce every button of one notification shares: the first use of any of them consumes it, so one notification decides at most once. `403` for a token that is not valid or has expired, `409` `"this notification was already acted on"` for a used nonce, and `409` (`"no longer in a state that allows this"`) when the thing was decided, withdrawn or expired first (the nonce is then used too). An approved action is executed as one approved in the app.
+- **iOS and iPadOS Safari show no action buttons** on web notifications: a tap opens `url`, so the person decides in the app. macOS Safari shows at most the first two actions in a menu. Chrome and Edge show up to two buttons (`Notification.maxActions`) next to the body, so `approve` and `reject` or `deny`; `open` is the body's click.
+
+**Close pushes.** When a row that was pushed closes (decided anywhere, answered, withdrawn, expired, dismissed), control sends `{"title": "", "url": "", "tag": "<the same tag>", "kind": "close", "count": 0}` with the same `Topic`, to the devices of each person it went to: the worker closes `getNotifications({tag})`, and a push service still holding the original for an offline device replaces it. A row pushed as itself closes with its key's tag; a summary (`orbit-inbox`) is closed once every row summarised to that person has closed. Each notification is closed once, and only within a day of its push (`push.MaxAge`). This is best effort: **devices on Apple's push service (`*.push.apple.com`: iOS, iPadOS and macOS Safari) get no close push**, because Safari counts a push that shows no notification against the subscription and revokes it after a few, so there the notification stays until it is tapped; Firefox counts such pushes against a quota that a visit to the app resets; Chrome may show its own "updated in the background" notice once its allowance of silent pushes is spent.
+
+- `GET /push` is `{"enabled": true, "public_key": "<VAPID public key, base64url>"}` (`enabled: false`, `public_key: null` without keys).
+- `POST /push/subscriptions` takes a browser's `PushSubscription.toJSON()` (`{"endpoint", "expirationTime", "keys": {"p256dh", "auth"}}`; `expirationTime` is ignored) and an optional `label`, and returns `201 {"id": "uuid"}`. The endpoint must be https on a known push service (FCM, Apple, Windows, Mozilla; `push.AllowedEndpoint`), else 400. The same endpoint again refreshes its row. 503 when push is not configured.
+- `GET /push/subscriptions` is the caller's active devices (`id`, `endpoint`, `author`, `label`, `created_at`, `last_sent_at`, `last_error`, `failures`; never the keys); every device for the operator token.
+- `DELETE /push/subscriptions` with `{"endpoint": "..."}` stops pushing to it (404 when none is active). A push service answering 404 or 410 revokes it too.
+- `POST /push/test` sends `orbit notifications are on` to the caller's devices now, ignoring the gap: `{"sent": <devices that accepted it>}`.
+
+**Presence.** `POST /presence` `{"conversation_id": "uuid"}` says the caller's app is showing that conversation now; `{"conversation_id": null}` says it shows none. It returns `{"ok": true}`; a `conversation_id` that is not a UUID is `400`, an unknown one `404`, and the body is required (`{}` is the same as `null`). A push for a conversation skips every device of the person whose latest heartbeat named it less than 60 s ago (`push.Presence`); in a summary only that conversation's rows are left out, and the person's inbox and thread still show them. Unknown or stale presence never silences a push: a person who never sent one, whose latest named another conversation or `null`, or whose latest is 60 s old or more, is pushed as usual. The person is the token's `preferred_username` (`operator` for the operator token), the same as a subscription's `author`.
+
+- A client sends it every 30 s while a page is visible (`document.visibilityState === "visible"`), with the conversation it shows or `null`, and at once when that changes; when the page is hidden or closes, it sends `null` (`navigator.sendBeacon` cannot carry the bearer token, so a `fetch` with `keepalive: true`). A missed heartbeat costs nothing: two in a row and pushes resume.
+- Presence is one row per person, the latest heartbeat replacing the one before, stored in Postgres so every instance (a rollout runs two) reads the same. Two devices of one person showing different conversations overwrite each other, so a push can reach a person who is looking at its conversation on another device; it is never held back from one who is not.
+
+| variable | meaning |
+|---|---|
+| `ORBIT_VAPID_PUBLIC_KEY`, `ORBIT_VAPID_PRIVATE_KEY` | the VAPID pair, base64url (`orbit vapid` prints a new one). Both unset: push is off, the inbox still works. Set but invalid or mismatched: `serve` refuses to start. Rotating the pair invalidates every subscription (browsers bind them to the key), so devices subscribe again. |
+| `ORBIT_VAPID_SUBJECT` | the contact push services may use, `mailto:` or `https:`. Required with the keys. |
+| `ORBIT_PUSH_LINK_BASE` | the app path links start with, default `/orbit` (the portfolio's chat). |
+
+
 ## Uploads
 
 Files a person gives an agent, as Claude Code takes a file: uploaded into a conversation, then carried by a message. The run that reads the message finds each file in its working directory at `uploads/<name>` and is told so in its prompt (`attached: uploads/<name> (<type>, <n> bytes)`); an image is readable with Claude Code's `Read`, as a picture. A file is at most 64 MiB (`store.MaxUploadBytes`), and kept whole (`uploads`).
@@ -761,7 +815,7 @@ Both types are denied unless the agent names a rule.
 
 MCP servers orbit calls for agents (orbit.yaml `connectors`, docs/agents/configuration.md, Connectors). No response carries a credential.
 
-`GET /connectors` is every configured connector. A package-backed stdio connector has `transport: "stdio"`, no `url`, `auth: "none"`, and no token; its package path and digest are not returned:
+`GET /connectors` is every configured connector; catalog entries also include `catalog_added: true` and their `default_tool_rule` (`approve`). A package-backed stdio connector has `transport: "stdio"`, no `url`, `auth: "none"`, and no token; its package path and digest are not returned:
 
 ```json
 {"connectors": [{"name": "housing-watch", "transport": "http", "url": "https://.../mcp", "description": "...",
@@ -775,6 +829,8 @@ MCP servers orbit calls for agents (orbit.yaml `connectors`, docs/agents/configu
 `GET /connectors/{name}/tools` lists the server's tools now, `{"tools": [{"name": "find_listings", "description": "...", "inputSchema": {}, "read_only": true, "write": false}]}`; `read_only` is the server's `readOnlyHint` for HTTP connectors and true for package-backed stdio tools, whose description and schema come from the pinned manifest; `write` whether the tool is in `write_tools` (so it waits for approval unless an agent's rules say otherwise). `404` for an unknown connector, `502` when the server cannot be listed (unreachable, not signed in, or the pinned package fails validation).
 
 `POST /connectors/{name}/authorize` takes no body and starts the caller's sign-in to an `oauth` connector (the operator token signs in as `operator`): orbit reads the server's protected resource and authorization server metadata, registers itself as a client unless `auth.client_id` is set, and returns `{"authorize_url": "https://..."}`, which the client opens in a browser within 15 minutes. The authorization server sends the browser to `GET /api/v1/connectors/oauth/callback`, which takes no token (its sealed `state` is the credential), stores the token as the connector's next version and shows a page saying it is connected, or why not. `404` for an unknown connector, `409` for one that is not `oauth`, `502` when discovery or registration fails or the host has no `ORBIT_CONNECTOR_KEY`.
+
+`GET /connectors/catalog` lists connector endpoint records added by a person. `POST /connectors/catalog` requires a signed-in person and takes `{"name":"acme","url":"https://service.example/mcp","description":"...","scopes":["read"]}`; `scopes` is optional and defaults to the OAuth metadata's advertised scopes. The endpoint must be a canonical HTTPS URL. Orbit checks the protected-resource and authorization-server metadata and requires support for dynamic client registration before storing it. Metadata and subsequent OAuth requests are restricted to public IP addresses and redirects are refused. The record contains the URL, description, scopes, and the person who added it, never credentials. On success the `201` response includes `connector`, and either `authorize_url`, `sign_in_error`, or `pending_reload`. Open the authorization URL to sign in. Newly added connectors are available in agent definitions; all their tools require approval unless an agent explicitly sets a tool rule. `409` means the name or URL is already registered.
 
 **Calls.** A run's connector calls are events (`orbit.connector`, payload by `step`): `list` (`connector`, `tools`, `offered`, `approve`: the tools waiting for approval, `skipped`: names orbit cannot offer; or `error` when the connector was left out), `call` (`connector`, `tool`, `tool_use_id`, `rule`, `duration_ms`, `is_error`, `result`: the whole MCP result as a bounded value, `file` when it was written to the run's inputs; or `error`), `proposed` (`action_id`) and `waiting` (`action_id`, `tool_use_id`, a call waiting for its person in the chat). Each run stores the tools it was offered as the artifact `connectors/<name>.tools.json`, and each result written to a file as an artifact of that path.
 
