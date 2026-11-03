@@ -164,3 +164,16 @@ func TestParseLineAndResult(t *testing.T) {
 		t.Error("a broken result parsed")
 	}
 }
+
+func TestResumeAtCutsTheSession(t *testing.T) {
+	args, err := Args(Transport{Resume: "s1", ResumeAt: "u1"}, []string{"--model", "opus"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(args, " "); !strings.Contains(got, "--resume s1 --fork-session --resume-session-at u1 --model opus") {
+		t.Fatalf("args = %s", got)
+	}
+	if _, err := Args(Transport{ResumeAt: "u1"}, nil); err == nil {
+		t.Fatal("resume-at without a session was accepted")
+	}
+}

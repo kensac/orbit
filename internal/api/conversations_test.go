@@ -141,3 +141,35 @@ func TestAConversationsModelAndEffort(t *testing.T) {
 		t.Fatalf("unknown conversation = %d", code)
 	}
 }
+
+func TestForkOverTheAPI(t *testing.T) {
+	v := newEnv(t, nil)
+	kanishk := v.person("kanishk")
+	base := v.srv.URL + "/api/v1"
+	_, r := call(t, "POST", base+"/agents/a/conversations", kanishk, `{"body":"Remember APPLE","wake":false}`)
+	id, msg := r["conversation_id"].(string), r["message_id"].(string)
+	code, r := call(t, "POST", base+"/conversations/"+id+"/fork", kanishk, `{"message_id":"`+msg+`","client_request_id":"f1"}`)
+	if code != 201 {
+		t.Fatalf("fork = %d %v", code, r)
+	}
+	c := r["conversation"].(map[string]any)
+	from := c["forked_from"].(map[string]any)
+	if c["id"] == id || from["conversation_id"] != id || from["message_id"] != msg || c["title"] != "Remember APPLE (fork)" {
+		t.Fatalf("fork = %v", c)
+	}
+	if _, again := call(t, "POST", base+"/conversations/"+id+"/fork", kanishk, `{"message_id":"`+msg+`","client_request_id":"f1"}`); again["conversation"].(map[string]any)["id"] != c["id"] {
+		t.Fatalf("retried fork = %v", again)
+	}
+	if code, _ := call(t, "POST", base+"/conversations/"+id+"/fork", kanishk, `{}`); code != 400 {
+		t.Fatalf("no message = %d", code)
+	}
+	if code, _ := call(t, "POST", base+"/conversations/"+c["id"].(string)+"/fork", kanishk, `{"message_id":"`+msg+`"}`); code != 404 {
+		t.Fatalf("another conversation's message = %d", code)
+	}
+	if code, _ := call(t, "POST", base+"/conversations/"+id+"/fork", kanishk, `{"message_id":"nope"}`); code != 400 {
+		t.Fatalf("a bad id = %d", code)
+	}
+	if code, r := call(t, "GET", base+"/conversations/"+id, kanishk, ""); code != 200 || r["conversation"].(map[string]any)["forked_from"] != nil {
+		t.Fatalf("the parent = %d %v", code, r)
+	}
+}
