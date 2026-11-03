@@ -22,6 +22,7 @@ var referenceTables = map[string]any{
 	"`endpoints.<name>.params.<name>`":  EndpointParam{},
 	"`runners.<name>`":                  RunnerSpec{},
 	"`github`":                          GitHub{},
+	"`github.box`":                      GitHubBox{},
 	"`build`":                           Build{},
 	"`build.repositories.<owner/name>`": BuildRepo{},
 	"`sandbox` (orbit.yaml)":            SandboxService{},

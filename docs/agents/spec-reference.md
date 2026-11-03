@@ -97,6 +97,17 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `repositories` | list of `owner/name` | required | The repositories tickets and `github:merge` may target; every token is limited to one. |
 | `read_repositories` | list of `owner/name` | none | The repositories an agent's `repos` may name: orbit mirrors them and mints read tokens for them. Reading one never permits a ticket or a merge there (configuration.md, Repositories). |
 | `comment_repositories` | list of `owner/name` | none | Where `github:comment` may post, with an `issues: write` token per comment. Commenting never permits a push, a ticket or a merge. |
+| `box` | map (below) | token on | The GitHub token orbit keeps in agents’ boxes for the person’s gh and git there (docs/workspace.md, GitHub in the box). |
+
+### `github.box`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `token` | bool | `true` | `false` writes no token into boxes and removes the one orbit wrote. |
+| `owner` | GitHub account | owner of the first configured repository | Whose installation the token is for. |
+| `repositories` | list of `owner/name` | installation repositories after exclusions | Repositories the token reaches, all under one owner. |
+| `exclude` | list of globs | `[*/*-config]` | Installation repositories excluded when `repositories` is empty. |
+| `permissions` | map of permission to `read` or `write` | contents and pull requests write, checks and statuses read | Token permissions. `workflows` is never allowed. |
 
 ### `build`
 

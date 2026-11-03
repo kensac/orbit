@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/boxkeep"
+	"github.com/kensac/orbit/internal/github"
+	"github.com/kensac/orbit/internal/github/githubtest"
 	"github.com/kensac/orbit/internal/sandbox"
+	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/testdb"
 )
@@ -37,8 +40,12 @@ func TestParsePollUsage(t *testing.T) {
 type fakeBoxes struct {
 	mu      sync.Mutex
 	running map[string][]string
+	ids     map[string]string
 	polled  []string
 	at      time.Time
+	// tokens are the gh tokens written, "agent=token", and "agent=" for a
+	// clear.
+	tokens []string
 }
 
 func (f *fakeBoxes) server(t *testing.T) *sandbox.Client {
@@ -48,7 +55,7 @@ func (f *fakeBoxes) server(t *testing.T) *sandbox.Client {
 		defer f.mu.Unlock()
 		st := sandbox.BoxStatus{Name: r.PathValue("name"), State: sandbox.BoxNone}
 		if mounts, ok := f.running[r.PathValue("name")]; ok {
-			st.State, st.Accounts = sandbox.BoxRunning, mounts
+			st.State, st.Accounts, st.ID = sandbox.BoxRunning, mounts, f.ids[r.PathValue("name")]
 		}
 		_ = json.NewEncoder(w).Encode(st)
 	})
@@ -59,6 +66,19 @@ func (f *fakeBoxes) server(t *testing.T) *sandbox.Client {
 		pct := 9.0
 		_ = json.NewEncoder(w).Encode(sandbox.AccountUsage{Source: sandbox.UsagePoll, ObservedAt: &f.at,
 			Windows: []sandbox.UsageWindow{{Window: "five_hour", UsedPercentage: &pct}}})
+	})
+	mux.HandleFunc("PUT /v1/boxes/{name}/gh-token", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.tokens = append(f.tokens, r.PathValue("name")+"="+string(b))
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("DELETE /v1/boxes/{name}/gh-token", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.tokens = append(f.tokens, r.PathValue("name")+"=")
+		w.WriteHeader(http.StatusNoContent)
 	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+sbToken {
@@ -122,4 +142,80 @@ func TestPollOnce(t *testing.T) {
 
 func storeLogin() store.AccountLogin {
 	return store.AccountLogin{LoggedIn: true, Email: "k@example.com"}
+}
+
+// TestGHOnce keeps the box token in running box agents' boxes: written
+// once, again when the box is recreated or GHRewrite has passed, minted at
+// most every ten minutes, and removed once when switched off.
+func TestGHOnce(t *testing.T) {
+	s := testdb.New(t)
+	ctx := context.Background()
+	_, _ = s.EnsureBox(ctx, "orbit")
+	_, _ = s.EnsureBox(ctx, "idle")
+	_, _ = s.EnsureBox(ctx, "retired")
+	f := &fakeBoxes{running: map[string][]string{"orbit": nil, "retired": nil}, ids: map[string]string{"orbit": "c1", "retired": "c9"}}
+	client := f.server(t)
+	gh := githubtest.New(t)
+	gh.InstallationRepos = []string{"kensac/orbit", "kensac/hetzner-vps-config"}
+	now := time.Date(2026, 11, 2, 7, 0, 0, 0, time.UTC)
+	on := true
+	cfg := &spec.GitHub{AppID: githubtest.AppID, Repositories: []string{"kensac/orbit"}, Box: &spec.GitHubBox{Token: &on}}
+	k := &boxkeep.Keeper{Store: s, Boxes: func() (*sandbox.Client, error) { return client, nil },
+		Agents: func() []string { return []string{"orbit", "idle"} },
+		GitHub: func() *spec.GitHub { return cfg },
+		App: func(*spec.GitHub) (*github.App, error) {
+			return &github.App{ID: githubtest.AppID, Key: githubtest.Key, BaseURL: gh.URL(), HTTP: gh.Srv.Client(), Now: time.Now}, nil
+		},
+		Now: func() time.Time { return now }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	written := func() []string {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return append([]string(nil), f.tokens...)
+	}
+	mints := func() int {
+		gh.Mu.Lock()
+		defer gh.Mu.Unlock()
+		n := 0
+		for _, r := range gh.TokenReqs {
+			if r["repositories"] != nil {
+				n++
+			}
+		}
+		return n
+	}
+	k.Once(ctx)
+	if got := written(); len(got) != 1 || got[0] != "orbit="+githubtest.Token || mints() != 1 {
+		t.Fatalf("first round: %v, %d mints", got, mints())
+	}
+	gh.Mu.Lock()
+	if repos := gh.TokenReq["repositories"].([]any); len(repos) != 1 || repos[0] != "orbit" {
+		t.Fatalf("the box token reaches %v", repos)
+	}
+	gh.Mu.Unlock()
+	now = now.Add(time.Minute)
+	k.Once(ctx)
+	if len(written()) != 1 {
+		t.Fatal("written again within GHRewrite")
+	}
+	// A recreated box gets the token at once, without a new mint.
+	f.mu.Lock()
+	f.ids["orbit"] = "c2"
+	f.mu.Unlock()
+	k.Once(ctx)
+	if len(written()) != 2 || mints() != 1 {
+		t.Fatalf("recreated box: %v, %d mints", written(), mints())
+	}
+	now = now.Add(boxkeep.GHRewrite)
+	k.Once(ctx)
+	if len(written()) != 3 || mints() != 2 {
+		t.Fatalf("after GHRewrite: %v, %d mints", written(), mints())
+	}
+	// Switched off: removed once from each running box.
+	off := false
+	cfg.Box.Token = &off
+	k.Once(ctx)
+	k.Once(ctx)
+	if got := written(); len(got) != 4 || got[3] != "orbit=" {
+		t.Fatalf("switched off: %v", got)
+	}
 }

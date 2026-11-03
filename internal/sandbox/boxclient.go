@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 )
 
@@ -302,4 +303,38 @@ func (c *Client) usage(ctx context.Context, method, name, slot string, rest ...s
 		err = c.boxCall(ctx, method, p, &u)
 	}
 	return u, err
+}
+
+// WriteGHToken puts a GitHub installation token at /run/orbit/gh-token in a
+// running box, for its gh and git.
+func (c *Client) WriteGHToken(ctx context.Context, name, token string) error {
+	return c.ghToken(ctx, http.MethodPut, name, strings.NewReader(token))
+}
+
+// ClearGHToken removes it.
+func (c *Client) ClearGHToken(ctx context.Context, name string) error {
+	return c.ghToken(ctx, http.MethodDelete, name, nil)
+}
+
+func (c *Client) ghToken(ctx context.Context, method, name string, body io.Reader) error {
+	p, err := boxPath(name, "gh-token")
+	if err != nil {
+		return err
+	}
+	ctype := ""
+	if body != nil {
+		ctype = "text/plain"
+	}
+	resp, err := c.do(ctx, method, PathBoxes+p, body, ctype)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNoBox
+	}
+	if resp.StatusCode >= 300 {
+		return readError(resp)
+	}
+	return nil
 }

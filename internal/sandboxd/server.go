@@ -123,6 +123,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+sandbox.PathBoxes+"/{name}/accounts/{slot}", s.accountStatus)
 	mux.HandleFunc("GET "+sandbox.PathBoxes+"/{name}/accounts/{slot}/usage", s.accountUsage)
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/accounts/{slot}/usage/poll", s.accountPoll)
+	mux.HandleFunc("PUT "+sandbox.PathBoxes+"/{name}/gh-token", s.ghTokenPut)
+	mux.HandleFunc("DELETE "+sandbox.PathBoxes+"/{name}/gh-token", s.ghTokenDelete)
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/tty", s.tty)
 	mux.HandleFunc("GET "+sandbox.PathBoxes+"/{name}/sessions/{session}", s.sessionExists)
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/sessions/{session}/kill", s.sessionKill)
