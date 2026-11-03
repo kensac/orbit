@@ -14,6 +14,8 @@ const (
 	WorkspaceUploadURL = "orbit workspace upload url"
 	// MCPOAuth keys the MCP OAuth proxy's sealed state and codes (internal/api oauth.go).
 	MCPOAuth = "orbit mcp oauth"
+	// PushAction keys the action links in a push (Approve, Reject, Deny; internal/push actions.go).
+	PushAction = "orbit push action"
 	// ConnectorTokens keys connector tokens at rest and a connector sign-in's state (internal/connectors). Its root is ORBIT_CONNECTOR_KEY, not the operator token, so rotating the operator token signs no connector out.
 	ConnectorTokens = "orbit connector tokens"
 	// TemplateLink keys a signed templates link (docs/api.md, Sharing templates).

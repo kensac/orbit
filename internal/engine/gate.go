@@ -63,6 +63,25 @@ func (e *Engine) budgetGate(ctx context.Context, a *spec.Agent, c *store.Claimed
 
 func (g *gateSkip) Error() string { return "skipped by gate " + g.gate + ": " + g.summary }
 
+// quietHours suppresses a first scheduled attempt when its fire time or
+// claim time falls inside the agent's local quiet interval.
+func quietHours(a *spec.Agent, c *store.ClaimedRun, now time.Time) *gateSkip {
+	if a == nil || a.QuietHours == nil || c.Trigger != "schedule" || c.Attempt != 1 {
+		return nil
+	}
+	loc := a.Location()
+	if c.ScheduledFor != nil && a.QuietHours.Contains(*c.ScheduledFor, loc) {
+		return &gateSkip{gate: store.GateQuietHours, summary: fmt.Sprintf(
+			"the scheduled fire at %s falls inside quiet hours %s-%s",
+			c.ScheduledFor.In(loc).Format("2006-01-02 15:04 MST"), a.QuietHours.Start, a.QuietHours.End)}
+	}
+	if a.QuietHours.Contains(now, loc) {
+		return &gateSkip{gate: store.GateQuietHours, summary: fmt.Sprintf(
+			"the run was claimed during quiet hours %s-%s local time", a.QuietHours.Start, a.QuietHours.End)}
+	}
+	return nil
+}
+
 // gated reports whether a run's gates apply: a scheduled or webhook run
 // with no person's message waiting. A message, a manual run, a
 // continuation, a build and a recovered attempt always reach the backend,

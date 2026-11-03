@@ -157,6 +157,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `description` | string | none | What the server is for, shown to the model. |
 | `auth` | map | `kind: none` | How orbit signs the server's requests (below). |
 | `write_tools` | list of tool names | none | The server's tools that change the world: each waits for a person unless the agent's rules say otherwise. Every other tool runs at once. |
+| `default_tool_rule` | `auto` or `approve` | none | Internal deployment setting used for person-added connectors; an explicit agent tool rule takes precedence. |
 
 ### `connectors.<name>.auth`
 
@@ -239,6 +240,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `runner` | runner name | `defaults.runner` | The backend. |
 | `timeout` | duration | `defaults.timeout` | How long one run may take. |
 | `budget` | map (below) | none | API-equivalent cost and runner-started run limits per local period; scheduled runs are skipped once a limit is reached. |
+| `quiet_hours` | map (below) | none | Suppress a scheduled run if its fire or claim time is within the local interval. |
 | `triggers` | list | none | When the agent wakes on its own (below). |
 | `sources` | list | none | Data orbit fetches before a run (below). |
 | `transforms` | list | none | Code over a source before the model sees it (below). |
@@ -467,6 +469,15 @@ claude-code runners only.
 | `idle` | duration | `6h` | The resume window, at most `24h`. |
 | `live` | duration | `0` (none) | Keep one process open this long after a message-started run and feed later runs into it; at most `24h` and at most `idle`. Linux memory pressure closes idle processes sooner. |
 | `stall` | duration | `10m` | A chat or live turn with no line from the CLI (keep_alive included) for this long, and no tool call running, is interrupted and the run handed back to continue the session (ARCHITECTURE.md, Stall watchdog); `1m` to `24h`. Needs no `resume`. |
+
+### `quiet_hours`
+
+Uses the agent's `timezone`. Start is inclusive and end is exclusive. If end is earlier than start, the interval crosses midnight. Scheduled runs whose fire time or first claim time is within the interval are skipped before sources or a backend are called; manual runs and messages are unaffected. Times are wall-clock across daylight saving changes.
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `start` | local time `HH:MM` | required | The first minute in the quiet interval. |
+| `end` | local time `HH:MM` | required | The first minute outside the quiet interval; must differ from start. |
 
 ### `learn`
 

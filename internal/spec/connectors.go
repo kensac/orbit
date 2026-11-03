@@ -20,6 +20,11 @@ type Connector struct {
 	Auth        ConnectorAuth `yaml:"auth,omitempty" json:"auth,omitempty"`
 	// WriteTools are the server's tools that change the world. A call to one waits for a person unless the agent's rules say otherwise; every other tool runs at once.
 	WriteTools []string `yaml:"write_tools,omitempty" json:"write_tools,omitempty"`
+	// DefaultToolRule overrides the static connector default for every tool.
+	// The catalog uses approve until a person creates a narrower agent rule.
+	DefaultToolRule Rule `yaml:"default_tool_rule,omitempty" json:"default_tool_rule,omitempty"`
+	// CatalogManaged marks a connector loaded from the person-added catalog.
+	CatalogManaged bool `yaml:"-" json:"catalog_managed,omitempty"`
 }
 
 // ConnectorAuth is how orbit signs a connector's requests.
@@ -61,6 +66,9 @@ var ReservedConnectorNames = []string{"orbit"}
 // ConnectorToolRE is a tool name orbit offers: the Messages API's tool name alphabet. A tool named otherwise is not offered.
 var ConnectorToolRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
+// ConnectorNameRE validates names used for server definitions and catalog entries.
+var ConnectorNameRE = regexp.MustCompile(AgentNamePattern)
+
 // ConnectorRuleKey is the actions key of one connector tool's rule.
 func ConnectorRuleKey(conn, tool string) string { return ConnectorRulePrefix + conn + ":" + tool }
 
@@ -81,6 +89,9 @@ func ParseConnectorAction(typ string) (conn, tool string, ok bool) {
 func (a *Agent) ToolRule(c Connector, conn, tool string) Rule {
 	if r, ok := a.Actions[ConnectorRuleKey(conn, tool)]; ok {
 		return r
+	}
+	if c.DefaultToolRule != "" {
+		return c.DefaultToolRule
 	}
 	if slices.Contains(c.WriteTools, tool) {
 		return RuleApprove
@@ -110,6 +121,9 @@ func (c *Config) validateConnectors() []error {
 		}
 		if !nameRE.MatchString(n) {
 			at("name must match %s", nameRE)
+		}
+		if cn.DefaultToolRule != "" && cn.DefaultToolRule != RuleApprove && cn.DefaultToolRule != RuleAuto {
+			at("default_tool_rule must be auto or approve")
 		}
 		if slices.Contains(ReservedConnectorNames, n) {
 			at("name is orbit's own MCP server's")
