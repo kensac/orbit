@@ -81,6 +81,19 @@ func (s *Store) LatestSession(ctx context.Context, conversationID string) (*Prio
 	return &p, nil
 }
 
+// ConversationSeed returns the session id a conversation started from an imported session resumes (SessionSeed), while none of its runs has succeeded with a session of its own; "" otherwise. Until then every run of it continues the seed; after that, its own session.
+func (s *Store) ConversationSeed(ctx context.Context, conversationID string) (string, error) {
+	var seed string
+	err := s.Pool.QueryRow(ctx, `SELECT c.seed_session FROM conversations c
+		WHERE c.id = $1 AND c.seed_session IS NOT NULL
+		  AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.conversation_id = c.id AND r.status = 'succeeded' AND r.session_id IS NOT NULL)`,
+		conversationID).Scan(&seed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return seed, err
+}
+
 // ---------------------------------------------------------------- continuations
 
 // ErrChainLimit is returned when a continuation would make a chain longer

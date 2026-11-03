@@ -488,7 +488,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 				Meta: map[string]any{"delivery_id": d.DeliveryID, "event": d.Event, "trigger": d.TriggerName}}
 		}
 	}
-	vars := sources.Vars(now)
+	vars := sources.Vars{Now: now, Trigger: c.Trigger}
 	var inputs []runner.Input
 	if rec != nil {
 		// The session read these; it continues on exactly them.
@@ -919,6 +919,9 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			} else {
 				pa.Params = p
 			}
+		}
+		if act.Type == actions.TemplateCreateType && pa.Error == "" {
+			e.templateOutcome(ctx, c.ConversationID, &pa, &o.Questions)
 		}
 		if len(pa.Params) == 0 {
 			pa.Params = json.RawMessage(`{}`)
