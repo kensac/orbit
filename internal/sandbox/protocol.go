@@ -38,6 +38,11 @@ const (
 // only writable path that outlives the process.
 const WorkDir = "/work"
 
+// ExtensionWorkDir is a separate volume target that is absent from the runner
+// image. Docker creates it root-owned, so the fixed unprivileged extension
+// identity cannot add files beside its read-only package and inputs.
+const ExtensionWorkDir = "/orbit-extension"
+
 // Limits both sides hold. MaxArchiveBytes bounds the workdir in either
 // direction: orbit's own checkout is a few MB, so 256 MiB leaves room for a
 // repository with assets and still stops a sandbox from filling sandboxd's
