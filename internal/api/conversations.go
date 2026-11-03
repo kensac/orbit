@@ -2,10 +2,13 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 )
@@ -54,6 +57,8 @@ func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
 		// Agent is POST /conversations's: the agent to talk to, the
 		// built-in general agent when empty.
 		Agent string `json:"agent"`
+		// FromSession starts the conversation from an imported session (its orbit id or its source's session id): its first runs resume that session.
+		FromSession string `json:"from_session"`
 	}
 	if !decode(w, r, 64<<10, &body, bodyOptional) {
 		return
@@ -74,9 +79,25 @@ func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
 	if body.Wake != nil {
 		wake = *body.Wake
 	}
+	var seed *store.SessionSeed
+	if body.FromSession != "" {
+		cfg := s.Engine.Current().Config
+		if cfg.Deployment.Runners[a.Runner].Kind != "claude-code" || a.Session == nil || !a.Session.Resume {
+			respond(w, nil, fmt.Errorf("%w: agent %s does not resume Claude Code sessions (it needs a claude-code runner and session.resume)", store.ErrInvalid, a.Name))
+			return
+		}
+		var err error
+		if seed, _, err = s.Engine.SessionSeed(r.Context(), body.FromSession); err != nil {
+			if errors.Is(err, engine.ErrSeedTooLarge) {
+				err = fmt.Errorf("%w: %w", store.ErrInvalid, err)
+			}
+			respond(w, nil, err)
+			return
+		}
+	}
 	res, replayed, err := s.Store.CreateConversation(r.Context(), store.NewConversation{
 		Agent: a.Name, SpecSHA: a.SHA, Title: body.Title, Body: strings.TrimSpace(body.Body),
-		Author: actor(r, body.Author), Wake: wake, ClientID: body.ClientRequestID,
+		Author: actor(r, body.Author), Wake: wake, ClientID: body.ClientRequestID, Seed: seed,
 	})
 	if err == nil && res.RunID != "" && !replayed {
 		s.Wake()
