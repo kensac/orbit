@@ -675,7 +675,10 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if !a.Chat {
 		instructor = ""
 	}
-	now := (rule == spec.RuleAuto || (rule == spec.RuleApprove && instructor != "")) && !e.Outbox && v.Type != "continue"
+	// Workers leave credentialed actions for control. page:publish only
+	// writes validated content to this conversation's action row; executing
+	// it here lets the same attended turn receive its page reference.
+	now := (rule == spec.RuleAuto || (rule == spec.RuleApprove && instructor != "")) && (!e.Outbox || v.Type == actions.PagePublishType) && v.Type != "continue"
 	if now && v.Type == actions.DefineType && len(e.defineWidening(ctx, v.Params)) > 0 {
 		// A change that widens an agent waits for a person's decision on
 		// the change itself, whatever the rule (succeed holds it).
