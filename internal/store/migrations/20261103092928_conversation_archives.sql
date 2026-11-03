@@ -19,11 +19,13 @@ CREATE INDEX conversation_archives_latest
     ON conversation_archives (target_agent, source_agent, source_conversation_id, version DESC);
 
 -- Archive rows are historical evidence. A changed import adds a version.
+-- +goose StatementBegin
 CREATE FUNCTION orbit_conversation_archive_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     RAISE EXCEPTION 'conversation archive rows are append-only';
 END;
 $$;
+-- +goose StatementEnd
 CREATE TRIGGER conversation_archives_immutable
     BEFORE UPDATE OR DELETE ON conversation_archives
     FOR EACH ROW EXECUTE FUNCTION orbit_conversation_archive_immutable();
