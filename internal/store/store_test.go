@@ -202,7 +202,7 @@ func TestOutcomeAndOpenQuestions(t *testing.T) {
 	mem := "baseline: 2700"
 	ids, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Attempt: 1, Status: "succeeded", Summary: "ok"}, store.Outcome{
 		Memory:    &mem,
-		Questions: []string{"Is the Enterprise charge a deductible?"},
+		Questions: []store.Question{{Body: "Is the Enterprise charge a deductible?"}},
 		Actions: []store.ProposedAction{
 			{Type: "notify", Params: json.RawMessage(`{}`), Rule: "auto"},
 			{Type: "webhook:x", Params: json.RawMessage(`{}`), Rule: "approve"},
