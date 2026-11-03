@@ -125,3 +125,11 @@ func TestAConversationStartsFromAnImportedSession(t *testing.T) {
 		t.Fatalf("conversation = %v", c)
 	}
 }
+
+func TestLearningASessionNeedsTheBuiltinAgent(t *testing.T) {
+	v := newEnv(t, nil)
+	pub, tok := v.srv.URL+"/api/v1", v.person("kanishk")
+	if code, out := call(t, "POST", pub+"/sessions/"+apiSession+"/learn", tok, ""); code != 400 || !strings.Contains(out["error"].(string), "built-in agent") {
+		t.Fatalf("learn without the built-in agent = %d %v", code, out)
+	}
+}
