@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -126,5 +127,105 @@ func TestDeliverSendsOncePerDeviceAndRevokesGone(t *testing.T) {
 	}
 	if n, err := p.Test(ctx, "kanishk"); err != nil || n != 1 {
 		t.Fatalf("test push = %d %v", n, err)
+	}
+}
+
+func TestPresenceKeepsAPushOffTheDevicesOfWhoeverIsLooking(t *testing.T) {
+	s := testdb.New(t)
+	if err := s.SyncAgents(ctx, map[string]store.AgentSpec{"a": {SHA: "sha-a", JSON: []byte(`{"name":"a"}`), Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	got := map[string]int{} // pushes per device path
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		got[r.URL.Path]++
+		mu.Unlock()
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	for _, d := range []struct{ path, author string }{{"/kanishk-phone", "kanishk"}, {"/kanishk-laptop", "kanishk"}, {"/other", "other"}} {
+		k, _ := ecdh.P256().GenerateKey(rand.Reader)
+		if _, err := s.SavePushSubscription(ctx, store.PushSubscription{Endpoint: srv.URL + d.path, Author: d.author,
+			P256DH: base64.RawURLEncoding.EncodeToString(k.PublicKey().Bytes()), Auth: base64.RawURLEncoding.EncodeToString(make([]byte, 16))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pub, priv, _ := webpush.GenerateKeys()
+	keys, _ := webpush.ParseKeys(pub, priv, "mailto:a@b.c")
+	p := &Sender{Store: s, Keys: keys, Client: srv.Client(), LinkBase: "/orbit", Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	fail := func() string {
+		t.Helper()
+		id, err := s.EnqueueRun(ctx, store.NewRun{Agent: "a", SpecSHA: "sha-a", Trigger: "manual"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ClaimRun(ctx, "w"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.FinishRun(ctx, id, store.RunResult{Attempt: 1, Status: "failed", Error: "x"}); err != nil {
+			t.Fatal(err)
+		}
+		var conv string
+		if err := s.Pool.QueryRow(ctx, `SELECT conversation_id::text FROM runs WHERE id = $1`, id).Scan(&conv); err != nil {
+			t.Fatal(err)
+		}
+		return conv
+	}
+	deliver := func() map[string]int {
+		t.Helper()
+		mu.Lock()
+		got = map[string]int{}
+		mu.Unlock()
+		// The gap is fleet-wide; each case starts clear of it.
+		if _, err := s.Pool.Exec(ctx, `UPDATE push_state SET last_push_at = now() - interval '1 hour'`); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Deliver(ctx); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return maps.Clone(got)
+	}
+
+	conv := fail()
+	if err := s.SetPresence(ctx, "kanishk", &conv); err != nil {
+		t.Fatal(err)
+	}
+	if hits := deliver(); hits["/kanishk-phone"] != 0 || hits["/kanishk-laptop"] != 0 || hits["/other"] != 1 {
+		t.Fatalf("hits = %v: kanishk is looking at the conversation, other is not", hits)
+	}
+
+	// Another conversation's push still reaches the person looking elsewhere.
+	other := "00000000-0000-0000-0000-000000000001"
+	if err := s.SetPresence(ctx, "kanishk", &other); err != nil {
+		t.Fatal(err)
+	}
+	fail()
+	if hits := deliver(); hits["/kanishk-phone"] != 1 || hits["/kanishk-laptop"] != 1 || hits["/other"] != 1 {
+		t.Fatalf("hits = %v: presence elsewhere silences nothing here", hits)
+	}
+
+	// A stale heartbeat never silences.
+	if err := s.SetPresence(ctx, "kanishk", &conv); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx, `UPDATE presence SET seen_at = now() - interval '61 seconds'`); err != nil {
+		t.Fatal(err)
+	}
+	fail()
+	if hits := deliver(); hits["/kanishk-phone"] != 1 || hits["/kanishk-laptop"] != 1 {
+		t.Fatalf("hits = %v: a heartbeat older than %s silences nothing", hits, Presence)
+	}
+
+	// Null (the app shows no conversation) silences nothing either.
+	if err := s.SetPresence(ctx, "kanishk", nil); err != nil {
+		t.Fatal(err)
+	}
+	fail()
+	if hits := deliver(); hits["/kanishk-phone"] != 1 {
+		t.Fatalf("hits = %v: no conversation shown", hits)
 	}
 }

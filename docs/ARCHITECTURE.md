@@ -241,7 +241,7 @@ Separately from channels, everything waiting on a person is an `attention`
 row (store/attention.go), written in the transaction that created it, for
 attended runs too. It feeds the app's inbox (`GET /attention`) and, for
 unattended runs and for a chat run's permission request (its turn waits on the person), Web Push to the person's devices (`internal/push`), which
-carries a title and a link only; bursts fold into one summary push.
+carries a title and a link only; bursts fold into one summary push, and a person whose app is showing the conversation (a 30 s heartbeat, `POST /presence`, fresh for 60 s) is not pushed for it.
 
 ## Memory, questions, messages
 
