@@ -60,6 +60,24 @@ func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.Claime
 			}
 		}
 	}
+	seed := ""
+	if rec == nil && (prior == nil || prior.Status != "succeeded") {
+		// A conversation started from an imported session resumes it until a run of its own succeeds.
+		if seed, err = e.Store.ConversationSeed(ctx, c.ConversationID); err != nil {
+			return nil, false, err
+		}
+		if seed != "" {
+			present, err := e.ensureSeed(ctx, home, workdir, seed)
+			if err != nil {
+				return nil, false, err
+			}
+			if present {
+				reason = ""
+			} else {
+				seed, reason = "", "the imported session's transcript could not be written under "+workdir
+			}
+		}
+	}
 	sess := &runner.Session{
 		Home:     home,
 		KeepDays: int(math.Ceil(idle.Hours()/24)) + 1,
@@ -68,7 +86,10 @@ func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.Claime
 		Key: c.ConversationID,
 	}
 	depth := 1
-	if reason == "" {
+	switch {
+	case seed != "":
+		sess.Resume = seed
+	case reason == "":
 		sess.Resume = prior.SessionID
 		if prior.CostUSD != nil {
 			sess.BaseCostUSD = *prior.CostUSD
@@ -92,6 +113,9 @@ func (e *Engine) planSession(ctx context.Context, a *spec.Agent, c *store.Claime
 		ev := map[string]any{"mode": mode, "parent": parent, "depth": depth, "fresh_because": reason}
 		if recovers > 0 {
 			ev["recovers_attempt"] = recovers
+		}
+		if seed != "" {
+			ev["imported_session"] = seed
 		}
 		emit("orbit.session", ev)
 		return e.Store.SetSession(ctx, c.ID, c.Attempt, mode, parent, depth)
