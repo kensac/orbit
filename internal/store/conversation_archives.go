@@ -276,9 +276,13 @@ func setArchiveContract(a *ConversationArchive) {
 
 func isLowerHex(s string) bool {
 	for _, r := range s {
-		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
-			return false
+		if r >= '0' && r <= '9' {
+			continue
 		}
+		if r >= 'a' && r <= 'f' {
+			continue
+		}
+		return false
 	}
 	return true
 }
