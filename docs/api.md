@@ -379,7 +379,7 @@ conversation:
    "tasks": [{"id": "uuid", "key": "facts", "agent": "researcher", "status": "working",
               "conversation_id": "uuid", "depends_on": [], "summary": null, "error": null,
               "decision_action_id": null}],
-   "needs_input": true,
+   "needs_input": true, "changes": {"files": 3, "additions": 40, "deletions": 2},
    "agent_status": {"state": "waiting", "kind": "approval", "since": "...", "source": "run", "run_id": "uuid"}},
   {"kind": "message", "id": "uuid-of-the-question-message", "at": "...", "from": "agent",
    "body": "<a question>", "run_id": "uuid", "open": true},
@@ -524,11 +524,12 @@ The final answer is `done.report`, not the concatenated `text`: `text` is what t
  "prefix": {"sha": "hex", "parts": {"model": "hex16", "tools": "hex16", "mcp": "hex16", "schema": "hex16",
                                     "skills": "hex16", "system": "hex16", "workdir": "hex16", "charter": "hex16"},
             "previous_run": "uuid", "previous_sha": "hex", "changed": ["system"]},
- "agent_status": {"state": "done", "since": "...", "source": "run", "run_id": "uuid"}}
+ "agent_status": {"state": "done", "since": "...", "source": "run", "run_id": "uuid"},
+ "changes": {"files": 3, "additions": 40, "deletions": 2}}
 ```
 
-- Always present: `id`, `attempt`, `agent`, `spec_sha`, `trigger`, `prompt` (`""` when none), `status`, `created_at`, `steps` and `agent_status`. Every other field is omitted when it has no value (not `null`).
-- `trigger` and `status` are as in a thread run item. `trigger_index` is set on a `schedule` or `webhook` run: which of the agent's triggers fired. `scheduled_for` is set on a `schedule` run: the fire time.
+- Always present: `id`, `attempt`, `agent`, `spec_sha`, `trigger`, `prompt` (`""` when none), `status`, `created_at`, `steps`, `agent_status` and `changes` (`null` when it has none). Every other field is omitted when it has no value (not `null`).
+- `trigger` and `status` are as in a thread run item. `trigger_index` is set on a `schedule` or `webhook` run: which trigger fired. `scheduled_for` is set on a `schedule` run: the fire time.
 - `runner_kind`, `model` and `worker` are the latest attempt's backend, its model (the conversation's when it sets one, else the runner's; absent when neither names one) and the instance that claimed it. `effort` is the conversation's effort the attempt ran at, absent for the runner's default. `spec_sha` is the spec the latest attempt ran under.
 - `output` is the backend's raw structured output and `usage` its token usage, as it reported them. `cost_usd` is every attempt's cost together.
 - `report` is the submitted `report`, except when the attempt's final assistant prose (its last run of top-level `message` items, as in The journal) holds more: the submitted one was empty, one line where the prose has several, or shorter. Then `report` is that prose, `summary` stays the submitted one, and `output` keeps what was submitted. A chat agent's `report` is its final message.
@@ -813,7 +814,7 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
 
 ## Workspace
 
-**Partly built.** The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). Built: finding a workspace on both backends, the file reads (tree, stat, files, download), the writes (write, mkdir, rename, trash and restore, upload and signed upload) and the audit on the snapshot backend, and Terminals (below) in a box. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
+**Partly built.** The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). Built: finding a workspace, snapshot reads (W1), snapshot writes (W3), history, the change stream and per-reply changes (W6), the audit, and terminals in a box. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
 
 A workspace is a file tree a person and an agent share. Routes take the authentik token as above; writes, trash, uploads, terminals and git writes also require membership of `ORBIT_WORKSPACE_GROUP` (default `ORBIT_OIDC_GROUP`; `403`, `check: "group"`). Errors carry a `check` beside `error`, as authentication errors do:
 
@@ -821,7 +822,8 @@ A workspace is a file tree a person and an agent share. Routes take the authenti
 |---|---|---|
 | `request` | 400 | a malformed parameter: a cursor not from `next_cursor` or `next_before` |
 | `path` | 400 | not clean (`a/`, `./a`, `a//b`), absolute, outside the tree, or through a symlink; the wrong kind for the route (a directory to `files`, a file to `tree`, a symlink to `files` or `download`) |
-| `not_found` | 404 | no such path, ref, terminal or comment |
+| `not_found` | 404 | no such path, ref, run, terminal or comment |
+| `no_workspace` | 404 | a run whose conversation has no workspace (`GET /runs/{id}/changes`) |
 | `exists` | 409 | the target of a create, rename, restore or upload exists (the body carries `current`, the entry there, for a write or an upload), or a signed upload URL was used |
 | `version` | 412 | `If-Match` is not the current version; the body carries `current` (the entry, or `null` when it is gone) |
 | `version_required` | 428 | a write to an existing file without `If-Match` |
@@ -848,7 +850,7 @@ A workspace is a file tree a person and an agent share. Routes take the authenti
 
 - A conversation of a chat agent (`chat: true`) has a workspace; it is made the first time it is asked for, or with the conversation's first snapshot. For an agent without a box, `GET /agents/{name}/workspace` is the agent's default conversation's workspace, where its agent-level routes speak.
 - `scope` is `conversation` (the snapshot backend: one per conversation) or `agent` (a box: one per agent, shared by its conversations). From a conversation, `cwd` is that conversation's directory in the tree (`""` on the snapshot backend, `conversations/<id>` in a box); a client opens there and lets the person go up. From an agent, `cwd` is `""`.
-- `backend` is informative; a client decides from `capabilities`. `presets` lists the terminal presets (`shell`, `claude`). `capabilities` is the backend's, narrowed for the person asking: `write` is false for a person outside `ORBIT_WORKSPACE_GROUP`. On the snapshot backend today it is `{"read": true, "write": true, "terminals": false, "git": false, "watch": false, "presets": []}`: its change stream is planned. In a box today it is `{"read": false, "write": false, "terminals": true, "git": false, "watch": false, "presets": ["shell", "claude"]}`, until the box serves files and git (W10, W13).
+- `backend` is informative; a client decides from `capabilities`. `presets` lists the terminal presets (`shell`, `claude`). `capabilities` is the backend's, narrowed for the person asking: `write` is false for a person outside `ORBIT_WORKSPACE_GROUP`. On the snapshot backend it is `{"read": true, "write": true, "terminals": false, "git": false, "watch": true, "presets": []}`. In a box today it is `{"read": false, "write": false, "terminals": true, "git": false, "watch": false, "presets": ["shell", "claude"]}`, until the box serves files and git (W10, W13).
 - `as_of` is the snapshot read (snapshot backend), `null` before the first one and in a box. Its `run_id` is `null` when a person's write stored it.
 - `box` is `{"host": "oci", "arch": "arm64", "state": "running", "image": "sha256:..."}` in a box (`null` on the snapshot backend), `state` one of `starting`, `running`, `stopped`. A request to a stopped box starts it, waits up to 30 s, then answers `box_starting`. Built: `host` and `arch` are sandboxd's docker host's, `image` the reference the container runs (`ghcr.io/kensac/orbit-workstation@sha256:...`), `state` `running` or `stopped` (also before the box's first start); reading the workspace does not start the box, creating or attaching a terminal does, and `box_starting` is not used yet.
 - A conversation of an agent without chat workspaces returns `{"workspace": null}`.
@@ -870,7 +872,7 @@ Reads are limited to 100 requests a second per person per workspace (per orbit i
 
 - `GET /workspaces/{id}/tree?path=&cursor=&limit=` lists one directory: `{"path", "entries": [<entry>], "next_cursor": null}`, directories first, then by name (bytewise); `limit` defaults to 500, at most 2000 (a larger one is clamped); `next_cursor` is opaque, `null` on the last page. `version` is omitted from tree entries (it costs a read of every file). An empty workspace's root is an empty list.
 - `GET /workspaces/{id}/stat?path=` is `{"entry": <entry>}`, with `version`.
-- `GET /workspaces/{id}/files?path=&ref=` is a file for the editor: `{"entry": <entry>, "text": "...", "reason": null}`. `text` is the whole file as UTF-8, byte for byte (line endings and a BOM kept). When it cannot be edited, `text` is absent and `reason` is `binary` (a NUL in the first 8000 bytes, or not UTF-8) or `too_large` (over 2 MiB, checked first). *(planned)* `ref` reads a past version from `history` (below); until history is built every `ref` is `not_found`. The response's `ETag` is the version, quoted.
+- `GET /workspaces/{id}/files?path=&ref=` is a file for the editor: `{"entry": <entry>, "text": "...", "reason": null}`. `text` is the whole file as UTF-8, byte for byte (line endings and a BOM kept). When it cannot be edited, `text` is absent and `reason` is `binary` (a NUL in the first 8000 bytes, or not UTF-8) or `too_large` (over 2 MiB, checked first). `ref` reads a past version: a `ref` from `history` or from a run's `before` or `after` (below); one that is not this workspace's is `not_found`. The response's `ETag` is the version, quoted.
 - `PUT /workspaces/{id}/files?path=` writes the body (raw bytes, at most 8 MiB, else `too_large`) as the file. `If-Match: "<version>"` is required for an existing file (`version_required` without it; `If-Match: *` accepts any version); `If-None-Match: *` creates and fails `exists` if it is there; an `If-Match` on a path that is not there is `version` with `current: null`. Parent directories are created; a path under a file, a directory or a symlink at the path, the root and orbit's own state are `path` errors. An existing file keeps its mode, a new one is `0644`. `200` (or `201` created) `{"entry": <entry>}`.
 - `POST /workspaces/{id}/mkdir` `{"path"}`: `201 {"entry"}`, parents created; `exists` when the path is there.
 - `POST /workspaces/{id}/rename` `{"from", "to", "version"?}`: `200 {"entry"}` at `to`, with everything under a directory. Never overwrites (`exists`); `version` guards a file's content as `If-Match` does (given for a directory, it is `version`). A move into itself or of the root is a `path` error.
@@ -891,11 +893,13 @@ The next turn of the conversation's agent is told, by code, which files the pers
 
 ### History
 
-*(planned)* `GET /workspaces/{id}/history?path=&before=&limit=` is a file's versions, newest first: `{"versions": [{"ref": "opaque", "version": "sha256:<hex>", "at": "...", "by": {"kind": "run", "run_id": "uuid", "person": null, "terminal_id": null}, "source": "snapshot"}], "next_before": null}`. `source` is `snapshot`, `checkpoint` (a box's per-turn record) or `git` (a commit; `rev` is set). `by.kind` is `run`, `person`, `terminal` or `unknown` (a change seen between turns that nothing attributed). Read one with `GET /workspaces/{id}/files?path=&ref=`.
+`GET /workspaces/{id}/history?path=&before=&limit=` is a file's versions, newest first: `{"versions": [{"ref": "opaque", "version": "sha256:<hex>", "at": "...", "by": {"kind": "run", "run_id": "uuid", "person": null, "terminal_id": null}, "source": "snapshot"}], "next_before": null}`. `source` is `snapshot`, `checkpoint` (a box's per-turn record) or `git` (a commit; `rev` is set). `by.kind` is `run`, `person`, `terminal` or `unknown` (a change seen between turns that nothing attributed). Read one with `GET /workspaces/{id}/files?path=&ref=`.
+
+On the snapshot backend a version is each snapshot that left a file at `path` different from the one before it (created, modified, renamed there or restored), so a snapshot that changed only other paths adds none; `source` is always `snapshot`, and `by` is the run or the person that stored it (`person` `null` for the operator token). `path` is a file's, not the root (`path`); a path that never held a file has no versions. `limit` defaults to 50, at most 500; `next_before` is opaque, `null` on the last page.
 
 ### The change stream
 
-*(planned)* `GET /workspaces/{id}/changes?path=` is Server-Sent Events for a subtree (default the root):
+`GET /workspaces/{id}/changes?path=` is Server-Sent Events for a subtree (default the root):
 
 | event | id | data |
 |---|---|---|
@@ -905,11 +909,13 @@ The next turn of the conversation's agent is told, by code, which files the pers
 
 `Last-Event-ID` resumes from a cursor; a cursor the serving instance no longer holds sends `resync`. `: ping` every 15 s. Changes made through this API and by runs are attributed; a change a terminal process made is `terminal` when one terminal was in the directory's session, else `unknown`.
 
+On the snapshot backend the stream follows the conversation's snapshots (it looks for new ones every second): each snapshot's changes against the one before it, in path order, one event per path, every path under a directory that came or went included. `version` is a file's after the change, `null` for a trash and for directories and symlinks. A file that left one path and arrived at another with the same content in one snapshot is a `rename`; a path whose kind changed is a `trash` then a `create`; what a person's restore brought back is `restore`. `by` is the snapshot's run (`kind: "run"`) or person (`kind: "person"`, `person` `null` for the operator token). A connection without `Last-Event-ID` starts at the newest snapshot and replays nothing. A cursor is opaque; one of another workspace or not a cursor at all sends `ready` at the newest snapshot, then `resync` (`cursor_lost`); resuming more than 1000 changes behind sends `resync` (`overflow`) and carries on from the newest. `path` narrows to changes whose `path` or `from` is in that subtree. Opening the stream spends one read. It never ends on its own; reconnect with `Last-Event-ID` after a deploy.
+
 ### A reply's changes
 
-*(planned)* Thread run items and runs gain `changes`: `{"files": 3, "additions": 40, "deletions": 2}`, `null` for a run with no workspace.
+Thread run items and runs carry `changes`: `{"files": 3, "additions": 40, "deletions": 2}`, `null` for a run with no workspace and for one not finished yet. It counts every regular file the run changed and every line added and removed, whatever the caps below leave out of the diff; it is computed once, the first time a finished run is read.
 
-`GET /runs/{id}/changes` is what the run changed in its workspace:
+`GET /runs/{id}/changes?path=` is what the run changed in its workspace:
 
 ```json
 {"run_id": "uuid", "workspace_id": "uuid",
@@ -917,7 +923,7 @@ The next turn of the conversation's agent is told, by code, which files the pers
  "files": [<diff file>], "truncated": false}
 ```
 
-`before` and `after` are the snapshots (snapshot backend) or checkpoints (box) at the run's start and end. A run of an agent without a workspace is `404` (`check: "no_workspace"`); its journal's `diff` items are what it changed.
+`before` and `after` are the snapshots (snapshot backend) or checkpoints (box) at the run's start and end; read a file as it was with `GET /workspaces/{id}/files?path=&ref=`. On the snapshot backend `after` is the newest snapshot the run stored and `before` the one before its first; a run that stored none changed nothing, and both are the snapshot the workspace was at when it finished (for a running run, the newest). Either is `null` while the workspace has no snapshot. A run of an agent without a workspace is `404` (`check: "no_workspace"`); its journal's `diff` items are what it changed. An unknown run is `404` (`not_found`). `path` narrows to one file (its path after, or before for a deleted one) without the per-file line cap. The diff covers regular files, by path, as `changes` counts them; a request spends one read of the workspace.
 
 A diff file, here and in git diffs:
 
@@ -931,7 +937,7 @@ A diff file, here and in git diffs:
                       {"kind": "delete", "old": 11, "new": null, "text": "..."}]}]}
 ```
 
-`status` is `added`, `modified`, `deleted`, `renamed` or `mode`. `text` is the line without its newline. Caps: 300 files and 10 MiB per response, 5000 lines per file (`truncated` on the file or the response); a truncated file is read whole with `path`.
+`status` is `added`, `modified`, `deleted`, `renamed` or `mode`. `text` is the line without its newline. Line numbers are 1-based on each side (`old`, `new`; `null` on the side a line is not on), hunks carry 3 lines of context and merge when closer than 6, and `header` is git's default (the nearest line above the hunk starting with a letter, `_` or `$`, at most 80 bytes). A binary file (a NUL in its first 8000 bytes on either side) has `binary` true and no hunks; a rename on the snapshot backend is content-identical, so it has none either; `old_path` is set for a rename. Caps: 300 files and 10 MiB per response, 5000 lines per file (`truncated` on the file or the response); a truncated file is read whole with `path`.
 
 ### Git (box only)
 
