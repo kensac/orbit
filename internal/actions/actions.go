@@ -91,7 +91,62 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 	if a.RuleFor(SkillWriteType) != spec.RuleDeny {
 		out = append(out, skillWriteType())
 	}
+	if a.RuleFor(TemplateCreateType) != spec.RuleDeny {
+		out = append(out, templateCreateType())
+	}
 	return out
+}
+
+// TemplateCreateType creates an agent from a template in orbit's library. It is never executed as itself: when proposed, code renders the template with the parameters (engine/templates.go) and records the result as an agent:define that waits for a person, or, when the person must still give a user_prompt parameter, asks them with a form instead.
+const TemplateCreateType = "template:create"
+
+// TemplateCreate is template:create's params.
+type TemplateCreate struct {
+	Template string `json:"template"`
+	// Version is the template's version; 0 or absent is its current one.
+	Version int `json:"version,omitempty"`
+	// Name, when set, is the new agent's name in place of the one the template renders.
+	Name       string                     `json:"name,omitempty"`
+	Parameters map[string]json.RawMessage `json:"parameters"`
+}
+
+func templateCreateType() Type {
+	return Type{
+		Name: TemplateCreateType,
+		Description: "Create an agent from a template in orbit's library: template is its name, parameters its values by name " +
+			"(the template's parameters say each one's type). orbit renders it, checks the agent loads, and asks your person to approve it; " +
+			"a parameter only your person can give is asked of them with a form, and their answers come back to you to propose again.",
+		ParamsSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"template":   map[string]any{"type": "string", "pattern": `^[a-z][a-z0-9-]{0,62}$`},
+				"version":    map[string]any{"type": "integer", "minimum": 0},
+				"name":       map[string]any{"type": "string", "pattern": spec.AgentNamePattern},
+				"parameters": map[string]any{"type": "object"},
+			},
+			"required":             []string{"template", "parameters"},
+			"additionalProperties": false,
+		},
+		Validate: func(p json.RawMessage) error {
+			_, err := DecodeTemplateCreate(p)
+			return err
+		},
+	}
+}
+
+// DecodeTemplateCreate reads template:create's params.
+func DecodeTemplateCreate(p json.RawMessage) (TemplateCreate, error) {
+	var v TemplateCreate
+	if err := strictDecode(p, &v); err != nil {
+		return v, err
+	}
+	if v.Template == "" {
+		return v, fmt.Errorf("template:create: template is required")
+	}
+	if v.Version < 0 {
+		return v, fmt.Errorf("template:create: version is 0 (the current one) or more")
+	}
+	return v, nil
 }
 
 // DefineType creates or changes an agent defined in the database, this
@@ -102,6 +157,14 @@ const DefineType = "agent:define"
 
 type defineParams struct {
 	Spec json.RawMessage `json:"spec"`
+	// Template names the template version a define was rendered from (template:create); a record for the person approving it, not an input to the change.
+	Template *TemplateRef `json:"template,omitempty"`
+}
+
+// TemplateRef names one version of a template.
+type TemplateRef struct {
+	Name    string `json:"name"`
+	Version int    `json:"version"`
 }
 
 func defineType(a *spec.Agent) Type {
@@ -411,6 +474,9 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 			return nil, fmt.Errorf("%s: not available in this process", typ)
 		}
 		return e.Connector(ctx, c)
+	case typ == TemplateCreateType:
+		// Proposals of it are recorded as agent:define (engine/templates.go); one stored as itself is never run.
+		return nil, fmt.Errorf("template:create: recorded as an agent:define when proposed; nothing to execute")
 	case typ == DefineType:
 		sp, err := DecodeDefine(params)
 		if err != nil {
