@@ -2,10 +2,14 @@ package engine_test
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/kensac/orbit/internal/actions"
+	orbitharness "github.com/kensac/orbit/internal/harness"
+	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -178,4 +182,79 @@ func TestARunGetsItsAgentsHooks(t *testing.T) {
 		h.AgentHooks[1].Def.Timeout.Seconds() != 10 {
 		t.Fatalf("hooks = %+v", h)
 	}
+}
+
+// TestBuiltInSkillsCarryTheHowTo: a Claude Code run with orbit's tools gets the built-in skills (query, calc, entries, actions, and continuations when it may continue) as stubs in its plugin and in full for the skill tool, references included; its system contract states the rules and points to them, shorter than a run without them; their names cannot be written or stored.
+func TestBuiltInSkillsCarryTheHowTo(t *testing.T) {
+	fr := &fakeRunner{}
+	e, s, _ := harnessWith(t, fr, "  continue: auto\n  skill:write: auto\n")
+	e.Harness = "/usr/local/bin/orbit"
+	var stubs, full []string
+	var reference map[string]any
+	fr.seen = func(req runner.Request) {
+		dirs, _ := os.ReadDir(filepath.Join(req.SkillsPlugin, "skills"))
+		for _, d := range dirs {
+			stubs = append(stubs, d.Name())
+		}
+		state := orbitharness.StateDir(req.Session.Home)
+		dirs, _ = os.ReadDir(orbitharness.SkillsDir(state))
+		for _, d := range dirs {
+			full = append(full, d.Name())
+		}
+		reference, _ = orbitharness.ReadSkill(state, "orbit-query", "", "examples", 0)
+	}
+	fr.output = skillWriteOutput(map[string]any{"op": "write", "name": "orbit-query", "content": "---\nname: orbit-query\ndescription: mine\n---\nx\n", "note": ""})
+	c := claim(t, e, s)
+	if err := e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	want := "orbit-actions,orbit-calc,orbit-continuations,orbit-entries,orbit-query"
+	if strings.Join(stubs, ",") != want || strings.Join(full, ",") != want {
+		t.Fatalf("plugin stubs %v, full copies %v", stubs, full)
+	}
+	if reference == nil || !strings.Contains(reference["content"].(string), "Spend per category") {
+		t.Fatalf("the orbit-query examples reference = %v", reference)
+	}
+	withSkills := fr.got.System
+	for _, wantText := range []string{"The orbit-entries skill says how", "the orbit-query and orbit-calc skills say how", "The orbit-actions skill says how"} {
+		if !strings.Contains(withSkills, wantText) {
+			t.Fatalf("system lacks %q:\n%s", wantText, withSkills)
+		}
+	}
+	if strings.Contains(withSkills, "- add: ref is where it goes") {
+		t.Fatalf("the entries how-to is still in the contract:\n%s", withSkills)
+	}
+	run, _ := s.ThreadRunByID(ctx, c.ID)
+	for _, a := range run.Actions {
+		if a.Type == "skill:write" && a.Status != "denied" {
+			t.Fatalf("a write to a built-in skill = %s", a.Status)
+		}
+	}
+	ins, _ := s.AttemptArtifacts(ctx, c.ID, c.Attempt, "in")
+	found := false
+	for _, a := range ins {
+		if a.Name == "skills.json" {
+			found = true
+			if !strings.Contains(string(a.Content), `"name":"orbit-query","version":0`) {
+				t.Fatalf("skills.json = %s", a.Content)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no skills.json")
+	}
+	if _, _, err := s.PutSkill(ctx, store.SkillWrite{Name: "orbit-calc", Content: "---\nname: orbit-calc\ndescription: d\n---\n"}, store.SkillProvenance{Source: store.SkillByPerson}); err == nil {
+		t.Fatal("the library stored a skill under a built-in's name")
+	}
+
+	// Without orbit's tools the run gets none, and the contract keeps the how-to.
+	e.Harness = ""
+	fr.seen, fr.output = nil, goodOutput
+	if err := e.Execute(ctx, claim(t, e, s)); err != nil {
+		t.Fatal(err)
+	}
+	if fr.got.SkillsPlugin != "" || !strings.Contains(fr.got.System, "- add: ref is where it goes") {
+		t.Fatalf("without the harness: plugin %q, system:\n%s", fr.got.SkillsPlugin, fr.got.System)
+	}
+	t.Logf("system contract: %d bytes with the built-in skills, %d without", len(withSkills), len(fr.got.System))
 }
