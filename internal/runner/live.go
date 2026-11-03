@@ -185,6 +185,7 @@ type liveProcess interface {
 	SendUUID(text, uuid string) error
 	CancelQueued(ctx context.Context, uuid string) (bool, error)
 	Capable(name string) bool
+	SetPermissionMode(ctx context.Context, mode string) error
 }
 
 // closeIdle closes every idle live process, for a sandbox slot or memory.

@@ -290,6 +290,14 @@ fails at runtime, not at load.
 
 `chat: true` (claude-code runners only) makes an agent a Claude Code session whose reply is its final message, with memory, questions and actions as orbit's tools (docs/ARCHITECTURE.md, Chat agents); each conversation gets its own workspace. `sandbox: workstation` (needs `chat`) runs it in a sandboxd container with Claude Code's full tool set, a kept home and egress to any public host; `sandbox: build` with the tools in its `tools` and the build allowlist; sandboxd is `sandbox: {sandboxd: <host:port | unix:/path>, token_env: ORBIT_SANDBOX_TOKEN}` in orbit.yaml, or the `build:` section's when there is no `sandbox:`. The CLI there needs `CLAUDE_CODE_OAUTH_TOKEN`. Give a sandboxed agent `needs: [sandbox]` so only hosts that reach sandboxd claim it (the built-in has it).
 
+## Permissions
+
+`permissions: {level, ceiling}` is how a chat agent's Claude Code session asks before a tool runs, named as Orca names them and mapped onto Claude Code's permission modes: `locked` is `dontAsk` (the spec's allowlist, everything else denied unasked), `ask` is `default` with the stdio permission prompt, `edits` is `acceptEdits`, `auto` is `auto` where the CLI and model offer it (else `ask`, recorded as an `orbit.permissions` event), `full` is `bypassPermissions`. A level decides which calls run without a person; it never adds a tool (`tools` and the sandbox profile do).
+
+- **Defaults.** A chat in a `sandbox` is `full` with ceiling `full`: the container is the boundary (security.md, Sandboxed chats). Every other agent is `locked`, and an agent that is not a chat runs unattended, so it can be nothing else.
+- **Limits.** `level` is at most `ceiling`. Without a `sandbox` the widest is `edits`: `auto` and `full` let a call run without a person on orbit's host, beside its secrets. A level that is not one of the five, or one the agent cannot run, resolves down at run time, never up (`Agent.ResolveLevel`); at load it is an error.
+- **A process can be raised.** Every chat process has the stdio permission prompt, and one whose ceiling is `full` is launched with `--allow-dangerously-skip-permissions` (without it the CLI refuses `set_permission_mode bypassPermissions`).
+
 ## Web allowlist
 
 `web: {allow: [example.com, "*.wikipedia.org"]}` limits an agent's `WebFetch` to those hosts when it runs on orbit's host: the bare `WebFetch` in `--allowedTools` becomes one `WebFetch(domain:<d>)` rule per entry, and the private names are denied (spec-reference.md, `web`). It needs `WebFetch` in `tools`; a sandboxed agent goes through its egress profile instead and may not have one. Adding a domain, or dropping the list, widens the agent (`agent:define` waits for a person).

@@ -439,6 +439,7 @@ type chatTurn struct {
 	sess                     *runner.Session
 	harness                  *runner.Harness
 	emit                     func(string, any)
+	record                   func(string, any) error
 	cancel                   <-chan struct{}
 	// steer is where the attempt's poll looks for this turn's steer feed.
 	steer *atomic.Pointer[steerFeed]
@@ -505,6 +506,10 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 		chat.Steered = func(id string) { e.steered(ctx, c, feed, id, t.emit) }
 		t.steer.Store(feed)
 		defer t.steer.Store(nil)
+	}
+	chat.Level, chat.Ceiling = a.PermissionLevel(), a.PermissionCeiling()
+	chat.RecordPermission = func(req claudeproto.PermissionRequest, p claudeproto.Permission) error {
+		return recordPermission(t.record, req, p)
 	}
 	if a.Sandbox != "" {
 		sb, err := e.sandboxPlan(d, a.Sandbox, c, t.workdir, t.home, t.plugin, t.emit)

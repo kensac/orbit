@@ -44,7 +44,7 @@ more than its agent's rules allow.
   chat tools and a run's connectors (Connectors, below), and answers any
   other with an error, recorded in the run's events. The tool grant is the
   spec's `tools` and the connector tools its rules offer, decided before
-  the process starts.
+  the process starts. Chat processes also ask for tool permission decisions under their configured level. Orbit records a decision before answering and denies a request if it cannot record the decision.
 
 - **orbit's tools and hooks** run inside the CLI's process tree with its
   environment (no orbit secret) and are given `--root <workdir>` and
@@ -272,7 +272,7 @@ without docker):
 
 ## Sandboxed chats
 
-A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as a workstation when sandboxd is configured) runs Claude Code in a sandboxd container with `bypassPermissions`; a workstation has every tool. There is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the container holds a credential proxy token, not the backend credential: any command the model runs can spend the credential through the proxy while the sandbox lives, and cannot carry it out. A person's own `claude` terminal in a box (docs/workspace.md, direct mode) holds the real subscription credential, by choice; orbit's runs never do. A workstation's egress is the open web (Workstation egress, below), so anything the session read can leave the box, by design: it holds no GitHub token, no orbit secret, and nothing of the person's beyond what they gave the conversation. Pushing, merging, mail and spend stay orbit's actions, under the agent's rules. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
+A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as a workstation when sandboxd is configured) runs Claude Code in a sandboxd container, at `full` (`bypassPermissions`) unless its `permissions` say otherwise; a workstation has every tool. There is no tool policy, the container is the whole boundary, and everything "The build sandbox" guarantees and does not guarantee holds. In particular the container holds a credential proxy token, not the backend credential: any command the model runs can spend the credential through the proxy while the sandbox lives, and cannot carry it out. A person's own `claude` terminal in a box (docs/workspace.md, direct mode) holds the real subscription credential, by choice; orbit's runs never do. A workstation's egress is the open web (Workstation egress, below), so anything the session read can leave the box, by design: it holds no GitHub token, no orbit secret, and nothing of the person's beyond what they gave the conversation. Pushing, merging, mail and spend stay orbit's actions, under the agent's rules. What crosses back is the workspace tar, unpacked through `os.Root` (`internal/workspace`), so no entry, symlinks included, lands outside the conversation's directory or HOME's project directory; orbit never executes anything from it. orbit's tools (memory, questions, actions) run in orbit's process over the CLI's control channel and do only what the agent's rules allow; the sandbox has no route to orbit's API.
 
 ## Workstation egress
 
@@ -291,6 +291,10 @@ A sandboxed chat agent (`sandbox: workstation | build`, the built-in `orbit` as 
 - **A non-TLS tunnel, or TLS on another port, is not inspected.** Plain HTTP over a CONNECT tunnel, or TLS to port 8443, can name a denied host in its own `Host` or server name if the address it reaches serves that host (a CDN). Denied hosts behind a CDN still enforce their own authentication (orbit's API checks an authentik token, authentik and Infisical their logins), which is what stands between a box and them there.
 - **The deny lists are configuration.** A fleet host's public address missing from `ORBIT_EGRESS_DENY_NETS` is reachable, with every public port on it (hetzner has no firewall); deployment.md lists what each host's egress must carry; the planned nftables tables (deployment.md, Box isolation on a host) drop the same ranges in the kernel for traffic that does not go through a proxy.
 - **Abuse from the fleet's address.** Traffic leaves from the host's public IP, so what a box sends is attributed to it.
+
+## Permission levels
+
+A chat agent's `permissions` level (configuration.md, Permissions) decides which of its tools' calls run without a person; it never grants a tool. `full` and `auto` need a sandbox: both let a call run unasked (auto's classifier is the model's judgment, not a boundary), and on orbit's host that call is beside every `ORBIT_*` secret. Without a sandbox the widest level is `edits`, which runs only file edits inside the workspace unasked, and orbit's Read deny rules hold at every level. A level or ceiling an agent raises is a widening, so an `agent:define` that raises one waits for a person. A process whose ceiling is `full` is launched with `--allow-dangerously-skip-permissions`, which lets a set_permission_mode raise it to bypass; orbit sends that only for a level the ceiling allows, and only a sandboxed process gets the flag.
 
 ## Boxes and terminals
 

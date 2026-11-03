@@ -648,10 +648,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err != nil {
 		return nil, nil, err
 	}
-	gw, conns, connSection := e.prepareConnectors(ctx, snap, a, c, workdir, inputsDir, emit, func(kind string, v any) error {
+	record := func(kind string, v any) error {
 		b, _ := json.Marshal(v)
 		return events.write(kind, b)
-	})
+	}
+	gw, conns, connSection := e.prepareConnectors(ctx, snap, a, c, workdir, inputsDir, emit, record)
 	defer gw.close()
 	var hooks *status.Listener
 	if hr != nil {
@@ -663,7 +664,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached,
 				WorkspaceChanges: wsNote}, fresh: wsFresh,
 			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, steer: &st.steer, rec: rec, instructor: st.instructor,
-			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny), plugin: skillsPlugin, repos: repoRun, connectors: conns, pinned: pinned, skills: skills})
+			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny), plugin: skillsPlugin, repos: repoRun, connectors: conns, pinned: pinned, skills: skills, record: record})
 		if out != nil {
 			out.connectorCalls = gw.pendingCalls()
 		}
