@@ -8,6 +8,7 @@ import (
 
 // schedulerLock is the scheduler leader's advisory lock id: "orbit" in ASCII.
 const schedulerLock = 0x6f72626974
+const telegramLock = 0x6f726274656c
 
 // SchedulerLock is the scheduler leader's advisory lock, held on one pooled
 // connection for the leader's lifetime: if that connection drops, Postgres
@@ -46,5 +47,33 @@ func (l *SchedulerLock) Ping(ctx context.Context) error {
 // otherwise keep the lock until the process exits.
 func (l *SchedulerLock) Release(ctx context.Context) {
 	_, _ = l.conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, int64(schedulerLock))
+	l.conn.Release()
+}
+
+// TelegramLock serializes Telegram getUpdates polling across control instances.
+type TelegramLock struct{ conn *pgxpool.Conn }
+
+// TryTelegramLock takes the Telegram poller's advisory lock without waiting.
+func (s *Store) TryTelegramLock(ctx context.Context) (*TelegramLock, error) {
+	conn, err := s.Pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var ok bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, int64(telegramLock)).Scan(&ok); err != nil {
+		conn.Release()
+		return nil, err
+	}
+	if !ok {
+		conn.Release()
+		return nil, nil
+	}
+	return &TelegramLock{conn: conn}, nil
+}
+
+func (l *TelegramLock) Ping(ctx context.Context) error { return l.conn.Ping(ctx) }
+
+func (l *TelegramLock) Release(ctx context.Context) {
+	_, _ = l.conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, int64(telegramLock))
 	l.conn.Release()
 }
