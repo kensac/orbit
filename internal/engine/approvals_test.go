@@ -90,6 +90,12 @@ func TestAskingAPersonForAToolCall(t *testing.T) {
 	if events != 7 { // q1, q3, q4 opened and ended; q2's grant
 		t.Fatalf("orbit.approval events = %d", events)
 	}
+	// Each request put to the person had an attention row, and every one closed with its approval.
+	var rows int
+	_ = s.Pool.QueryRow(ctx, `SELECT count(*) FROM attention WHERE kind = 'permission' AND push AND run_id = $1`, c.ID).Scan(&rows)
+	if open, err := s.ListAttention(ctx, 0); rows != 3 || err != nil || len(open) != 0 {
+		t.Fatalf("permission rows = %d, open = %+v %v", rows, open, err)
+	}
 
 	// An unattended run asks nobody.
 	fr.seen = func(req runner.Request) {
@@ -107,5 +113,8 @@ func TestAskingAPersonForAToolCall(t *testing.T) {
 	}
 	if all, _ := s.ListApprovals(ctx, conv, "", 0); len(all) != 3 {
 		t.Fatalf("an unattended request was put to the person: %d approvals", len(all))
+	}
+	if _ = s.Pool.QueryRow(ctx, `SELECT count(*) FROM attention WHERE kind = 'permission'`).Scan(&rows); rows != 3 {
+		t.Fatalf("an unattended request reached the inbox: %d rows", rows)
 	}
 }

@@ -23,9 +23,31 @@ type Package struct {
 	Bytes          int64     `json:"bytes"`
 }
 
+// PackageFile is a validated, bounded copy of one regular package file.
+type PackageFile struct {
+	Content []byte
+	Mode    fs.FileMode
+}
+
+// Bundle contains the exact validated files used for one invocation.
+type Bundle struct {
+	Package *Package
+	Files   map[string]PackageFile
+}
+
 // ValidateDir reads a package without executing code or mutating it. The caller
 // must keep the directory immutable; validation is not a later install handle.
 func ValidateDir(dir string) (*Package, error) {
+	bundle, err := ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	return bundle.Package, nil
+}
+
+// ReadDir validates a package and returns the same bytes that were hashed.
+// Callers must still compare the package digest to a deployment pin.
+func ReadDir(dir string) (*Bundle, error) {
 	dir = rootName(dir)
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -40,6 +62,7 @@ func ValidateDir(dir string) (*Package, error) {
 	}
 	defer func() { _ = root.Close() }()
 	result := &Package{}
+	bundle := &Bundle{Package: result, Files: map[string]PackageFile{}}
 	hash := sha256.New()
 
 	names, err := packageFiles(root)
@@ -57,6 +80,7 @@ func ValidateDir(dir string) (*Package, error) {
 		if err != nil {
 			return nil, err
 		}
+		bundle.Files[name] = PackageFile{Content: body, Mode: mode}
 		result.Files++
 		result.Bytes += int64(len(body))
 		files[name] = mode&0111 != 0 && validELF(body)
@@ -84,7 +108,7 @@ func ValidateDir(dir string) (*Package, error) {
 	result.Digest = hex.EncodeToString(hash.Sum(nil))
 	sum := sha256.Sum256(manifest)
 	result.ManifestDigest = hex.EncodeToString(sum[:])
-	return result, nil
+	return bundle, nil
 }
 
 // validELF checks the supported Linux ABI header; validation never loads code.

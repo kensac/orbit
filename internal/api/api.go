@@ -140,10 +140,14 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/conversations/{id}/pages/{page}", s.publishedConversationPage)
 	// The signature in the URL is the credential (uploads.go).
 	mux.HandleFunc("PUT /api/v1/uploads/signed", s.signedUpload)
+	// The token in the URL is the credential (attention.go, pushAct).
+	mux.HandleFunc("POST "+push.ActionPath, s.pushAct)
 	mux.HandleFunc("GET /api/v1/templates/shared/{token}", s.sharedTemplates)
+
 	api("GET /api/v1/agents/{name}/memory", s.memoryHistory)
 	api("POST /api/v1/agents/{name}/runs", s.startRun)
 	api("POST /api/v1/agents/{name}/replay", s.replayEvaluation)
+	api("POST /api/v1/agents/{name}/grade", s.gradeEvaluation)
 	api("GET /api/v1/agents/{name}/messages", s.listMessages)
 	api("POST /api/v1/agents/{name}/messages", s.sendMessage)
 	api("GET /api/v1/runs", s.listRuns)
@@ -166,6 +170,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/actions/{id}/reject", s.decide(false))
 	api("GET /api/v1/attention", s.listAttention)
 	api("POST /api/v1/attention/{id}/dismiss", s.dismissAttention)
+	api("POST /api/v1/presence", s.setPresence)
 	api("GET /api/v1/push", s.pushInfo)
 	api("GET /api/v1/push/subscriptions", s.listPushSubscriptions)
 	api("POST /api/v1/push/subscriptions", s.savePushSubscription)
@@ -190,6 +195,8 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/workspaces/{id}/terminals", s.createTerminal)
 	api("GET /api/v1/workspaces/{id}/terminals", s.listTerminals)
 	api("GET /api/v1/terminals/{tid}", s.getTerminal)
+	api("GET /api/v1/terminals/{tid}/scrollback", s.terminalScrollback)
+	api("POST /api/v1/terminals/{tid}/resize", s.terminalResize)
 	api("POST /api/v1/terminals/{tid}/kill", s.killTerminal)
 	api("POST /api/v1/terminals/{tid}/attach", s.attachTicket)
 	api("GET /api/v1/workspaces/{id}/accounts", s.listAccounts)
@@ -200,6 +207,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	// The ticket in Sec-WebSocket-Protocol is the credential (terminals.go).
 	mux.HandleFunc("GET /api/v1/terminals/{tid}/ws", s.terminalSocket)
 	s.memoryRoutes(api)
+	s.conversationArchiveRoutes(api)
 	s.workspaceRoutes(api)
 	s.workspaceWriteRoutes(api, mux)
 	s.workspaceReviewRoutes(api)

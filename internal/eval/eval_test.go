@@ -30,6 +30,28 @@ func TestRegressionAndExactNumbers(t *testing.T) {
 		t.Fatalf("%+v %v", report, err)
 	}
 }
+
+func TestApplyGradesAddsIndependentJudgmentsAndExactCosts(t *testing.T) {
+	s := Suite{Version: 1, Cases: []Case{{Name: "one", Grade: "mentions a specific amount"}, {Name: "two", Grade: "mentions a date"}}}
+	report := Report{Passed: true, KnownCostUSD: "0.3"}
+	good := json.Number("0.125")
+	if err := ApplyGrades(s, &report, []GradeResult{{Name: "one", Passed: true, Reason: "amount is present", CostUSD: &good}, {Name: "two", Passed: true, Reason: "date is present"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !report.Passed || report.GradingCostUSD != "0.125" || report.MissingGradingCosts != 1 || len(report.Grades) != 2 {
+		t.Fatalf("grade report = %+v", report)
+	}
+	bad := json.Number("0.125")
+	if err := ApplyGrades(s, &report, []GradeResult{{Name: "one", Passed: false, Reason: "missing", CostUSD: &bad}, {Name: "two", Passed: true, Reason: "date is present"}}); err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed {
+		t.Fatal("failed model grade passed the full report")
+	}
+	if err := ApplyGrades(s, &report, []GradeResult{{Name: "two", Passed: true}}); err == nil {
+		t.Fatal("accepted grade for a case without a rubric")
+	}
+}
 func TestMissingNullAndArrayPointers(t *testing.T) {
 	s, r := fixture(t)
 	s.Cases[0].Checks = []Check{{Pointer: "/missing", Op: "equals", Value: json.RawMessage(`null`)}}

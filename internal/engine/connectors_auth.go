@@ -53,13 +53,17 @@ func (e *Engine) ConnectorAuthorize(ctx context.Context, name, person string) (s
 		return "", errors.New("orbit.yaml has no public_url, so there is no callback to sign in to")
 	}
 	redirect := strings.TrimRight(d.PublicURL, "/") + ConnectorCallbackPath
-	md, err := connectors.Discover(ctx, e.Client, cn.URL)
+	client := e.Client
+	if cn.CatalogManaged {
+		client = connectors.PublicClient(client)
+	}
+	md, err := connectors.Discover(ctx, client, cn.URL)
 	if err != nil {
 		return "", fmt.Errorf("connector %s: %w", name, err)
 	}
 	reg := connectors.Registration{ClientID: cn.Auth.ClientID}
 	if reg.ClientID == "" {
-		r, err := connectors.Register(ctx, e.Client, md, redirect)
+		r, err := connectors.Register(ctx, client, md, redirect)
 		if err != nil {
 			return "", fmt.Errorf("connector %s: %w", name, err)
 		}
@@ -88,11 +92,15 @@ func (e *Engine) ConnectorCallback(ctx context.Context, state, code string) (str
 	if !ok || cn.AuthKind() != spec.ConnectorAuthOAuth {
 		return "", fmt.Errorf("connector %q is no longer an oauth connector", st.Conn)
 	}
+	client := e.Client
+	if cn.CatalogManaged {
+		client = connectors.PublicClient(client)
+	}
 	secret := st.ClientSecret
 	if cn.Auth.ClientSecretEnv != "" {
 		secret, _ = e.Env(cn.Auth.ClientSecretEnv)
 	}
-	tok, err := connectors.Exchange(ctx, e.Client, &st.Metadata, connectors.Registration{ClientID: st.ClientID, ClientSecret: secret}, code, st.Verifier, st.Redirect)
+	tok, err := connectors.Exchange(ctx, client, &st.Metadata, connectors.Registration{ClientID: st.ClientID, ClientSecret: secret}, code, st.Verifier, st.Redirect)
 	if err != nil {
 		return st.Conn, fmt.Errorf("connector %s: %w", st.Conn, err)
 	}
@@ -116,16 +124,16 @@ func (e *Engine) ConnectorCallback(ctx context.Context, state, code string) (str
 
 // ConnectorTools lists connector name's tools as an agent with every default rule would see them, for a person choosing rules.
 func (e *Engine) ConnectorTools(ctx context.Context, name string) ([]connectors.Tool, error) {
-	d := e.Current().Config.Deployment
+	cfg := e.Current().Config
+	d := cfg.Deployment
 	cn, ok := d.Connectors[name]
 	if !ok {
 		return nil, store.ErrNotFound
 	}
-	auth, err := e.connectorAuth(d, name, cn)
+	cl, err := e.connectorClient(d, cfg.ExtensionPackages, name, cn)
 	if err != nil {
 		return nil, err
 	}
-	cl := connectors.New(name, cn, auth, e.Client)
 	defer cl.Close()
 	lctx, cancel := context.WithTimeout(ctx, connectorListTimeout)
 	defer cancel()

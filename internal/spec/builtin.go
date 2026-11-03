@@ -83,7 +83,8 @@ func Builtins(d Deployment) []*Agent {
 		// The general agent coordinates the others: in its person's chat a
 		// delegation applies directly, unattended it waits for approval
 		// (docs/ARCHITECTURE.md, Delegation).
-		Delegates: []string{"*"},
+		Delegates:         []string{"*"},
+		DelegateTemplates: []string{"*"},
 		// It is the person's general session: every topic's entries,
 		// within the index budget (engine/known.go).
 		Topics:          []string{AllTopics},

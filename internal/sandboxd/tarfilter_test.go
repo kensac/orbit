@@ -110,6 +110,38 @@ func TestSanitizeInRefuses(t *testing.T) {
 	}
 }
 
+func TestSanitizeExtensionInMakesInputsReadOnlyAndOnlyOutWritable(t *testing.T) {
+	in := mkTar(t,
+		entry{h: tar.Header{Typeflag: tar.TypeDir, Name: "extension/", Mode: 0o755}},
+		entry{h: tar.Header{Typeflag: tar.TypeReg, Name: "extension/tool", Mode: 0o755}, body: "code"},
+		entry{h: tar.Header{Typeflag: tar.TypeDir, Name: "inputs/", Mode: 0o755}},
+		entry{h: tar.Header{Typeflag: tar.TypeReg, Name: "inputs/data", Mode: 0o600}, body: "input"},
+	)
+	var out bytes.Buffer
+	if err := SanitizeExtensionIn(&out, in); err != nil {
+		t.Fatal(err)
+	}
+	es := readTar(t, &out)
+	if es[0].h.Uid != 0 || es[0].h.Mode&0o222 != 0 {
+		t.Fatalf("root is writable: %+v", es[0].h)
+	}
+	for _, e := range es[1:] {
+		if e.h.Name == "extension/" || e.h.Name == "inputs/" {
+			if e.h.Typeflag != tar.TypeDir || e.h.Uid != 0 || e.h.Gid != 0 || e.h.Mode&0o777 != 0o555 {
+				t.Errorf("package/input directory is not root-owned and searchable read-only: %+v", e.h)
+			}
+		}
+		if e.h.Name == "extension/tool" || e.h.Name == "inputs/data" {
+			if e.h.Uid != 0 || e.h.Gid != 0 || e.h.Mode&0o222 != 0 || e.h.Mode&0o444 != 0o444 {
+				t.Errorf("input/package writable: %+v", e.h)
+			}
+		}
+	}
+	if err := SanitizeExtensionIn(io.Discard, mkTar(t, entry{h: tar.Header{Typeflag: tar.TypeReg, Name: "other/file", Mode: 0o644}, body: "x"})); err == nil {
+		t.Fatal("accepted file outside fixed roots")
+	}
+}
+
 func TestSanitizeOutStripsPrefix(t *testing.T) {
 	in := mkTar(t,
 		entry{h: tar.Header{Typeflag: tar.TypeDir, Name: "work/", Mode: 0o755, Uid: UID}},

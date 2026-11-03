@@ -210,6 +210,11 @@ func Widening(cur, next *Agent) []string {
 			out = append(out, "delegate to "+d)
 		}
 	}
+	for _, name := range next.DelegateTemplates {
+		if !slices.Contains(cur.DelegateTemplates, name) && !slices.Contains(cur.DelegateTemplates, "*") {
+			out = append(out, "delegate from template "+name)
+		}
+	}
 	for _, n := range next.Needs {
 		if !slices.Contains(cur.Needs, n) {
 			out = append(out, "need "+n)
@@ -220,6 +225,9 @@ func Widening(cur, next *Agent) []string {
 			// Its tools run as the agent's, on the person's account at that server.
 			out = append(out, "connector "+n)
 		}
+	}
+	if next.CalendarSkip != nil && !reflect.DeepEqual(cur.CalendarSkip, next.CalendarSkip) {
+		out = append(out, "calendar skip configuration")
 	}
 	for _, t := range next.Triggers {
 		// A webhook lets an outside sender start unattended runs with a body it wrote.

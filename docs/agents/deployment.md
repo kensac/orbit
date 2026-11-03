@@ -113,6 +113,10 @@ Web Push needs `ORBIT_VAPID_PUBLIC_KEY`, `ORBIT_VAPID_PRIVATE_KEY` (from
 `orbit vapid`) and `ORBIT_VAPID_SUBJECT` on control (docs/api.md, Attention
 and push); without them push is off and `serve` logs so.
 
+When Telegram is configured, add its `token_env` variable to the service's
+secret environment. The token is used only by the control service's Bot API
+poller and Telegram notification channel; workers do not need it.
+
 ## Seeding memory from Claude Code
 
 `orbit import claude-memory <dir> --scope <profile|topic:NAME|agent:NAME>` reads a Claude Code memory directory (`~/.claude/projects/<project>/memory`) and sends it to `POST /api/v1/memory/import`. Entries of the types in `--profile-types` (default `user`) go to the profile whatever `--scope` says. It is a dry run unless `--apply` is given: the server reports what it would create, update or leave alone. `--print` shows what was read from disk without calling a server. A file it cannot map (no frontmatter, an unknown type) is skipped with a warning; an operating system's droppings (macOS AppleDouble `._*` files, `.DS_Store`, `__MACOSX`, `Thumbs.db` and the like: `claudeimport.Junk`) are left out silently. Repeating it is safe: it matches by key and changes only what changed.
@@ -136,6 +140,8 @@ The API is `--api` (default `ORBIT_API_URL`, else the internal listener) with `-
 ## Importing Claude Code sessions
 
 `orbit import claude-sessions <dir>` reads the session transcripts under `dir` (Claude Code's projects directory, `~/.claude/projects`, or one project's directory under it: every top-level `<session id>.jsonl`; subagent transcripts under `<id>/` are not sessions of their own) and sends what orbit does not hold yet to `POST /api/v1/sessions/import` (docs/api.md, Imported sessions). Each line is normalized on the Mac before it is sent (credentials scrubbed, an oversized line cut to its skeleton) and again by the server. It is incremental: it reads every session's `offset` and `prefix_sha256` from `GET /api/v1/sessions` first and sends only the complete lines after that offset when the file still starts with those bytes, the whole file as a new generation when it does not, and nothing for a session that has not grown. Without `--apply` it prints that plan and sends no line; `--print` lists what was read from disk without calling a server. A line that is not a JSON object is skipped with a warning. The API and token are as for memory above; run it from the Mac against the public API, since the transcripts are there.
+
+`orbitexport import BUNDLE.zip TARGET_AGENT` imports the bundle's current memory and skills, attaches API-origin topics and skills, and stores each exported conversation as a separate read-only archive snapshot. `orbitexport -dry-run import BUNDLE.zip TARGET_AGENT` validates the import without writing. Conversation archives preserve only exported conversation metadata and thread pages; they are not live conversations and do not restore runs, actions, journals, uploads or workspaces. The command uses the public API and device sign-in as for other laptop imports.
 
 ## Syncing back to Claude Code
 

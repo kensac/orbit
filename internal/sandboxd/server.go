@@ -125,7 +125,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/accounts/{slot}/usage/poll", s.accountPoll)
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/tty", s.tty)
 	mux.HandleFunc("GET "+sandbox.PathBoxes+"/{name}/sessions/{session}", s.sessionExists)
+	mux.HandleFunc("GET "+sandbox.PathBoxes+"/{name}/sessions/{session}/scrollback", s.sessionScrollback)
+	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/sessions/{session}/resize", s.sessionResize)
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/sessions/{session}/kill", s.sessionKill)
+	mux.HandleFunc("POST "+sandbox.PathChatBoxes+"/{name}", s.chatBoxEnsure)
+	mux.HandleFunc("GET "+sandbox.PathChatBoxes+"/{name}/archive", s.chatBoxArchive)
+	mux.HandleFunc("POST "+sandbox.PathChatBoxes+"/{name}/attach", s.chatBoxAttach)
 	authed := s.auth(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -198,8 +203,15 @@ func (s *Server) managedOrError(w http.ResponseWriter, r *http.Request) (contain
 
 // profile is the configuration a create's profile runs under: the same
 // container options, and for a workstation its own egress proxy.
-func (s *Server) profile(name string) (Config, error) {
+func (s *Server) profile(name string, memoryLimit ...int64) (Config, error) {
 	cfg := s.cfg
+	var memoryBytes int64
+	if len(memoryLimit) > 1 {
+		return cfg, errors.New("only one extension memory limit may be set")
+	}
+	if len(memoryLimit) == 1 {
+		memoryBytes = memoryLimit[0]
+	}
 	switch name {
 	case "", sandbox.ProfileBuild:
 	case sandbox.ProfileWorkstation:
@@ -210,6 +222,12 @@ func (s *Server) profile(name string) (Config, error) {
 		if cfg.WorkstationCredProxy != "" {
 			cfg.CredProxy = cfg.WorkstationCredProxy
 		}
+	case sandbox.ProfileExtension:
+		if memoryBytes < 1 || memoryBytes > ExtensionMemoryBytes {
+			return cfg, fmt.Errorf("extension memory_bytes must be between 1 and %d", ExtensionMemoryBytes)
+		}
+		cfg.ExtensionProfile = true
+		cfg.ExtensionMemoryBytes = memoryBytes
 	default:
 		return cfg, fmt.Errorf("unknown profile %q", name)
 	}
@@ -223,7 +241,20 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "run_id must be 1 to 64 letters, digits or dashes")
 		return
 	}
-	cfg, err := s.profile(r.URL.Query().Get("profile"))
+	profile := r.URL.Query().Get("profile")
+	var extensionMemory int64
+	if profile == sandbox.ProfileExtension {
+		value, parseErr := strconv.ParseInt(r.URL.Query().Get("memory_bytes"), 10, 64)
+		if parseErr != nil {
+			writeError(w, http.StatusBadRequest, "extension memory_bytes is required")
+			return
+		}
+		extensionMemory = value
+	} else if r.URL.Query().Has("memory_bytes") {
+		writeError(w, http.StatusBadRequest, "memory_bytes is only valid for the extension profile")
+		return
+	}
+	cfg, err := s.profile(profile, extensionMemory)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -238,9 +269,19 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	if len(existing) >= MaxSandboxes {
+	active := 0
+	for _, c := range existing {
+		if (c.Labels[LabelProfile] == sandbox.ProfileExtension) == cfg.ExtensionProfile {
+			active++
+		}
+	}
+	limit := MaxSandboxes
+	if cfg.ExtensionProfile {
+		limit = MaxExtensionSandboxes
+	}
+	if active >= limit {
 		s.mu.Unlock()
-		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("%d sandboxes exist, the most allowed", len(existing)))
+		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("%d sandboxes of this profile exist, the most allowed", limit))
 		return
 	}
 	id, err := s.d.createContainer(ctx, spec)
@@ -273,11 +314,20 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	pr, pw := io.Pipe()
 	sanErr := make(chan error, 1)
 	go func() {
-		err := SanitizeIn(pw, body)
+		var err error
+		if cfg.ExtensionProfile {
+			err = SanitizeExtensionIn(pw, body)
+		} else {
+			err = SanitizeIn(pw, body)
+		}
 		_ = pw.CloseWithError(err)
 		sanErr <- err
 	}()
-	putErr := s.d.putArchive(ctx, id, sandbox.WorkDir, pr)
+	workDir := sandbox.WorkDir
+	if cfg.ExtensionProfile {
+		workDir = sandbox.ExtensionWorkDir
+	}
+	putErr := s.d.putArchive(ctx, id, workDir, pr)
 	_ = pr.CloseWithError(errors.New("upload ended"))
 	if err := <-sanErr; err != nil {
 		fail(http.StatusBadRequest, "archive: "+err.Error())
@@ -376,6 +426,10 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := ar.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateProfileAttach(c, ar); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

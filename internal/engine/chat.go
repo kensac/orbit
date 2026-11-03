@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -165,13 +166,21 @@ func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.Claimed
 	if len(cred) == 0 {
 		return nil, fmt.Errorf("a sandboxed chat needs %s or %s for the CLI in the sandbox", claudeproto.OAuthToken, claudeproto.APIKey)
 	}
+	persistent := profile == spec.SandboxWorkstation
+	label := c.ID
+	if persistent {
+		label, err = sandbox.ChatBoxName(c.ConversationID)
+		if err != nil {
+			return nil, fmt.Errorf("chat box: %w", err)
+		}
+	}
 	path, _ := runner.SessionFile(home, workdir, "x")
 	project := filepath.Dir(path)
 	// A workstation's own HOME, beside the conversation's (it is the
 	// model's, unlike HOME, which holds orbit's session state).
 	boxHome := filepath.Join(filepath.Dir(workdir), "box-home")
 	return &runner.Sandbox{
-		Client: client, Label: c.ID, Env: cred, Profile: profile,
+		Client: client, Label: label, Env: cred, Profile: profile, Persistent: persistent, RunID: c.ID,
 		Pack: func() ([]byte, error) {
 			tree, _, err := workspace.Pack(
 				workspace.Tree{Dir: workdir, Skip: func(rel string) bool { return rel == ".orbit" || strings.HasPrefix(rel, ".orbit/") }},
@@ -464,6 +473,8 @@ type chatTurn struct {
 	// repos is what the agent's repositories add (repos.go), or nil.
 	repos *repoRun
 	stall *runner.Stall
+	// model and effort are the conversation's (conversationModel).
+	model, effort string
 }
 
 // errCancelled is a run a person stopped; Execute records it cancelled.
@@ -539,8 +550,9 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	req := runner.Request{
 		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
 		Tools: a.Tools, WebAllow: webAllow(a), Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin, Connectors: t.connectors, Stall: t.stall,
+		Model: t.model, Effort: t.effort,
 	}
-	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
+	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), cmp.Or(t.model, r.Model()), a.Charter, req)); err != nil {
 		return nil, nil, err
 	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
@@ -706,7 +718,7 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return "orbit could not record the action: " + err.Error(), true
 	}
 	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ActionTimeout)
-	result, xerr := e.executor(snap).Execute(actx, actions.Call{ID: id, Agent: a.Name, RunID: c.ID, Type: v.Type, Params: v.Params, Rule: rule,
+	result, xerr := e.executor(snap).Execute(actx, actions.Call{ID: id, Agent: a.Name, RunID: c.ID, ConversationID: c.ConversationID, Type: v.Type, Params: v.Params, Rule: rule,
 		Workspace: runner.WorkspaceOf(ctx)})
 	cancel()
 	if err := e.finishAction(ctx, snap, &store.Action{ID: id, RunID: c.ID, Agent: a.Name, Type: v.Type}, result, xerr); err != nil {

@@ -62,6 +62,58 @@ func TestMergeParamsAreValidated(t *testing.T) {
 	}
 }
 
+func TestDefineOffersOnlyConfiguredConnectorNames(t *testing.T) {
+	a := &spec.Agent{Name: "orbit", Actions: spec.ActionSet{actions.DefineType: spec.RuleApprove}}
+	d := spec.Deployment{Connectors: map[string]spec.Connector{
+		"sheets":  {URL: "https://sheets.example/mcp", Description: "Private endpoint description."},
+		"housing": {URL: "https://housing.example/mcp", Auth: spec.ConnectorAuth{Value: "secret"}},
+	}}
+	var define actions.Type
+	for _, typ := range actions.Catalog(a, d) {
+		if typ.Name == actions.DefineType {
+			define = typ
+			break
+		}
+	}
+	if define.Name == "" {
+		t.Fatal("agent:define was not offered")
+	}
+	for _, want := range []string{"housing", "sheets", "Adding a connector", "approval", "does not add a server or sign in"} {
+		if !strings.Contains(define.Description, want) {
+			t.Fatalf("description lacks %q: %s", want, define.Description)
+		}
+	}
+	for _, secret := range []string{"https://", "Private endpoint", "secret"} {
+		if strings.Contains(define.Description, secret) {
+			t.Fatalf("description contains connector configuration %q: %s", secret, define.Description)
+		}
+	}
+	schema := define.ParamsSchema["properties"].(map[string]any)["spec"].(map[string]any)["properties"].(map[string]any)
+	connector := schema["connectors"].(map[string]any)
+	items := connector["items"].(map[string]any)
+	if got := items["enum"].([]string); strings.Join(got, ",") != "housing,sheets" {
+		t.Fatalf("connector enum = %v", got)
+	}
+
+	noConnectors := &spec.Agent{Name: "orbit", Actions: spec.ActionSet{actions.DefineType: spec.RuleApprove}}
+	found := false
+	for _, typ := range actions.Catalog(noConnectors, spec.Deployment{}) {
+		if typ.Name == actions.DefineType {
+			found = true
+			props := typ.ParamsSchema["properties"].(map[string]any)["spec"].(map[string]any)["properties"].(map[string]any)
+			if !strings.Contains(typ.Description, "No connectors are configured") {
+				t.Fatalf("description does not state connector availability: %s", typ.Description)
+			}
+			if _, ok := props["connectors"]; ok {
+				t.Fatalf("schema offers a connector when none are configured: %+v", props["connectors"])
+			}
+		}
+	}
+	if !found {
+		t.Fatal("agent:define was not offered without connectors")
+	}
+}
+
 func TestMergeExecutorMergesAndRevokesItsToken(t *testing.T) {
 	f := githubtest.New(t)
 	env := func(n string) (string, bool) {

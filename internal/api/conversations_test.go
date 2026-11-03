@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -102,4 +103,85 @@ func TestConversationsOverTheAPI(t *testing.T) {
 	}
 }
 
+func TestImportedConversationArchiveRemainsSeparateAndReadOnly(t *testing.T) {
+	v := newEnv(t, nil)
+	kanishk := v.person("kanishk")
+	base := v.srv.URL + "/api/v1/agents/a/conversation-archives"
+	const sourceID = "10000000-0000-4000-8000-000000000001"
+	body := `{"archives":[{"source_agent":"old-agent","source_conversation_id":"` + sourceID + `","source_bundle_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","snapshot":{"conversation":{"id":"` + sourceID + `","title":"Imported","archived":true},"pages":[{"items":[{"kind":"message","id":"m1","body":"hello"}],"has_more":false,"next_before":null}]}}]}`
+	code, result := call(t, "POST", base+"/import", kanishk, body)
+	if code != 200 || len(result["results"].([]any)) != 1 {
+		t.Fatalf("import = %d %v", code, result)
+	}
+	id := result["results"].([]any)[0].(map[string]any)["id"].(float64)
+	code, listed := call(t, "GET", base, kanishk, "")
+	if code != 200 || len(listed["archives"].([]any)) != 1 {
+		t.Fatalf("list archives = %d %v", code, listed)
+	}
+	if _, includesSnapshot := listed["archives"].([]any)[0].(map[string]any)["snapshot"]; includesSnapshot {
+		t.Fatal("archive list included the full snapshot")
+	}
+	code, archive := call(t, "GET", base+"/"+strconv.FormatInt(int64(id), 10), kanishk, "")
+	if code != 200 || archive["archive"].(map[string]any)["source_conversation_id"] != sourceID {
+		t.Fatalf("get archive = %d %v", code, archive)
+	}
+	archiveShape := archive["archive"].(map[string]any)
+	if _, includesSnapshot := archiveShape["snapshot"]; !includesSnapshot {
+		t.Fatal("archive detail omitted the snapshot")
+	}
+	if archiveShape["kind"] != "exported_thread_snapshot" || archiveShape["read_only"] != true ||
+		archiveShape["coverage"] != "partial" || archiveShape["coverage_details"] != "source conversation metadata and exported thread pages only" {
+		t.Fatalf("archive contract = %v", archiveShape)
+	}
+	// The archive remains separate from live conversations and does not wake a run.
+	var messages, runs int
+	if err := v.s.Pool.QueryRow(ctx, `SELECT count(*) FROM messages WHERE agent='a'`).Scan(&messages); err != nil || messages != 0 {
+		t.Fatalf("messages = %d, %v", messages, err)
+	}
+	if err := v.s.Pool.QueryRow(ctx, `SELECT count(*) FROM runs WHERE agent='a'`).Scan(&runs); err != nil || runs != 0 {
+		t.Fatalf("runs = %d, %v", runs, err)
+	}
+	if code, again := call(t, "POST", base+"/import", kanishk, body); code != 200 || again["results"].([]any)[0].(map[string]any)["outcome"] != "unchanged" {
+		t.Fatalf("repeat import = %d %v", code, again)
+	}
+}
+
 var longTitle = strings.Repeat("x", 300)
+
+func TestAConversationsModelAndEffort(t *testing.T) {
+	v := newEnv(t, nil)
+	kanishk := v.person("kanishk")
+	base := v.srv.URL + "/api/v1"
+	_, r := call(t, "POST", base+"/agents/a/conversations", kanishk, `{"title":"x"}`)
+	id := r["conversation_id"].(string)
+	conv := func(body string, want int) map[string]any {
+		t.Helper()
+		code, r := call(t, "PATCH", base+"/conversations/"+id, kanishk, body)
+		if code != want {
+			t.Fatalf("PATCH %s = %d %v, want %d", body, code, r, want)
+		}
+		if want != 200 {
+			return nil
+		}
+		return r["conversation"].(map[string]any)
+	}
+	if c := conv(`{"model":"sonnet","effort":"high"}`, 200); c["model"] != "sonnet" || c["effort"] != "high" {
+		t.Fatalf("set = %v", c)
+	}
+	// One field at a time leaves the other; null clears.
+	if c := conv(`{"effort":"max"}`, 200); c["model"] != "sonnet" || c["effort"] != "max" {
+		t.Fatalf("effort only = %v", c)
+	}
+	if c := conv(`{"model":null}`, 200); c["model"] != nil || c["effort"] != "max" {
+		t.Fatalf("model cleared = %v", c)
+	}
+	if c := conv(`{"effort":""}`, 200); c["effort"] != nil {
+		t.Fatalf("effort cleared = %v", c)
+	}
+	conv(`{"effort":"extreme"}`, 400)
+	conv(`{"model":"Opus Max"}`, 400)
+	conv(`{"model":3}`, 400)
+	if code, _ := call(t, "PATCH", base+"/conversations/00000000-0000-0000-0000-000000000000", kanishk, `{"model":"opus"}`); code != 404 {
+		t.Fatalf("unknown conversation = %d", code)
+	}
+}
