@@ -118,6 +118,9 @@ func (p *Poller) Handle(ctx context.Context, cfg *spec.Config, received Received
 	u := received.Update
 	in := store.TelegramIn{UpdateID: u.ID, Raw: received.Raw}
 	ignore := func(reason string) (bool, error) {
+		if in.Raw == nil {
+			in.Raw = []byte{}
+		}
 		if len(in.Raw) > maxUpdateBytes {
 			in.Raw = in.Raw[:maxUpdateBytes]
 			reason = "update exceeded the storage limit"
