@@ -43,6 +43,16 @@ type attemptState struct {
 	steer atomic.Pointer[steerFeed]
 	// remembered is what /remember saved for a run that also answers other messages: it follows the reply.
 	remembered string
+	stalled    bool
+}
+
+func (st *attemptState) sawStall(err error) error {
+	st.stalled = errors.Is(err, runner.ErrStalled)
+	return err
+}
+
+func (st *attemptState) stalledBack(attempt int) bool {
+	return st.stalled && attempt < store.MaxAttempts
 }
 
 // stop closes cancel once.
@@ -78,6 +88,7 @@ type recovery struct {
 	baseKnown bool
 	inputs    []store.StoredInput
 	seen      map[string]bool
+	stalled   bool
 }
 
 // planRecovery decides whether this attempt continues the previous
@@ -125,6 +136,9 @@ func (e *Engine) planRecovery(ctx context.Context, a *spec.Agent, c *store.Claim
 	}
 
 	rec = &recovery{from: prev.Attempt, sessionID: *prev.SessionID, seen: map[string]bool{}}
+	if rec.stalled, err = e.Store.AttemptStalled(ctx, c.ID, prev.Attempt); err != nil {
+		return nil, "", err
+	}
 	// An attempt whose process died was costed by nobody; its transcript
 	// says what it spent when the CLI saved one (a SIGTERM does, a SIGKILL
 	// does not).
@@ -194,9 +208,14 @@ func restoreInputs(rec *recovery, workdir string) ([]runner.Input, error) {
 // the agent since.
 func recoveryPrompt(rec *recovery, rc *store.RunContext, loc *time.Location) string {
 	var b strings.Builder
-	b.WriteString("orbit was restarted while you were working on this run, so your previous turn was interrupted. " +
+	if rec.stalled {
+		b.WriteString("Your previous turn wrote nothing for so long, with no tool running, that orbit interrupted it. ")
+	} else {
+		b.WriteString("orbit was restarted while you were working on this run, so your previous turn was interrupted. ")
+	}
+	b.WriteString(
 		"Continue from exactly where you stopped: do not redo work already done above, your inputs are where they were, " +
-		"and finish by returning the structured output as before.\n")
+			"and finish by returning the structured output as before.\n")
 	var fresh []store.Message
 	for _, m := range rc.Messages {
 		if !rec.seen[m.ID] {
