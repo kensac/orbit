@@ -320,6 +320,9 @@ type Agent struct {
 	// The delegate rule still decides whether it may (docs/ARCHITECTURE.md,
 	// Delegation).
 	Delegates []string `yaml:"delegates,omitempty" json:"delegates,omitempty"`
+	// DelegateTemplates names active templates this one may instantiate as
+	// task workers with the delegate action ("*" is every active template).
+	DelegateTemplates []string `yaml:"delegate_templates,omitempty" json:"delegate_templates,omitempty"`
 	// Connectors names orbit.yaml's connectors whose tools this agent's runs may call (claude-code only); each tool's rule is in actions as mcp:<connector>:<tool> (connectors.go).
 	Connectors []string `yaml:"connectors,omitempty" json:"connectors,omitempty"`
 	// Repos are git repositories every run reads: orbit fetches each into
@@ -331,6 +334,9 @@ type Agent struct {
 	// delegateTargets is Delegates resolved against the configuration,
 	// sorted; set by Validate.
 	delegateTargets []string
+	// delegateTemplateTargets is DelegateTemplates, sorted; active template
+	// names are resolved when the delegate action is offered.
+	delegateTemplateTargets []string
 	// loc is Timezone parsed; set by Validate, which rejects a zone that does not parse.
 	loc *time.Location
 
@@ -815,6 +821,10 @@ func (a *Agent) SetTimezone(name string) error {
 // DelegateTargets is the agents this one may delegate to, sorted: Delegates
 // with "*" resolved against the configuration it was validated in.
 func (a *Agent) DelegateTargets() []string { return a.delegateTargets }
+
+// DelegateTemplateTargets returns the templates this agent may instantiate,
+// sorted. "*" is expanded against the active library by the engine.
+func (a *Agent) DelegateTemplateTargets() []string { return a.delegateTemplateTargets }
 
 // ReservedAgentNames are the names an agent may not take: the portfolio
 // serves an agent at /orbit/<name>, beside these static segments of its own
@@ -1307,7 +1317,11 @@ func (c *Config) validateAgent(a *Agent) []error {
 		switch {
 		case typ == "notify", typ == "continue", typ == "agent:define", typ == "agent:save", typ == "skill:write",
 			typ == "schedule:add", typ == "schedule:pause", typ == "schedule:resume", typ == "schedule:remove", typ == "run:now", typ == "template:create":
-		case typ == "delegate", typ == "task:message", typ == "task:cancel", typ == "task:retry":
+		case typ == "delegate":
+			if len(a.Delegates) == 0 && len(a.DelegateTemplates) == 0 {
+				at("action %q: needs delegates or delegate_templates, the targets this one may hand tasks to", typ)
+			}
+		case typ == "task:message", typ == "task:cancel", typ == "task:retry":
 			if len(a.Delegates) == 0 {
 				at("action %q: needs delegates, the agents this one may hand tasks to", typ)
 			}
@@ -1410,6 +1424,26 @@ func (c *Config) validateAgent(a *Agent) []error {
 		at("delegates: \"*\" already names every agent; list nothing beside it")
 	}
 	slices.Sort(a.delegateTargets)
+	a.delegateTemplateTargets = nil
+	for _, name := range a.DelegateTemplates {
+		if name == "*" {
+			if !slices.Contains(a.delegateTemplateTargets, name) {
+				a.delegateTemplateTargets = append(a.delegateTemplateTargets, name)
+			}
+			continue
+		}
+		if !nameRE.MatchString(name) {
+			at("delegate_templates: %q must match %s or be \"*\"", name, nameRE)
+			continue
+		}
+		if !slices.Contains(a.delegateTemplateTargets, name) {
+			a.delegateTemplateTargets = append(a.delegateTemplateTargets, name)
+		}
+	}
+	if slices.Contains(a.DelegateTemplates, "*") && len(a.DelegateTemplates) > 1 {
+		at("delegate_templates: \"*\" already names every active template; list nothing beside it")
+	}
+	slices.Sort(a.delegateTemplateTargets)
 	seenSkill := map[string]bool{}
 	for _, k := range a.Skills {
 		if !nameRE.MatchString(k) {

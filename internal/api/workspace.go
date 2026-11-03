@@ -301,6 +301,7 @@ func (s *Server) workspaceRoutes(api func(string, http.HandlerFunc)) {
 	api("GET /api/v1/workspaces/{id}/download", s.readRoute(s.workspaceDownload))
 	api("GET /api/v1/workspaces/{id}/events", s.readRoute(s.workspaceEvents))
 	api("GET /api/v1/workspaces/{id}/history", s.readRoute(s.workspaceHistory))
+	api("GET /api/v1/workspaces/{id}/search", s.readRoute(s.workspaceSearch))
 	api("GET /api/v1/workspaces/{id}/changes", s.readRoute(s.workspaceChangeStream))
 	api("GET /api/v1/runs/{id}/changes", s.runChangesRoute)
 }
