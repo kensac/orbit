@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/kensac/orbit/internal/boxkeep"
 	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/store"
 )
@@ -54,12 +55,21 @@ func epochMillis(ms int64) *time.Time {
 	return &t
 }
 
-// refreshAccount reads an account's login from the running box and stores
-// it, returning the account as stored (unchanged when the read failed).
+// refreshAccount reads an account's login and the usage its status line
+// recorded from the running box and stores them, returning the account as
+// stored (unchanged where a read failed).
 func (s *Server) refreshAccount(ctx context.Context, c *sandbox.Client, a store.BoxAccount) store.BoxAccount {
+	if u, err := c.AccountUsage(ctx, a.Agent, a.Slot); err != nil {
+		s.Log.Warn("account: read its usage", "account", a.ID, "agent", a.Agent, "err", err)
+	} else if _, err := boxkeep.RecordUsage(ctx, s.Store, a.ID, u); err != nil {
+		s.Log.Warn("account: record its usage", "account", a.ID, "err", err)
+	}
 	st, err := c.AccountStatus(ctx, a.Agent, a.Slot)
 	if err != nil {
 		s.Log.Warn("account: read its login", "account", a.ID, "agent", a.Agent, "err", err)
+		if got, gerr := s.Store.GetAccount(ctx, a.ID); gerr == nil {
+			return got
+		}
 		return a
 	}
 	got, err := s.Store.RecordAccountLogin(ctx, a.ID, store.AccountLogin{

@@ -215,3 +215,80 @@ func truncate(b []byte, n int) string {
 	}
 	return string(b)
 }
+
+// usageScript prints the status line's record for an account (the box
+// image's orbit-statusline writes it), nothing when there is none yet.
+const usageScript = `d=$HOME/.claude-accounts/$1
+[ -d "$d" ] || { echo "no directory $d: the box does not mount this account" >&2; exit 3; }
+f=$d/.orbit/usage.json
+[ -s "$f" ] || exit 0
+head -c 65536 "$f"`
+
+// pollScript asks /api/oauth/usage with the account's access token, which
+// it reads and sends from inside the box (curl reads the header from its
+// stdin, so it is not in an argv): the token never reaches sandboxd. It
+// never refreshes a token, since a refresh rotates the refresh token under
+// the CLI that owns it; an expired one answers 401 until the CLI next runs.
+const pollScript = `d=$HOME/.claude-accounts/$1
+[ -d "$d" ] || { echo "no directory $d: the box does not mount this account" >&2; exit 3; }
+tok=$(jq -r '.claudeAiOauth.accessToken // empty' "$d/.credentials.json" 2>/dev/null)
+[ -n "$tok" ] || { echo "the account is not logged in" >&2; exit 4; }
+case $tok in *[!A-Za-z0-9._~+/=-]*) echo "the account's access token has an unexpected shape" >&2; exit 4 ;; esac
+out=$(printf 'header = "Authorization: Bearer %s"\n' "$tok" |
+	curl -sS --fail --max-time 20 --max-filesize 65536 -K - -H 'anthropic-beta: oauth-2025-04-20' -H 'Accept: application/json' \
+		https://api.anthropic.com/api/oauth/usage) || exit 5
+printf '%s' "$out"`
+
+// exitNotLoggedIn is pollScript's exit for an account without a login.
+const exitNotLoggedIn = 4
+
+func (s *Server) accountUsage(w http.ResponseWriter, r *http.Request) {
+	c, _, slot, ok := s.accountBox(w, r)
+	if !ok {
+		return
+	}
+	stdout, stderr, code, err := s.boxRun(r.Context(), c.ID, []string{"sh", "-c", usageScript, "orbit-account", slot}, nil, nil)
+	switch {
+	case err != nil:
+		writeError(w, http.StatusBadGateway, "usage: "+err.Error())
+		return
+	case code == exitNoAccountDir:
+		writeError(w, http.StatusConflict, scriptError("usage", code, stderr))
+		return
+	case code != 0:
+		writeError(w, http.StatusBadGateway, scriptError("usage", code, stderr))
+		return
+	}
+	u, err := sandbox.ParseStatuslineUsage(stdout)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, u)
+}
+
+func (s *Server) accountPoll(w http.ResponseWriter, r *http.Request) {
+	c, name, slot, ok := s.accountBox(w, r)
+	if !ok {
+		return
+	}
+	stdout, stderr, code, err := s.boxRun(r.Context(), c.ID, []string{"sh", "-c", pollScript, "orbit-account", slot}, nil, nil)
+	switch {
+	case err != nil:
+		writeError(w, http.StatusBadGateway, "poll: "+err.Error())
+		return
+	case code == exitNoAccountDir, code == exitNotLoggedIn:
+		writeError(w, http.StatusConflict, scriptError("poll", code, stderr))
+		return
+	case code != 0:
+		writeError(w, http.StatusBadGateway, scriptError("poll", code, stderr))
+		return
+	}
+	u, err := sandbox.ParseOAuthUsage(stdout, s.now().UTC().Truncate(time.Second))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	s.log.Info("sandboxd: account usage polled", "box", name, "account", slot, "windows", len(u.Windows))
+	writeJSON(w, http.StatusOK, u)
+}
