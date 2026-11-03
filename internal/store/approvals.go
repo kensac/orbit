@@ -92,19 +92,41 @@ func jsonOrNull(b json.RawMessage) any {
 	return nullJSON(b)
 }
 
-// CreateApproval records a pending request. The same request of the same attempt is one row: a repeat returns it.
+// CreateApproval records a pending request and, in the same transaction, its attention row (kind permission, pushed: the turn waits on its person). The same request of the same attempt is one row: a repeat returns it.
 func (s *Store) CreateApproval(ctx context.Context, n NewApproval) (Approval, error) {
 	if len(n.Input) == 0 {
 		n.Input = json.RawMessage(`{}`)
 	}
-	return scanApproval(s.Pool.QueryRow(ctx, `INSERT INTO approvals (run_id, attempt, conversation_id, agent, request_id, kind, tool, input, level,
-		decision_reason, decision_reason_type, blocked_path, matched_rule, suggestions, title, description, conversation_grant, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-		ON CONFLICT (run_id, attempt, request_id) DO UPDATE SET request_id = EXCLUDED.request_id
-		RETURNING `+approvalCols,
-		n.RunID, n.Attempt, n.ConversationID, n.Agent, n.RequestID, n.Kind, n.Tool, n.Input, n.Level,
-		n.DecisionReason, n.DecisionReasonType, n.BlockedPath, jsonOrNull(n.MatchedRule), jsonOrNull(n.Suggestions), n.Title, n.Description,
-		n.ConversationGrant, n.ExpiresAt))
+	var a Approval
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var err error
+		a, err = scanApproval(tx.QueryRow(ctx, `INSERT INTO approvals (run_id, attempt, conversation_id, agent, request_id, kind, tool, input, level,
+			decision_reason, decision_reason_type, blocked_path, matched_rule, suggestions, title, description, conversation_grant, expires_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+			ON CONFLICT (run_id, attempt, request_id) DO UPDATE SET request_id = EXCLUDED.request_id
+			RETURNING `+approvalCols,
+			n.RunID, n.Attempt, n.ConversationID, n.Agent, n.RequestID, n.Kind, n.Tool, n.Input, n.Level,
+			n.DecisionReason, n.DecisionReasonType, n.BlockedPath, jsonOrNull(n.MatchedRule), jsonOrNull(n.Suggestions), n.Title, n.Description,
+			n.ConversationGrant, n.ExpiresAt))
+		if err != nil {
+			return err
+		}
+		return approvalAttention(ctx, tx, a)
+	})
+	return a, err
+}
+
+// approvalAttention writes a pending approval's attention row. Its title is the agent and a fixed phrase, never the tool or its input. Unlike a reply's other attention, it is pushed although a person's message started the run: the turn is blocked until that person answers.
+func approvalAttention(ctx context.Context, db execer, a Approval) error {
+	suffix := " needs permission"
+	if a.Kind == ApprovalKindPlan {
+		suffix = " has a plan to approve"
+	}
+	_, err := db.Exec(ctx, `
+		INSERT INTO attention (key, kind, agent, run_id, conversation_id, approval_id, title, push)
+		VALUES ($1, $2, $3, $4, $5, $6, $3 || $7, true)
+		ON CONFLICT (key) DO NOTHING`, "approval:"+a.ID, AttentionPermission, a.Agent, a.RunID, a.ConversationID, a.ID, suffix)
+	return err
 }
 
 // GetApproval reads one approval.
