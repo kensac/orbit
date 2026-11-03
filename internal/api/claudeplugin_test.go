@@ -17,10 +17,11 @@ import (
 
 func TestAccountClaudePluginRequiresExactOperatorPinAndIsAccountScoped(t *testing.T) {
 	v := newBoxEnv(t)
-	cfg := &spec.Config{Deployment: spec.Deployment{Box: &spec.BoxConfig{PluginDigests: map[string]string{
+	cfg := *v.api.Engine.Current().Config
+	cfg.Deployment.Box = &spec.BoxConfig{PluginDigests: map[string]string{
 		"review@local-market": string(bytes.Repeat([]byte("a"), 64)),
-	}}}}
-	if err := v.api.Engine.SetConfig(cfg); err != nil {
+	}}
+	if err := v.api.Engine.SetConfig(&cfg); err != nil {
 		t.Fatal(err)
 	}
 	ws := v.workspaceID(t)
