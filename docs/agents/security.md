@@ -132,7 +132,7 @@ A connector's tools act on a person's account at another service (internal/conne
 - A push leaves orbit for a third party (the browser vendor's push
   service, then the device's lock screen), so it carries only the
   attention row's title (an agent name and a fixed phrase) and a link into
-  the app. Never a report, a question, an error or an action's parameters:
+  the app. Never a report, a question, an error, an action's parameters or a permission request's tool and input:
   agents read finance data. The payload is encrypted to the device, so the
   push service sees only its size.
 - A subscription's endpoint is a URL a browser chose, and orbit posts to it
