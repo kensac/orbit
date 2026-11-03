@@ -91,11 +91,13 @@ func inspect(params map[string]any) map[string]any {
 	_, sockErr := os.Stat("/var/run/docker.sock")
 	status := readStatus()
 	hostSessionPathsHidden := true
-	for _, path := range []string{"/proc/1/root/etc/shadow", "/root/.ssh", "/run/secrets", "/home/agent/.claude", "/work/.orbit/claude", "/host", "/mnt/host"} {
+	for _, path := range []string{"/root/.ssh", "/run/secrets", "/home/agent/.claude", "/work/.orbit/claude", "/host", "/mnt/host"} {
 		if _, err := os.Stat(path); err == nil || !os.IsNotExist(err) && !os.IsPermission(err) {
 			hostSessionPathsHidden = false
 		}
 	}
+	_, shadowErr := os.ReadFile("/proc/1/root/etc/shadow")
+	containerShadowUnreadable := shadowErr != nil
 	symlinkRootWriteDenied := false
 	if err := os.Symlink("/etc", "/work/out/escape"); err == nil {
 		symlinkRootWriteDenied = os.WriteFile("/work/out/escape/orbit-probe", []byte("x"), 0o600) != nil
@@ -131,6 +133,7 @@ func inspect(params map[string]any) map[string]any {
 		"no_new_privileges":           status["NoNewPrivs"] == "1",
 		"seccomp_enabled":             status["Seccomp"] == "2",
 		"host_session_paths_hidden":   hostSessionPathsHidden,
+		"container_shadow_unreadable": containerShadowUnreadable,
 		"symlink_root_write_denied":   symlinkRootWriteDenied,
 		"cross_mount_hardlink_denied": crossMountHardlinkDenied,
 		"fork_limit_hit":              false,
