@@ -42,7 +42,16 @@ func (e *Engine) LoadConfig(ctx context.Context, override map[string]*spec.Defin
 			merged = append(merged, *d)
 		}
 	}
-	return spec.LoadAll(e.ConfigDir, merged)
+	catalog, err := e.Store.CatalogConnectors(ctx)
+	if err != nil {
+		return nil, err
+	}
+	connectors := make(map[string]spec.Connector, len(catalog))
+	for _, c := range catalog {
+		connectors[c.Name] = spec.Connector{URL: c.URL, Description: c.Description,
+			Auth: spec.ConnectorAuth{Kind: spec.ConnectorAuthOAuth, Scopes: c.Scopes}}
+	}
+	return spec.LoadAllWithConnectors(e.ConfigDir, merged, connectors)
 }
 
 // Reload loads the configuration and puts it in force: every agent and spec

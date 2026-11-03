@@ -382,6 +382,8 @@ fails at runtime, not at load.
 
 `connectors:` in `orbit.yaml` names MCP servers; an agent's `connectors: [<name>, ...]` gives its runs their tools, as `mcp__<name>__<tool>` (claude-code runners only; docs/ARCHITECTURE.md, Connectors). orbit is the gateway: it lists the tools before each run and makes every call itself with the connector's credential, so neither the CLI nor a sandbox ever holds one.
 
+A signed-in person can also add a public OAuth connector by URL at `POST /api/v1/connectors/catalog` (docs/api.md). Its URL, description, scopes, and creator are stored as configuration; OAuth grants remain separately sealed in `connector_tokens`. These records join the deployment's connector map and are offered to `agent:define`. Every tool of a catalog connector defaults to `approve`; an agent must explicitly set a tool rule to change that behavior.
+
 ```yaml
 credentials:
   HOUSING_MCP_TOKEN: {url_prefix: https://housing.example.com/}

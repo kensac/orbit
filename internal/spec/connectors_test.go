@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -45,6 +46,69 @@ actions:
 	}
 	if got := a.ToolRule(cfg.Deployment.Connectors["gws"], "gws", "delete"); got != RuleDeny {
 		t.Errorf("an agent's deny = %s", got)
+	}
+}
+
+func TestCatalogConnectorsLoadWithApprovalByDefault(t *testing.T) {
+	dir := write(t, map[string]string{
+		"orbit.yaml": connectorBase,
+		"agents/f.yaml": `name: f
+charter: x
+connectors: [public-api]
+`,
+	})
+	cfg, err := LoadAllWithConnectors(dir, nil, map[string]Connector{
+		"public-api": {URL: "https://service.example/mcp", Description: "Public API", Auth: ConnectorAuth{Kind: ConnectorAuthOAuth}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := cfg.Deployment.Connectors["public-api"]
+	if !c.CatalogManaged || c.AuthKind() != ConnectorAuthOAuth {
+		t.Fatalf("catalog connector = %+v", c)
+	}
+	a := cfg.Agents["f"]
+	if got := a.ToolRule(c, "public-api", "read"); got != RuleApprove {
+		t.Fatalf("unspecified catalog tool rule = %s, want approve", got)
+	}
+	a.Actions = ActionSet{}
+	a.Actions["mcp:public-api:read"] = RuleDeny
+	if got := a.ToolRule(c, "public-api", "read"); got != RuleDeny {
+		t.Fatalf("explicit rule = %s, want deny", got)
+	}
+}
+
+func TestCatalogConnectorCannotReplaceConfiguredConnector(t *testing.T) {
+	dir := write(t, map[string]string{"orbit.yaml": connectorBase, "agents/f.yaml": "name: f\ncharter: x\n"})
+	_, err := LoadAllWithConnectors(dir, nil, map[string]Connector{"hw": {URL: "https://other.example/mcp"}})
+	if err == nil || !strings.Contains(err.Error(), `connector "hw" is defined in orbit.yaml and the catalog`) {
+		t.Fatalf("collision error = %v", err)
+	}
+}
+
+func TestStoredCatalogConnectorRetainsItsSafetyPolicy(t *testing.T) {
+	dir := write(t, map[string]string{"orbit.yaml": connectorBase, "agents/f.yaml": "name: f\ncharter: x\nconnectors: [public-api]\n"})
+	cfg, err := LoadAllWithConnectors(dir, nil, map[string]Connector{
+		"public-api": {URL: "https://service.example/mcp", Auth: ConnectorAuth{Kind: ConnectorAuthOAuth}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, dep, err := cfg.DeploymentJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := json.Marshal(cfg.Agents["f"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := FromStored(dep, []StoredAgent{{Name: "f", SHA: cfg.Agents["f"].SHA, JSON: agent}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := got.Deployment.Connectors["public-api"]
+	if !c.CatalogManaged || c.DefaultToolRule != RuleApprove {
+		t.Fatalf("stored connector lost its safety policy: %+v", c)
 	}
 }
 
