@@ -184,6 +184,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/tickets/{id}/comments/{comment}/edit", s.editComment)
 	api("POST /api/v1/tickets/{id}/comments/{comment}/withdraw", s.withdrawComment)
 	api("POST /api/v1/tickets/{id}/review", s.submitReview)
+	api("GET /api/v1/tickets/{id}/diff", s.ticketDiff)
 	api("GET /api/v1/agents/{name}/workspace", s.agentWorkspace)
 	api("POST /api/v1/workspaces/{id}/terminals", s.createTerminal)
 	api("GET /api/v1/workspaces/{id}/terminals", s.listTerminals)

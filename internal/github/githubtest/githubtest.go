@@ -97,6 +97,8 @@ type Server struct {
 	// Others are pull requests besides PR (7), by number: read and
 	// patched, nothing else.
 	Others map[int]map[string]any
+	// PRFiles are PR 7's files as pulls/7/files lists them, paged.
+	PRFiles []map[string]any
 	// Issues and Releases are what GET issues and releases answer, one
 	// page of per_page from page.
 	Issues   []map[string]any
@@ -244,6 +246,13 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			"base": map[string]any{"ref": b["base"], "repo": map[string]any{"full_name": "kensac/orbit", "default_branch": "main"}},
 		}
 		f.write(w, 201, f.PR)
+	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls/7/files" && f.PR != nil:
+		per, page := 30, 1
+		_, _ = fmt.Sscan(r.URL.Query().Get("per_page"), &per)
+		_, _ = fmt.Sscan(r.URL.Query().Get("page"), &page)
+		per = min(per, 100)
+		lo, hi := min((page-1)*per, len(f.PRFiles)), min(page*per, len(f.PRFiles))
+		f.write(w, 200, f.PRFiles[lo:hi])
 	case (r.Method == "GET" || r.Method == "PATCH") && f.other(r.URL.Path) != nil:
 		pr := f.other(r.URL.Path)
 		if r.Method == "PATCH" {
