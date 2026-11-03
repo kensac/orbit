@@ -14,7 +14,7 @@
 //	orbit import claude-memory <dir> --scope <s> [--apply]   seed memory entries through the API
 //	orbit import skills <dir> [--attach <agent>] [--apply]   seed the skills library through the API
 //	orbit import claude-sessions <dir> [--apply]   import Claude Code session transcripts through the API
-//	orbit sync claude [--memory-dir <dir>] [--bundle <tar> --claude-dir <dir>] [--apply <digest>]   sync orbit's skills and memory, or bundle local Claude instructions and skills
+//	orbit sync claude [--memory-dir <dir>] [--bundle <tar> | --mcp-patch <yaml>] [--apply <digest>]   sync orbit's skills and memory, or export local Claude config
 //	orbit mcp --root <dir> --state <dir>   orbit's tool server, started by Claude Code
 //	orbit hook --root <dir> --state <dir> [--figures] [--status <socket>]   orbit's hook, run by Claude Code
 //	orbit agent-hook --root <dir> --def <hook>   one of an agent's own hooks, run by Claude Code

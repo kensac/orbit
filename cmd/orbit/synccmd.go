@@ -38,14 +38,22 @@ func syncCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	apply := fs.String("apply", "", "write the plan whose digest a dry run printed, if it is still the plan")
 	bundle := fs.String("bundle", "", "write a portable CLAUDE.md and skills tar for a box (no account state or other config)")
 	claudeDir := fs.String("claude-dir", filepath.Join(home, ".claude"), "the local Claude config directory used by --bundle")
+	mcpPatch := fs.String("mcp-patch", "", "write a reviewable credential-free orbit.yaml patch from local remote MCP declarations")
+	mcpConfig := fs.String("mcp-config", filepath.Join(home, ".claude.json"), "local Claude config read by --mcp-patch")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
 	if *bundle != "" {
-		if *memoryDir != "" || *only != "" || *skillsDir != filepath.Join(home, ".claude", "skills") {
-			return errors.New("--bundle cannot be combined with --skills-dir, --memory-dir or --only")
+		if *mcpPatch != "" || *memoryDir != "" || *only != "" || *skillsDir != filepath.Join(home, ".claude", "skills") {
+			return errors.New("--bundle cannot be combined with --mcp-patch, --skills-dir, --memory-dir or --only")
 		}
 		return exportClaudeBundle(*bundle, *claudeDir, *apply, stdout)
+	}
+	if *mcpPatch != "" {
+		if *memoryDir != "" || *only != "" || *skillsDir != filepath.Join(home, ".claude", "skills") {
+			return errors.New("--mcp-patch cannot be combined with --skills-dir, --memory-dir or --only")
+		}
+		return exportClaudeMCPConfigPatch(*mcpPatch, *mcpConfig, *apply, stdout)
 	}
 	var ops []claudesync.Op
 	if *skillsDir != "" {
@@ -101,6 +109,57 @@ func syncCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	if failed > 0 {
 		return fmt.Errorf("%d of the plan's writes failed", failed)
 	}
+	return nil
+}
+
+func exportClaudeMCPConfigPatch(dest, source, apply string, stdout io.Writer) error {
+	f, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("read local Claude config %q: %w", source, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect local Claude config %q: %w", source, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > 1<<20 {
+		return fmt.Errorf("local Claude config %q must be a regular file no larger than 1048576 bytes", source)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+	if err != nil {
+		return fmt.Errorf("read local Claude config %q: %w", source, err)
+	}
+	patch, err := claudesync.NewMCPConfigPatch(data)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(stdout, "%d credential-free HTTPS MCP declarations\npatch bytes %d\nplan %s\n", patch.Servers, len(patch.Config), patch.Digest)
+	if apply == "" {
+		_, _ = fmt.Fprintf(stdout, "dry run: nothing was written; run again with --apply %s\n", patch.Digest)
+		return nil
+	}
+	if apply != patch.Digest {
+		return fmt.Errorf("the MCP config patch changed: --apply %s does not match plan %s", apply, patch.Digest)
+	}
+	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create MCP config patch %q: %w", dest, err)
+	}
+	if _, err := out.Write(patch.Config); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dest)
+		return fmt.Errorf("write MCP config patch %q: %w", dest, err)
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dest)
+		return fmt.Errorf("sync MCP config patch %q: %w", dest, err)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dest)
+		return fmt.Errorf("close MCP config patch %q: %w", dest, err)
+	}
+	_, _ = fmt.Fprintf(stdout, "created\t%s\n", dest)
 	return nil
 }
 
