@@ -87,7 +87,7 @@ func (s *Server) readThread(ctx context.Context, id, before string, limit int, f
 	if err != nil {
 		return nil, err
 	}
-	resp, err := threadPage(before, limit, fold, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
+	resp, err := s.threadPage(ctx, before, limit, fold, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
 		return s.Store.ConversationThread(ctx, id, before, limit)
 	})
 	if err != nil {
