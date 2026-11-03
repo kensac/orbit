@@ -193,6 +193,9 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		return e.executeLearn(ctx, actx, snap, a, c, start, log)
 	}
 
+	if sk := quietHours(a, c, time.Now()); sk != nil {
+		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
+	}
 	if sk := missed(a, c, time.Now()); sk != nil {
 		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
 	}

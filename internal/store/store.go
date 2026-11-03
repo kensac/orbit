@@ -574,6 +574,8 @@ const (
 	GateMissed = "missed"
 	// GateBudget names a scheduled run refused after reaching its agent's budget.
 	GateBudget = "budget"
+	// GateQuietHours names a scheduled run suppressed by its agent's local quiet interval.
+	GateQuietHours = "quiet_hours"
 )
 
 // FinishRun records the outcome of a run that wrote nothing else (a failure,
