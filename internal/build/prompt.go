@@ -72,7 +72,7 @@ var outputSchema = func() json.RawMessage {
 }()
 
 // cliArgs is the build CLI's command line. The prompt goes on stdin as one stream-json user message; stdin stays open for permission answers, and nothing is kept of the session.
-func cliArgs(binary, model string, maxTurns int, system string) []string {
+func cliArgs(binary, model, effort string, maxTurns int, system string) []string {
 	extra := []string{
 		"--permission-mode", "default",
 		"--tools", cliTools,
@@ -83,6 +83,11 @@ func cliArgs(binary, model string, maxTurns int, system string) []string {
 	}
 	if model != "" {
 		extra = append(extra, "--model", model)
+	}
+	if effort != "" {
+		// What the Agent SDK passes for Options.effort (ProcessTransport,
+		// core.mjs in @anthropic-ai/claude-agent-sdk 0.3.316).
+		extra = append(extra, "--effort", effort)
 	}
 	if maxTurns > 0 {
 		extra = append(extra, "--max-turns", strconv.Itoa(maxTurns))

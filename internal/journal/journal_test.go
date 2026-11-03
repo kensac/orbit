@@ -260,6 +260,23 @@ func TestApprovalsAreRequestThenDecision(t *testing.T) {
 	}
 }
 
+func TestASteerIsAnItemInItsTurn(t *testing.T) {
+	m := &memJournal{}
+	m.feed(t, 1,
+		`{"type":"system","subtype":"init","session_id":"s"}`,
+		`orbit.steer {"message_id":"m2","text":"also banana","author":"kanishk"}`,
+		`{"type":"command_lifecycle","command_uuid":"m2","state":"started"}`,
+		`{"type":"result","subtype":"success"}`)
+	var st Steer
+	it := m.latest(t, "steer:m2", &st)
+	if it.Kind != KindSteer || *it.Turn != "turn:1.1" || st.Text != "also banana" || st.Author != "kanishk" {
+		t.Fatalf("steer = %s %v %+v", it.Kind, it.Turn, st)
+	}
+	if it, _ := m.look("status:1.3.0"); it != nil {
+		t.Fatal("a lifecycle frame is an item")
+	}
+}
+
 func TestCodexItemsAreOneItemAcrossTheirLines(t *testing.T) {
 	m := &memJournal{}
 	m.feed(t, 1,
