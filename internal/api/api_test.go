@@ -17,6 +17,7 @@ import (
 	"github.com/kensac/orbit/internal/auth"
 	"github.com/kensac/orbit/internal/auth/authtest"
 	"github.com/kensac/orbit/internal/engine"
+	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/testdb"
@@ -147,6 +148,51 @@ func TestManualRunAndMessageWake(t *testing.T) {
 	runs, _ := s.ListRuns(ctx, store.RunFilter{Agent: "a"})
 	if len(runs) != 2 {
 		t.Fatalf("runs = %d", len(runs))
+	}
+}
+
+type replayRunner struct {
+	got   runner.Request
+	calls int
+}
+
+func (r *replayRunner) Kind() string  { return "claude-code" }
+func (r *replayRunner) Model() string { return "fake" }
+func (r *replayRunner) Run(_ context.Context, req runner.Request, _ func(runner.Event)) (*runner.Result, error) {
+	r.got = req
+	r.calls++
+	cost := 0.13
+	return &runner.Result{Output: json.RawMessage(`{"summary":"ok","report":"ok","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[]}`), CostUSD: &cost}, nil
+}
+
+func TestEvaluationReplayUsesCurrentAgentWithoutPersisting(t *testing.T) {
+	v := newEnv(t, nil)
+	fr := &replayRunner{}
+	v.e.NewRunner = func(string, spec.RunnerSpec, func(string) (string, bool)) (runner.Runner, error) { return fr, nil }
+	before, err := v.s.ListRuns(ctx, store.RunFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, got := call(t, "POST", v.internal.URL+"/api/v1/agents/a/replay", token, `{"cases":[{"name":"one","input":{"records":[1,2]}}]}`)
+	results, _ := got["results"].([]any)
+	if code != http.StatusOK || len(results) != 1 || results[0].(map[string]any)["cost_usd"] != 0.13 {
+		t.Fatalf("replay = %d %v", code, got)
+	}
+	if len(fr.got.Tools) != 0 || fr.got.Harness != nil || fr.got.Session != nil || fr.got.Connectors != nil {
+		t.Fatalf("replay received capabilities: %+v", fr.got)
+	}
+	if len(fr.got.Inputs) != 1 || string(fr.got.Inputs[0].Content) != `{"records":[1,2]}` || !strings.Contains(fr.got.Prompt, "x") {
+		t.Fatalf("replay request = %+v", fr.got)
+	}
+	after, err := v.s.ListRuns(ctx, store.RunFilter{})
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("replay persisted a run: before %d after %d err %v", len(before), len(after), err)
+	}
+	if code, _ := call(t, "POST", v.internal.URL+"/api/v1/agents/a/replay", token, `{"cases":[{"name":"one","input":{"records":[]}}],"unexpected":true}`); code != http.StatusBadRequest {
+		t.Fatalf("unknown field = %d", code)
+	}
+	if code, _ := call(t, "POST", v.internal.URL+"/api/v1/agents/a/replay", token, `{}`); code != http.StatusBadRequest || fr.calls != 1 {
+		t.Fatalf("missing input = %d, backend calls %d", code, fr.calls)
 	}
 }
 
