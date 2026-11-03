@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 )
 
@@ -149,6 +150,48 @@ func (c *Client) SessionExists(ctx context.Context, name, session string) (bool,
 		err = c.boxCall(ctx, http.MethodGet, p, &out)
 	}
 	return out.Exists, err
+}
+
+// SessionScrollback returns a bounded tmux capture, including terminal
+// attributes, for a reconnecting terminal client.
+func (c *Client) SessionScrollback(ctx context.Context, name, session string, lines int) ([]byte, error) {
+	if !ValidSession(session) {
+		return nil, fmt.Errorf("invalid session %q", session)
+	}
+	if lines < 1 || lines > 10000 {
+		return nil, fmt.Errorf("lines: want 1 to 10000")
+	}
+	p, err := boxPath(name, "sessions", session, "scrollback")
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(ctx, http.MethodGet, PathBoxes+p+"?lines="+strconv.Itoa(lines), nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrNoBox
+	}
+	if resp.StatusCode >= 300 {
+		return nil, readError(resp)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+}
+
+// ResizeSession changes the tmux window size for an existing session.
+func (c *Client) ResizeSession(ctx context.Context, name, session string, size Resize) error {
+	if !ValidSession(session) {
+		return fmt.Errorf("invalid session %q", session)
+	}
+	if err := size.Validate(); err != nil {
+		return err
+	}
+	p, err := boxPath(name, "sessions", session, "resize")
+	if err != nil {
+		return err
+	}
+	return c.boxSend(ctx, http.MethodPost, p, size, nil)
 }
 
 // KillSession ends a tmux session; one already gone is not an error.

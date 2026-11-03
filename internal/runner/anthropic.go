@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -68,7 +69,7 @@ func (a *anthropicAPI) Run(ctx context.Context, req Request, emit func(Event)) (
 		maxTokens = 8192
 	}
 	body, err := json.Marshal(map[string]any{
-		"model":      a.rs.Model,
+		"model":      cmp.Or(req.Model, a.rs.Model),
 		"max_tokens": maxTokens,
 		"system":     req.System,
 		"messages":   []any{map[string]any{"role": "user", "content": b.String()}},

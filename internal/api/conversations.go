@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -126,14 +127,61 @@ func (s *Server) conversationShape(ctx context.Context, id string) (*store.Conve
 
 func (s *Server) updateConversation(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Title    *string `json:"title"`
-		Archived *bool   `json:"archived"`
+		Title    *string         `json:"title"`
+		Archived *bool           `json:"archived"`
+		Model    json.RawMessage `json:"model"`
+		Effort   json.RawMessage `json:"effort"`
 	}
 	if !decode(w, r, 4<<10, &body, bodyRequired) {
 		return
 	}
 	id := r.PathValue("id")
-	err := s.Store.UpdateConversation(r.Context(), id, store.ConversationUpdate{Title: body.Title, Archived: body.Archived})
+	u := store.ConversationUpdate{Title: body.Title, Archived: body.Archived}
+	for _, f := range []struct {
+		name string
+		raw  json.RawMessage
+		to   **string
+	}{{"model", body.Model, &u.Model}, {"effort", body.Effort, &u.Effort}} {
+		if f.raw == nil {
+			continue
+		}
+		// null returns the field to the runner's own, as "" does.
+		var v *string
+		if err := json.Unmarshal(f.raw, &v); err != nil {
+			writeErr(w, http.StatusBadRequest, f.name+" must be a string or null")
+			return
+		}
+		set := ""
+		if v != nil {
+			set = strings.TrimSpace(*v)
+		}
+		*f.to = &set
+	}
+	if u.Model != nil || u.Effort != nil {
+		c, err := s.Store.GetConversation(r.Context(), id)
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		cfg := s.Engine.Current().Config
+		a, ok := cfg.Agents[c.Agent]
+		if !ok {
+			writeErr(w, http.StatusConflict, "the conversation's agent "+strconv.Quote(c.Agent)+" is not configured")
+			return
+		}
+		model, effort := deref(c.Model), deref(c.Effort)
+		if u.Model != nil {
+			model = *u.Model
+		}
+		if u.Effort != nil {
+			effort = *u.Effort
+		}
+		if err := spec.CheckModel(cfg.Deployment.Runners[a.Runner].Kind, model, effort); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	err := s.Store.UpdateConversation(r.Context(), id, u)
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -158,4 +206,11 @@ func (s *Server) conversationMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.postTo(w, r, a, c.ID)
+}
+
+func deref(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }

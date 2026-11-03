@@ -215,7 +215,7 @@ conversation is never deleted, only archived.
   "ticket_id": null, "workspace_id": null, "task_id": null, "purpose": null,
   "last_run": {"id": "uuid", "status": "running", "trigger": "message",
                "created_at": "...", "finished_at": null, "summary": null},
-  "read_through": "...", "from_session": null}],
+  "read_through": "...", "from_session": null, "model": null, "effort": null}],
  "has_more": false, "next_before": null}
 ```
 
@@ -259,9 +259,10 @@ Either route also takes `from_session`: an imported session (Imported sessions, 
 
 Regular files only, by path; orbit's own state (`.orbit/`, the run's `inputs/`) is left out. `snapshot` is `null` (and `files` empty) for a conversation without one; one a person's workspace write stored has `source: "person"`, `author` the person, and `run_id` and `attempt` null. `GET /conversations/{id}/files/{path}` is one file, always as a download (`application/octet-stream`, `Content-Disposition: attachment`, `nosniff`, a CSP that runs nothing), 404 for a path the snapshot does not have.
 
-`PATCH /conversations/{id}` `{"title": "...", "archived": true}` (either
-field) returns the updated `{"conversation": {...}}`. A title is at most 240
-characters (400 otherwise). The default conversation cannot be archived
+`PATCH /conversations/{id}` `{"title": "...", "archived": true, "model": "sonnet", "effort": "high"}` (any of the fields) returns the updated `{"conversation": {...}}`. A title is at most 240
+characters (400 otherwise).
+
+`model` and `effort` are what the conversation's runs use instead of the agent's runner's own; `null` or `""` returns one to the runner's, and an absent field is left as it is. Both are checked against the agent's runner (`spec.CheckModel`, 400 naming the problem): a model is an alias or id (`opus`, `claude-opus-4-5`, `sonnet[1m]`, `gpt-5-codex`: lowercase letters, digits and `. _ : -`), an `anthropic` runner's an id starting `claude-`; `effort` is only for `claude-code`, one of `low`, `medium`, `high`, `xhigh`, `max`. A run reads them when it starts and records what it ran with (a run's `model` and `effort`). A conversation's live process takes a change at its next turn without ending (`set_model`, and `apply_flag_settings` with `effortLevel`), so the session and its cache carry on; a process that refuses either is closed and the turn starts one with `--model` and `--effort`. A stored pair the runner no longer takes (the agent moved to another runner) is not used, and the run's `orbit.model_skipped` event `{"reason"}` says why. The default conversation cannot be archived
 (409). A message to an archived conversation brings it back.
 
 `POST /conversations/{id}/messages` takes and returns exactly what
@@ -577,7 +578,7 @@ The final answer is `done.report`, not the concatenated `text`: `text` is what t
 {"id": "uuid", "attempt": 1, "agent": "finance", "spec_sha": "hex",
  "trigger": "schedule", "trigger_index": 0, "scheduled_for": "...",
  "prompt": "", "status": "succeeded",
- "runner_kind": "claude-code", "model": "...", "worker": "orbit/0",
+ "runner_kind": "claude-code", "model": "...", "effort": "high", "worker": "orbit/0",
  "created_at": "...", "started_at": "...", "finished_at": "...",
  "error": "...", "summary": "...", "report": "<markdown>",
  "output": {}, "usage": {}, "cost_usd": 0.03, "session_id": "...",
@@ -595,7 +596,7 @@ The final answer is `done.report`, not the concatenated `text`: `text` is what t
 
 - Always present: `id`, `attempt`, `agent`, `spec_sha`, `trigger`, `prompt` (`""` when none), `status`, `created_at`, `steps`, `agent_status` and `changes` (`null` when it has none). Every other field is omitted when it has no value (not `null`).
 - `trigger` and `status` are as in a thread run item. `trigger_index` is set on a `schedule` or `webhook` run: which trigger fired. `scheduled_for` is set on a `schedule` run: the fire time.
-- `runner_kind`, `model` and `worker` are the latest attempt's backend, its model (absent when the runner names none) and the instance that claimed it. `spec_sha` is the spec the latest attempt ran under.
+- `runner_kind`, `model` and `worker` are the latest attempt's backend, its model (the conversation's when it sets one, else the runner's; absent when neither names one) and the instance that claimed it. `effort` is the conversation's effort the attempt ran at, absent for the runner's default. `spec_sha` is the spec the latest attempt ran under.
 - `output` is the backend's raw structured output and `usage` its token usage, as it reported them. `cost_usd` is every attempt's cost together.
 - `report` is the submitted `report`, except when the attempt's final assistant prose (its last run of top-level `message` items, as in The journal) holds more: the submitted one was empty, one line where the prose has several, or shorter. Then `report` is that prose, `summary` stays the submitted one, and `output` keeps what was submitted. A chat agent's `report` is its final message.
 - `session_id` is the backend session the run ended in. `session_mode` (`fresh`, `resumed`, `live`), `session_parent` (the run whose session it continued) and `session_depth` are set for an agent with a session.
@@ -631,7 +632,7 @@ An attempt (`store.Attempt`), oldest first:
 {"attempt": 1, "seq": 12, "at": "...", "kind": "assistant", "payload": {}}
 ```
 
-`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.stalled`, `orbit.figures_unverified`, a chat turn's `orbit.steer` (`{"message_id", "text", "author"}`: it took a steered message) and `orbit.steer_withdrawn` (`{"message_id", "confirmed"}`: a steered message written into the turn and not taken was withdrawn when it ended; `confirmed` false means the backend did not confirm it, and its process was closed), a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`; a chat run's `orbit.permission` (a permission request's decision), `orbit.approval` (one opened for its person and how it ended), `orbit.permissions` (its level applied; The journal, `permissions`); and connector steps, `orbit.connector` (Connectors, below), with `orbit.permission` for each permission prompt of a connector tool.
+`payload` is one line of the backend's stream as it sent it (a line that was not JSON is stored as a JSON string). `kind` is the line's `type`, with `.<subtype>` when it has one (`system.init`, `result.success`, `assistant`, `user`, `rate_limit_event`; Codex's `item.started`, `item.completed`, ...), `response` for the Messages API, and `raw` for a line without a type. orbit's own events are `orbit.*`: `orbit.source_fetched` and `orbit.source_failed`, `orbit.transform` and `orbit.transform_failed`, `orbit.gate`, `orbit.session`, `orbit.recovery`, `orbit.stalled`, `orbit.model_skipped`, `orbit.figures_unverified`, a chat turn's `orbit.steer` (`{"message_id", "text", "author"}`: it took a steered message) and `orbit.steer_withdrawn` (`{"message_id", "confirmed"}`: a steered message written into the turn and not taken was withdrawn when it ended; `confirmed` false means the backend did not confirm it, and its process was closed), a build's `orbit.build`, `orbit.git`, `orbit.sandbox`, `orbit.permission` and `orbit.permission_denials`; a chat run's `orbit.permission` (a permission request's decision), `orbit.approval` (one opened for its person and how it ended), `orbit.permissions` (its level applied; The journal, `permissions`); and connector steps, `orbit.connector` (Connectors, below), with `orbit.permission` for each permission prompt of a connector tool.
 
 ### The journal
 
@@ -1067,7 +1068,9 @@ Unattended agents push through the action `workspace:push`, `{"repo", "branch", 
 - `POST /workspaces/{id}/terminals` `{"preset": "shell", "cwd"?, "cols", "rows", "title"?}`: `201 {"terminal"}`. `preset` is `shell` or `claude`; `cols` 1 to 1000, `rows` 1 to 500; `cwd` is a clean path relative to `/work` (default `""`, `/work` itself; `path` otherwise); `title` defaults to `Shell` or `Claude Code (direct)`. The box is created or started here (a failure is `502` naming sandboxd's reason). At most 8 running per workspace (`limit`). `claude` options (`{"resume"?, "continue"?, "model"?}`) are planned and answer `400`.
 - `GET /workspaces/{id}/terminals?state=running|exited|all`: `{"terminals": [...]}`, newest first, at most 500. `GET /terminals/{tid}`: `{"terminal"}`.
 - `POST /terminals/{tid}/kill` `{"signal"?: "HUP"}` (`HUP`, `INT`, `TERM`, `KILL`; each ends the tmux session the same way): `200 {"terminal"}`, `exited` with `end_reason` `killed`. A terminal already ended is returned as it is.
-- Planned: `PATCH /terminals/{tid}` `{"title"}`, `POST /terminals/{tid}/resize` (an attached client resizes in band), `GET /terminals/{tid}/scrollback?lines=`, and `GET /workspaces/{id}/claude-sessions?cwd=` (`{"sessions": [{"id", "started_at", "last_at", "first_prompt"}]}`, for a `resume` picker).
+- `POST /terminals/{tid}/resize` `{"cols", "rows"}` resizes the tmux window; it needs workspace-group membership and returns 204. Dimensions use the same bounds as terminal creation.
+- `GET /terminals/{tid}/scrollback?lines=` returns up to 10,000 captured lines as terminal bytes (including ANSI attributes), capped at 4 MiB; the default is 10,000 lines. A stopped or ended terminal cannot be read.
+- Planned: `PATCH /terminals/{tid}` `{"title"}` and `GET /workspaces/{id}/claude-sessions?cwd=` (`{"sessions": [{"id", "started_at", "last_at", "first_prompt"}]}`, for a `resume` picker).
 
 **Attaching.** `POST /terminals/{tid}/attach` `{"origin"?}` mints a ticket for the token's person and returns:
 
@@ -1083,7 +1086,7 @@ The ticket is single-use, expires in 30 s, and is bound to the terminal, the per
 | frame | direction | content |
 |---|---|---|
 | binary | both | terminal bytes: input to the terminal, output from it |
-| `{"type": "ready", "terminal": {...}, "replay_bytes": 0}` | server | first. tmux redraws the screen on attach; replaying scrollback first (`replay_bytes` above 0: the next that many binary bytes are the replay) is planned |
+| `{"type": "ready", "terminal": {...}, "replay_bytes": N}` | server | first. The next N binary bytes are the bounded tmux scrollback replay; following bytes are the attached terminal stream |
 | `{"type": "resize", "cols", "rows"}` | client | this client's size; send one after `ready` and on every change |
 | `{"type": "ping"}` / `{"type": "pong"}` | both | the client pings every 10 s and may treat 25 s without a frame as a dead socket; the server answers each ping with a pong at once and sends its own ping every 15 s (Cloudflare closes a socket idle for 100 s) |
 | `{"type": "exit", "code": 0, "reason": "exit"}` | server | the session ended; the terminal is `exited`; the socket closes (1000) |
@@ -1277,7 +1280,7 @@ A skill:
  "agents": ["finance"]}
 ```
 
-- `name` matches `^[a-z][a-z0-9-]{0,62}$`; a `name` in the frontmatter must be the same. `description` is the frontmatter's (required: it is how Claude Code decides to use the skill). `SKILL.md` is UTF-8, at most 256 KB; at most 200 files, each at most 4 MB, 16 MB in all; a file's `path` is relative, clean, inside the skill and not `SKILL.md`. A file's `content` is base64.
+- `name` matches `^[a-z][a-z0-9-]{0,62}$`; a `name` in the frontmatter must be the same. The names of orbit's built-in skills (`orbit-query`, `orbit-calc`, `orbit-entries`, `orbit-actions`, `orbit-continuations`; docs/ARCHITECTURE.md, Skills) are reserved: a skill so named is a `400`. `description` is the frontmatter's (required: it is how Claude Code decides to use the skill). `SKILL.md` is UTF-8, at most 256 KB; at most 200 files, each at most 4 MB, 16 MB in all; a file's `path` is relative, clean, inside the skill and not `SKILL.md`. A file's `content` is base64.
 - `version` counts versions, the newest in force; `status` is `active` or `retired` (a retired skill is given to no run). `sha256` is over `SKILL.md` and every file. `source` is `person`, `agent` (a run wrote it: `source_run_id`) or `import`. `author` is the token's person for `person` and `import`. `restored_from` is the version a restore copied.
 - `content` and `files` are in the responses of `GET /skills/{name}` and `GET /skills/{name}/versions/{v}` only; lists carry `file_paths`. `agents` (in the list and `GET /skills/{name}`) are the agents that run with it, from their spec or attached.
 
@@ -1293,7 +1296,7 @@ Routes:
 - `POST /skills/import` `{"dry_run", "skills": [{"name", "content", "files"?}], "note"?}`: each skill's next version where it differs from the current one (or is new, or retired); `{"dry_run", "results": [{"name", "outcome": "created"|"updated"|"unchanged", "version"}]}`, one transaction, at most 100 skills. `orbit import skills` calls it (deployment.md).
 - `PUT /agents/{name}/skills/{skill}` and `DELETE` attach and detach, as for topics; attaching an unknown skill is 404. `GET /agents/{name}/context` lists the agent's `skills`: `[{"name", "from": ["spec"|"api"], "version", "status"}]`, `status` `missing` (and `version` null) for a name no skill has.
 
-**Skills agents write.** A skill steers every later run it is given to, so an agent writes one with the `skill:write` action, under its rule like any action (`auto`, `approve` or `deny`; unnamed, denied and not offered; the built-in `orbit` has it under `approve`). Its params are `{"op": "write"|"retire", "name", "content", "note"}`: `write` gives the whole `SKILL.md` of a new skill, or of one the run has, whose files stay; `retire` ends one the run has. At most 3 per run. Code resolves each when proposed and adds to its params `version` (the version the run had, which the write applies against; 0 for a new skill) and `changes`: `{"from_version", "lines_added", "lines_removed", "diff", "files", "scripts"}`, where `diff` is `SKILL.md`'s change, one `+` or `-` line each (at most 16 KB, then how many lines it left out), `files` the skill's other files, and `scripts` those of them that run (under `scripts/` or `bin/`, a script's extension, a `#!` line, or an executable's header). A retire of a skill the run lacks, a `SKILL.md` without a description, or a fourth write is `denied` with the reason. The approval notification leads with the change in words, `Writes skill deploy (version 1 to 2): SKILL.md +1 -1 lines; its 3 other files stay.`, then `Scripts and executables in this skill (...): scripts/go.sh, tools/check`, then the diff. Executed, the write is a `source: "agent"` version against `version` (a newer one fails the action, naming it), a written skill is attached to the agent, and the action's `result` is `{"skill", "op", "outcome": "written"|"unchanged", "version", "changes"}`. The versions the run was given are its `skills.json` artifact. A person reverts with `restore` or `retire`.
+**Skills agents write.** A skill steers every later run it is given to, so an agent writes one with the `skill:write` action, under its rule like any action (`auto`, `approve` or `deny`; unnamed, denied and not offered; the built-in `orbit` has it under `approve`). Its params are `{"op": "write"|"retire", "name", "content", "note"}`: `write` gives the whole `SKILL.md` of a new skill, or of one the run has, whose files stay; `retire` ends one the run has. At most 3 per run. Code resolves each when proposed and adds to its params `version` (the version the run had, which the write applies against; 0 for a new skill) and `changes`: `{"from_version", "lines_added", "lines_removed", "diff", "files", "scripts"}`, where `diff` is `SKILL.md`'s change, one `+` or `-` line each (at most 16 KB, then how many lines it left out), `files` the skill's other files, and `scripts` those of them that run (under `scripts/` or `bin/`, a script's extension, a `#!` line, or an executable's header). A retire of a skill the run lacks, a built-in skill's name, a `SKILL.md` without a description, or a fourth write is `denied` with the reason. The approval notification leads with the change in words, `Writes skill deploy (version 1 to 2): SKILL.md +1 -1 lines; its 3 other files stay.`, then `Scripts and executables in this skill (...): scripts/go.sh, tools/check`, then the diff. Executed, the write is a `source: "agent"` version against `version` (a newer one fails the action, naming it), a written skill is attached to the agent, and the action's `result` is `{"skill", "op", "outcome": "written"|"unchanged", "version", "changes"}`. The versions the run was given are its `skills.json` artifact (`[{"name", "version", "sha256"}]`, a built-in skill at version 0). A person reverts with `restore` or `retire`.
 
 ## Templates
 

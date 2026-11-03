@@ -125,6 +125,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/accounts/{slot}/usage/poll", s.accountPoll)
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/tty", s.tty)
 	mux.HandleFunc("GET "+sandbox.PathBoxes+"/{name}/sessions/{session}", s.sessionExists)
+	mux.HandleFunc("GET "+sandbox.PathBoxes+"/{name}/sessions/{session}/scrollback", s.sessionScrollback)
+	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/sessions/{session}/resize", s.sessionResize)
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/sessions/{session}/kill", s.sessionKill)
 	authed := s.auth(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

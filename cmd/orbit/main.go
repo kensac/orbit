@@ -101,6 +101,8 @@ func main() {
 		err = drainCmd()
 	case "import":
 		err = importCmd(ctx, os.Args[2:])
+	case "pack":
+		err = packCmd(ctx, os.Args[2:])
 	case "sync":
 		err = syncCmd(ctx, os.Args[2:], os.Stdout)
 	case "mcp", "hook":
@@ -169,7 +171,7 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | restore-check [--expect file] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills|claude-sessions <dir> | sync claude | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | restore-check [--expect file] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills|claude-sessions <dir> | pack <agent> --output <new-dir> | pack inspect <dir> | sync claude | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
 	os.Exit(2)
 }
 
