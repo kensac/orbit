@@ -35,10 +35,45 @@ func (s *Server) connectorRoutes(api func(string, http.HandlerFunc), mux *http.S
 	api("GET /api/v1/connectors", s.listConnectors)
 	api("GET /api/v1/connectors/catalog", s.listConnectorCatalog)
 	api("POST /api/v1/connectors/catalog", s.addConnectorCatalog)
+	api("POST /api/v1/connectors/catalog/{name}/revoke", s.revokeConnectorGrant)
 	api("GET /api/v1/connectors/{name}/tools", s.connectorTools)
 	api("POST /api/v1/connectors/{name}/authorize", s.authorizeConnector)
 	// The sealed state is the credential: the authorization server sends the person's browser here.
 	mux.HandleFunc("GET "+engine.ConnectorCallbackPath, s.connectorCallback)
+}
+
+// revokeConnectorGrant revokes the current OAuth grant without removing the
+// catalog record or any sealed token history.
+func (s *Server) revokeConnectorGrant(w http.ResponseWriter, r *http.Request) {
+	person := principalOf(r).Person
+	if person == "" {
+		writeErr(w, http.StatusForbidden, "revoking a connector grant requires a signed-in person")
+		return
+	}
+	name := r.PathValue("name")
+	entry, err := s.Store.CatalogConnector(r.Context(), name)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	if entry == nil {
+		writeErr(w, http.StatusNotFound, "catalog connector not found")
+		return
+	}
+	if entry.CreatedBy != person {
+		writeErr(w, http.StatusForbidden, "only the person who added this connector can revoke its grant")
+		return
+	}
+	version, err := s.Store.RevokeConnectorToken(r.Context(), name, person)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusConflict, "connector has no active grant")
+		return
+	}
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	respond(w, map[string]any{"connector": name, "revoked_version": version}, nil)
 }
 
 func (s *Server) listConnectors(w http.ResponseWriter, r *http.Request) {
