@@ -741,6 +741,12 @@ A row:
 
 `rule` is the agent's rule for the type when it was proposed (`auto`, `approve`, `deny`). `decided_by` is the person, or `rule` for an action its rule approved or denied. `instructed_by` is the person whose message a chat agent was answering when it proposed the action: their message is the instruction (Chat agents, above), so an `approve` action they asked for is approved by them (`decided_by` is that person) without a second approval. `result` is what the executor returned; `error` is why it was denied (an unknown type, invalid params, a limit) or why it failed. `decided_by`, `decided_at`, `executed_at`, `result` and `error` are omitted when unset.
 
+`gmail:draft` and `calendar:create` are typed actions. Their parameters contain
+only message or event fields; `google_actions` in `orbit.yaml` fixes the
+authenticated connector and write tool, and fixes Calendar's destination.
+Orbit builds the Google API request and executes it through the connector.
+Both types are denied unless the agent names a rule.
+
 - `POST /actions/{id}/approve`, `POST /actions/{id}/reject`: `200 {"ok":
   true}`; 404 for an unknown action; 409 when it was already decided. With
   `{"client_request_id": "..."}` (same rules as `client_message_id`), a retry
@@ -806,7 +812,7 @@ Something waiting on a person is an **attention** row, written in the same trans
 
 ## Tickets
 
-A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /tickets` (opens its conversation; returns `ticket_id`, `conversation_id`, `message_id`, `run_id`; `stack_on` files a request on top of another, tickets.md, Stacked tickets; `race` and `variants` build it two or three times, tickets.md, Races), `GET /tickets`, `GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that reached merging carries `merge_action_id`, its `github:merge` action), `POST /tickets/{id}/plans/{version}/approve`, `POST /tickets/{id}/{abandon,retry,reopen}`, and `POST /tickets/{id}/checks/rerun` (`202`; the ticket loop reruns the PR's failed Actions jobs on its next tick, and a failed ticket goes back to review; `GET /tickets/{id}` lists every rerun in `reruns`), and review comments on its PR: `GET`/`POST /tickets/{id}/comments`, `POST /tickets/{id}/comments/{comment}/{edit,withdraw}` and `POST /tickets/{id}/review`, which sends the drafts as one message (tickets.md, Review comments). Its thread and messages are its conversation's (`/conversations/{conversation_id}/thread`, `/messages`); a message there reopens a `planned` ticket, and a `merged`, `done` or `abandoned` one refuses messages (409). A ticket's conversation carries `ticket_id` in the conversation list. Filing and approving take `client_request_id`; the author and approver are the token's person. A transition the ticket's state does not allow is 409.
+A ticket is a conversation with a lifecycle ([tickets.md](tickets.md)): `POST /tickets` (opens its conversation; returns `ticket_id`, `conversation_id`, `message_id`, `run_id`; `stack_on` files a request on top of another, tickets.md, Stacked tickets; `race` and `variants` build it two or three times, tickets.md, Races), `GET /tickets`, `GET /tickets/{id}` (the ticket, its plans and transitions; a ticket that reached merging carries `merge_action_id`, its `github:merge` action), `POST /tickets/{id}/plans/{version}/approve`, `POST /tickets/{id}/{abandon,retry,reopen}`, and `POST /tickets/{id}/checks/rerun` (`202`; the ticket loop reruns the PR's failed Actions jobs on its next tick, and a failed ticket goes back to review; `GET /tickets/{id}` lists every rerun in `reruns`), and review comments on its PR: `GET`/`POST /tickets/{id}/comments`, `POST /tickets/{id}/comments/{comment}/{edit,withdraw}` and `POST /tickets/{id}/review`, which sends the drafts as one message (tickets.md, Review comments); `GET /tickets/{id}/diff` is the PR's diff for those comments (below). Its thread and messages are its conversation's (`/conversations/{conversation_id}/thread`, `/messages`); a message there reopens a `planned` ticket, and a `merged`, `done` or `abandoned` one refuses messages (409). A ticket's conversation carries `ticket_id` in the conversation list. Filing and approving take `client_request_id`; the author and approver are the token's person. A transition the ticket's state does not allow is 409.
 
 `GET /tickets?status=&agent=&before=&limit=` is `{"tickets": [...]}`, newest first. `status` and `agent` match exactly; `before` is an RFC 3339 time and returns tickets created before it (400 if it does not parse), so the last ticket's `created_at` is the next page's cursor. `limit` defaults to 50, at most 500. Each ticket:
 
@@ -840,6 +846,18 @@ Until a person picks, the ticket has no `branch`, `pr_number` or `head_sha`; `ra
 `run_*`, `branch`, `pr_number`, `base_sha`, `head_sha`, `added`, `deleted`, `diff_policy` (`passed` or `failed`) and `cost_usd` are the lane's newest build's and omitted until it has them; `files` is always a list. `checks` (`pending`, `green`, `failed`), `checks_head`, `pr_state` (`open`, `closed`, `merged`), `checks_at` and `pr_closed_at` are the ticket loop's latest reading of the lane's PR. `why` is the reason for its place in one phrase. `recommended` is the first lane when it delivered a PR, omitted otherwise; `picked` once a person picked.
 
 `POST /tickets/{id}/pick` `{"lane": "a", "client_request_id": "..."}` is the person's pick (`by` counts only with the operator token): `{"ok": true, "action_id": "uuid"}`, the `ticket:pick` action recorded on the lane's build run with rule `approve`, approved and executed by that person in the same transaction (no rule makes it automatic and no agent is offered it). The ticket stays `review` and takes the lane's `branch`, `pr_number`, `base_sha` and `head_sha`, then goes on like any ticket (checks, fixes, revisions and the merge are that lane's); the loop closes the other lanes' PRs and keeps their branches. 400 for a lane that is not `a`, `b` or `c`; 409 unless the ticket is a race in `review` with no pick and the lane's newest build delivered a PR.
+
+### A ticket's diff
+
+`GET /tickets/{id}/diff?path=` returns the ticket PR as diff files in the same shape as a run's changes (Workspace, A reply's changes), with real line numbers for comments:
+
+```json
+{"ticket_id": "uuid", "repo": "kensac/orbit", "pr": 7,
+ "base": {"ref": "main", "sha": "..."}, "head": {"ref": "orbit/uuid", "sha": "..."},
+ "files": [<diff file>], "truncated": false}
+```
+
+orbit reads the PR and its files from GitHub on each request, with a token for the ticket's repository alone (`contents: read`, `pull_requests: read`), revoked after use (tickets.md, GitHub access). `head` is the PR's current head, which comments are written against (`head_sha`). Each file's hunks are GitHub's patch with line numbers on each side; `additions` and `deletions` are GitHub's counts for the whole file. GitHub statuses map to `added` (also `copied`), `deleted` (`removed`), `modified`, `renamed` (with `old_path`) and `mode` (`changed`). A file without a patch is `binary` when it changed no lines and `truncated` when GitHub would not show it. The response is capped at 300 files, 10 MiB and 5000 lines per file; `path` selects one file of the PR without the per-file line cap (`404` when the PR does not change it). A ticket without a PR is `409`; GitHub unconfigured is `503`, unreachable or refusing `502`.
 
 ## Delegation
 
@@ -1075,13 +1093,17 @@ A box holds Claude accounts besides its own profile: each is a directory, `/home
  "email": "k@example.com", "account_uuid": "uuid", "org_id": "uuid", "org_name": "...",
  "subscription_type": "max", "rate_limit_tier": "default_claude_max_20x",
  "access_expires_at": "...", "refresh_expires_at": "...", "checked_at": "...",
- "last_used_at": "...", "created_by": "kanishk", "created_at": "..."}
+ "last_used_at": "...",
+ "usage": {"source": "statusline", "observed_at": "...",
+           "windows": [{"window": "five_hour", "used_percentage": 12.5, "resets_at": "..."}]},
+ "created_by": "kanishk", "created_at": "..."}
 ```
 
 - `slot` names the account's volume (`orbit-box-<agent>-acct-<slot>`) and directory: 12 hex digits of its `id`.
 - `logged_in`, `email`, `account_uuid`, `org_id`, `org_name`, `subscription_type`, `rate_limit_tier` and the expiries are what the account's files said when `checked_at` was: `logged_in` is whether its credentials hold a refresh token; `access_expires_at` is the access token's expiry (the CLI refreshes it itself), `refresh_expires_at` the refresh token's, past which the account needs a new login. A read that finds no login sets `logged_in` false and clears the expiries but keeps the identity fields, so a logged-out account still says whose it was. Each is `null` until read, or when the CLI did not write it.
 - `last_used_at` is the newest attach of a terminal under the account, `null` before one.
-- An account is read from the box on every list and get while the box is running (a stopped box is not started for it), and when a terminal under it ends; otherwise the fields are as last read.
+- `usage` is the newest observation of the account's subscription windows, `null` before one. `source` is `statusline`: the box image's status line (`orbit-statusline`, which managed settings give every Claude Code in the box) records the `rate_limits` the CLI hands it into the account's `.orbit/usage.json` whenever an interactive Claude Code runs under the account, and orbit reads that file; or `poll`: orbit asked the undocumented `/api/oauth/usage` from inside the box with the account's access token, only when `ORBIT_ACCOUNT_USAGE_POLL` is set (off by default; docs/agents/deployment.md). `observed_at` is when the status line ran or the poll answered. `windows` are sorted by name: `window` is the CLI's or the endpoint's name (`five_hour`, `seven_day`, `seven_day_opus`, ...), `used_percentage` 0 to 100 (`null` when not reported), `resets_at` `null` when not reported. An older observation never replaces a newer one, whichever its source, and it is not refreshed by a stopped box: after a window's `resets_at` has passed, its `used_percentage` is out of date.
+- An account (its login and its status line's usage record) is read from the box on every list and get while the box is running (a stopped box is not started for it), and when a terminal under it ends; otherwise the fields are as last read.
 
 Routes require the workspace to be a box (`409`, `no_shell`, otherwise). Mutations and account login require membership of `ORBIT_WORKSPACE_GROUP` (`403`, `group`); account reads use the authenticated workspace access.
 

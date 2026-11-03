@@ -529,6 +529,50 @@ func (e *Engine) executeConnector(ctx context.Context, snap *Snapshot, c actions
 	return actionResult(res, err), callError(res, err)
 }
 
+// executeGoogleAction sends a typed Gmail or Calendar write through the
+// deployment's fixed connector binding. The action rule is checked against
+// the current agent spec before credentials are added.
+func (e *Engine) executeGoogleAction(ctx context.Context, snap *Snapshot, c actions.Call, g actions.GoogleCall) (json.RawMessage, error) {
+	a, ok := snap.Config.Agents[c.Agent]
+	if !ok || a.RuleFor(c.Type) == spec.RuleDeny {
+		return nil, fmt.Errorf("agent %q no longer allows %s", c.Agent, c.Type)
+	}
+	if snap.Config.Deployment.GoogleActions == nil {
+		return nil, fmt.Errorf("google_actions is no longer configured")
+	}
+	var expected spec.GoogleActionBinding
+	switch c.Type {
+	case actions.GmailDraftType:
+		if b := snap.Config.Deployment.GoogleActions.GmailDraft; b != nil {
+			expected = *b
+		}
+	case actions.CalendarCreateType:
+		if b := snap.Config.Deployment.GoogleActions.CalendarCreate; b != nil {
+			expected = spec.GoogleActionBinding{Connector: b.Connector, Tool: b.Tool}
+		}
+	default:
+		return nil, fmt.Errorf("%q is not a typed Google action", c.Type)
+	}
+	if g.Connector != expected.Connector || g.Tool != expected.Tool || g.Connector == "" || g.Tool == "" {
+		return nil, fmt.Errorf("%s: configured connector or tool changed", c.Type)
+	}
+	if !containsString(a.Connectors, g.Connector) {
+		return nil, fmt.Errorf("agent %q no longer has connector %q", c.Agent, g.Connector)
+	}
+	cn, ok := snap.Config.Deployment.Connectors[g.Connector]
+	if !ok || !containsString(cn.WriteTools, g.Tool) {
+		return nil, fmt.Errorf("%s: configured connector write tool is unavailable", c.Type)
+	}
+	auth, err := e.connectorAuth(snap.Config.Deployment, g.Connector, cn)
+	if err != nil {
+		return nil, err
+	}
+	cl := connectors.New(g.Connector, cn, auth, e.Client)
+	defer cl.Close()
+	res, err := cl.Call(ctx, g.Tool, g.Arguments)
+	return actionResult(res, err), callError(res, err)
+}
+
 func containsString(list []string, s string) bool {
 	for _, x := range list {
 		if x == s {
