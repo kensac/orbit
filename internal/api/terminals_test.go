@@ -238,6 +238,7 @@ type boxEnv struct {
 	*env
 	fake  *fakeSandboxd
 	drain *engine.Drain
+	api   *api.Server
 }
 
 func newBoxEnv(t *testing.T) *boxEnv {
@@ -295,7 +296,7 @@ sandbox: {sandboxd: "`+addr+`"}
 		pub.Close()
 		internal.Close()
 	})
-	return &boxEnv{env: &env{srv: pub, internal: internal, s: s, e: e, is: is}, fake: fake, drain: drain}
+	return &boxEnv{env: &env{srv: pub, internal: internal, s: s, e: e, is: is}, fake: fake, drain: drain, api: a}
 }
 
 func (v *boxEnv) newTerminal(t *testing.T, body string) map[string]any {

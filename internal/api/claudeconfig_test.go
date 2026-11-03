@@ -73,6 +73,7 @@ func TestAccountClaudeConfigRejectsStaleAndUnsafeWrites(t *testing.T) {
 	if code, out := putConfig(t, url, v.person("kanishk"), unsafe, expected, hex.EncodeToString(unsafeHash[:])); code != http.StatusBadRequest {
 		t.Fatalf("unsafe file path: %d %v", code, out)
 	}
+	v.api.WorkspaceGroup = "box-writers"
 	if code, out := putConfig(t, url, v.person("guest"), archive, expected, digest); code != http.StatusForbidden {
 		t.Fatalf("nonmember write: %d %v", code, out)
 	}
