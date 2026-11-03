@@ -36,8 +36,16 @@ func syncCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	only := fs.String("only", "", "comma list of skill names to sync (default: every skill)")
 	_ = fs.Bool("dry-run", true, "plan and print, writing nothing (the default)")
 	apply := fs.String("apply", "", "write the plan whose digest a dry run printed, if it is still the plan")
+	bundle := fs.String("bundle", "", "write a portable CLAUDE.md and skills tar for a box (no account state or other config)")
+	claudeDir := fs.String("claude-dir", filepath.Join(home, ".claude"), "the local Claude config directory used by --bundle")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
+	}
+	if *bundle != "" {
+		if *memoryDir != "" || *only != "" || *skillsDir != filepath.Join(home, ".claude", "skills") {
+			return errors.New("--bundle cannot be combined with --skills-dir, --memory-dir or --only")
+		}
+		return exportClaudeBundle(*bundle, *claudeDir, *apply, stdout)
 	}
 	var ops []claudesync.Op
 	if *skillsDir != "" {
@@ -93,6 +101,49 @@ func syncCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	if failed > 0 {
 		return fmt.Errorf("%d of the plan's writes failed", failed)
 	}
+	return nil
+}
+
+func exportClaudeBundle(dest, source, apply string, stdout io.Writer) error {
+	bundle, err := claudesync.NewBoxBundle(source)
+	if err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	for _, f := range bundle.Files {
+		_, _ = fmt.Fprintf(tw, "include\t%s\t%d bytes\n", f.Path, f.Bytes)
+	}
+	for _, warning := range bundle.Warnings {
+		_, _ = fmt.Fprintf(tw, "skip\t%s\n", warning)
+	}
+	_ = tw.Flush()
+	_, _ = fmt.Fprintf(stdout, "\n%d files, %d archive bytes\nplan %s\n", len(bundle.Files), len(bundle.Archive), bundle.Digest)
+	if apply == "" {
+		_, _ = fmt.Fprintf(stdout, "dry run: nothing was written; run again with --apply %s\n", bundle.Digest)
+		return nil
+	}
+	if apply != bundle.Digest {
+		return fmt.Errorf("the bundle changed: --apply %s does not match plan %s", apply, bundle.Digest)
+	}
+	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create bundle %q: %w", dest, err)
+	}
+	if _, err := f.Write(bundle.Archive); err != nil {
+		_ = f.Close()
+		_ = os.Remove(dest)
+		return fmt.Errorf("write bundle %q: %w", dest, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(dest)
+		return fmt.Errorf("sync bundle %q: %w", dest, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(dest)
+		return fmt.Errorf("close bundle %q: %w", dest, err)
+	}
+	_, _ = fmt.Fprintf(stdout, "created\t%s\n", dest)
 	return nil
 }
 
