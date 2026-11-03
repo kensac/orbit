@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -127,6 +128,54 @@ func TestATurnSendsAUserMessageAndEndsAtItsResult(t *testing.T) {
 	}
 	if got := strings.Join(kinds, ","); got != "system.init,raw,assistant,result.success" {
 		t.Fatalf("lines handed on: %s (keep_alive is dropped, the rest kept in order)", got)
+	}
+}
+
+type discardWriteCloser struct{ io.Writer }
+
+func (discardWriteCloser) Close() error { return nil }
+
+func TestObserveRunsInStreamOrderBeforeControlHandler(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+	observed := make(chan struct{})
+	called := make(chan struct{}, 1)
+	h := Handler{
+		Observe: func(line Line) {
+			mu.Lock()
+			order = append(order, line.Kind)
+			mu.Unlock()
+			if line.Kind == "system.status" {
+				close(observed)
+			}
+		},
+		CanUseTool: func(context.Context, PermissionRequest) (Permission, error) {
+			<-observed
+			mu.Lock()
+			order = append(order, "handler")
+			mu.Unlock()
+			called <- struct{}{}
+			return Permission{}, nil
+		},
+	}
+	stream := strings.Join([]string{
+		`{"type":"system","subtype":"status","permissionMode":"plan"}`,
+		`{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","tool_use_id":"t1","input":{}}}`,
+	}, "\n") + "\n"
+	c := NewConn(strings.NewReader(stream), discardWriteCloser{io.Discard}, h)
+	select {
+	case <-called:
+	case <-time.After(5 * time.Second):
+		t.Fatal("control handler was not called")
+	}
+	<-c.Done()
+
+	mu.Lock()
+	got := append([]string(nil), order...)
+	mu.Unlock()
+	want := []string{"system.status", "control_request", "handler"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("observation order = %v, want %v", got, want)
 	}
 }
 
