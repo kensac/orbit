@@ -170,11 +170,25 @@ func invocationArchive(bundle *Bundle, inputs map[string]Input) (io.Reader, erro
 		_, err := tw.Write(body)
 		return err
 	}
+	dirs := map[string]bool{"extension": true, "inputs": true}
 	names := make([]string, 0, len(bundle.Files))
 	for name := range bundle.Files {
 		names = append(names, name)
+		for dir := path.Dir(name); dir != "."; dir = path.Dir(dir) {
+			dirs["extension/"+dir] = true
+		}
 	}
 	sort.Strings(names)
+	dirNames := make([]string, 0, len(dirs))
+	for name := range dirs {
+		dirNames = append(dirNames, name)
+	}
+	sort.Strings(dirNames)
+	for _, name := range dirNames {
+		if err := tw.WriteHeader(&tar.Header{Name: name + "/", Mode: 0o755, Typeflag: tar.TypeDir, Uid: 0, Gid: 0, Format: tar.FormatPAX}); err != nil {
+			return nil, err
+		}
+	}
 	for _, name := range names {
 		if err := write("extension/"+name, bundle.Files[name].Content, int64(bundle.Files[name].Mode.Perm())); err != nil {
 			return nil, err
