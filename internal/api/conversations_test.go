@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -99,6 +100,49 @@ func TestConversationsOverTheAPI(t *testing.T) {
 	}
 	if _, r = call(t, "POST", base+"/conversations/"+id+"/messages", kanishk, `{"body":"plain","wake":false}`); r["delivered"] != "queued" || r["run_id"] != nil {
 		t.Fatalf("a queued message = %v", r)
+	}
+}
+
+func TestImportedConversationArchiveRemainsSeparateAndReadOnly(t *testing.T) {
+	v := newEnv(t, nil)
+	kanishk := v.person("kanishk")
+	base := v.srv.URL + "/api/v1/agents/a/conversation-archives"
+	const sourceID = "10000000-0000-4000-8000-000000000001"
+	body := `{"archives":[{"source_agent":"old-agent","source_conversation_id":"` + sourceID + `","source_bundle_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","snapshot":{"conversation":{"id":"` + sourceID + `","title":"Imported","archived":true},"pages":[{"items":[{"kind":"message","id":"m1","body":"hello"}],"has_more":false,"next_before":null}]}}]}`
+	code, result := call(t, "POST", base+"/import", kanishk, body)
+	if code != 200 || len(result["results"].([]any)) != 1 {
+		t.Fatalf("import = %d %v", code, result)
+	}
+	id := result["results"].([]any)[0].(map[string]any)["id"].(float64)
+	code, listed := call(t, "GET", base, kanishk, "")
+	if code != 200 || len(listed["archives"].([]any)) != 1 {
+		t.Fatalf("list archives = %d %v", code, listed)
+	}
+	if _, includesSnapshot := listed["archives"].([]any)[0].(map[string]any)["snapshot"]; includesSnapshot {
+		t.Fatal("archive list included the full snapshot")
+	}
+	code, archive := call(t, "GET", base+"/"+strconv.FormatInt(int64(id), 10), kanishk, "")
+	if code != 200 || archive["archive"].(map[string]any)["source_conversation_id"] != sourceID {
+		t.Fatalf("get archive = %d %v", code, archive)
+	}
+	archiveShape := archive["archive"].(map[string]any)
+	if _, includesSnapshot := archiveShape["snapshot"]; !includesSnapshot {
+		t.Fatal("archive detail omitted the snapshot")
+	}
+	if archiveShape["kind"] != "exported_thread_snapshot" || archiveShape["read_only"] != true ||
+		archiveShape["coverage"] != "partial" || archiveShape["coverage_details"] != "source conversation metadata and exported thread pages only" {
+		t.Fatalf("archive contract = %v", archiveShape)
+	}
+	// The archive remains separate from live conversations and does not wake a run.
+	var messages, runs int
+	if err := v.s.Pool.QueryRow(ctx, `SELECT count(*) FROM messages WHERE agent='a'`).Scan(&messages); err != nil || messages != 0 {
+		t.Fatalf("messages = %d, %v", messages, err)
+	}
+	if err := v.s.Pool.QueryRow(ctx, `SELECT count(*) FROM runs WHERE agent='a'`).Scan(&runs); err != nil || runs != 0 {
+		t.Fatalf("runs = %d, %v", runs, err)
+	}
+	if code, again := call(t, "POST", base+"/import", kanishk, body); code != 200 || again["results"].([]any)[0].(map[string]any)["outcome"] != "unchanged" {
+		t.Fatalf("repeat import = %d %v", code, again)
 	}
 }
 

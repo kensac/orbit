@@ -237,6 +237,27 @@ func TestAddCatalogConnectorDiscoversOAuthAndStartsSignIn(t *testing.T) {
 	if code, _ := call(t, "POST", url, person, `{"name":"unsafe","url":"http://127.0.0.1/mcp"}`); code != http.StatusBadRequest {
 		t.Fatalf("non-HTTPS connector URL = %d", code)
 	}
+	if _, err := v.s.PutConnectorToken(ctx, "acme", []byte("sealed-grant"), nil, "kanishk"); err != nil {
+		t.Fatal(err)
+	}
+	revokeURL := v.srv.URL + "/api/v1/connectors/catalog/acme/revoke"
+	if code, _ := call(t, "POST", revokeURL, v.person("someone-else"), ""); code != http.StatusForbidden {
+		t.Fatalf("another person revoking connector = %d", code)
+	}
+	if code, body := call(t, "POST", revokeURL, person, ""); code != http.StatusOK || body["revoked_version"] != float64(1) {
+		t.Fatalf("owner revoking connector = %d %v", code, body)
+	}
+	if code, body := call(t, "GET", v.srv.URL+"/api/v1/connectors", person, ""); code != http.StatusOK {
+		t.Fatalf("list connectors after revoke = %d %v", code, body)
+	} else {
+		listed := body["connectors"].([]any)
+		for _, raw := range listed {
+			c := raw.(map[string]any)
+			if c["name"] == "acme" && c["connected"] != false {
+				t.Fatalf("revoked connector still connected: %v", c)
+			}
+		}
+	}
 }
 
 func TestManualRunAndMessageWake(t *testing.T) {

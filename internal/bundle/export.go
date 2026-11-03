@@ -469,10 +469,25 @@ func verify(filename string, validated *Manifest) error {
 	if err != nil {
 		return err
 	}
-	if err = preflight(file, info.Size()); err != nil {
+	if info.Size() < 0 || info.Size() > maxBundleBytes+maxResponseBytes+maxResponses*1024 {
+		return errors.New("archive size exceeds format bounds")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBundleBytes+maxResponseBytes+maxResponses*1024+1))
+	if err != nil {
 		return err
 	}
-	z, err := zip.NewReader(file, info.Size())
+	if int64(len(data)) != info.Size() {
+		return errors.New("archive size changed while reading")
+	}
+	return verifyData(data, validated)
+}
+
+func verifyData(data []byte, validated *Manifest) error {
+	reader := bytes.NewReader(data)
+	if err := preflight(reader, int64(len(data))); err != nil {
+		return err
+	}
+	z, err := zip.NewReader(reader, int64(len(data)))
 	if err != nil {
 		return err
 	}
@@ -508,16 +523,16 @@ func verify(filename string, validated *Manifest) error {
 	if err != nil {
 		return err
 	}
-	data, err := io.ReadAll(io.LimitReader(r, maxResponseBytes+1))
+	manifestData, err := io.ReadAll(io.LimitReader(r, maxResponseBytes+1))
 	_ = r.Close()
 	if err != nil {
 		return err
 	}
-	if err := jsonstrict.ValidateJSON(data, maxResponseBytes); err != nil {
+	if err := jsonstrict.ValidateJSON(manifestData, maxResponseBytes); err != nil {
 		return fmt.Errorf("manifest: %w", err)
 	}
 	var m Manifest
-	dec := json.NewDecoder(bytes.NewReader(data))
+	dec := json.NewDecoder(bytes.NewReader(manifestData))
 	dec.DisallowUnknownFields()
 	err = dec.Decode(&m)
 	if err == nil {
@@ -619,7 +634,7 @@ func validCursor(s string) bool {
 
 // The emitted format uses a single-disk non-ZIP64 directory with no archive comment.
 // Validate its actual central-record count before archive/zip allocates file objects.
-func preflight(file *os.File, size int64) error {
+func preflight(file io.ReaderAt, size int64) error {
 	if size < 22 || size > maxBundleBytes+maxResponseBytes+maxResponses*1024 {
 		return errors.New("archive size exceeds format bounds")
 	}

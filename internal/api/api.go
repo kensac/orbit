@@ -208,6 +208,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	// The ticket in Sec-WebSocket-Protocol is the credential (terminals.go).
 	mux.HandleFunc("GET /api/v1/terminals/{tid}/ws", s.terminalSocket)
 	s.memoryRoutes(api)
+	s.conversationArchiveRoutes(api)
 	s.workspaceRoutes(api)
 	s.workspaceWriteRoutes(api, mux)
 	s.workspaceReviewRoutes(api)
