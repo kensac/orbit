@@ -1,10 +1,13 @@
 package engine_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	orbitharness "github.com/kensac/orbit/internal/harness"
+	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/store"
 )
 
 func TestRunsSearchTheirOwnAgentsHistoryOverTheSocket(t *testing.T) {
@@ -41,5 +44,49 @@ func TestRunsSearchTheirOwnAgentsHistoryOverTheSocket(t *testing.T) {
 	}
 	if fr.got.Harness.Search != sock {
 		t.Fatalf("second run's socket = %q, want %q", fr.got.Harness.Search, sock)
+	}
+}
+
+// A run searches the memory entries it reads (its own, the profile's, its topics') and no other topic's; a chat run has the same search among orbit's tools.
+func TestSearchCoversTheEntriesARunReads(t *testing.T) {
+	var found map[string]any
+	fr := &fakeRunner{output: `{"reply": "Done."}`}
+	e, s, _ := harnessWith(t, fr, "topics: [money]\nchat: true\n")
+	fr.seen = func(req runner.Request) {
+		if req.Chat == nil {
+			t.Error("not a chat run")
+			return
+		}
+		text, isErr := req.Chat.Call(ctx, "search", json.RawMessage(`{"q": "zebra", "kind": "memory_entry"}`))
+		if isErr {
+			t.Errorf("search: %s", text)
+			return
+		}
+		_ = json.Unmarshal([]byte(text), &found)
+		if text, isErr := req.Chat.Call(ctx, "search", json.RawMessage(`{"q": "zebra", "agent": "other"}`)); !isErr || !strings.Contains(text, "agent") {
+			t.Errorf("a field the schema does not have = %s", text)
+		}
+	}
+	p := store.Provenance{Source: store.SourcePerson, Author: "kanishk"}
+	for _, n := range []store.NewEntry{
+		{EntryRef: store.EntryRef{Scope: store.ScopeProfile}},
+		{EntryRef: store.EntryRef{Scope: store.ScopeTopic, Owner: "money"}},
+		{EntryRef: store.EntryRef{Scope: store.ScopeTopic, Owner: "elsewhere"}},
+		{EntryRef: store.EntryRef{Scope: store.ScopeAgent, Owner: "finance"}},
+		{EntryRef: store.EntryRef{Scope: store.ScopeAgent, Owner: "other"}},
+	} {
+		n.EntryFields = store.EntryFields{Type: "project", Title: "Zebra " + n.Scope + " " + n.Owner, Body: "A zebra fact."}
+		if _, err := s.CreateEntry(ctx, n, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.Execute(ctx, claim(t, e, s)); err != nil {
+		t.Fatal(err)
+	}
+	if found["total"] != 3.0 {
+		t.Fatalf("search = %v, want the profile's, money's and the agent's own entries", found)
+	}
+	if !strings.Contains(fr.got.System, "mcp__orbit__search") {
+		t.Fatal("the chat's system prompt does not offer search")
 	}
 }

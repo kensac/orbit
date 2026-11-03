@@ -62,19 +62,30 @@ func Branch(ticketID string) (string, error) {
 	return "orbit/" + hex[:8], nil
 }
 
+// LaneBranch is a race lane's branch: the ticket's branch and -<lane>
+// (orbit/3f2a9c1e-b), so every lane of a race has its own branch and PR;
+// an empty lane is the ticket's own branch.
+func LaneBranch(ticketID, lane string) (string, error) {
+	b, err := Branch(ticketID)
+	if err != nil || lane == "" {
+		return b, err
+	}
+	if len(lane) != 1 || lane < "a" || lane > "c" {
+		return "", fmt.Errorf("lane %q is not a, b or c", lane)
+	}
+	return b + "-" + lane, nil
+}
+
 // refspec is the one refspec a build pushes: a commit to its ticket's
-// branch, forced, because a retry rebuilds the branch from the default
-// branch. It cannot name anything outside refs/heads/orbit/.
-func refspec(ticketID, sha string) (string, error) {
+// branch (Branch, LaneBranch), forced, because a retry rebuilds the branch
+// from the default branch. It cannot name anything outside
+// refs/heads/orbit/.
+func refspec(branch, sha string) (string, error) {
 	if !shaRE.MatchString(sha) {
 		return "", fmt.Errorf("%q is not a commit sha", sha)
 	}
-	b, err := Branch(ticketID)
-	if err != nil {
-		return "", err
-	}
-	ref := "refs/heads/" + b
-	if !strings.HasPrefix(ref, BranchPrefix) || strings.ContainsAny(ref[len(BranchPrefix):], "/:.~^*?[\\ ") {
+	ref := "refs/heads/" + branch
+	if !strings.HasPrefix(ref, BranchPrefix) || len(ref) == len(BranchPrefix) || strings.ContainsAny(ref[len(BranchPrefix):], "/:.~^*?[\\ ") {
 		return "", fmt.Errorf("refusing to push %q", ref)
 	}
 	return "+" + sha + ":" + ref, nil

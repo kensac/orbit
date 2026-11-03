@@ -319,6 +319,25 @@ func readText(t *testing.T, c *websocket.Conn) map[string]any {
 	}
 }
 
+// readBinary returns the next output frame, skipping the server's keepalive
+// pings, which may arrive at any point after the ready frame.
+func readBinary(t *testing.T, c *websocket.Conn) []byte {
+	t.Helper()
+	for {
+		typ, b, err := c.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if typ == websocket.MessageBinary {
+			return b
+		}
+		var m map[string]any
+		if json.Unmarshal(b, &m) != nil || m["type"] != "ping" {
+			t.Fatalf("control %q where output was expected", b)
+		}
+	}
+}
+
 func TestBoxWorkspace(t *testing.T) {
 	v := newBoxEnv(t)
 	code, out := call(t, http.MethodGet, v.srv.URL+"/api/v1/agents/a/workspace", v.person("kanishk"), "")
@@ -413,9 +432,8 @@ func TestTerminalSocket(t *testing.T) {
 	}
 	_ = c.Write(ctx, websocket.MessageText, []byte(`{"type":"resize","cols":132,"rows":40}`))
 	_ = c.Write(ctx, websocket.MessageBinary, []byte("ls\r"))
-	typ, b, err := c.Read(ctx)
-	if err != nil || typ != websocket.MessageBinary || string(b) != "ls\r" {
-		t.Fatalf("echo %v %q %v", typ, b, err)
+	if b := readBinary(t, c); string(b) != "ls\r" {
+		t.Fatalf("echo %q", b)
 	}
 	_ = c.Write(ctx, websocket.MessageText, []byte(`{"type":"ping"}`))
 	if m := readText(t, c); m["type"] != "pong" {

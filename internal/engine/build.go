@@ -16,11 +16,8 @@ import (
 	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
+	"github.com/kensac/orbit/internal/tokens"
 )
-
-// buildCredential is the one secret a build sandbox receives: what the CLI
-// needs to reach its own backend (sandbox.AllowedEnv).
-const buildCredential = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // G101: the variable's name, not a value
 
 // errDraining stops a build attempt from starting its sandbox on an
 // instance that is leaving: the run is handed back to the ready instance.
@@ -39,8 +36,9 @@ func (e *Engine) executeBuild(ctx, actx context.Context, snap *Snapshot, a *spec
 		return nil
 	}
 	var cost *float64
+	var used *tokens.Usage
 	if res != nil {
-		cost = res.CostUSD
+		cost, used = res.CostUSD, res.Tokens
 	}
 	if ctx.Err() != nil || errors.Is(err, build.ErrStopped) {
 		log.Info("build handed back", "attempt", c.Attempt, "err", err)
@@ -48,7 +46,7 @@ func (e *Engine) executeBuild(ctx, actx context.Context, snap *Snapshot, a *spec
 	}
 	kind := "claude-code"
 	if err != nil {
-		rr := store.RunResult{Attempt: c.Attempt, Error: err.Error(), CostUSD: cost}
+		rr := store.RunResult{Attempt: c.Attempt, Error: err.Error(), CostUSD: cost, Tokens: used, DiffPolicyFailed: errors.Is(err, build.ErrPolicy)}
 		if ferr := e.Store.FailBuild(context.WithoutCancel(ctx), c.ID, rr); ferr != nil {
 			return ferr
 		}
@@ -62,11 +60,13 @@ func (e *Engine) executeBuild(ctx, actx context.Context, snap *Snapshot, a *spec
 	report := buildReport(res)
 	out, _ := json.Marshal(res.Output)
 	rr := store.RunResult{Attempt: c.Attempt, Summary: res.Output.Summary, Report: report, Output: out,
-		CostUSD: res.CostUSD, Usage: res.Usage, Gate: res.GateName}
+		CostUSD: res.CostUSD, Usage: res.Usage, Tokens: res.Tokens, Gate: res.GateName}
 	pr := res.PRNumber
-	if err := e.Store.FinishBuild(context.WithoutCancel(ctx), c.ID, rr, store.TicketUpdate{
-		BaseSHA: res.BaseSHA, Branch: res.Branch, PRNumber: &pr, HeadSHA: res.HeadSHA,
-	}); err != nil {
+	u := store.TicketUpdate{BaseSHA: res.BaseSHA, Branch: res.Branch, PRNumber: &pr, HeadSHA: res.HeadSHA}
+	if d := res.Diff; d != nil {
+		u.Diff = &store.BuildDiff{Added: d.Added, Deleted: d.Deleted, Files: d.Paths()}
+	}
+	if err := e.Store.FinishBuild(context.WithoutCancel(ctx), c.ID, rr, u); err != nil {
 		return err
 	}
 	status := store.StatusSucceeded
@@ -113,7 +113,16 @@ func (e *Engine) build(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 		return nil, fmt.Errorf("orbit does not build %s (build.repositories)", *t.Repo)
 	}
 	rs := d.Runners[a.Runner]
-	if err := e.Store.SetRunner(ctx, c.ID, c.Attempt, "claude-code", rs.Model, a.SHA); err != nil {
+	model := rs.Model
+	lane := ""
+	if b.Lane != nil {
+		// A race lane runs with its variant (docs/tickets.md, Races).
+		lane = *b.Lane
+		if b.Variant.Model != "" {
+			model = b.Variant.Model
+		}
+	}
+	if err := e.Store.SetRunner(ctx, c.ID, c.Attempt, "claude-code", model, a.SHA); err != nil {
 		return nil, err
 	}
 	author, err := build.ParseIdentity(d.Build.Author)
@@ -129,7 +138,6 @@ func (e *Engine) build(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 	if err != nil {
 		return nil, fmt.Errorf("sandboxd: %w (%s)", err, d.Build.TokenEnv)
 	}
-	cred, _ := e.Env(buildCredential)
 	ticket, err := e.ticketJSON(ctx, t)
 	if err != nil {
 		return nil, err
@@ -156,11 +164,11 @@ func (e *Engine) build(ctx context.Context, snap *Snapshot, a *spec.Agent, c *st
 
 	emit := e.events(ctx, c, log, false).emit
 	job := build.Job{
-		RunID: c.ID, Attempt: c.Attempt, TicketID: t.ID, Title: t.Title, Repo: *t.Repo,
+		RunID: c.ID, Attempt: c.Attempt, TicketID: t.ID, Lane: lane, Title: t.Title, Repo: *t.Repo,
 		Plan: b.Plan, PlanVersion: b.PlanVersion, Ticket: ticket, Purpose: b.Purpose, Failure: b.Failure, Review: review,
 		StackBranch: stackBranch, StackPR: stackPR,
-		Policy: policy, Model: rs.Model, MaxTurns: rs.MaxTurns, Timeout: time.Duration(a.Timeout),
-		Credential: cred, Author: author,
+		Policy: policy, Model: model, Effort: b.Variant.Effort, MaxTurns: rs.MaxTurns, Timeout: time.Duration(a.Timeout),
+		Env: build.SandboxEnv(e.Env), Author: author,
 	}
 	deps := build.Deps{
 		App: app, Sandbox: sb, Emit: emit,

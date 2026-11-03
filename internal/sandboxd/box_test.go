@@ -23,7 +23,7 @@ const testBoxImage = "ghcr.io/kensac/orbit-workstation@sha256:abcdefabcdefabcdef
 func boxConfig() Config {
 	c := testConfig()
 	c.BoxImage = testBoxImage
-	c.WorkstationProxy = "orbit-egress-open:3128"
+	c.WorkstationProxy, c.WorkstationNetwork = "orbit-egress-open:3128", "orbit-workstation"
 	return c
 }
 
@@ -115,7 +115,7 @@ func TestBoxSpecDocument(t *testing.T) {
 			// setgid, and with no-new-privileges it would not run at all.
 			"CapDrop":         []any{"MKNOD", "NET_RAW"},
 			"SecurityOpt":     nil,
-			"NetworkMode":     "orbit-sandbox",
+			"NetworkMode":     "orbit-workstation",
 			"IpcMode":         "private",
 			"PidMode":         "",
 			"UTSMode":         "",
@@ -138,7 +138,7 @@ func TestBoxSpecDocument(t *testing.T) {
 			"AutoRemove":      false,
 			"RestartPolicy":   map[string]any{"Name": "unless-stopped"},
 		},
-		"NetworkingConfig": map[string]any{"EndpointsConfig": map[string]any{"orbit-sandbox": map[string]any{}}},
+		"NetworkingConfig": map[string]any{"EndpointsConfig": map[string]any{"orbit-workstation": map[string]any{}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		gb, _ := json.MarshalIndent(got, "", "  ")
@@ -219,7 +219,7 @@ func TestVerifyBox(t *testing.T) {
 		c.Config.User = "10001:10001"
 		c.Config.Labels = map[string]string{LabelBox: "orbit"}
 		c.HostConfig.CapDrop = []string{"MKNOD", "NET_RAW"}
-		c.HostConfig.NetworkMode = "orbit-sandbox"
+		c.HostConfig.NetworkMode = "orbit-workstation"
 		c.HostConfig.IpcMode = "private"
 		c.HostConfig.Memory = BoxMemoryBytes
 		p := int64(BoxPids)
@@ -238,6 +238,7 @@ func TestVerifyBox(t *testing.T) {
 		"cap added":       func(c *containerState) { c.HostConfig.CapAdd = []string{"SYS_ADMIN"} },
 		"raw sockets":     func(c *containerState) { c.HostConfig.CapDrop = []string{"MKNOD"} },
 		"host network":    func(c *containerState) { c.HostConfig.NetworkMode = "host" },
+		"build network":   func(c *containerState) { c.HostConfig.NetworkMode = "orbit-sandbox" },
 		"bind":            func(c *containerState) { c.HostConfig.Binds = []string{"/:/host"} },
 		"host pid":        func(c *containerState) { c.HostConfig.PidMode = "host" },
 		"other volume":    func(c *containerState) { c.Mounts[1].Name = "root_plaid_db_data_v18" },

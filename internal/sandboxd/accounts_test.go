@@ -80,7 +80,7 @@ func TestVerifyBoxAccounts(t *testing.T) {
 	c.Config.User = "10001:10001"
 	c.Config.Labels = map[string]string{LabelBox: "orbit"}
 	c.HostConfig.CapDrop = []string{"MKNOD", "NET_RAW"}
-	c.HostConfig.NetworkMode = "orbit-sandbox"
+	c.HostConfig.NetworkMode = cfg.WorkstationNetwork
 	c.HostConfig.IpcMode = "private"
 	c.HostConfig.Memory = BoxMemoryBytes
 	p := int64(BoxPids)
