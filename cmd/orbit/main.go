@@ -49,6 +49,7 @@ import (
 
 	"github.com/kensac/orbit/internal/api"
 	"github.com/kensac/orbit/internal/auth"
+	"github.com/kensac/orbit/internal/boxkeep"
 	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/harness"
@@ -500,6 +501,10 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		if err != nil {
 			return err
 		}
+		pollUsage, err := boxkeep.ParsePollUsage(os.Getenv("ORBIT_ACCOUNT_USAGE_POLL"))
+		if err != nil {
+			return err
+		}
 		if pusher == nil {
 			log.Info("ORBIT_VAPID_* not set: Web Push is off (the inbox still lists what needs attention)")
 		}
@@ -562,6 +567,18 @@ func serve(ctx context.Context, log *slog.Logger) error {
 				Store: s, Config: func() *spec.Config { return eng.Current().Config }, Env: os.LookupEnv,
 				Client: &http.Client{Timeout: 2 * time.Minute}, Revision: revision, Log: log.With("component", "tickets"),
 				Approval: eng.NotifyApproval, Wake: nudge, Restack: eng.Builder.Restack, Checkouts: checkouts,
+			}).Run(claimCtx)
+		}()
+
+		// The box keeper polls accounts' usage when that is on; it stops
+		// with claims, so a draining instance leaves the boxes to the
+		// ready one.
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			(&boxkeep.Keeper{
+				Store: s, Boxes: apiSrv.Boxes, PollUsage: pollUsage, Log: log.With("component", "boxes"),
+				Agents: func() []string { return boxkeep.BoxAgents(eng.Current().Config) },
 			}).Run(claimCtx)
 		}()
 

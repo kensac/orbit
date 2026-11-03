@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -34,8 +35,11 @@ type BoxAccount struct {
 	CheckedAt        *time.Time `json:"checked_at"`
 	// LastUsedAt is the newest attach of a terminal under the account.
 	LastUsedAt *time.Time `json:"last_used_at"`
-	CreatedBy  string     `json:"created_by"`
-	CreatedAt  time.Time  `json:"created_at"`
+	// Usage is the newest observation of its rate-limit windows
+	// (sandbox.AccountUsage), null before one.
+	Usage     json.RawMessage `json:"usage"`
+	CreatedBy string          `json:"created_by"`
+	CreatedAt time.Time       `json:"created_at"`
 }
 
 // AccountLogin is what a status read of the box found.
@@ -53,13 +57,16 @@ type AccountLogin struct {
 
 const accountCols = `a.id::text, a.workspace_id::text, b.agent, a.slot, a.label, a.logged_in, a.email, a.account_uuid, a.org_id,
 	a.org_name, a.subscription_type, a.rate_limit_tier, a.access_expires_at, a.refresh_expires_at, a.checked_at,
-	(SELECT max(t.last_attached_at) FROM terminals t WHERE t.account_id = a.id), a.created_by, a.created_at`
+	(SELECT max(t.last_attached_at) FROM terminals t WHERE t.account_id = a.id), a.usage, a.created_by, a.created_at`
 
 func scanAccount(row pgx.Row) (BoxAccount, error) {
 	var a BoxAccount
 	err := row.Scan(&a.ID, &a.WorkspaceID, &a.Agent, &a.Slot, &a.Label, &a.LoggedIn, &a.Email, &a.AccountUUID, &a.OrgID,
 		&a.OrgName, &a.SubscriptionType, &a.RateLimitTier, &a.AccessExpiresAt, &a.RefreshExpiresAt, &a.CheckedAt,
-		&a.LastUsedAt, &a.CreatedBy, &a.CreatedAt)
+		&a.LastUsedAt, &a.Usage, &a.CreatedBy, &a.CreatedAt)
+	if a.Usage == nil {
+		a.Usage = json.RawMessage("null")
+	}
 	return a, err
 }
 
@@ -211,4 +218,34 @@ func (s *Store) RunningTerminals(ctx context.Context, workspaceID string) (int, 
 	var n int
 	err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM terminals WHERE workspace_id = $1 AND ended_at IS NULL`, workspaceID).Scan(&n)
 	return n, err
+}
+
+// RecordAccountUsage stores an observation of an account's usage observed
+// at at, unless the account holds a newer one already (a poll and a status
+// line read racing). It reports whether it was stored.
+func (s *Store) RecordAccountUsage(ctx context.Context, id string, usage json.RawMessage, at time.Time) (bool, error) {
+	if !IsUUID(id) {
+		return false, ErrNotFound
+	}
+	tag, err := s.Pool.Exec(ctx, `UPDATE box_accounts SET usage = $2, usage_at = $3
+		WHERE id = $1 AND (usage_at IS NULL OR usage_at < $3)`, id, usage, at)
+	return tag.RowsAffected() == 1, err
+}
+
+// Boxes is every box row, for the work done on running boxes.
+func (s *Store) Boxes(ctx context.Context) ([]Box, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT id::text, agent, created_at FROM boxes ORDER BY agent`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Box
+	for rows.Next() {
+		var b Box
+		if err := rows.Scan(&b.ID, &b.Agent, &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
 }

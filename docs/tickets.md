@@ -345,6 +345,7 @@ The permission sets are named in code, one per use:
 |---|---|
 | reading (a build's clone, a fetch into the mirror of a repository an agent reads) | `contents: read` |
 | an agent's `pr_list` and `pr_view` (docs/api.md, Repositories) | `pull_requests: read`, `checks: read`, `statuses: read` |
+| a ticket's diff for a person (`GET /tickets/{id}/diff`, one request) | `contents: read`, `pull_requests: read` |
 | an agent's `github` source, one per fetch: `issues`, `pulls`, `checks`, `releases` | `issues: read`; `pull_requests: read`; `checks: read`, `statuses: read`; `contents: read` |
 | build delivery (push `orbit/*`, open the PR, close it on abandon) | `contents: write`, `pull_requests: write` |
 | merge (read the PR and its checks, update the body, merge) | `contents: write`, `pull_requests: write`, `checks: read`, `statuses: read` |

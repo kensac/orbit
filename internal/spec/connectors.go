@@ -166,6 +166,48 @@ func (c *Config) validateConnectors() []error {
 	return errs
 }
 
+// validateGoogleActions makes each typed Google write resolve to one fixed
+// configured write tool, with its credential retained by orbit.
+func (c *Config) validateGoogleActions() []error {
+	g := c.Deployment.GoogleActions
+	if g == nil {
+		return nil
+	}
+	var errs []error
+	if g.GmailDraft == nil && g.CalendarCreate == nil {
+		errs = append(errs, fmt.Errorf("google_actions needs gmail_draft or calendar_create"))
+	}
+	validate := func(name, connector, tool string) {
+		at := func(format string, args ...any) {
+			errs = append(errs, fmt.Errorf("google_actions.%s: "+format, append([]any{name}, args...)...))
+		}
+		cn, ok := c.Deployment.Connectors[connector]
+		if connector == "" || !ok {
+			at("connector %q is not configured", connector)
+			return
+		}
+		if !ConnectorToolRE.MatchString(tool) {
+			at("tool %q is not a valid connector tool name", tool)
+		}
+		if !slices.Contains(cn.WriteTools, tool) {
+			at("tool %q must be listed in connectors.%s.write_tools", tool, connector)
+		}
+		if cn.AuthKind() == ConnectorAuthNone {
+			at("connector %q must have authentication configured", connector)
+		}
+	}
+	if b := g.GmailDraft; b != nil {
+		validate("gmail_draft", b.Connector, b.Tool)
+	}
+	if b := g.CalendarCreate; b != nil {
+		validate("calendar_create", b.Connector, b.Tool)
+		if strings.ContainsAny(b.CalendarID, "\r\n") || len(b.CalendarID) > 320 {
+			errs = append(errs, fmt.Errorf("google_actions.calendar_create.calendar_id must be at most 320 bytes without line breaks"))
+		}
+	}
+	return errs
+}
+
 // validateAgentConnectors checks an agent's connectors and its per-tool rules.
 func (c *Config) validateAgentConnectors(a *Agent) []error {
 	var errs []error
@@ -197,6 +239,14 @@ func (c *Config) validateAgentConnectors(a *Agent) []error {
 		}
 		if !seen[conn] {
 			at("action %q: the agent does not list connector %q", typ, conn)
+		}
+	}
+	if g := c.Deployment.GoogleActions; g != nil {
+		if b := g.GmailDraft; b != nil && a.RuleFor("gmail:draft") != RuleDeny && !seen[b.Connector] {
+			at("action %q: the agent must list connector %q", "gmail:draft", b.Connector)
+		}
+		if b := g.CalendarCreate; b != nil && a.RuleFor("calendar:create") != RuleDeny && !seen[b.Connector] {
+			at("action %q: the agent must list connector %q", "calendar:create", b.Connector)
 		}
 	}
 	return errs

@@ -279,3 +279,27 @@ func (t *TTY) Read(p []byte) (int, error) {
 
 // Close detaches.
 func (t *TTY) Close() error { return t.conn.Close() }
+
+// AccountUsage reads the rate limits the box's status line last recorded
+// for an account; no observation yet is a zero ObservedAt.
+func (c *Client) AccountUsage(ctx context.Context, name, slot string) (AccountUsage, error) {
+	return c.usage(ctx, http.MethodGet, name, slot, "usage")
+}
+
+// PollAccountUsage asks the account's usage of /api/oauth/usage from inside
+// the box, with the account's own access token.
+func (c *Client) PollAccountUsage(ctx context.Context, name, slot string) (AccountUsage, error) {
+	return c.usage(ctx, http.MethodPost, name, slot, "usage", "poll")
+}
+
+func (c *Client) usage(ctx context.Context, method, name, slot string, rest ...string) (AccountUsage, error) {
+	var u AccountUsage
+	if !ValidSlot(slot) {
+		return u, fmt.Errorf("invalid account slot %q", slot)
+	}
+	p, err := boxPath(name, append([]string{"accounts", slot}, rest...)...)
+	if err == nil {
+		err = c.boxCall(ctx, method, p, &u)
+	}
+	return u, err
+}
