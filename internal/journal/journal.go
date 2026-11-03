@@ -36,16 +36,17 @@ const Version = 1
 
 // Item kinds.
 const (
-	KindMessage  = "message"
-	KindThinking = "thinking"
-	KindToolCall = "tool_call"
-	KindDiff     = "diff"
-	KindPlan     = "plan"
-	KindApproval = "approval"
-	KindQuestion = "question"
-	KindSteer    = "steer"
-	KindStatus   = "status"
-	KindTurn     = "turn"
+	KindMessage     = "message"
+	KindThinking    = "thinking"
+	KindToolCall    = "tool_call"
+	KindDiff        = "diff"
+	KindPlan        = "plan"
+	KindApproval    = "approval"
+	KindQuestion    = "question"
+	KindSteer       = "steer"
+	KindPermissions = "permissions"
+	KindStatus      = "status"
+	KindTurn        = "turn"
 )
 
 // Item is one stored revision of a journal item.
@@ -181,17 +182,35 @@ const (
 	ApprovalPending = "pending"
 	ApprovalAllowed = "allowed"
 	ApprovalDenied  = "denied"
+	// ApprovalExpired and ApprovalWithdrawn are a chat run's approvals that nobody answered: past their time, or given up by the CLI or the run. Both were denied.
+	ApprovalExpired   = "expired"
+	ApprovalWithdrawn = "withdrawn"
 )
 
-// Approval is a backend asking orbit's policy whether a tool call may run
-// (a build's permission protocol). Revision 1 is the request; the decision
-// is the next.
+// Approval is a backend asking whether a tool call may run: a build's, decided by orbit's policy, or a chat run's, put to its person (docs/api.md, Approvals). Revision 1 is the request, with the CLI's account of why it asked; a chat run's next revision opens it for its person (approval_id, expires_at), and the last is the decision.
 type Approval struct {
 	RequestID string          `json:"request_id"`
 	Tool      string          `json:"tool"`
 	Input     json.RawMessage `json:"input"`
 	State     string          `json:"state"`
 	Message   string          `json:"message,omitempty"`
+	// ApprovalID is the approval a person answers (POST /approvals/{id}); absent for a build's and for one decided without a person.
+	ApprovalID string `json:"approval_id,omitempty"`
+	// Kind is "tool", or "plan" for ExitPlanMode presenting a plan.
+	Kind               string          `json:"kind,omitempty"`
+	Level              string          `json:"level,omitempty"`
+	DecisionReason     string          `json:"decision_reason,omitempty"`
+	DecisionReasonType string          `json:"decision_reason_type,omitempty"`
+	BlockedPath        string          `json:"blocked_path,omitempty"`
+	MatchedRule        json.RawMessage `json:"matched_rule,omitempty"`
+	Suggestions        json.RawMessage `json:"suggestions,omitempty"`
+	Title              string          `json:"title,omitempty"`
+	Description        string          `json:"description,omitempty"`
+	ExpiresAt          *time.Time      `json:"expires_at,omitempty"`
+	Scope              string          `json:"scope,omitempty"`
+	DecidedBy          string          `json:"decided_by,omitempty"`
+	// Grant is the approval whose conversation-wide allow answered this request.
+	Grant string `json:"grant,omitempty"`
 }
 
 // Steer is a person's message the turn in progress took (delivery steer): from here on the turn answers it too.
@@ -199,6 +218,19 @@ type Steer struct {
 	MessageID string `json:"message_id"`
 	Text      string `json:"text"`
 	Author    string `json:"author,omitempty"`
+}
+
+// Permissions is a permission level applied to a chat run's process.
+type Permissions struct {
+	Level     string     `json:"level"`
+	Applied   string     `json:"applied"`
+	Mode      string     `json:"mode"`
+	When      string     `json:"when"`
+	Source    string     `json:"source"`
+	Version   int        `json:"version,omitempty"`
+	SetBy     string     `json:"set_by,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	Reason    string     `json:"reason,omitempty"`
 }
 
 // Question is something the agent asked its person: one of its output's
@@ -233,7 +265,8 @@ const (
 	TurnRunning   = "running"
 	TurnCompleted = "completed"
 	// TurnInterrupted is a turn whose process orbit saw end without a
-	// result: a timeout, a crash, a drain's hand-back.
+	// result: a timeout, a crash, a drain's hand-back, or orbit ending a
+	// stalled turn (Reason).
 	TurnInterrupted = "interrupted"
 	// TurnUnverifiable is a turn whose attempt was lost (reaped without a
 	// heartbeat): nothing observed how it ended.
@@ -253,7 +286,14 @@ type Turn struct {
 	CostUSD     *float64        `json:"cost_usd,omitempty"`
 	Usage       json.RawMessage `json:"usage,omitempty"`
 	Error       string          `json:"error,omitempty"`
+	// Reason is why orbit ended an interrupted turn, when it did so itself:
+	// ReasonStalled. Absent otherwise (and on rows older than the field).
+	Reason string `json:"reason,omitempty"`
 }
+
+// ReasonStalled is a turn orbit's stall watchdog ended (an orbit.stalled
+// event): the CLI wrote nothing for session.stall with no tool call running.
+const ReasonStalled = "stalled"
 
 // ---------------------------------------------------------------- cursors
 

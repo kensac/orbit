@@ -291,10 +291,12 @@ func chatPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 // chatState collects what a chat run's tools asked for: its outcome
 // beside the reply.
 type chatState struct {
-	mu        sync.Mutex
-	memory    *string
-	questions []OutputQuestion
-	actions   []chatAction
+	// conversation is the run's, whose uploads and answers a template:create reads.
+	conversation string
+	mu           sync.Mutex
+	memory       *string
+	questions    []OutputQuestion
+	actions      []chatAction
 }
 
 type chatAction struct {
@@ -461,6 +463,7 @@ type chatTurn struct {
 	skills []store.Skill
 	// repos is what the agent's repositories add (repos.go), or nil.
 	repos *repoRun
+	stall *runner.Stall
 }
 
 // errCancelled is a run a person stopped; Execute records it cancelled.
@@ -494,7 +497,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 			return nil, nil, err
 		}
 	}
-	st := &chatState{}
+	st := &chatState{conversation: c.ConversationID}
 	chat := e.chatTools(snap, a, c, t.instructor, t.types, d.Defaults.MemoryMaxBytes, st)
 	e.repoChatTools(a, chat)
 	e.promChatTools(a, chat)
@@ -507,7 +510,11 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 		t.steer.Store(feed)
 		defer t.steer.Store(nil)
 	}
-	chat.Level, chat.Ceiling = a.PermissionLevel(), a.PermissionCeiling()
+	lc, err := e.runLevel(ctx, a, c)
+	if err != nil {
+		return nil, nil, err
+	}
+	chat.Level, chat.Ceiling, chat.Choice = lc.Level, a.PermissionCeiling(), lc.Choice
 	chat.RecordPermission = func(req claudeproto.PermissionRequest, p claudeproto.Permission) error {
 		return recordPermission(t.record, req, p)
 	}
@@ -531,13 +538,20 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	}
 	req := runner.Request{
 		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
-		Tools: a.Tools, WebAllow: webAllow(a), Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin, Connectors: t.connectors,
+		Tools: a.Tools, WebAllow: webAllow(a), Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin, Connectors: t.connectors, Stall: t.stall,
 	}
 	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
 		return nil, nil, err
 	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
 	defer cancel()
+	changes := make(chan runner.LevelChange, 1)
+	chat.Changes = changes
+	lvl := &currentLevel{}
+	lvl.set(lc.Level)
+	deadline, _ := runCtx.Deadline()
+	chat.Prompt = e.approvalPrompt(a, c, lvl, deadline, t.emit)
+	go e.watchLevel(runCtx, a, c, lc, lvl, changes)
 	res, err := r.Run(runCtx, req, func(ev runner.Event) { t.emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
@@ -611,6 +625,28 @@ func (e *Engine) chatAct(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	if err := t.Validate(v.Params); err != nil {
 		return "invalid params: " + err.Error(), true
+	}
+	if v.Type == actions.TemplateCreateType {
+		define, ask, err := e.templateProposal(ctx, c.ConversationID, v.Params)
+		if err != nil {
+			return "refused: " + err.Error(), true
+		}
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if len(st.actions) >= maxActions {
+			return fmt.Sprintf("at most %d actions per reply", maxActions), true
+		}
+		st.actions = append(st.actions, v)
+		if ask != nil {
+			return fmt.Sprintf("orbit will ask the person, with a form, for %d value(s) only they give; when their answers arrive, propose this again.", len(ask.Fields)), false
+		}
+		var rendered struct {
+			Spec struct {
+				Name string `json:"name"`
+			} `json:"spec"`
+		}
+		_ = json.Unmarshal(define, &rendered)
+		return fmt.Sprintf("Rendered and checked: creating agent %q waits for the person's approval.", rendered.Spec.Name), false
 	}
 	// A schedule change is parsed by code now: one it cannot read is refused, and what a recorded one will do goes back to the model to confirm with the person (an executed one's result says it).
 	preview := ""

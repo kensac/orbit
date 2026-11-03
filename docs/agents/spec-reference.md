@@ -18,6 +18,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `credentials` | map of variable to credential | none | The variables sources and endpoint headers may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
 | `connectors` | map of name to connector | none | MCP servers agents may be given; orbit calls them on the agents' behalf and holds their credentials (below). |
+| `google_actions` | map | absent | Fixed connector tools for typed Gmail draft and Calendar create actions (below). |
 | `expires` | map of variable to `YYYY-MM-DD` | none | When a credential orbit cannot inspect stops working (the Claude Code subscription token), exported as `orbit_credential_expiry_timestamp_seconds{credential}` at midnight UTC of the date so an alert fires before it lapses. Nothing else reads it. |
 | `webhook_secrets` | map of variable to webhook secret | none | The signing secrets inbound webhooks are verified with, each bound to the agents whose webhook triggers may name it (below). |
 | `usage_poll` | map: `every` (default 5m, at least 1m), `token_env` (default `CLAUDE_CODE_OAUTH_TOKEN`) | absent | Poll the subscription's usage windows (configuration.md, Subscription usage and low-priority agents). |
@@ -153,6 +154,28 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `client_id` | string | none | An `oauth` client registered by hand; without it orbit registers itself (dynamic client registration). |
 | `client_secret_env` | env var | none | That client's secret, for a confidential client; needs `client_id`. |
 
+### `google_actions`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `gmail_draft` | map | absent | Fixed connector and write tool used by `gmail:draft`. |
+| `calendar_create` | map | absent | Fixed connector, write tool and calendar used by `calendar:create`. |
+
+### `google_actions.gmail_draft`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `connector` | connector name | required | Connector must authenticate and be named by any agent enabling `gmail:draft`. |
+| `tool` | tool name | required | Must be listed in that connector's `write_tools`; receives Google `users.drafts.create` arguments. |
+
+### `google_actions.calendar_create`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `connector` | connector name | required | Connector must authenticate and be named by any agent enabling `calendar:create`. |
+| `tool` | tool name | required | Must be listed in that connector's `write_tools`; receives Google `events.insert` arguments. |
+| `calendar_id` | string | `primary` | Fixed destination calendar. The agent cannot choose it. |
+
 ### `webhook_secrets.<VAR>`
 
 | Field | Type | Default | What it does |
@@ -200,6 +223,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `timezone` | IANA zone | `orbit.yaml` timezone | Zone for triggers and source templates; parsed once at load (`Agent.Location`), and one the tz database does not have fails it. |
 | `runner` | runner name | `defaults.runner` | The backend. |
 | `timeout` | duration | `defaults.timeout` | How long one run may take. |
+| `budget` | map (below) | none | API-equivalent cost and runner-started run limits per local period; scheduled runs are skipped once a limit is reached. |
 | `triggers` | list | none | When the agent wakes on its own (below). |
 | `sources` | list | none | Data orbit fetches before a run (below). |
 | `transforms` | list | none | Code over a source before the model sees it (below). |
@@ -223,6 +247,22 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `connectors` | list of connector names | none | `orbit.yaml` connectors whose tools the agent's runs may call; claude-code only. Each tool's rule is `mcp:<connector>:<tool>` in `actions`. Adding one widens the agent. |
 | `repos` | list (below) | none | Repositories every run reads: the tree at a commit under `inputs/repos/<name>/`, plus orbit's history and pull request tools. Each must be in `github.read_repositories`; needs `github` in `needs` and a claude-code or codex runner. |
 | `priority` | `normal`, `low` | `normal` | `low` is work that can wait: with `defer_low_priority`, its scheduled runs are held while the subscription is nearly spent. |
+
+### `budget`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `period` | `day`, `week`, `month` | required | Local calendar period in the agent's timezone; weeks start Monday. |
+| `max_cost_usd` | number | none | API-equivalent cost limit for runner-started runs in the period. |
+| `max_runs` | integer | none | Runner-started run limit in the period. |
+
+At least one limit is required. Once either limit is reached, scheduled runs
+are skipped before sources or a model are called; manual runs and messages
+still run. The first blocked run per agent and period creates one dismissible
+attention alert and Web Push notification. `/usage` reports current use and
+alerts at 80% of either limit. A run already underway may finish past a cost
+limit; cost is the backend's reported API-equivalent estimate, and runs with
+no cost report are visible in `runs_with_cost` coverage.
 
 ### `triggers[]`
 
@@ -347,12 +387,15 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint, with `path` params filling its path's placeholders; never a URL, method or header of the model's. No redirect is followed. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
 | `github:comment` | Posts a comment on an issue or a pull request as the App: `{repo, number, body}`, body at most 20000 bytes, attribution lines scrubbed. | `github.comment_repositories` |
+| `gmail:draft` | Creates a plain text Gmail draft with recipients, subject and body; never sends it. | `google_actions.gmail_draft`, the connector in `connectors` |
+| `calendar:create` | Creates one timed event with summary, start and end, and optional description, location and attendees. | `google_actions.calendar_create`, the connector in `connectors` |
 | `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |
 | `mcp:<connector>:<tool>` | The rule for one connector tool, overriding its default: `approve` for a tool in the connector's `write_tools`, `auto` for any other. A `deny` tool is not offered. An `approve` call is recorded as the action `connector:<connector>/<tool>` (configuration.md, Connectors). | the connector in `connectors` |
 | `schedule:add`, `schedule:pause`, `schedule:resume`, `schedule:remove` | Changes one trigger (or, pausing and resuming, every trigger) of this agent or one in `delegates`, as a new revertible version; times are the person's words, parsed by code (configuration.md, Changing schedules by talking). `approve` applies directly in a run answering the person's message. | a database or built-in target |
 | `agent:save` | Saves the conversation as a new agent: the model writes its name, description, charter and starters; orbit adds what the conversation did and proposes it as an `agent:define` that always waits for a person (configuration.md, Saving a conversation as an agent). | |
 | `run:now` | Starts a manual run of this agent or one in `delegates`; a run no message woke cannot start its own agent. `approve` applies directly in a run answering the person's message. | |
 | `skill:write` | Writes or retires one of the agent's skills as the next version; the approval shows the SKILL.md diff and the skill's scripts. | |
+| `template:create` | Creates an agent from a template in the library: code renders and dry-runs it and records an `agent:define` that waits for a person whatever the rule; a `user_prompt` parameter is asked of the person with a form. | |
 
 ### `notify`
 
@@ -388,6 +431,7 @@ claude-code runners only.
 | `resume` | bool | `false` | Continue the previous run's session when it succeeded under the same spec within `idle`. |
 | `idle` | duration | `6h` | The resume window, at most `24h`. |
 | `live` | duration | `0` (none) | Keep one process open this long after a message-started run and feed later runs into it; at most `1h` and at most `idle`. |
+| `stall` | duration | `10m` | A chat or live turn with no line from the CLI (keep_alive included) for this long, and no tool call running, is interrupted and the run handed back to continue the session (ARCHITECTURE.md, Stall watchdog); `1m` to `24h`. Needs no `resume`. |
 
 ### `learn`
 

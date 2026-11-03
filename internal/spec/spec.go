@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -81,12 +82,34 @@ type Deployment struct {
 	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
 	// Connectors are MCP servers agents may be given (connectors.go); orbit calls them on the agents' behalf.
 	Connectors map[string]Connector `yaml:"connectors,omitempty" json:"connectors,omitempty"`
+	// GoogleActions binds typed Gmail and Calendar writes to fixed tools on
+	// configured connectors; action parameters cannot choose a server or tool.
+	GoogleActions *GoogleActions `yaml:"google_actions,omitempty" json:"google_actions,omitempty"`
 	// Expires records when a credential orbit cannot inspect stops working (the Claude Code subscription token lasts a year), keyed by its variable, as YYYY-MM-DD (expires.go). It only feeds orbit_credential_expiry_timestamp_seconds, so an alert fires before the date.
 	Expires map[string]string `yaml:"expires,omitempty" json:"expires,omitempty"`
 	// WebhookSecrets are the signing secrets inbound webhooks are verified with, keyed by variable, each bound to the agents that may use it (webhook.go).
 	WebhookSecrets map[string]WebhookSecret `yaml:"webhook_secrets,omitempty" json:"webhook_secrets,omitempty"`
 	// Board tunes GET /board (docs/api.md, The board).
 	Board *Board `yaml:"board,omitempty" json:"board,omitempty"`
+}
+
+// GoogleActions configures the MCP tools used by typed Google write actions.
+type GoogleActions struct {
+	GmailDraft     *GoogleActionBinding   `yaml:"gmail_draft,omitempty" json:"gmail_draft,omitempty"`
+	CalendarCreate *GoogleCalendarBinding `yaml:"calendar_create,omitempty" json:"calendar_create,omitempty"`
+}
+
+// GoogleActionBinding names one configured connector and its write tool.
+type GoogleActionBinding struct {
+	Connector string `yaml:"connector" json:"connector"`
+	Tool      string `yaml:"tool" json:"tool"`
+}
+
+// GoogleCalendarBinding also fixes the destination calendar.
+type GoogleCalendarBinding struct {
+	Connector  string `yaml:"connector" json:"connector"`
+	Tool       string `yaml:"tool" json:"tool"`
+	CalendarID string `yaml:"calendar_id,omitempty" json:"calendar_id,omitempty"`
 }
 
 // Board tunes the board of every open conversation.
@@ -228,13 +251,16 @@ type Agent struct {
 	// Charter is the standing instruction every run starts from.
 	Charter string `yaml:"charter" json:"charter"`
 	// Starters are prompts a client offers for a new conversation with the agent (at most MaxStarters, each MaxStarterLen bytes).
-	Starters []string  `yaml:"starters,omitempty" json:"starters,omitempty"`
-	Enabled  *bool     `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	Timezone string    `yaml:"timezone,omitempty" json:"timezone,omitempty"`
-	Runner   string    `yaml:"runner,omitempty" json:"runner,omitempty"`
-	Timeout  Duration  `yaml:"timeout,omitempty" json:"timeout,omitempty"`
-	Triggers []Trigger `yaml:"triggers" json:"triggers"`
-	Sources  []Source  `yaml:"sources,omitempty" json:"sources,omitempty"`
+	Starters []string `yaml:"starters,omitempty" json:"starters,omitempty"`
+	Enabled  *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Timezone string   `yaml:"timezone,omitempty" json:"timezone,omitempty"`
+	Runner   string   `yaml:"runner,omitempty" json:"runner,omitempty"`
+	Timeout  Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// Budget limits API-equivalent cost and runner-started runs in a local
+	// calendar period. Only unattended scheduled runs are stopped by it.
+	Budget   *AgentBudget `yaml:"budget,omitempty" json:"budget,omitempty"`
+	Triggers []Trigger    `yaml:"triggers" json:"triggers"`
+	Sources  []Source     `yaml:"sources,omitempty" json:"sources,omitempty"`
 	// Transforms run over sources before the model sees them; each output
 	// is an input of its own (internal/transforms).
 	Transforms []Transform `yaml:"transforms,omitempty" json:"transforms,omitempty"`
@@ -317,6 +343,13 @@ type Agent struct {
 	Version int `yaml:"-" json:"-"`
 }
 
+// AgentBudget is the optional per-agent spend and run limit.
+type AgentBudget struct {
+	Period     string  `yaml:"period" json:"period"`
+	MaxCostUSD float64 `yaml:"max_cost_usd,omitempty" json:"max_cost_usd,omitempty"`
+	MaxRuns    int     `yaml:"max_runs,omitempty" json:"max_runs,omitempty"`
+}
+
 // RepoRef is one repository an agent reads, at a branch, tag or commit.
 type RepoRef struct {
 	Repo string `yaml:"repo" json:"repo"`
@@ -360,6 +393,8 @@ type SessionSpec struct {
 	// person's message started, and feeds the next runs into it instead of
 	// starting a process per run. Zero means no live process.
 	Live Duration `yaml:"live,omitempty" json:"live,omitempty"`
+	// Stall bounds time without CLI output while no tool call is running.
+	Stall Duration `yaml:"stall,omitempty" json:"stall,omitempty"`
 }
 
 // Hook is one Claude Code hook of an agent: at Event (and, for a tool event, a tool Matcher matches), orbit's hook binary does one thing: Say tells the model something (as context; at Stop it sends the model back once with it), Deny refuses the tool with a reason (PreToolUse), or Run runs a command with the event on stdin, in the run's workdir, with an empty environment but PATH, under Timeout.
@@ -426,6 +461,15 @@ const MaxSessionIdle = 24 * time.Hour
 // a resident CLI process; an hour covers a conversation with pauses, and
 // resume picks up after it closes.
 const MaxSessionLive = time.Hour
+
+// DefaultSessionStall is session.stall when a spec names none.
+const DefaultSessionStall = 10 * time.Minute
+
+// MinSessionStall and MaxSessionStall bound session.stall.
+const (
+	MinSessionStall = time.Minute
+	MaxSessionStall = 24 * time.Hour
+)
 
 // Trigger is one way an agent wakes: a cron Schedule, an RRule (RFC
 // 5545, internal/rrule) anchored at Start, or a Webhook (webhook.go).
@@ -714,6 +758,14 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 
 // Verifies reports whether the agent's spec names a check.
 func (a *Agent) Verifies(check string) bool { return slices.Contains(a.Verify, check) }
+
+// StallAfter is the agent's session.stall, or DefaultSessionStall.
+func (a *Agent) StallAfter() time.Duration {
+	if a.Session != nil && a.Session.Stall > 0 {
+		return time.Duration(a.Session.Stall)
+	}
+	return DefaultSessionStall
+}
 
 // IsEnabled reports whether the agent's triggers fire. Manual runs work
 // either way.
@@ -1044,6 +1096,7 @@ func (c *Config) Validate() error {
 	}
 	errs = append(errs, c.validateCredentials()...)
 	errs = append(errs, c.validateConnectors()...)
+	errs = append(errs, c.validateGoogleActions()...)
 	errs = append(errs, c.validateExpires()...)
 	errs = append(errs, c.validateWebhookSecrets()...)
 	errs = append(errs, c.validateBuild()...)
@@ -1071,6 +1124,20 @@ func (c *Config) validateAgent(a *Agent) []error {
 	}
 	if err := a.SetTimezone(a.Timezone); err != nil {
 		at("timezone: %v", err)
+	}
+	if b := a.Budget; b != nil {
+		if b.Period != "day" && b.Period != "week" && b.Period != "month" {
+			at("budget.period must be day, week or month")
+		}
+		if b.MaxCostUSD < 0 || math.IsNaN(b.MaxCostUSD) || math.IsInf(b.MaxCostUSD, 0) {
+			at("budget.max_cost_usd must be finite and non-negative")
+		}
+		if b.MaxRuns < 0 {
+			at("budget.max_runs must be non-negative")
+		}
+		if b.MaxCostUSD == 0 && b.MaxRuns == 0 {
+			at("budget needs max_cost_usd or max_runs")
+		}
 	}
 	if r, ok := c.Deployment.Runners[a.Runner]; !ok {
 		at("unknown runner %q", a.Runner)
@@ -1226,7 +1293,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		switch {
 		case typ == "notify", typ == "continue", typ == "agent:define", typ == "agent:save", typ == "skill:write",
-			typ == "schedule:add", typ == "schedule:pause", typ == "schedule:resume", typ == "schedule:remove", typ == "run:now":
+			typ == "schedule:add", typ == "schedule:pause", typ == "schedule:resume", typ == "schedule:remove", typ == "run:now", typ == "template:create":
 		case typ == "delegate", typ == "task:message", typ == "task:cancel", typ == "task:retry":
 			if len(a.Delegates) == 0 {
 				at("action %q: needs delegates, the agents this one may hand tasks to", typ)
@@ -1243,12 +1310,20 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if c.Deployment.GitHub == nil || len(c.Deployment.GitHub.CommentRepositories) == 0 {
 				at("action %q: needs github.comment_repositories in orbit.yaml", typ)
 			}
+		case typ == "gmail:draft":
+			if c.Deployment.GoogleActions == nil || c.Deployment.GoogleActions.GmailDraft == nil {
+				at("action %q: needs google_actions.gmail_draft in orbit.yaml", typ)
+			}
+		case typ == "calendar:create":
+			if c.Deployment.GoogleActions == nil || c.Deployment.GoogleActions.CalendarCreate == nil {
+				at("action %q: needs google_actions.calendar_create in orbit.yaml", typ)
+			}
 		case strings.HasPrefix(typ, ConnectorRulePrefix):
 			// validateAgentConnectors
 		case strings.HasPrefix(typ, ConnectorActionPrefix):
 			at("action %q: a connector tool's rule is named mcp:<connector>:<tool>", typ)
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, skill:write, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr, github:comment or mcp:<connector>:<tool>)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, skill:write, template:create, gmail:draft, calendar:create, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr, github:comment or mcp:<connector>:<tool>)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
@@ -1420,6 +1495,9 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		if ss.Idle < 0 || time.Duration(ss.Idle) > MaxSessionIdle {
 			at("session.idle must be between 0 and %s", MaxSessionIdle)
+		}
+		if ss.Stall != 0 && (time.Duration(ss.Stall) < MinSessionStall || time.Duration(ss.Stall) > MaxSessionStall) {
+			at("session.stall must be between %s and %s", MinSessionStall, MaxSessionStall)
 		}
 		if ss.Live < 0 || time.Duration(ss.Live) > MaxSessionLive {
 			at("session.live must be between 0 and %s", MaxSessionLive)

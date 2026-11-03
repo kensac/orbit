@@ -61,6 +61,8 @@ type Server struct {
 	Push *push.Sender
 	// OAuth, when set, serves the authorization server MCP clients sign in through (oauth.go) on the public listener. Without it /mcp still takes an authentik token from a client that has one.
 	OAuth *OAuthProxy
+	// LinkClient, when set, fetches another orbit's template link in place of the guarded client (share.go's fetchBundle); tests point it at a local TLS server, which the guard refuses.
+	LinkClient *http.Client
 	// Boxes returns sandboxd's client for agents' boxes (terminals.go);
 	// nil is no boxes, and every workspace has no terminals.
 	Boxes func() (*sandbox.Client, error)
@@ -116,6 +118,11 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/conversations", s.createConversation)
 	api("GET /api/v1/conversations/{id}", s.getConversation)
 	api("PATCH /api/v1/conversations/{id}", s.updateConversation)
+	api("GET /api/v1/conversations/{id}/permissions", s.getPermissions)
+	api("PUT /api/v1/conversations/{id}/permissions", s.putPermissions)
+	api("GET /api/v1/conversations/{id}/approvals", s.listApprovals)
+	api("GET /api/v1/approvals/{id}", s.getApproval)
+	api("POST /api/v1/approvals/{id}", s.decideApproval)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
 	api("POST /api/v1/conversations/{id}/read", s.markRead)
 	api("GET /api/v1/board", s.board)
@@ -132,8 +139,10 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/conversations/{id}/files/{path...}", s.workspaceFile)
 	// The signature in the URL is the credential (uploads.go).
 	mux.HandleFunc("PUT /api/v1/uploads/signed", s.signedUpload)
+	mux.HandleFunc("GET /api/v1/templates/shared/{token}", s.sharedTemplates)
 	api("GET /api/v1/agents/{name}/memory", s.memoryHistory)
 	api("POST /api/v1/agents/{name}/runs", s.startRun)
+	api("POST /api/v1/agents/{name}/replay", s.replayEvaluation)
 	api("GET /api/v1/agents/{name}/messages", s.listMessages)
 	api("POST /api/v1/agents/{name}/messages", s.sendMessage)
 	api("GET /api/v1/runs", s.listRuns)
@@ -182,6 +191,11 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/terminals/{tid}", s.getTerminal)
 	api("POST /api/v1/terminals/{tid}/kill", s.killTerminal)
 	api("POST /api/v1/terminals/{tid}/attach", s.attachTicket)
+	api("GET /api/v1/workspaces/{id}/accounts", s.listAccounts)
+	api("POST /api/v1/workspaces/{id}/accounts", s.createAccount)
+	api("GET /api/v1/workspaces/{id}/accounts/{aid}", s.getAccount)
+	api("PATCH /api/v1/workspaces/{id}/accounts/{aid}", s.renameAccount)
+	api("POST /api/v1/workspaces/{id}/accounts/{aid}/login", s.loginAccount)
 	// The ticket in Sec-WebSocket-Protocol is the credential (terminals.go).
 	mux.HandleFunc("GET /api/v1/terminals/{tid}/ws", s.terminalSocket)
 	s.memoryRoutes(api)
@@ -191,6 +205,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	s.skillsRoutes(api)
 	s.connectorRoutes(api, mux)
 	s.sessionRoutes(api)
+	s.templatesRoutes(api)
 
 	mux.Handle("/mcp", s.mcpHandler(internal))
 	// The signature is the credential (hooks.go); traefik routes /hooks/ past forward-auth.

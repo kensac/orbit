@@ -441,3 +441,69 @@ func TestUpcastKeepsNewerRowsAsStored(t *testing.T) {
 		t.Fatal("a version 0 row read without error")
 	}
 }
+
+func TestALevelAppliedIsAPermissionsItem(t *testing.T) {
+	m := &memJournal{}
+	m.feed(t, 1, `orbit.permissions {"level":"auto","applied":"ask","mode":"default","when":"start","source":"conversation","version":3,"set_by":"kanishk","reason":"auto mode unavailable"}`,
+		`orbit.permissions {"level":"locked","applied":"locked","mode":"dontAsk","when":"live","source":"agent"}`,
+		`orbit.permissions {"nothing":true}`)
+	if len(m.items) != 3 || m.items[0].Kind != KindPermissions || m.items[1].Kind != KindPermissions || m.items[2].Kind != KindStatus {
+		t.Fatalf("items:\n%s", m.dump())
+	}
+	var p Permissions
+	_ = json.Unmarshal(m.items[0].Body, &p)
+	if p.Level != "auto" || p.Applied != "ask" || p.Version != 3 || p.SetBy != "kanishk" || p.Reason == "" || m.items[0].ID != "permissions:1.1.0" {
+		t.Fatalf("first = %s %+v", m.items[0].ID, p)
+	}
+}
+
+func TestAChatApprovalCarriesTheCLIsReasonAndThePersonsDecision(t *testing.T) {
+	m := &memJournal{}
+	m.feed(t, 1,
+		// orbit's opening of the approval can land before the request line it answers.
+		`orbit.approval {"request_id":"q1","approval_id":"ap-1","kind":"tool","tool":"Bash","level":"ask","state":"pending","expires_at":"2026-11-02T08:00:00Z"}`,
+		`{"type":"control_request","request_id":"q1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"npm test"},"decision_reason":"runs a command","decision_reason_type":"rule","blocked_path":"/x","matched_ask_rule":{"source":"cliArg","tool_name":"Bash"},"permission_suggestions":[{"type":"addRules"}],"title":"Run npm test"}}`,
+		`orbit.approval {"request_id":"q1","approval_id":"ap-1","kind":"tool","state":"allowed","scope":"conversation","decided_by":"kanishk"}`,
+		`orbit.permission {"request_id":"q1","tool":"Bash","allowed":true,"message":""}`)
+	var ap Approval
+	it := m.latest(t, "approval:q1", &ap)
+	if it.Revision != 3 || ap.State != ApprovalAllowed || ap.ApprovalID != "ap-1" || ap.Scope != "conversation" || ap.DecidedBy != "kanishk" ||
+		ap.DecisionReason != "runs a command" || ap.DecisionReasonType != "rule" || ap.BlockedPath != "/x" || ap.Title != "Run npm test" ||
+		!strings.Contains(string(ap.MatchedRule), "cliArg") || !strings.Contains(string(ap.Suggestions), "addRules") || ap.ExpiresAt == nil || ap.Level != "ask" {
+		t.Fatalf("approval = r%d %+v", it.Revision, ap)
+	}
+	var second Approval
+	_ = json.Unmarshal(m.items[2].Body, &second)
+	if second.State != ApprovalPending || second.ApprovalID != "ap-1" || second.Tool != "Bash" {
+		t.Fatalf("the request line kept orbit's opening: %s", m.items[2].Body)
+	}
+}
+
+func TestAStalledTurnIsInterruptedWhateverEndedIt(t *testing.T) {
+	// The interrupt's result closed the turn first; the watchdog's event
+	// after it says the turn did not finish its work.
+	m := &memJournal{}
+	m.feed(t, 1, `{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"}]}}`,
+		`{"type":"result","subtype":"error_during_execution","is_error":true}`,
+		`orbit.stalled {"idle_ms":600000,"stall_ms":600000}`)
+	var tb Turn
+	m.latest(t, "turn:1.1", &tb)
+	if tb.State != TurnInterrupted || tb.Reason != ReasonStalled || tb.Outcome != "" || tb.CompletedAt == nil {
+		t.Fatalf("turn = %+v", tb)
+	}
+	// A kill left the turn open; the event closes it, and the attempt's
+	// end finds nothing open.
+	m = &memJournal{}
+	m.feed(t, 1, `{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"}]}}`,
+		`orbit.stalled {"idle_ms":600000,"stall_ms":600000}`)
+	m.latest(t, "turn:1.1", &tb)
+	if tb.State != TurnInterrupted || tb.Reason != ReasonStalled || m.state.OpenTurn != "" {
+		t.Fatalf("turn = %+v, open %q", tb, m.state.OpenTurn)
+	}
+	if ws, _ := Close(&m.state, "handed_back", t0.Add(time.Hour), m.look); ws != nil {
+		t.Fatalf("the hand-back closed the turn again: %+v", ws)
+	}
+	if !strings.Contains(m.dump(), `"code":"orbit.stalled"`) {
+		t.Fatalf("no status item for the event: %s", m.dump())
+	}
+}
