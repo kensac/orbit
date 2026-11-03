@@ -16,8 +16,8 @@
   of skipping it. `TestIntegrationIsolation` exercises both the build profile
   and the native extension profile; extension checks include filesystem
   boundaries, absent network and credentials, process capabilities, inspected
-  resource limits, host/session path reads, symlink and hard-link writes from
-  scratch, process flooding, memory exhaustion, per-invocation scratch,
+  resource limits, host/session path visibility, read-only-root symlink writes,
+  cross-mount hardlinks, process flooding, memory exhaustion, per-invocation scratch,
   timeout cleanup and container removal. This does not cover every isolation acceptance case in
   [plugins.md](../plugins.md), so it is not by itself evidence that extensions
   are ready to enable.
