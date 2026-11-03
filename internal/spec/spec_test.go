@@ -95,6 +95,52 @@ func TestAgentBudgetsValidate(t *testing.T) {
 	}
 }
 
+func TestAgentQuietHoursValidate(t *testing.T) {
+	for _, tc := range []struct {
+		quiet string
+		valid bool
+	}{
+		{`{start: "22:00", end: "07:00"}`, true},
+		{`{start: "09:00", end: "17:00"}`, true},
+		{`{start: "09:00", end: "09:00"}`, false},
+		{`{start: "9:00", end: "17:00"}`, false},
+		{`{start: "24:00", end: "07:00"}`, false},
+		{`{start: "22:00"}`, false},
+	} {
+		_, err := Load(write(t, map[string]string{
+			"orbit.yaml":    base,
+			"agents/a.yaml": "name: a\ncharter: x\nquiet_hours: " + tc.quiet + "\n",
+		}))
+		if (err == nil) != tc.valid {
+			t.Errorf("quiet_hours %s: err = %v, valid = %v", tc.quiet, err, tc.valid)
+		}
+	}
+}
+
+func TestQuietHoursContainment(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		q    QuietHours
+		at   time.Time
+		want bool
+	}{
+		{"cross midnight start included", QuietHours{"22:00", "07:00"}, time.Date(2026, 11, 1, 22, 0, 0, 0, loc), true},
+		{"cross midnight before end", QuietHours{"22:00", "07:00"}, time.Date(2026, 11, 2, 6, 59, 0, 0, loc), true},
+		{"end excluded", QuietHours{"22:00", "07:00"}, time.Date(2026, 11, 2, 7, 0, 0, 0, loc), false},
+		{"day interval", QuietHours{"09:00", "17:00"}, time.Date(2026, 11, 2, 12, 0, 0, 0, loc), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.q.Contains(tc.at, loc); got != tc.want {
+				t.Fatalf("Contains(%s) = %v, want %v", tc.at, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGoogleActionsRequireFixedAuthenticatedWriteToolsAndAgentConnector(t *testing.T) {
 	orbit := base + `
 credentials:
