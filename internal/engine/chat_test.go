@@ -331,7 +331,7 @@ func TestThePersonsMessageIsTheInstruction(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "orbit.yaml"), []byte("defaults: {runner: cc, channels: [log]}\nrunners: {cc: {kind: claude-code}}\nchannels: {log: {kind: log}}\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "agents", "helper.yaml"), []byte("name: helper\ncharter: Help.\nchat: true\nwake_on_message: true\nactions: {agent:define: approve}\n"), 0o644)
 	args := `{"type": "agent:define", "reason": "asked", "params": {"spec": {"name": "news", "charter": "News."}}}`
-	e := &engine.Engine{Store: s, DataDir: t.TempDir(), ConfigDir: dir, Outbox: true, Env: func(string) (string, bool) { return "", false },
+	e := &engine.Engine{Store: s, DataDir: t.TempDir(), ConfigDir: dir, Env: func(string) (string, bool) { return "", false },
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		NewRunner: func(string, spec.RunnerSpec, func(string) (string, bool)) (runner.Runner, error) {
 			return actRunner{args}, nil
@@ -394,7 +394,7 @@ func TestPagePublishReturnsTheConversationPageReferenceOnlyForPersonMessage(t *t
 	_ = os.WriteFile(filepath.Join(dir, "orbit.yaml"), []byte("defaults: {runner: cc, channels: [log]}\nrunners: {cc: {kind: claude-code}}\nchannels: {log: {kind: log}}\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "agents", "chat.yaml"), []byte("name: chat\ncharter: Help.\nchat: true\nwake_on_message: true\nactions: {page:publish: approve}\n"), 0o644)
 	args := `{"type":"page:publish","reason":"requested","params":{"title":"Example","html":"<main>hello</main>"}}`
-	e := &engine.Engine{Store: s, DataDir: t.TempDir(), ConfigDir: dir, Env: func(string) (string, bool) { return "", false },
+	e := &engine.Engine{Store: s, DataDir: t.TempDir(), ConfigDir: dir, Outbox: true, Env: func(string) (string, bool) { return "", false },
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		NewRunner: func(string, spec.RunnerSpec, func(string) (string, bool)) (runner.Runner, error) {
 			return actRunner{args}, nil
