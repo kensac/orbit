@@ -342,6 +342,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `schedule:add`, `schedule:pause`, `schedule:resume`, `schedule:remove` | Changes one trigger (or, pausing and resuming, every trigger) of this agent or one in `delegates`, as a new revertible version; times are the person's words, parsed by code (configuration.md, Changing schedules by talking). `approve` applies directly in a run answering the person's message. | a database or built-in target |
 | `agent:save` | Saves the conversation as a new agent: the model writes its name, description, charter and starters; orbit adds what the conversation did and proposes it as an `agent:define` that always waits for a person (configuration.md, Saving a conversation as an agent). | |
 | `run:now` | Starts a manual run of this agent or one in `delegates`; a run no message woke cannot start its own agent. `approve` applies directly in a run answering the person's message. | |
+| `skill:write` | Writes or retires one of the agent's skills as the next version; the approval shows the SKILL.md diff and the skill's scripts. | |
 
 ### `notify`
 

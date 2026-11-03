@@ -473,7 +473,14 @@ func (s *Store) ImportSkills(ctx context.Context, skills []SkillWrite, p SkillPr
 	return results, err
 }
 
-// applySkillWrites applies a run's skill writes in savepoints of its outcome, as applyEntryWrites does entries: a write the store refuses is reported and skipped. A written skill is attached to the agent, so a skill it writes is one it runs with.
+// ApplySkillWrite applies one skill write a run proposed (a skill:write action, executed by rule or a person's approval) in its own transaction, with the run as its source; w.Result says what became of it, a refusal (a newer version, a taken name, an invalid skill) included.
+func (s *Store) ApplySkillWrite(ctx context.Context, runID, agent string, w *AgentSkillWrite) error {
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		return applySkillWrites(ctx, tx, runID, agent, []*AgentSkillWrite{w})
+	})
+}
+
+// applySkillWrites applies skill writes in savepoints, as applyEntryWrites does entries: a write the store refuses is reported and skipped. A written skill is attached to the agent, so a skill it writes is one it runs with.
 func applySkillWrites(ctx context.Context, tx pgx.Tx, runID, agent string, writes []*AgentSkillWrite) error {
 	for _, w := range writes {
 		p := SkillProvenance{Source: SkillByAgent, RunID: runID, Note: w.Note}

@@ -379,7 +379,7 @@ orbit's binary runs each (`orbit agent-hook`, its definition a flag orbit writes
 
 ## Skills
 
-`skills: [monthly-close]` names skills from orbit's library the agent runs with (docs/ARCHITECTURE.md, Skills). A name no skill has is skipped at run time and shown as `missing` in `GET /agents/{name}/context`; the API attaches more.
+`skills: [monthly-close]` names skills from orbit's library the agent runs with (docs/ARCHITECTURE.md, Skills). A name no skill has is skipped at run time and shown as `missing` in `GET /agents/{name}/context`; the API attaches more. An agent writes skills only with `actions: {skill:write: approve}` (or `auto`): unnamed, it writes none.
 
 ## Learning
 
