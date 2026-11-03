@@ -552,7 +552,8 @@ func (s *Server) sessionScrollback(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(b)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(b) //nolint:gosec // G705: this is raw terminal data, never HTML.
 }
 
 func (s *Server) sessionResize(w http.ResponseWriter, r *http.Request) {
