@@ -179,10 +179,10 @@ func (c *Client) InstallClaudePlugin(ctx context.Context, name, slot, pluginID, 
 		return result, errors.New("invalid account slot or Claude plugin ID")
 	}
 	if !validSHA256(pluginDigest) || !validSHA256(archiveDigest) {
-		return result, errors.New("Claude plugin digests must be lowercase sha256 values")
+		return result, errors.New("claude plugin digests must be lowercase sha256 values")
 	}
 	if len(archive) == 0 || len(archive) > MaxClaudeBundleBytes {
-		return result, fmt.Errorf("Claude plugin archive must be 1 to %d bytes", MaxClaudeBundleBytes)
+		return result, fmt.Errorf("claude plugin archive must be 1 to %d bytes", MaxClaudeBundleBytes)
 	}
 	p, err := boxPath(name, "accounts", slot, "claude-plugins", pluginID)
 	if err != nil {

@@ -55,7 +55,7 @@ func NewPluginBundle(claudeDir, id string) (PluginBundle, error) {
 		return PluginBundle{}, fmt.Errorf("plugin ID %q must be name@marketplace", id)
 	}
 	if err := requireRealDirectories(claudeDir, "plugins"); err != nil {
-		return PluginBundle{}, fmt.Errorf("Claude plugin profile: %w", err)
+		return PluginBundle{}, fmt.Errorf("claude plugin profile: %w", err)
 	}
 	settingsPath := filepath.Join(claudeDir, "settings.json")
 	settings, err := readBoundedJSONFile(settingsPath, 1<<20)
@@ -306,9 +306,6 @@ func readPluginTree(root, id, version string) ([]PluginFile, error) {
 		content, err := readBoundedFile(filePath, maxPluginArchiveBytes-total)
 		if err != nil {
 			return err
-		}
-		if len(content) == 0 {
-			// Empty files are valid plugin payloads and remain in the digest.
 		}
 		total += int64(len(content))
 		if total > maxPluginArchiveBytes || len(files) >= maxPluginFiles {
