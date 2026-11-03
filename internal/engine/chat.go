@@ -461,6 +461,7 @@ type chatTurn struct {
 	skills []store.Skill
 	// repos is what the agent's repositories add (repos.go), or nil.
 	repos *repoRun
+	stall *runner.Stall
 }
 
 // errCancelled is a run a person stopped; Execute records it cancelled.
@@ -531,7 +532,7 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	}
 	req := runner.Request{
 		RunID: c.ID, Workdir: t.workdir, System: system, Prompt: prompt, Inputs: t.inputs,
-		Tools: a.Tools, WebAllow: webAllow(a), Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin, Connectors: t.connectors,
+		Tools: a.Tools, WebAllow: webAllow(a), Session: t.sess, Harness: t.harness, Chat: chat, SkillsPlugin: t.plugin, Connectors: t.connectors, Stall: t.stall,
 	}
 	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
 		return nil, nil, err

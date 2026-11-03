@@ -194,12 +194,21 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		e.saveSession(ctx, c, st.home, st.workdir, st.sessionID)
 		return e.Store.HandBack(context.WithoutCancel(ctx), c.ID, c.Attempt, cost, total)
 	}
+	if st.stalledBack(c.Attempt) {
+		cost, total := st.spent()
+		e.saveSession(ctx, c, st.home, st.workdir, st.sessionID)
+		log.Info("stalled; handed back", "attempt", c.Attempt, "session", st.sessionID)
+		return e.Store.HandBack(context.WithoutCancel(ctx), c.ID, c.Attempt, cost, total)
+	}
 	var sk *gateSkip
 	if errors.As(err, &sk) {
 		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
 	}
 	if cr := (cancelledRun{}); errors.As(err, &cr) || errors.Is(context.Cause(actx), errCancelled) {
 		return e.cancelled(ctx, snap, a, c, start, cr.out, res)
+	}
+	if err != nil && st.stalled && c.Attempt >= store.MaxAttempts {
+		err = fmt.Errorf("%w (attempt %d of %d)", err, c.Attempt, store.MaxAttempts)
 	}
 	if err != nil {
 		if h := e.holdFor(context.WithoutCancel(ctx), a, c, err); h != nil {
@@ -340,7 +349,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	home := filepath.Join(workdir, ".home")
 	inputsDir := "inputs"
-	keepScratch := func() bool { return ctx.Err() != nil }
+	keepScratch := func() bool { return ctx.Err() != nil || st.stalledBack(c.Attempt) }
 	withSession := a.Session != nil && a.Session.Resume && claudeCode
 	chat := a.Chat && claudeCode
 	// What the person changed in a chat's workspace since the last turn.
@@ -659,8 +668,14 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		hooks, hr.Status = e.listenHooks(ctx, c, home, emit, log)
 		defer hooks.Close()
 	}
+	var stall *runner.Stall
+	if claudeCode {
+		stall = &runner.Stall{After: a.StallAfter(), ToolOpen: func(ctx context.Context) (bool, error) {
+			return e.Store.ToolCallRunning(ctx, c.ID, c.Attempt)
+		}}
+	}
 	if chat {
-		out, res, err := e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
+		out, res, err := e.chatTurn(ctx, snap, a, c, r, chatTurn{stall: stall, workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached,
 				WorkspaceChanges: wsNote}, fresh: wsFresh,
 			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, steer: &st.steer, rec: rec, instructor: st.instructor,
@@ -668,7 +683,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		if out != nil {
 			out.connectorCalls = gw.pendingCalls()
 		}
-		return out, res, err
+		return out, res, st.sawStall(err)
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
 	if tk != nil {
@@ -709,7 +724,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 
 	req := runner.Request{
 		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
-		Tools: a.Tools, WebAllow: webAllow(a), OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin, Connectors: conns,
+		Tools: a.Tools, WebAllow: webAllow(a), OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin, Connectors: conns, Stall: stall,
 	}
 	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
 		return nil, nil, err
@@ -724,7 +739,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
 	}
 	if err != nil {
-		return nil, res, backendErr{err}
+		return nil, res, st.sawStall(backendErr{err})
 	}
 	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "out", "output.json", "application/json", res.Output); err != nil {
 		return nil, res, err
