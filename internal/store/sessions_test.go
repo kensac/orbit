@@ -140,7 +140,7 @@ func TestConversationIsTheThreadBeforeThisRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Attempt: 1, Status: "succeeded", Summary: "$412", Report: "Food was $412."},
-		store.Outcome{Questions: []string{"Include restaurants?"}}); err != nil {
+		store.Outcome{Questions: []store.Question{{Body: "Include restaurants?"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.SendToAgent(ctx, "a", "yes, include them", "k", nil); err != nil {

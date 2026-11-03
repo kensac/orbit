@@ -204,7 +204,7 @@ One agent coordinates others. An agent whose spec names `delegates` (agents, or 
 
 Every backend returns the same JSON (`internal/engine/contract.go`):
 `summary`, `report` (Markdown), `notify` (send, priority, title), `memory`
-(update, the complete new document), `questions`, `actions`, and, only for a
+(update, the complete new document), `questions` (each a string, or a question with a form), `actions`, and, only for a
 run in a request ticket's conversation that is still being discussed,
 `plan` ([tickets.md](tickets.md)), only for a run in a delegated task's conversation, `outcome` and `outcome_reason` (Delegation, above), and `entries`, the memory entry writes the run makes (below); skills are written with the `skill:write` action (Skills, below). The backend is
 given a strict schema in which each action type's parameters are spelled out;
@@ -246,7 +246,7 @@ carries a title and a link only; bursts fold into one summary push.
   sets `memory.update`. Every version is kept (`memory_versions`).
 - **Memory entries** are the durable layer above it (below).
 - **Questions** a run asks become `from_agent` messages and are delivered with
-  the report, in the asking run's conversation. A question stays open until
+  the report, in the asking run's conversation. A question may carry a form (`fields`, `internal/forms`: typed fields with options, defaults and required), checked by code when it is recorded; a reply's `answers` are checked against it when they are posted and listed in the reply's body, which is what the agent reads (docs/api.md, A conversation's thread). A question stays open until
   a reply names it or any later message reaches that conversation; open
   questions are shown to the conversation's next run so it does not ask
   again.
@@ -322,7 +322,7 @@ runs and next fires. `/mcp` serves the same reads and writes as MCP tools (`inte
 
 ## Search
 
-Everything a person or an agent wrote is searchable (`Store.Search`, `GET /search`, the `search` MCP tool, and in a run `mcp__orbit__search`): people's messages, agents' questions, run reports and errors, the prose a backend narrated, each tool call's input, memory versions and memory entries, and the prose of imported sessions (below; a run's in-run search covers its own agent's records and the memory entries it reads: its own, the profile's and its topics', and no imported sessions, which belong to no agent). A chat run has the same search among the tools orbit serves it (`chatTools`); any other Claude Code run reaches it through the harness's tool server and a socket per agent. `search_docs` holds one document per piece with a stored `tsvector` (English, a GIN index), derived by triggers on the source tables (the `search` migration, which also backfills), so a worker or the previous release indexes what it writes without knowing search exists. Queries are `websearch_to_tsquery`, ranked by `ts_rank_cd` normalised by length, with `ts_headline` snippets whose matches are split out in code, never as markup in the text. Tool results are not indexed: they are inputs, already in artifacts, and would drown every query.
+Everything a person or an agent wrote is searchable (`Store.Search`, `GET /search`, the `search` MCP tool, and in a run `mcp__orbit__search`): people's messages, agents' questions, run reports and errors, the prose a backend narrated, each tool call's input, memory versions, memory entries, skills, and the prose of imported sessions (below; a run's in-run search covers its own agent's records and the memory entries it reads: its own, the profile's and its topics', and no imported sessions, which belong to no agent). A chat run has the same search among the tools orbit serves it (`chatTools`); any other Claude Code run reaches it through the harness's tool server and a socket per agent. `search_docs` holds one document per piece with a stored English `tsvector` and a second `simple` `code_tsv` over `orbit_search_code_text`, both GIN indexed and derived by triggers from source tables. The code index splits identifiers at punctuation and camelCase so different spellings match. Tool call documents also expose `repo` and `path` to the `repo:` and `path:` operators. The `agent:`, `kind:`, `repo:` and `path:` operators are parsed in code and apply as filters; a first page with no match is retried once with misspelt words corrected from `search_terms` using `pg_trgm`. Queries are ranked by `ts_rank_cd` normalised by length, with `ts_headline` snippets whose matches are split out in code, never as markup in the text. Tool results are not indexed: they are inputs, already in artifacts, and would drown every query.
 
 ## Imported sessions
 
