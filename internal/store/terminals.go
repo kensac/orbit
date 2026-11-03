@@ -67,14 +67,18 @@ type BoxTerminal struct {
 	Agent       string `json:"-"`
 	Preset      string `json:"preset"`
 	// Session is the tmux session's name in the box.
-	Session   string  `json:"-"`
-	Title     string  `json:"title"`
-	Cwd       string  `json:"cwd"`
-	State     string  `json:"state"`
-	ExitCode  *int    `json:"exit_code"`
-	EndReason *string `json:"end_reason"`
-	Cols      int     `json:"cols"`
-	Rows      int     `json:"rows"`
+	Session string `json:"-"`
+	// AccountID is the account the terminal runs under (null: the box's
+	// own profile); AccountSlot is its directory's name.
+	AccountID   *string `json:"account_id"`
+	AccountSlot string  `json:"-"`
+	Title       string  `json:"title"`
+	Cwd         string  `json:"cwd"`
+	State       string  `json:"state"`
+	ExitCode    *int    `json:"exit_code"`
+	EndReason   *string `json:"end_reason"`
+	Cols        int     `json:"cols"`
+	Rows        int     `json:"rows"`
 	// Clients is how many sockets are attached on the instance answering;
 	// the API fills it.
 	Clients        int        `json:"clients"`
@@ -94,14 +98,19 @@ type NewBoxTerminal struct {
 	Cwd         string
 	Cols, Rows  int
 	CreatedBy   string
+	// AccountID is the account to run under, "" for none.
+	AccountID string
 }
 
-const terminalCols = `t.id::text, t.workspace_id::text, b.agent, t.preset, t.session, t.title, t.cwd,
+const terminalCols = `t.id::text, t.workspace_id::text, b.agent, t.preset, t.session, t.account_id::text, coalesce(a.slot, ''), t.title, t.cwd,
 	t.exit_code, t.end_reason, t.cols, t.rows, t.created_by, t.created_at, t.last_attached_at, t.ended_at`
+
+// terminalFrom is the join terminalCols reads, with t the terminals rows.
+const terminalFrom = ` JOIN boxes b ON b.id = t.workspace_id LEFT JOIN box_accounts a ON a.id = t.account_id`
 
 func scanTerminal(row pgx.Row) (BoxTerminal, error) {
 	var t BoxTerminal
-	err := row.Scan(&t.ID, &t.WorkspaceID, &t.Agent, &t.Preset, &t.Session, &t.Title, &t.Cwd,
+	err := row.Scan(&t.ID, &t.WorkspaceID, &t.Agent, &t.Preset, &t.Session, &t.AccountID, &t.AccountSlot, &t.Title, &t.Cwd,
 		&t.ExitCode, &t.EndReason, &t.Cols, &t.Rows, &t.CreatedBy, &t.CreatedAt, &t.LastAttachedAt, &t.EndedAt)
 	t.State = TerminalRunning
 	if t.EndedAt != nil {
@@ -128,14 +137,24 @@ func (s *Store) CreateTerminal(ctx context.Context, n NewBoxTerminal) (BoxTermin
 		if running >= MaxRunningTerminals {
 			return fmt.Errorf("%w: %d terminals are running in this workspace, the most allowed", ErrLimit, running)
 		}
+		if n.AccountID != "" {
+			var ok bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM box_accounts WHERE id = $1 AND workspace_id = $2)`,
+				n.AccountID, n.WorkspaceID).Scan(&ok); err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("%w: no such account in this workspace", ErrNotFound)
+			}
+		}
 		// The tmux session is named for the terminal: a preset and the
 		// first 12 hex digits of its id.
 		t, err = scanTerminal(tx.QueryRow(ctx, `WITH n AS (SELECT gen_random_uuid() AS id),
-			t AS (INSERT INTO terminals (id, workspace_id, preset, session, title, cwd, cols, rows, created_by)
-				SELECT n.id, $1, $2, $2 || '-' || substr(replace(n.id::text, '-', ''), 1, 12), $3, $4, $5, $6, $7 FROM n
+			t AS (INSERT INTO terminals (id, workspace_id, preset, session, title, cwd, cols, rows, created_by, account_id)
+				SELECT n.id, $1, $2, $2 || '-' || substr(replace(n.id::text, '-', ''), 1, 12), $3, $4, $5, $6, $7, nullif($8, '')::uuid FROM n
 				RETURNING *)
-			SELECT `+terminalCols+` FROM t JOIN boxes b ON b.id = t.workspace_id`,
-			n.WorkspaceID, n.Preset, n.Title, n.Cwd, n.Cols, n.Rows, n.CreatedBy))
+			SELECT `+terminalCols+` FROM t`+terminalFrom,
+			n.WorkspaceID, n.Preset, n.Title, n.Cwd, n.Cols, n.Rows, n.CreatedBy, n.AccountID))
 		return err
 	})
 	return t, err
@@ -147,7 +166,7 @@ func (s *Store) GetTerminal(ctx context.Context, id string) (BoxTerminal, error)
 		return BoxTerminal{}, ErrNotFound
 	}
 	t, err := scanTerminal(s.Pool.QueryRow(ctx, `SELECT `+terminalCols+`
-		FROM terminals t JOIN boxes b ON b.id = t.workspace_id WHERE t.id = $1`, id))
+		FROM terminals t`+terminalFrom+` WHERE t.id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return BoxTerminal{}, ErrNotFound
 	}
@@ -158,7 +177,7 @@ func (s *Store) GetTerminal(ctx context.Context, id string) (BoxTerminal, error)
 // running, exited or "" for all.
 func (s *Store) ListTerminals(ctx context.Context, workspaceID, state string) ([]BoxTerminal, error) {
 	rows, err := s.Pool.Query(ctx, `SELECT `+terminalCols+`
-		FROM terminals t JOIN boxes b ON b.id = t.workspace_id
+		FROM terminals t`+terminalFrom+`
 		WHERE t.workspace_id = $1
 		  AND ($2 = '' OR ($2 = 'running') = (t.ended_at IS NULL))
 		ORDER BY t.created_at DESC, t.id DESC LIMIT 500`, workspaceID, state)
@@ -185,7 +204,7 @@ func (s *Store) EndTerminal(ctx context.Context, id, reason string, exitCode *in
 	}
 	t, err := scanTerminal(s.Pool.QueryRow(ctx, `WITH t AS (UPDATE terminals SET ended_at = now(), end_reason = $2, exit_code = $3
 			WHERE id = $1 AND ended_at IS NULL RETURNING *)
-		SELECT `+terminalCols+` FROM t JOIN boxes b ON b.id = t.workspace_id`, id, reason, exitCode))
+		SELECT `+terminalCols+` FROM t`+terminalFrom, id, reason, exitCode))
 	if errors.Is(err, pgx.ErrNoRows) {
 		if _, gerr := s.GetTerminal(ctx, id); gerr != nil {
 			return BoxTerminal{}, gerr

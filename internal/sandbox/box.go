@@ -13,22 +13,82 @@ import (
 // One container per agent, from the workstation image, with named volumes
 // for its home and /work, kept until it is stopped. sandboxd exposes:
 //
-//	POST /v1/boxes/{name}                          creates the box, or starts it; BoxStatus
+//	POST /v1/boxes/{name}                          body: EnsureRequest (optional); creates the box, or starts it; BoxStatus
 //	GET  /v1/boxes/{name}                          BoxStatus (state "none" when there is none)
 //	POST /v1/boxes/{name}/stop                     stops it (volumes kept); BoxStatus
+//	POST /v1/boxes/{name}/recreate                 body: EnsureRequest; replaces the container (volumes kept); BoxStatus
 //	POST /v1/boxes/{name}/tty                      body: TTYRequest; upgrades to a framed TTY stream
 //	GET  /v1/boxes/{name}/sessions/{session}       {"exists": bool}
 //	POST /v1/boxes/{name}/sessions/{session}/kill  ends that tmux session; 204
+//	POST /v1/boxes/{name}/accounts/{slot}/prepare  links the shared profile into an account's directory; 204
+//	GET  /v1/boxes/{name}/accounts/{slot}          AccountStatus, read from the account's own files
 //
 // As for sandboxes, no request names a docker option: a TTY's argv comes
-// from a fixed preset (TTYShell, TTYClaude) and a tmux session name.
+// from a fixed preset (TTYShell, TTYClaude, TTYLogin), a tmux session name
+// and an account's slot, and every other command is a fixed script.
 const (
 	PathBoxes = "/v1/boxes"
 	// TTYUpgrade is the upgrade token of the TTY stream.
 	TTYUpgrade = "orbit-box-tty"
 	// BoxHome is the box user's HOME, a named volume of its own.
 	BoxHome = "/home/agent"
+	// AccountsRoot holds one directory per Claude account, each its own
+	// named volume and the CLAUDE_CONFIG_DIR of the terminals that use it.
+	AccountsRoot = BoxHome + "/.claude-accounts"
+	// MaxAccounts bounds the accounts one box mounts.
+	MaxAccounts = 16
 )
+
+var slotRE = regexp.MustCompile(`^[0-9a-f]{12}$`)
+
+// ValidSlot reports whether s can name an account's volume and directory:
+// twelve lowercase hex digits, which orbit derives from the account's id.
+func ValidSlot(s string) bool { return slotRE.MatchString(s) }
+
+// AccountDir is an account's directory in the box.
+func AccountDir(slot string) string { return AccountsRoot + "/" + slot }
+
+// EnsureRequest names the accounts a box mounts. A stopped box missing one
+// is recreated with it; a running one is reported as it is (BoxStatus
+// Accounts), since adding a mount means replacing the container.
+type EnsureRequest struct {
+	Accounts []string `json:"accounts,omitempty"`
+}
+
+// Validate bounds the request.
+func (r EnsureRequest) Validate() error {
+	if len(r.Accounts) > MaxAccounts {
+		return fmt.Errorf("%d accounts, more than %d", len(r.Accounts), MaxAccounts)
+	}
+	seen := map[string]bool{}
+	for _, a := range r.Accounts {
+		if !ValidSlot(a) || seen[a] {
+			return fmt.Errorf("account %q: want twelve lowercase hex digits, each once", a)
+		}
+		seen[a] = true
+	}
+	return nil
+}
+
+// AccountStatus is what an account's own files say of its login, read in
+// the box by a fixed script that selects these fields and nothing else, so
+// no token ever leaves the box. Times are the CLI's, milliseconds since the
+// epoch; the zero value is absent.
+type AccountStatus struct {
+	// LoggedIn is whether the account's credentials hold a refresh token.
+	LoggedIn         bool   `json:"logged_in"`
+	Email            string `json:"email,omitempty"`
+	AccountUUID      string `json:"account_uuid,omitempty"`
+	OrgID            string `json:"org_id,omitempty"`
+	OrgName          string `json:"org_name,omitempty"`
+	SubscriptionType string `json:"subscription_type,omitempty"`
+	RateLimitTier    string `json:"rate_limit_tier,omitempty"`
+	// AccessExpiresAt is the access token's expiry; the CLI refreshes it.
+	AccessExpiresAt int64 `json:"access_expires_at,omitempty"`
+	// RefreshExpiresAt is the refresh token's: past it, the account needs
+	// a new login.
+	RefreshExpiresAt int64 `json:"refresh_expires_at,omitempty"`
+}
 
 // Box states.
 const (
@@ -48,6 +108,8 @@ type BoxStatus struct {
 	Host      string     `json:"host,omitempty"`
 	Arch      string     `json:"arch,omitempty"`
 	CreatedAt *time.Time `json:"created_at,omitempty"`
+	// Accounts are the account slots the container mounts, sorted.
+	Accounts []string `json:"accounts,omitempty"`
 }
 
 // TTY presets: the only commands a TTY may run, each a tmux session so it
@@ -57,6 +119,10 @@ const (
 	TTYShell = "shell"
 	// TTYClaude is `tmux new -A -s <session> claude`: Claude Code's own TUI.
 	TTYClaude = "claude"
+	// TTYLogin is `claude auth login` under an account's directory: the
+	// full login (a URL, then a pasted code), which writes the account's
+	// credentials into its own volume.
+	TTYLogin = "login"
 )
 
 // TTYRequest attaches a TTY to a tmux session in a box.
@@ -69,6 +135,10 @@ type TTYRequest struct {
 	Rows int    `json:"rows"`
 	// Env is the allowed environment (AllowedEnv) for the attaching client.
 	Env map[string]string `json:"env,omitempty"`
+	// Account is an account's slot: the session runs with that account's
+	// directory as CLAUDE_CONFIG_DIR and without the subscription token
+	// or any ANTHROPIC_ variable, so its own login is used.
+	Account string `json:"account,omitempty"`
 }
 
 // Terminal size bounds: what xterm.js sends on a phone up to a wide
@@ -104,8 +174,14 @@ func ValidCwd(c string) bool {
 
 // Validate is the check sandboxd applies; the client applies it too.
 func (r TTYRequest) Validate() error {
-	if r.Preset != TTYShell && r.Preset != TTYClaude {
-		return fmt.Errorf("preset %q: want %s or %s", r.Preset, TTYShell, TTYClaude)
+	if r.Preset != TTYShell && r.Preset != TTYClaude && r.Preset != TTYLogin {
+		return fmt.Errorf("preset %q: want %s, %s or %s", r.Preset, TTYShell, TTYClaude, TTYLogin)
+	}
+	if r.Account != "" && !ValidSlot(r.Account) {
+		return fmt.Errorf("account %q: want twelve lowercase hex digits", r.Account)
+	}
+	if r.Preset == TTYLogin && r.Account == "" {
+		return errors.New("the login preset needs an account")
 	}
 	if !ValidSession(r.Session) {
 		return fmt.Errorf("session %q: want lowercase letters, digits and dashes", r.Session)
@@ -119,6 +195,10 @@ func (r TTYRequest) Validate() error {
 	for k, v := range r.Env {
 		if !AllowedEnv[k] {
 			return fmt.Errorf("env %q is not allowed", k)
+		}
+		if r.Account != "" {
+			// An account's session uses its own login, never the token.
+			return fmt.Errorf("env %q with an account: an account's terminal carries no credential", k)
 		}
 		if strings.IndexByte(v, 0) >= 0 || len(v) > MaxEnvValue {
 			return fmt.Errorf("env %q has an invalid value", k)
