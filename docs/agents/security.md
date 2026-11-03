@@ -56,6 +56,7 @@ more than its agent's rules allow.
   orbit never writes hooks or a status line into any settings file, the
   user's `~/.claude/settings.json` least of all: they exist for one run's
   CLI process, on its command line.
+- **Workspace box accounts** keep `settings.json` in each account volume. Shared profile settings are merged as defaults before an account terminal starts, and account overrides remain private, so enabling a pinned plugin for one login cannot enable it for another. Plugin payloads execute with the account's privileges and are trusted operator code; a digest pin checks identity, not safety.
 - **The status channel** is a unix socket, mode 0600, and a spool file in the run's state directory under the CLI's HOME (which the CLI denies reading): local to the host, never a network listener. What arrives on it is the model's process tree reporting on itself, so it is data, never trusted for a decision: it sets the status a person sees and the run's `orbit.hook` events, and nothing else. A forged event can misreport a running run's status at most; the run's row decides once it is final.
 - **The search tool** (`mcp__orbit__search`) holds no database credential:
   the tool server asks the engine over a unix socket (`--search`, a 0600
