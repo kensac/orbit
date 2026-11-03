@@ -353,6 +353,7 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `agent:save` | Saves the conversation as a new agent: the model writes its name, description, charter and starters; orbit adds what the conversation did and proposes it as an `agent:define` that always waits for a person (configuration.md, Saving a conversation as an agent). | |
 | `run:now` | Starts a manual run of this agent or one in `delegates`; a run no message woke cannot start its own agent. `approve` applies directly in a run answering the person's message. | |
 | `skill:write` | Writes or retires one of the agent's skills as the next version; the approval shows the SKILL.md diff and the skill's scripts. | |
+| `template:create` | Creates an agent from a template in the library: code renders and dry-runs it and records an `agent:define` that waits for a person whatever the rule; a `user_prompt` parameter is asked of the person with a form. | |
 
 ### `notify`
 
@@ -388,6 +389,7 @@ claude-code runners only.
 | `resume` | bool | `false` | Continue the previous run's session when it succeeded under the same spec within `idle`. |
 | `idle` | duration | `6h` | The resume window, at most `24h`. |
 | `live` | duration | `0` (none) | Keep one process open this long after a message-started run and feed later runs into it; at most `1h` and at most `idle`. |
+| `stall` | duration | `10m` | A chat or live turn with no line from the CLI (keep_alive included) for this long, and no tool call running, is interrupted and the run handed back to continue the session (ARCHITECTURE.md, Stall watchdog); `1m` to `24h`. Needs no `resume`. |
 
 ### `learn`
 

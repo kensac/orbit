@@ -41,7 +41,7 @@ inputs go in a per-attempt directory removed after the run.
 
 An agent is a file (`agents/<name>.yaml`), a database definition written
 through the API (`agent_definitions`, every version kept), or built in
-(`spec.Builtins`: `orbit`, the general agent). `engine.LoadConfig` merges
+(`spec.Builtins`: `orbit`, the general agent). A database agent may be rendered from a template (`templates`, `template_versions`: a spec with `{{ }}` slots and typed parameters, `internal/templates`) by code, then defined through the same path (`engine/templates.go`; docs/api.md, Templates). `engine.LoadConfig` merges
 the three and validates them as one configuration; a reload follows any
 change to the files or the definitions.
 
@@ -95,6 +95,7 @@ so `ORBIT_DATA_DIR` must be a persistent volume for resume to survive a restart.
   carries that turn's own `structured_output` (verified on 2.1.316). Any
   failure, a crash, a timeout or a mismatch closes the process; at most
   `runner.MaxLive` (4) are open, the least recently used idle one closed first.
+- **Stall watchdog.** A chat or live turn is watched (`runner.Stall`): every line the CLI writes, `keep_alive` included (counted by `claudeproto.Conn` before it drops them), is a sign of life. With none for `session.stall` (default 10 minutes) and no tool call running in the attempt's journal (a tool may be silent for as long as it runs), orbit interrupts the turn, kills the process when the turn has not ended `claudeproto.CloseGrace` after the interrupt was sent, writes `orbit.stalled` (the journal ends that turn `interrupted` with `reason: stalled`) and hands the run back, so the next attempt continues the session, told why. On the last of `store.MaxAttempts` attempts the run fails instead. A one-shot process (no live process, not a chat) is bounded by the run's timeout alone.
 - **Recorded per run:** `session_mode` (fresh, resumed, live),
   `session_parent`, `session_depth`, `session_id`, and `session_cost_usd`. The
   CLI reports a cumulative cost per session (across turns, resumes and forks),
@@ -288,7 +289,7 @@ An action type is code (`internal/actions`): a name, a parameter schema shown
 to the agent, a validator, and an executor. An agent's spec maps types to
 `auto`, `approve` or `deny`; unnamed types are denied and not offered.
 Today: `notify` (an extra message to one of the agent's channels),
-`continue` (wake this agent again later, above), `schedule:add`, `schedule:pause`, `schedule:resume`, `schedule:remove` and `run:now` (an agent's triggers changed from the person's words, parsed by code, each a new version; configuration.md, Changing schedules by talking), `agent:save` (the conversation as a new agent: the model writes its words, code its reach from what the conversation did, held for a person as an `agent:define`), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; a change that widens it waits for a person; docs/api.md, Defining agents), `skill:write` (write or retire a skill, Skills above), `github:clone` and `github:pr` (a chat agent's repository work: orbit clones into its workspace and commits and pushes its working tree to `orbit/chat/<branch>`, `build.Git`), `webhook:<endpoint>` (a
+`continue` (wake this agent again later, above), `schedule:add`, `schedule:pause`, `schedule:resume`, `schedule:remove` and `run:now` (an agent's triggers changed from the person's words, parsed by code, each a new version; configuration.md, Changing schedules by talking), `agent:save` (the conversation as a new agent: the model writes its words, code its reach from what the conversation did, held for a person as an `agent:define`), `agent:define` (create or change an agent defined in the database, itself included, as a new revertible version; a change that widens it waits for a person; docs/api.md, Defining agents), `template:create` (an agent from a template, rendered by code and recorded as an `agent:define` that waits for a person or a question with a form for values the person must supply), `skill:write` (write or retire a skill, Skills above), `github:clone` and `github:pr` (a chat agent's repository work: orbit clones into its workspace and commits and pushes its working tree to `orbit/chat/<branch>`, `build.Git`), `webhook:<endpoint>` (a
 JSON body to an endpoint whose URL, method and credentials are configuration, never
 chosen by the model; an endpoint's `path` may have `{name}` placeholders the action fills from params checked against the endpoint's declared types, and a `body_schema` the body must match, so a write like Sure's `PUT /transactions/{id}` is expressible without the model choosing a route; configuration.md, Endpoints), `connector:<connector>/<tool>` (a connector call that waits for approval, Connectors, above; recorded by orbit during the run, never proposed in an output), `github:merge` (squash one of orbit's own
 `orbit/*` PRs, only if its head is still the approved commit and every
@@ -413,7 +414,7 @@ for twice. The rollout contract is in docs/agents/deployment.md.
   scheduler keeps leading through a drain (it only enqueues, and the ready
   instance claims). A second signal hands back at once.
 - **Hand-back without paying twice.** A run stopped mid-flight (the cap, a
-  second signal, a lost claim, a crash the reaper finds) is continued, not
+  second signal, a lost claim, a crash the reaper finds, a stalled turn) is continued, not
   restarted: the next attempt resumes the interrupted attempt's Claude Code
   session with `--resume <id> --fork-session` (never writing into it), on
   the inputs that attempt read (restored from its artifacts, not refetched),
