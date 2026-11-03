@@ -378,6 +378,42 @@ func TestAnApproveToolWaitsForItsPersonInTheChat(t *testing.T) {
 	}
 }
 
+func TestAnAgentCanEnableAConfiguredConnectorByTalking(t *testing.T) {
+	sr := &connRunner{script: func(context.Context, runner.Request) error { return nil }, output: `{"summary":"s","report":"r","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[{"type":"agent:define","reason":"Enable listings for reports.","params":{"spec":{"name":"reports","charter":"Read listings.","connectors":["hw"]}}}]}`}
+	ch := connectorSetupExtra(t, sr, "", "  \"agent:define\": auto\n")
+	if _, err := ch.e.DefineAgent(ctx, engine.DefineRequest{Spec: json.RawMessage(`{"name":"reports","charter":"Read listings."}`), Author: "kanishk"}); err != nil {
+		t.Fatal(err)
+	}
+	ch.run(t, true)
+	acts, err := ch.s.ListActions(ctx, "finance", "pending", 10)
+	if err != nil || len(acts) != 1 {
+		t.Fatalf("pending actions = %+v, %v", acts, err)
+	}
+	act := acts[0]
+	if act.Type != actions.DefineType || act.Rule != string(spec.RuleApprove) || act.Status != "pending" {
+		t.Fatalf("connector enable was not held for approval: %+v", act)
+	}
+	preview, err := ch.e.PreviewAction(ctx, &act)
+	if err != nil || !strings.Contains(string(preview), "connector hw") {
+		t.Fatalf("preview = %s, %v", preview, err)
+	}
+	if err := ch.e.ExecuteActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := ch.e.Current().Config.Agents["reports"].Connectors; len(got) != 0 {
+		t.Fatalf("connector enabled before approval: %v", got)
+	}
+	if err := ch.s.DecideAction(ctx, act.ID, true, "kanishk"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.e.ExecuteActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := ch.e.Current().Config.Agents["reports"].Connectors; len(got) != 1 || got[0] != "hw" {
+		t.Fatalf("approved connector set = %v", got)
+	}
+}
+
 func TestAnApproveToolInAnUnattendedRunBecomesAPendingAction(t *testing.T) {
 	sr := &connRunner{output: connQuietOutput, script: func(ctx context.Context, req runner.Request) error {
 		p := req.Connectors.Permit(ctx, "hw", "create_view", "toolu_1", json.RawMessage(`{"name":"later"}`))
