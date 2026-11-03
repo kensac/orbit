@@ -60,10 +60,10 @@ type capabilities struct {
 	Presets   []string `json:"presets"`
 }
 
-// snapshotCapabilities are the snapshot backend's: reads and writes, no
-// terminals or git (orbit never runs git over a snapshot), and no change
-// stream until it is built.
-var snapshotCapabilities = capabilities{Read: true, Write: true, Presets: []string{}}
+// snapshotCapabilities are the snapshot backend's: reads, writes and the
+// change stream, no terminals or git (orbit never runs git over a
+// snapshot).
+var snapshotCapabilities = capabilities{Read: true, Write: true, Watch: true, Presets: []string{}}
 
 // boxCapabilities are a box's: terminals only, until `orbit box` serves its
 // files, git and watcher.
@@ -151,6 +151,8 @@ type workspaceState struct {
 	tick    int64
 	buckets map[string]*bucket
 	swept   time.Time
+	// indexing holds one lock per conversation for its change index pass.
+	indexing map[string]*sync.Mutex
 }
 
 type cachedSnapshot struct {
@@ -297,6 +299,9 @@ func (s *Server) workspaceRoutes(api func(string, http.HandlerFunc)) {
 	api("GET /api/v1/workspaces/{id}/files", s.readRoute(s.workspaceRead))
 	api("GET /api/v1/workspaces/{id}/download", s.readRoute(s.workspaceDownload))
 	api("GET /api/v1/workspaces/{id}/events", s.readRoute(s.workspaceEvents))
+	api("GET /api/v1/workspaces/{id}/history", s.readRoute(s.workspaceHistory))
+	api("GET /api/v1/workspaces/{id}/changes", s.readRoute(s.workspaceChangeStream))
+	api("GET /api/v1/runs/{id}/changes", s.runChangesRoute)
 }
 
 // readRoute resolves {id} to a workspace and spends a read.
@@ -425,16 +430,6 @@ func pathParam(w http.ResponseWriter, r *http.Request, name string) (string, boo
 	return p, true
 }
 
-// noRef answers a ref: a past version comes from history, which the
-// snapshot backend does not serve yet, so no ref names one.
-func noRef(w http.ResponseWriter, r *http.Request) bool {
-	if r.URL.Query().Get("ref") != "" {
-		wsErr(w, http.StatusNotFound, "not_found", "no such ref")
-		return true
-	}
-	return false
-}
-
 func entryOf(snap *workspace.Snapshot, e *workspace.Entry, withVersion bool) entryDoc {
 	d := entryDoc{Path: e.Path, Name: e.Name(), Kind: e.Kind, Bytes: e.Bytes,
 		Mode: fmt.Sprintf("%04o", e.Mode.Perm()), ModifiedAt: e.ModTime, Ignored: snap.Ignored(e)}
@@ -559,10 +554,10 @@ func fileOf(w http.ResponseWriter, snap *workspace.Snapshot, p string) (*workspa
 // workspaceRead is GET /workspaces/{id}/files: a file for the editor.
 func (s *Server) workspaceRead(w http.ResponseWriter, r *http.Request, t *store.WorkspaceTree) {
 	p, ok := pathParam(w, r, "path")
-	if !ok || noRef(w, r) {
+	if !ok {
 		return
 	}
-	snap, _, err := s.snapshot(r.Context(), t)
+	snap, err := s.snapshotFor(r, t)
 	if err != nil {
 		wsFail(w, err)
 		return
@@ -589,10 +584,10 @@ func (s *Server) workspaceRead(w http.ResponseWriter, r *http.Request, t *store.
 // download, a raster image inline when asked, a directory as a tar.gz.
 func (s *Server) workspaceDownload(w http.ResponseWriter, r *http.Request, t *store.WorkspaceTree) {
 	p, ok := pathParam(w, r, "path")
-	if !ok || noRef(w, r) {
+	if !ok {
 		return
 	}
-	snap, _, err := s.snapshot(r.Context(), t)
+	snap, err := s.snapshotFor(r, t)
 	if err != nil {
 		wsFail(w, err)
 		return
