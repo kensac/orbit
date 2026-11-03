@@ -69,7 +69,7 @@ more than its agent's rules allow.
 
 ## Memory entries a model writes
 
-A run writes memory entries directly, and a learning run writes them from a conversation, so a poisoned input or message can plant an entry that later runs of every agent reading its scope are shown. What bounds it: entries are shown as data (the system prompt says they never authorize an action the rules do not, and an instruction in one is not to be followed); a run may write only to the profile, itself and the topics it reads, at most 10 writes, and only change entries it was shown at the version it was shown; every version is kept with the run and conversation it came from (`GET /memory/entries?run_id=`), so a bad one is found and retired or restored. A learning run reads the person's messages and the agent's reports (which can quote inputs), not the inputs themselves.
+A run writes memory entries directly, and a learning run writes them from a conversation, so a poisoned input or message can plant an entry that later runs of every agent reading its scope are shown. What bounds it: entries are shown as data (the system prompt says they never authorize an action the rules do not, and an instruction in one is not to be followed); a run may write only to the profile, itself and the topics it reads, at most 10 writes, and only change entries it was shown at the version it was shown; every version is kept with the run and conversation it came from (`GET /memory/entries?run_id=`), so a bad one is found and retired or restored. A learning run reads the person's messages and the agent's reports (which can quote inputs), not the inputs themselves. A learning run over an imported session reads the person's own Claude Code session, tool calls included (one line each) but not their results, so whatever passed through that session (a web page it fetched and quoted, a file's text) can reach it the same way; its entries are bounded as above, and the skills it proposes are only ever `skill:write` actions a person approves, because a skill is instructions every agent given it follows.
 
 ## Agent hooks
 
@@ -123,7 +123,7 @@ A connector's tools act on a person's account at another service (internal/conne
 - A push leaves orbit for a third party (the browser vendor's push
   service, then the device's lock screen), so it carries only the
   attention row's title (an agent name and a fixed phrase) and a link into
-  the app. Never a report, a question, an error or an action's parameters:
+  the app. Never a report, a question, an error, an action's parameters or a permission request's tool and input:
   agents read finance data. The payload is encrypted to the device, so the
   push service sees only its size.
 - A subscription's endpoint is a URL a browser chose, and orbit posts to it
@@ -304,6 +304,7 @@ An agent's box (sandboxd's `box` profile, `internal/sandboxd/box.go`; docs/works
 
 - **What runs**: a TTY's argv is fixed by sandboxd from a preset (`shell`, `claude`) and a tmux session name orbit derives from the terminal's id; the request has no field for an argv, a user or an option (`TestTTYExecSpec`). The other execs are `tmux has-session`, `tmux kill-session` and `kill -HUP <pid>` of the tmux client sandboxd started, with exact targets.
 - **Credentials**: a `claude` terminal's client carries `CLAUDE_CODE_OAUTH_TOKEN` (the subscription, as a chat sandbox's CLI does); tmux copies it into that session (`update-environment`), and a tmux server first started by a `claude` terminal holds it for every session after. Any process in the box can read it. No GitHub token reaches the box yet.
+- The local `orbit sync claude --bundle` export contains only `CLAUDE.md` and skill files. It excludes account state, settings, plugins, and MCP configuration so login state and environment-backed credentials are not part of the bundle. The archive is only a local preparation step; orbit does not upload or install it into a box.
 - **The socket**: `GET /api/v1/terminals/{id}/ws` is on the public listener without a bearer token. Its credential is a ticket: 32 random bytes, stored only as a sha256, minted by a person's authentik token through `POST /terminals/{id}/attach`, valid 30 s, used once (a guarded UPDATE), and bound to that terminal and to the Origin it names, or, minted server side without one, to every Origin in `ORBIT_WORKSPACE_ORIGINS`. The socket refuses any Origin outside that list before reading the ticket, so a cross-site page cannot open one. The ticket travels in `Sec-WebSocket-Protocol`, so it stays out of access logs; the `?ticket=` fallback can reach them, which a single use and 30 s make worthless. Tickets are limited to 10 a minute per person. Terminal input is never logged or stored.
 
 ## Build runs

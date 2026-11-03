@@ -16,6 +16,16 @@ func (s *Server) sessionRoutes(api func(string, http.HandlerFunc)) {
 	api("GET /api/v1/sessions", s.listSessions)
 	api("GET /api/v1/sessions/{id}", s.getSession)
 	api("GET /api/v1/sessions/{id}/lines", s.sessionLines)
+	api("POST /api/v1/sessions/{id}/learn", s.learnSession)
+}
+
+// learnSession queues a learning run of an imported session now, whatever its age.
+func (s *Server) learnSession(w http.ResponseWriter, r *http.Request) {
+	id, err := s.Engine.LearnSessionNow(r.Context(), r.PathValue("id"))
+	if err == nil {
+		s.Wake()
+	}
+	respondStatus(w, http.StatusAccepted, map[string]any{"run_id": id}, err)
 }
 
 // sessionImportBodyLimit bounds one import: orbit import claude-sessions sends at most importChunkBytes of lines (8 MiB) per request, and one line may be claudeimport.MaxSessionLine past that.
