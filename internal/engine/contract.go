@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kensac/orbit/internal/actions"
+	"github.com/kensac/orbit/internal/forms"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/spec"
@@ -26,7 +27,7 @@ type Output struct {
 		Update  bool   `json:"update"`
 		Content string `json:"content"`
 	} `json:"memory"`
-	Questions []string `json:"questions"`
+	Questions []OutputQuestion `json:"questions"`
 	Actions   []struct {
 		Type   string          `json:"type"`
 		Params json.RawMessage `json:"params"`
@@ -38,17 +39,67 @@ type Output struct {
 	// planTicket is the ticket a non-empty Plan is for, set by the engine,
 	// never read from the output.
 	planTicket string
+	// Outcome and OutcomeReason are a task's run saying whether it did the
+	// work (delegation.go); only a run in a task's conversation is offered
+	// the fields.
+	Outcome       string `json:"outcome"`
+	OutcomeReason string `json:"outcome_reason"`
+	// instructedBy is the person the run answered, set by the engine: an
+	// approve-rule action they asked for is approved by them.
+	instructedBy string
 	// Entries are memory entry writes (entries.go).
 	Entries []OutputEntry `json:"entries"`
 	// known and topics are the entries the run was shown and the topics it reads, set by the engine to resolve Entries.
 	known  []store.Entry
 	topics []string
-	// Skills are skill writes (skills.go); skills is what the run was given.
-	Skills []OutputSkill `json:"skills"`
+	// skills is what the run was given, which its skill:write proposals resolve against (skills.go).
 	skills []store.Skill
 	// task is the task whose conversation the run is in, set by the
 	// engine.
 	task *store.Task
+	// connectorCalls are connector calls the run recorded for approval (connectors.go), each already a pending action; set by the engine, never read from the output.
+	connectorCalls []pendingCall
+}
+
+// OutputQuestion is one of a run's questions: a plain string, or {"question", "fields"} with a form the person fills in (forms.Field), which the thread exposes and a channel renders as a numbered list.
+type OutputQuestion struct {
+	Question string        `json:"question"`
+	Fields   []forms.Field `json:"fields"`
+	// fieldsErr is why fields could not be read as a form; the question stands without one.
+	fieldsErr error
+}
+
+// UnmarshalJSON reads either shape. Fields that are not a list of fields leave the question without a form rather than failing the output.
+func (q *OutputQuestion) UnmarshalJSON(b []byte) error {
+	*q = OutputQuestion{}
+	if s := strings.TrimSpace(string(b)); strings.HasPrefix(s, `"`) {
+		return json.Unmarshal(b, &q.Question)
+	}
+	var v struct {
+		Question string          `json:"question"`
+		Fields   json.RawMessage `json:"fields"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	q.Question = v.Question
+	if len(v.Fields) > 0 {
+		if err := json.Unmarshal(v.Fields, &q.Fields); err != nil {
+			q.Fields, q.fieldsErr = nil, err
+		}
+	}
+	return nil
+}
+
+// questionText is a question as a channel shows it: the question, then its form as a numbered list.
+func questionText(q store.Question) string {
+	s := "- " + q.Body
+	if len(q.Fields) > 0 {
+		for _, line := range strings.Split(strings.TrimRight(forms.Describe(q.Fields), "\n"), "\n") {
+			s += "\n  " + line
+		}
+	}
+	return s
 }
 
 // summaryMax keeps a summary to one notification title line.
@@ -56,6 +107,9 @@ const summaryMax = 200
 
 // maxQuestions bounds questions per run: a person answers a few, not a form.
 const maxQuestions = 5
+
+// questionMax bounds one question's text.
+const questionMax = 2000
 
 // maxActions bounds proposals per run so one run cannot flood the approval
 // queue; an agent with more to do proposes the rest next run.
@@ -102,6 +156,11 @@ func OutputSchema(types []actions.Type, memoryMax int, strictActions bool) json.
 	if len(types) == 0 {
 		maxA = 0
 	}
+	// As for actions, the engine's envelope takes any form: forms.Validate judges each, so one malformed form loses only itself.
+	fieldsSchema := forms.Schema()
+	if !strictActions {
+		fieldsSchema = map[string]any{"type": "array"}
+	}
 	s := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -128,7 +187,18 @@ func OutputSchema(types []actions.Type, memoryMax int, strictActions bool) json.
 			},
 			"questions": map[string]any{
 				"type": "array", "maxItems": maxQuestions,
-				"items": map[string]any{"type": "string", "minLength": 1, "maxLength": 2000},
+				"items": map[string]any{"anyOf": []any{
+					map[string]any{"type": "string", "minLength": 1, "maxLength": questionMax},
+					map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"question": map[string]any{"type": "string", "minLength": 1, "maxLength": questionMax},
+							"fields":   fieldsSchema,
+						},
+						"required":             []string{"question", "fields"},
+						"additionalProperties": false,
+					},
+				}},
 			},
 			"actions": map[string]any{"type": "array", "maxItems": maxA, "items": actionItems},
 		},
@@ -159,7 +229,7 @@ How your result is used:
 	}
 	b.WriteString(`
 - memory: your only persistence between runs. You receive the current memory below. To change it, set update to true and content to the COMPLETE new document (it replaces the old one). Keep it short: facts you will need next time, preferences the person stated, baselines to compare against. Do not copy the report into it.
-- questions: things only the person can answer. Their reply reaches your next run. Do not repeat a question that is still open (listed below). Ask only when the answer changes what you would do.
+- questions: things only the person can answer. Their reply reaches your next run. Do not repeat a question that is still open (listed below). Ask only when the answer changes what you would do. A question is a string, or {question, fields} when the answer is a few typed values: each field has a name, a label, a type (string, number, boolean, date, select, file), options (a select's choices, else empty), a default (null for none) and required; the person is shown a form and their reply lists each answer.
 - actions: things you want done outside this run.`)
 	if len(types) == 0 {
 		b.WriteString(" This agent has no actions enabled; return an empty list.\n")
@@ -227,6 +297,9 @@ type promptRun struct {
 	// Attached are the files the messages carry, by message id, as placed
 	// in the workdir.
 	Attached map[string][]placedUpload
+	// WorkspaceChanges is what the person changed in a chat's workspace
+	// since the agent's last turn (personChanges), "" when nothing.
+	WorkspaceChanges string
 }
 
 // userPrompt is the run's content: charter, why it woke, memory and inbox.
@@ -240,7 +313,7 @@ func userPrompt(a *spec.Agent, now time.Time, run promptRun, rc *store.RunContex
 		b.WriteString("Session: continued. Your earlier runs in this session are above; this message starts a new run. Inputs listed below are this run's, freshly fetched: read them rather than relying on earlier reads.\n")
 	}
 	if run.Trigger == store.TriggerDelegation {
-		b.WriteString("\nYou were woken because tasks you delegated settled: every one is over, or one asks you something. They are below.\n")
+		b.WriteString("\nYou were woken because tasks you delegated settled: every one is over, one failed, one asks you something, or none of the rest can move without you. They are below.\n")
 	}
 	if run.Trigger == "continue" {
 		fmt.Fprintf(&b, "\nYou asked to be woken again (continuation %d of at most %d). Your note to yourself:\n\n%s\n",

@@ -208,6 +208,15 @@ func (p *projector) orbit() {
 		p.status()
 		return
 	}
+	if p.ev.Kind == "orbit.steer" {
+		var st Steer
+		if json.Unmarshal(p.ev.Payload, &st) != nil || st.MessageID == "" {
+			p.status()
+			return
+		}
+		p.write("steer:"+st.MessageID, KindSteer, "", st)
+		return
+	}
 	if p.ev.Kind != "orbit.permission" {
 		p.status()
 		return
@@ -234,10 +243,6 @@ func (p *projector) orbit() {
 	p.write(id, KindApproval, "", ap)
 }
 
-// stalled ends the attempt's latest turn as interrupted, reason stalled: the
-// watchdog writes its event after the turn's last line, so the turn may
-// already have closed on the result the interrupt produced, which is not the
-// turn finishing its work.
 func (p *projector) stalled() {
 	id := p.a.OpenTurn
 	if id == "" {
@@ -252,7 +257,6 @@ func (p *projector) stalled() {
 	}
 	at := p.ev.At
 	t.State, t.Outcome, t.Reason, t.CompletedAt = TurnInterrupted, "", ReasonStalled, &at
-	// The revision belongs to its own turn, as closeTurn's does.
 	p.a.OpenTurn = id
 	p.write(id, KindTurn, "", t)
 	p.a.OpenTurn = ""
@@ -385,11 +389,16 @@ func (p *projector) toolUse(b block, parent string) {
 }
 
 // outputQuestions makes the final answer's questions (the output
-// contract's questions, plain strings) into question items.
+// contract's questions: a string, or an object whose question is the text
+// and whose form the thread shows) into question items.
 func (p *projector) outputQuestions(in map[string]any, parent string) {
 	qs, _ := in["questions"].([]any)
 	for _, q := range qs {
-		if s, ok := q.(string); ok && strings.TrimSpace(s) != "" {
+		s, ok := q.(string)
+		if m, isObj := q.(map[string]any); isObj {
+			s, ok = m["question"].(string)
+		}
+		if ok && strings.TrimSpace(s) != "" {
 			p.write(p.local("question"), KindQuestion, parent, Question{Text: s, Options: []QuestionOption{}})
 		}
 	}

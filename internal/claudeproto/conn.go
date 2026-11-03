@@ -35,6 +35,8 @@ type Conn struct {
 	inflight map[string]context.CancelFunc
 	ended    bool
 	endErr   error
+	// init is the newest system init frame the CLI wrote.
+	init *SystemInit
 
 	done chan struct{}
 }
@@ -111,6 +113,12 @@ func (c *Conn) dispatch(l Line) {
 			if cancel != nil {
 				cancel()
 			}
+		}
+	case "system":
+		if si, ok := l.InitFrame(); ok {
+			c.mu.Lock()
+			c.init = &si
+			c.mu.Unlock()
 		}
 	case "control_response":
 		var env responseEnvelope
@@ -214,17 +222,36 @@ func (c *Conn) WriteLine(b []byte) error {
 	return err
 }
 
-// Send writes one user turn. It fails with ErrEnded once the stream has ended: the CLI is gone, and a write to its stdin could block or vanish.
-func (c *Conn) Send(text string) error {
+// Send writes one user message with a fresh uuid. It fails with ErrEnded once the stream has ended: the CLI is gone, and a write to its stdin could block or vanish.
+func (c *Conn) Send(text string) error { return c.SendUUID(text, NewUUID()) }
+
+// SendUUID writes one user message named uuid, which the CLI's command_lifecycle frames for it carry. Written while a turn is in progress, the message is queued by the CLI (UserMessage says when it joins that turn); CancelQueued withdraws it while it waits.
+func (c *Conn) SendUUID(text, uuid string) error {
 	select {
 	case <-c.done:
 		return ErrEnded
 	default:
 	}
-	if err := c.WriteLine(UserMessage(text)); err != nil {
+	if err := c.WriteLine(UserMessage(text, uuid)); err != nil {
 		return fmt.Errorf("write the prompt to the CLI: %w", err)
 	}
 	return nil
+}
+
+// Init is the newest system init frame the CLI wrote (it writes one at the start of every turn), and false before the first.
+func (c *Conn) Init() (SystemInit, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.init == nil {
+		return SystemInit{}, false
+	}
+	return *c.init, true
+}
+
+// Capable reports whether the CLI's newest init frame advertised capability name; false before the first turn has started.
+func (c *Conn) Capable(name string) bool {
+	si, ok := c.Init()
+	return ok && si.Has(name)
 }
 
 // CloseInput closes the CLI's stdin: it finishes the turn it is in, if any, and exits.
@@ -340,10 +367,45 @@ type HookMatcher struct {
 	Timeout int `json:"timeout,omitempty"`
 }
 
-// Interrupt stops the turn in progress; the CLI ends it with a result.
-func (c *Conn) Interrupt(ctx context.Context) error {
-	_, err := c.Request(ctx, "interrupt", nil)
-	return err
+// InterruptReceipt is the CLI's answer to an interrupt (SDKControlInterruptResponse): the uuids of queued user messages that survive it, and, for an interrupt with cancel_queued, the ones it withdrew. Both may name uuids the host never sent (the CLI's own queued work); ignore those.
+type InterruptReceipt struct {
+	StillQueued []string `json:"still_queued"`
+	Cancelled   []string `json:"cancelled"`
+}
+
+// Interrupt stops the turn in progress; the CLI ends it with a result. With cancelQueued it also withdraws every user message still queued (each gets a terminal cancelled frame and is listed in the receipt's Cancelled); a CLI without CapInterruptCancelQueued ignores the flag. The receipt is nil when the CLI sent none (no CapInterruptReceipt).
+func (c *Conn) Interrupt(ctx context.Context, cancelQueued bool) (*InterruptReceipt, error) {
+	var fields map[string]any
+	if cancelQueued {
+		fields = map[string]any{"cancel_queued": true}
+	}
+	raw, err := c.Request(ctx, "interrupt", fields)
+	if err != nil {
+		return nil, err
+	}
+	var r struct {
+		StillQueued *[]string `json:"still_queued"`
+		Cancelled   []string  `json:"cancelled"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &r) != nil || r.StillQueued == nil {
+		return nil, nil
+	}
+	return &InterruptReceipt{StillQueued: *r.StillQueued, Cancelled: r.Cancelled}, nil
+}
+
+// CancelQueued withdraws a user message the CLI has queued and not yet started (cancel_async_message). True means it will never run, and the CLI has written its cancelled frame; false means it was no longer in the queue (started, folded into a turn, or finished), so it runs or ran.
+func (c *Conn) CancelQueued(ctx context.Context, uuid string) (bool, error) {
+	raw, err := c.Request(ctx, "cancel_async_message", map[string]any{"message_uuid": uuid})
+	if err != nil {
+		return false, err
+	}
+	var r struct {
+		Cancelled bool `json:"cancelled"`
+	}
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return false, fmt.Errorf("read cancel_async_message's answer: %w", err)
+	}
+	return r.Cancelled, nil
 }
 
 // SetPermissionMode changes the session's permission mode (default, acceptEdits, bypassPermissions, plan, dontAsk, auto).

@@ -26,6 +26,8 @@ import (
 
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/build"
+	"github.com/kensac/orbit/internal/forms"
+	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/mail"
 	"github.com/kensac/orbit/internal/metrics"
@@ -35,6 +37,7 @@ import (
 	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/sources"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/status"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -135,6 +138,7 @@ func (e *Engine) SetConfig(cfg *spec.Config) error {
 	e.mu.Lock()
 	e.cfg = &Snapshot{Config: cfg, Channels: chans}
 	e.mu.Unlock()
+	metrics.SetExpiries(cfg.Deployment.Expiries())
 	return nil
 }
 
@@ -168,6 +172,9 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		return e.executeLearn(ctx, actx, snap, a, c, start, log)
 	}
 
+	if sk := missed(a, c, time.Now()); sk != nil {
+		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
+	}
 	st := &attemptState{cancel: make(chan struct{})}
 	go e.watchCancel(actx, c, st, a.Chat, lose)
 	out, res, err := e.attempt(actx, snap, a, c, log, st)
@@ -177,19 +184,21 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		log.Warn("attempt stopped: it lost its claim on the run", "attempt", c.Attempt)
 		return nil
 	}
-	if ctx.Err() != nil || (errors.Is(err, runner.ErrStalled) && st.stalledBack(c.Attempt)) {
-		// orbit is stopping, or the turn stalled, not the run failing:
-		// give it back to the queue with what it spent, and the next
-		// attempt, here or on another instance, continues its session
-		// (planRecovery). A run stalled on its last attempt fails below.
+	if ctx.Err() != nil {
+		// orbit is stopping, not the run failing: give it back to the
+		// queue with what it spent, and the next attempt, here or on
+		// another instance, continues its session (planRecovery).
 		cost, total := st.spent()
-		log.Info("handed back", "attempt", c.Attempt, "session", st.sessionID, "stalled", st.stalled)
+		log.Info("handed back", "attempt", c.Attempt, "session", st.sessionID)
 		// The next attempt may be claimed on another host.
 		e.saveSession(ctx, c, st.home, st.workdir, st.sessionID)
 		return e.Store.HandBack(context.WithoutCancel(ctx), c.ID, c.Attempt, cost, total)
 	}
-	if errors.Is(err, runner.ErrStalled) {
-		err = fmt.Errorf("%w (attempt %d of %d)", err, c.Attempt, store.MaxAttempts)
+	if st.stalledBack(c.Attempt) {
+		cost, total := st.spent()
+		e.saveSession(ctx, c, st.home, st.workdir, st.sessionID)
+		log.Info("stalled; handed back", "attempt", c.Attempt, "session", st.sessionID)
+		return e.Store.HandBack(context.WithoutCancel(ctx), c.ID, c.Attempt, cost, total)
 	}
 	var sk *gateSkip
 	if errors.As(err, &sk) {
@@ -199,14 +208,29 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		return e.cancelled(ctx, snap, a, c, start, cr.out, res)
 	}
 	if err != nil {
+		if h := e.holdFor(context.WithoutCancel(ctx), a, c, err); h != nil {
+			return e.failHeld(ctx, snap, a, c, start, err, res, h)
+		}
 		return e.fail(ctx, snap, a, c, start, err, res)
+	}
+	if st.remembered != "" && out != nil {
+		out.Report = strings.TrimRight(out.Report, "\n") + "\n\n" + st.remembered
 	}
 	if st.keeps && res != nil {
 		// Stored before the run is recorded as succeeded, so the
 		// conversation's next run, claimed on any host, finds it.
 		e.saveSession(ctx, c, st.home, st.workdir, res.SessionID)
 	}
-	return e.succeed(ctx, snap, a, c, start, out, res)
+	if a.Chat {
+		// A chat with its person is instructions; a report agent's
+		// proposals still wait on their rules.
+		out.instructedBy = st.instructor
+	}
+	if err := e.succeed(ctx, snap, a, c, start, out, res); err != nil {
+		return err
+	}
+	e.personResumed(context.WithoutCancel(ctx), a, c)
+	return nil
 }
 
 // cancelPoll is how often a running attempt checks whether its person asked
@@ -216,7 +240,8 @@ const cancelPoll = 2 * time.Second
 
 // watchCancel stops the attempt when its person asks: a chat turn is
 // interrupted through the CLI's control channel (it ends with what it has),
-// any other run's backend is cancelled.
+// any other run's backend is cancelled. While a chat turn runs, the same
+// poll hands it the conversation's steer messages (steer.go).
 func (e *Engine) watchCancel(ctx context.Context, c *store.ClaimedRun, st *attemptState, chat bool, lose context.CancelCauseFunc) {
 	t := time.NewTicker(cancelPoll)
 	defer t.Stop()
@@ -227,6 +252,9 @@ func (e *Engine) watchCancel(ctx context.Context, c *store.ClaimedRun, st *attem
 		case <-t.C:
 			asked, err := e.Store.CancelRequested(ctx, c.ID)
 			if err != nil || !asked {
+				if f := st.steer.Load(); f != nil && err == nil {
+					e.pollSteers(ctx, c, f)
+				}
 				continue
 			}
 			st.stop()
@@ -321,6 +349,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	keepScratch := func() bool { return ctx.Err() != nil || st.stalledBack(c.Attempt) }
 	withSession := a.Session != nil && a.Session.Resume && claudeCode
 	chat := a.Chat && claudeCode
+	// What the person changed in a chat's workspace since the last turn.
+	var wsNote string
+	var wsFresh bool
 	if withSession || chat {
 		base := filepath.Join(e.DataDir, "agents", a.Name)
 		workdir, home = filepath.Join(base, "work"), filepath.Join(base, "home")
@@ -328,6 +359,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			// A chat's workspace is its conversation's, kept between
 			// messages and stored after every run.
 			workdir, home = e.chatDirs(c.ConversationID)
+			var err error
+			if wsNote, wsFresh, err = e.personChanges(ctx, c.ConversationID); err != nil {
+				return nil, nil, err
+			}
 			if err := e.restoreWorkspace(ctx, c.ConversationID, workdir); err != nil {
 				return nil, nil, err
 			}
@@ -381,6 +416,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		rc.Memory = ""
 	}
 	st.task = task
+	st.instructor = runInstructor(c, rc)
 	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "memory.md", "text/markdown", []byte(rc.Memory)); err != nil {
 		return nil, nil, err
 	}
@@ -392,6 +428,24 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		b, _ := json.Marshal(rc.Messages)
 		if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "in", "messages.json", "application/json", b); err != nil {
 			return nil, nil, err
+		}
+	}
+	// A person's /remember is code's to do (remember.go): written now, confirmed in the reply. A run their message woke that has nothing else to answer ends here.
+	if task == nil && len(rc.Messages) > 0 {
+		rm, err := e.remember(ctx, a, c, rc.Messages)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(rm.lines) > 0 {
+			report := rememberReport(rm.lines)
+			if len(rm.rest) == 0 && Attended(c.Trigger) {
+				return &Output{Summary: chatSummary(report), Report: report}, nil, nil
+			}
+			st.remembered = report
+			rc.Messages = rm.rest
+			if len(rc.Messages) > 0 {
+				rc.Messages[0].Body = "(orbit has saved to memory what you asked with /remember; your reply is followed by:\n" + report + ")\n\n" + rc.Messages[0].Body
+			}
 		}
 	}
 
@@ -409,7 +463,20 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		emit("orbit.recovery", map[string]any{"recovers_attempt": recFrom(rec), "skipped_because": skipped})
 	}
 	fetcher := &sources.Fetcher{Client: e.Client, Env: e.Env,
-		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted()}
+		Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted(),
+		GitHub: func(ctx context.Context, repo string, perms github.Permissions) (*github.Token, error) {
+			return e.readToken(ctx, snap.Config.Deployment, repo, perms)
+		}}
+	if c.Trigger == store.TriggerWebhook {
+		d, err := e.Store.WebhookForRun(ctx, c.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if d != nil {
+			fetcher.Delivery = &sources.Fetched{MediaType: d.MediaType, Content: d.Body,
+				Meta: map[string]any{"delivery_id": d.DeliveryID, "event": d.Event, "trigger": d.TriggerName}}
+		}
+	}
 	vars := sources.Vars(now)
 	var inputs []runner.Input
 	if rec != nil {
@@ -429,6 +496,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			break
 		}
 		f, err := fetcher.Fetch(ctx, s, vars)
+		if errors.Is(err, sources.ErrAbsent) {
+			// Its transforms are skipped and a gate on it counts no records (transform.go, gate.go).
+			emit("orbit.source_absent", map[string]any{"source": s.Name, "reason": err.Error()})
+			continue
+		}
 		if err != nil {
 			emit("orbit.source_failed", map[string]any{"source": s.Name, "error": err.Error()})
 			return nil, nil, fmt.Errorf("source %s: %w", s.Name, err)
@@ -536,7 +608,6 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	schema := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, true)
 	envelope := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, false)
 	schema, envelope = withEntries(schema, true), withEntries(envelope, false)
-	schema, envelope = withSkills(schema, true), withSkills(envelope, false)
 	tk, err := e.Store.TicketForConversation(ctx, c.ConversationID)
 	if err != nil {
 		return nil, nil, err
@@ -544,6 +615,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	planning := takesPlan(tk)
 	if planning {
 		schema, envelope = withPlan(schema), withPlan(envelope)
+	}
+	if task != nil {
+		schema, envelope = withOutcome(schema), withOutcome(envelope)
 	}
 	if tk != nil {
 		if inputs, err = e.ticketInput(ctx, c, tk, workdir, inputsDir, inputs); err != nil {
@@ -561,19 +635,35 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	var known string
 	if rec == nil {
-		if known, inputs, err = e.knownInput(ctx, c, knownEntries, workdir, inputsDir, inputs); err != nil {
+		if known, inputs, err = e.knownInput(ctx, e.Searchable(a), c, knownEntries, workdir, inputsDir, inputs); err != nil {
 			return nil, nil, err
 		}
 	}
 	var hr *runner.Harness
 	if e.Harness != "" && r.Kind() == "claude-code" {
-		hr = &runner.Harness{Bin: e.Harness, Figures: figures && !chat, Search: e.searchSocket(a.Name), Repos: e.repoSocket(a), AgentHooks: agentHooks(a)}
+		hr = &runner.Harness{Bin: e.Harness, Figures: figures && !chat, Search: e.searchSocket(a.Name), Repos: e.repoSocket(a), Prometheus: e.promSocket(a), AgentHooks: agentHooks(a)}
 	} else if len(a.Hooks) > 0 {
 		emit("orbit.hooks_skipped", map[string]any{"reason": "the agent's hooks need claude-code with orbit's harness binary"})
 	}
 	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, hr != nil && !chat, inputs)
 	if err != nil {
 		return nil, nil, err
+	}
+	// A sandboxed chat's CLI runs no orbit hook (runner/chat.go).
+	pinned, err := pinnedTurn(knownEntries, hr != nil && (!chat || a.Sandbox == ""), harness.StateDir(home))
+	if err != nil {
+		return nil, nil, err
+	}
+	record := func(kind string, v any) error {
+		b, _ := json.Marshal(v)
+		return events.write(kind, b)
+	}
+	gw, conns, connSection := e.prepareConnectors(ctx, snap, a, c, workdir, inputsDir, emit, record)
+	defer gw.close()
+	var hooks *status.Listener
+	if hr != nil {
+		hooks, hr.Status = e.listenHooks(ctx, c, home, emit, log)
+		defer hooks.Close()
 	}
 	var stall *runner.Stall
 	if claudeCode {
@@ -583,9 +673,13 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	if chat {
 		out, res, err := e.chatTurn(ctx, snap, a, c, r, chatTurn{stall: stall, workdir: workdir, home: home, inputsDir: inputsDir, now: now,
-			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached},
-			rc:  rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, rec: rec,
-			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun})
+			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached,
+				WorkspaceChanges: wsNote}, fresh: wsFresh,
+			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, steer: &st.steer, rec: rec, instructor: st.instructor,
+			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny), plugin: skillsPlugin, repos: repoRun, connectors: conns, pinned: pinned, skills: skills, record: record})
+		if out != nil {
+			out.connectorCalls = gw.pendingCalls()
+		}
 		return out, res, st.sawStall(err)
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
@@ -599,7 +693,8 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		system += knownContract
 	}
 	system += entriesContract(topics)
-	system += skillsContract(skills, skillsPlugin != "")
+	system += skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny)
+	system += connSection
 	delegated, err := e.Store.ConversationTasks(ctx, c.ConversationID, c.ID)
 	if err != nil {
 		return nil, nil, err
@@ -613,6 +708,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if rec != nil {
 		prompt = recoveryPrompt(rec, rc, now.Location())
 	}
+	prompt = pinned + prompt
 	for name, b := range map[string]string{"system.md": system, "prompt.md": prompt, "schema.json": string(schema)} {
 		mt := "text/markdown"
 		if strings.HasSuffix(name, ".json") {
@@ -623,17 +719,24 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 	}
 
+	req := runner.Request{
+		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
+		Tools: a.Tools, WebAllow: webAllow(a), OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin, Connectors: conns, Stall: stall,
+	}
+	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
+		return nil, nil, err
+	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
 	defer cancel()
-	res, err := r.Run(runCtx, runner.Request{
-		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
-		Tools: a.Tools, OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin, Stall: stall,
-	}, func(ev runner.Event) { emit(ev.Kind, ev.Payload) })
+	res, err := r.Run(runCtx, req, func(ev runner.Event) { emit(ev.Kind, ev.Payload) })
+	// Every hook of the turn has run once the CLI returned; what they
+	// spooled is read now, before the outcome is recorded.
+	hooks.Close()
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
 	}
 	if err != nil {
-		return nil, res, st.sawStall(err)
+		return nil, res, st.sawStall(backendErr{err})
 	}
 	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "out", "output.json", "application/json", res.Output); err != nil {
 		return nil, res, err
@@ -647,6 +750,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	out.known, out.topics, out.skills = knownEntries, topics, skills
 	out.task = task
+	out.connectorCalls = gw.pendingCalls()
 	prose := fullReport(out, events.prose())
 	if figures {
 		// The hook already sent the output back for these, up to
@@ -741,7 +845,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	for _, t := range actions.Catalog(a, snap.Config.Deployment) {
 		types[t.Name] = t
 	}
-	o := store.Outcome{Questions: out.Questions}
+	o := store.Outcome{Questions: e.outcomeQuestions(c, out.Questions)}
 	if out.planTicket != "" && strings.TrimSpace(out.Plan) != "" {
 		o.Plan = &store.PlanProposal{TicketID: out.planTicket, Body: strings.TrimSpace(out.Plan)}
 	}
@@ -749,8 +853,20 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		m := out.Memory.Content
 		o.Memory = &m
 	}
+	skillWrites := 0
+	acts := make([]proposed, 0, len(out.Actions))
 	for _, act := range out.Actions {
-		pa := store.ProposedAction{Type: act.Type, Params: act.Params, Reason: act.Reason, Rule: string(ruleFor(a, act.Type, c.Trigger))}
+		acts = append(acts, proposed{act.Type, act.Params, act.Reason})
+	}
+	acts, asked := absorbSchedules(acts)
+	for _, act := range acts {
+		if _, ok := types[act.Type]; ok && act.Type == actions.SaveType {
+			// Drafted by code from the conversation, then held for a person as an agent:define.
+			o.Actions = append(o.Actions, e.saveProposal(ctx, a, c, act, asked[saveName(act.Params)]))
+			continue
+		}
+		pa := store.ProposedAction{Type: act.Type, Params: act.Params, Reason: act.Reason, Rule: string(ruleFor(a, act.Type, c.Trigger)),
+			InstructedBy: out.instructedBy}
 		if t, ok := types[act.Type]; !ok {
 			pa.Rule, pa.Error = string(spec.RuleDeny), "action type not enabled for this agent"
 		} else if err := t.Validate(act.Params); err != nil {
@@ -764,11 +880,32 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		if act.Type == actions.DelegateType && pa.Error == "" && out.task != nil && out.task.Depth >= store.MaxTaskDepth {
 			pa.Rule, pa.Error = string(spec.RuleDeny), fmt.Sprintf("delegation is nested at most %d deep, and this task is at depth %d", store.MaxTaskDepth, out.task.Depth)
 		}
+		if actions.IsScheduleType(act.Type) && act.Type != actions.RunNowType && pa.Error == "" {
+			// Parsed now, so a phrase code cannot read, or a trigger that is not there, is refused with the reason while the person is still there to rephrase.
+			if _, err := e.PreviewSchedule(ctx, a.Name, act.Type, act.Params); err != nil {
+				pa.Rule, pa.Error = string(spec.RuleDeny), err.Error()
+			}
+		}
+		if act.Type == actions.TaskRetryType && pa.Error == "" && e.retryNeedsPerson(ctx, act.Params) {
+			// The circuit breaker: past it, a retry waits for a person even
+			// in a run answering one, so an agent cannot loop a hopeless task.
+			pa.Rule = string(spec.RuleApprove)
+		}
 		if act.Type == actions.DefineType && pa.Error == "" && pa.Rule == string(spec.RuleAuto) {
 			// A change that widens an agent waits for a person, whatever the rule: a model steered by its input must not grant itself reach.
 			if w := e.defineWidening(ctx, act.Params); len(w) > 0 {
-				pa.Rule = string(spec.RuleApprove)
+				// Nor does its person's message in the chat approve it: the
+				// decision is theirs to make on the change itself.
+				pa.Rule, pa.InstructedBy = string(spec.RuleApprove), ""
 				e.Log.Info("agent:define widens an agent; held for approval", "run", c.ID, "widens", strings.Join(w, "; "))
+			}
+		}
+		if act.Type == actions.SkillWriteType && pa.Error == "" {
+			skillWrites++
+			if p, err := skillProposal(out.skills, act.Params, skillWrites); err != nil {
+				pa.Rule, pa.Error = string(spec.RuleDeny), err.Error()
+			} else {
+				pa.Params = p
 			}
 		}
 		if len(pa.Params) == 0 {
@@ -778,8 +915,6 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	writes, refused := resolveEntryWrites(a.Name, out.topics, out.known, out.Entries)
 	o.Entries = writes
-	skillWrites, skillsRefused := resolveSkillWrites(out.skills, out.Skills)
-	o.Skills = skillWrites
 	rr := store.RunResult{Attempt: c.Attempt, Status: "succeeded", Summary: out.Summary, Report: out.Report}
 	fillResult(&rr, res)
 	ids, err := e.Store.RecordOutcome(ctx, c.ID, a.Name, rr, o)
@@ -787,7 +922,6 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return err
 	}
 	e.recordEntryWrites(ctx, c, out.Entries, writes, refused)
-	e.recordSkillWrites(ctx, c, out.Skills, skillWrites, skillsRefused)
 	metrics.RunFinished(a.Name, "succeeded", runnerKind(snap, a), time.Since(start), rr.CostUSD)
 
 	// Delivery: the report, then each pending approval.
@@ -803,7 +937,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	reply := e.mailForRun(ctx, snap, c.ID)
 	if reply != nil && !routed {
 		e.deliver(ctx, snap, a, &c.ID, nil, purposeMailReply, mailReply(reply, notify.Message{
-			Title: a.Name + ": " + out.Summary, Body: withQuestions(out.Report, out.Questions), Priority: pr, Link: link,
+			Title: a.Name + ": " + out.Summary, Body: withQuestions(out.Report, o.Questions), Priority: pr, Link: link,
 		}))
 	}
 	if Attended(c.Trigger) {
@@ -812,7 +946,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return nil
 	}
 	send := reply == nil && (a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send))
-	if !routed && (send || (reply == nil && len(out.Questions) > 0)) {
+	if !routed && (send || (reply == nil && len(o.Questions) > 0)) {
 		title := out.Notify.Title
 		if title == "" {
 			title = out.Summary
@@ -823,7 +957,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			title, body = a.Name+" has a question", ""
 		}
 		m := notify.Message{
-			Title: a.Name + ": " + title, Body: withQuestions(body, out.Questions), Priority: pr,
+			Title: a.Name + ": " + title, Body: withQuestions(body, o.Questions), Priority: pr,
 			Tags: []string{"orbit", a.Name}, Link: link,
 		}
 		e.deliver(ctx, snap, a, &c.ID, nil, "report", m)
@@ -833,16 +967,52 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			continue
 		}
 		id := ids[i]
+		body := pa.Reason + "\n\n```json\n" + string(pa.Params) + "\n```"
+		if pa.Type == actions.SkillWriteType {
+			// The change and the skill's scripts come first, in words, so a person sees what a skill would make later runs do.
+			body = skillApprovalText(pa.Params) + "\n" + body
+		}
 		e.deliver(ctx, snap, a, &c.ID, &id, "approval", notify.Message{
 			Title:    fmt.Sprintf("%s wants to %s", a.Name, pa.Type),
-			Body:     pa.Reason + "\n\n```json\n" + string(pa.Params) + "\n```",
+			Body:     body,
 			Priority: notify.High,
 			Tags:     []string{"orbit", "approval"},
 			Link:     e.ApprovalLink(snap, id),
 			Buttons:  []notify.Button{{Label: "Review", URL: e.ApprovalLink(snap, id)}},
 		})
 	}
+	// Connector calls recorded for approval during the run (connectors.go).
+	for _, pc := range out.connectorCalls {
+		e.deliver(ctx, snap, a, &c.ID, &pc.id, "approval", notify.Message{
+			Title:    fmt.Sprintf("%s wants to %s", a.Name, pc.typ),
+			Body:     "```json\n" + string(pc.params) + "\n```",
+			Priority: notify.High,
+			Tags:     []string{"orbit", "approval"},
+			Link:     e.ApprovalLink(snap, pc.id),
+			Buttons:  []notify.Button{{Label: "Review", URL: e.ApprovalLink(snap, pc.id)}},
+		})
+	}
 	return nil
+}
+
+// outcomeQuestions are a run's questions as stored. A form that does not validate (forms.Validate) is dropped and logged, keeping the question: the person can still answer it in words.
+func (e *Engine) outcomeQuestions(c *store.ClaimedRun, qs []OutputQuestion) []store.Question {
+	var out []store.Question
+	for _, q := range qs {
+		if strings.TrimSpace(q.Question) == "" {
+			continue
+		}
+		fields, err := q.Fields, q.fieldsErr
+		if err == nil {
+			err = forms.Validate(fields)
+		}
+		if err != nil {
+			e.Log.Warn("question form refused", "run", c.ID, "err", err)
+			fields = nil
+		}
+		out = append(out, store.Question{Body: q.Question, Fields: fields})
+	}
+	return out
 }
 
 func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, start time.Time, runErr error, r *runner.Result) error {
@@ -937,12 +1107,12 @@ func mailChannel(cfg *spec.Config, a *spec.Agent) string {
 	return names[0]
 }
 
-// withQuestions appends a run's questions to a body.
-func withQuestions(body string, questions []string) string {
+// withQuestions appends a run's questions to a body, each form as a numbered list under its question (questionText).
+func withQuestions(body string, questions []store.Question) string {
 	if len(questions) > 0 {
 		body += "\n\n**Questions**\n"
 		for _, q := range questions {
-			body += "\n- " + q
+			body += "\n" + questionText(q)
 		}
 	}
 	return strings.TrimSpace(body)
@@ -964,13 +1134,13 @@ func shortError(err error) string {
 // A run that read a mail is the exception: its sender is answered by mail (mailForRun).
 func Attended(trigger string) bool { return trigger == "message" }
 
-// ruleFor is the rule a run's proposal of typ gets. Delegation's types
-// under an approve rule apply directly in a run answering the person's
-// own message: they are reading the conversation and asked for the work.
-// Unattended runs follow the agent's rules as written.
+// ruleFor is the rule a run's proposal of typ gets. Delegation's types and
+// the schedule actions under an approve rule apply directly in a run
+// answering the person's own message: they are reading the conversation
+// and asked for the work. Unattended runs follow the agent's rules as written.
 func ruleFor(a *spec.Agent, typ, trigger string) spec.Rule {
 	r := a.RuleFor(typ)
-	if r == spec.RuleApprove && actions.IsTaskType(typ) && Attended(trigger) {
+	if r == spec.RuleApprove && (actions.IsTaskType(typ) || actions.IsScheduleType(typ)) && Attended(trigger) {
 		return spec.RuleAuto
 	}
 	return r
@@ -988,7 +1158,7 @@ func fillResult(rr *store.RunResult, r *runner.Result) {
 		return
 	}
 	rr.Output, rr.Usage, rr.CostUSD, rr.SessionID = r.Output, r.Usage, r.CostUSD, r.SessionID
-	rr.SessionCostUSD = r.SessionCostUSD
+	rr.SessionCostUSD, rr.Tokens = r.SessionCostUSD, r.Tokens
 }
 
 // deliver sends to every channel of the agent and records each attempt. A
@@ -1115,21 +1285,47 @@ func (e *Engine) DeliverOutbox(ctx context.Context) error {
 // a person's approval.
 func (e *Engine) ExecuteActions(ctx context.Context) error {
 	snap := e.Current()
-	ex := &actions.Executor{Deployment: snap.Config.Deployment, Channels: snap.Channels, Client: e.Client, Env: e.Env,
-		Tasks: &taskOps{e: e, snap: snap},
-		Continue: func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (string, bool, error) {
-			return e.Store.EnqueueContinuation(ctx, store.Continuation{
-				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
-		},
-		Define: e.defineAction}
+	ex := e.executor(snap)
 	for {
 		act, err := e.Store.ClaimApprovedAction(ctx)
 		if err != nil || act == nil {
 			return err
 		}
+		call := actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)}
+		var after func()
+		if a, ok := snap.Config.Agents[act.Agent]; ok && a.Chat {
+			call.Workspace, after = e.storedWorkspace(ctx, act.RunID)
+		}
 		actx, cancel := context.WithTimeout(ctx, ActionTimeout)
-		result, xerr := ex.Execute(actx, actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)})
+		result, xerr := ex.Execute(actx, call)
 		cancel()
+		if after != nil {
+			after()
+		}
+		if err := e.finishAction(ctx, snap, act, result, xerr); err != nil {
+			return err
+		}
+	}
+}
+
+// executor executes actions with this instance's channels and credentials.
+func (e *Engine) executor(snap *Snapshot) *actions.Executor {
+	return &actions.Executor{Deployment: snap.Config.Deployment, Channels: snap.Channels, Client: e.Client, Env: e.Env,
+		Git:   build.Git{WorkRoot: filepath.Join(e.DataDir, "actions")},
+		Tasks: &taskOps{e: e, snap: snap},
+		Continue: func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (string, bool, error) {
+			return e.Store.EnqueueContinuation(ctx, store.Continuation{
+				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
+		},
+		Define: e.defineAction, Schedule: e.scheduleAction, SkillWrite: e.skillWriteAction,
+		Connector: func(ctx context.Context, c actions.Call) (json.RawMessage, error) {
+			return e.executeConnector(ctx, snap, c)
+		}}
+}
+
+// finishAction records an execution and tells the person of a failure.
+func (e *Engine) finishAction(ctx context.Context, snap *Snapshot, act *store.Action, result json.RawMessage, xerr error) error {
+	{
 		if err := e.Store.FinishAction(context.WithoutCancel(ctx), act.ID, result, xerr); err != nil {
 			return err
 		}
@@ -1144,6 +1340,7 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 			}
 		}
 	}
+	return nil
 }
 
 func recFrom(r *recovery) int {

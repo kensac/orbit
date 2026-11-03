@@ -51,7 +51,7 @@ func TestRealCLIPermissionProtocol(t *testing.T) {
 	if model == "" {
 		model = "claude-haiku-4-5"
 	}
-	args := cliArgs(bin, model, 12, systemPrompt(policy, "build"))
+	args := cliArgs(bin, model, "", 12, systemPrompt(policy, "build"))
 	proc := func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 		cmd.Dir, cmd.Stdin, cmd.Stdout, cmd.Stderr = dir, stdin, stdout, stderr

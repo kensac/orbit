@@ -110,7 +110,7 @@ func TestATurnSendsAUserMessageAndEndsAtItsResult(t *testing.T) {
 		done <- r
 	}()
 	msg := c.read()
-	if msg["type"] != "user" || msg["parent_tool_use_id"] != nil {
+	if msg["type"] != "user" || msg["parent_tool_use_id"] != nil || len(msg["uuid"].(string)) != 36 {
 		t.Fatalf("user message: %v", msg)
 	}
 	if m := msg["message"].(map[string]any); m["role"] != "user" || m["content"] != "hello" {
@@ -321,7 +321,10 @@ func TestRequestsTheHostSends(t *testing.T) {
 
 	short, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	go func() { got <- answer{nil, c.conn.Interrupt(short)} }()
+	go func() {
+		_, err := c.conn.Interrupt(short, false)
+		got <- answer{nil, err}
+	}()
 	m = c.read()
 	if m["request"].(map[string]any)["subtype"] != "interrupt" {
 		t.Fatalf("interrupt: %v", m)
@@ -345,6 +348,88 @@ func TestRequestsTheHostSends(t *testing.T) {
 	}
 	if _, err := c.conn.Request(ctx(t), "interrupt", nil); !errors.Is(err, ErrEnded) {
 		t.Fatalf("a request after the end: %v", err)
+	}
+}
+
+func TestQueuedMessages(t *testing.T) {
+	c := newCLI(t, Handler{})
+	if c.conn.Capable(CapInterruptCancelQueued) {
+		t.Fatal("capable before any init frame")
+	}
+	c.say(`{"type":"system","subtype":"init","session_id":"s1","capabilities":["msg_lifecycle_v1","interrupt_receipt_v1","interrupt_cancel_queued_v1"]}`)
+	c.say(`{"type":"command_lifecycle","command_uuid":"u2","state":"queued","uuid":"f1","session_id":"s1"}`)
+	var lcs []Lifecycle
+	for range 2 {
+		l, err := c.conn.Next(ctx(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lc, ok := l.Lifecycle(); ok {
+			lcs = append(lcs, lc)
+		}
+	}
+	if !c.conn.Capable(CapInterruptCancelQueued) || !c.conn.Capable(CapLifecycle) || c.conn.Capable("other") {
+		t.Fatal("capabilities come from the newest init frame")
+	}
+	if len(lcs) != 1 || lcs[0].CommandUUID != "u2" || lcs[0].State != LifecycleQueued || lcs[0].Terminal() {
+		t.Fatalf("lifecycle frames: %+v", lcs)
+	}
+	if _, ok := (Line{Type: "assistant", Raw: []byte(`{"type":"assistant"}`)}).Lifecycle(); ok {
+		t.Fatal("an assistant line is not a lifecycle frame")
+	}
+
+	sent := make(chan error, 1)
+	go func() { sent <- c.conn.SendUUID("steer", "u2") }()
+	if m := c.read(); m["uuid"] != "u2" || m["message"].(map[string]any)["content"] != "steer" {
+		t.Fatalf("a named message: %v", m)
+	}
+	if err := <-sent; err != nil {
+		t.Fatal(err)
+	}
+
+	type answer struct {
+		ok      bool
+		receipt *InterruptReceipt
+		err     error
+	}
+	got := make(chan answer, 1)
+	go func() {
+		ok, err := c.conn.CancelQueued(ctx(t), "u2")
+		got <- answer{ok: ok, err: err}
+	}()
+	m := c.read()
+	if req := m["request"].(map[string]any); req["subtype"] != "cancel_async_message" || req["message_uuid"] != "u2" {
+		t.Fatalf("cancel_async_message: %v", m)
+	}
+	c.say(`{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{"cancelled":true}}}`, m["request_id"])
+	if a := <-got; !a.ok || a.err != nil {
+		t.Fatalf("withdrawn: %+v", a)
+	}
+
+	go func() {
+		r, err := c.conn.Interrupt(ctx(t), true)
+		got <- answer{receipt: r, err: err}
+	}()
+	m = c.read()
+	if req := m["request"].(map[string]any); req["subtype"] != "interrupt" || req["cancel_queued"] != true {
+		t.Fatalf("interrupt with cancel_queued: %v", m)
+	}
+	c.say(`{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{"still_queued":[],"cancelled":["u3"]}}}`, m["request_id"])
+	if a := <-got; a.err != nil || a.receipt == nil || len(a.receipt.StillQueued) != 0 || len(a.receipt.Cancelled) != 1 || a.receipt.Cancelled[0] != "u3" {
+		t.Fatalf("receipt: %+v %v", a.receipt, a.err)
+	}
+
+	go func() {
+		r, err := c.conn.Interrupt(ctx(t), false)
+		got <- answer{receipt: r, err: err}
+	}()
+	m = c.read()
+	if req := m["request"].(map[string]any); req["subtype"] != "interrupt" || req["cancel_queued"] != nil {
+		t.Fatalf("a plain interrupt: %v", m)
+	}
+	c.say(`{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{}}}`, m["request_id"])
+	if a := <-got; a.err != nil || a.receipt != nil {
+		t.Fatalf("an older CLI sends no receipt: %+v %v", a.receipt, a.err)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kensac/orbit/internal/runner"
@@ -30,25 +31,26 @@ type attemptState struct {
 	keeps       bool
 	sessionID   string
 	baseCostUSD float64
+	// instructor is the person the run answers (runInstructor).
+	instructor string
 	// cancel is closed when a person asks the run to stop.
 	cancel     chan struct{}
 	cancelOnce sync.Once
 	// task is the task whose conversation the run is in, nil for none.
 	task *store.Task
-	// stalled is set when the backend ended the turn as stalled
-	// (runner.ErrStalled).
-	stalled bool
+	// steer is set while a chat turn runs: where the attempt's poll hands
+	// the conversation's steer messages (steer.go).
+	steer atomic.Pointer[steerFeed]
+	// remembered is what /remember saved for a run that also answers other messages: it follows the reply.
+	remembered string
+	stalled    bool
 }
 
-// sawStall records whether err is a stalled turn, and passes it on.
 func (st *attemptState) sawStall(err error) error {
 	st.stalled = errors.Is(err, runner.ErrStalled)
 	return err
 }
 
-// stalledBack is whether the attempt ends by handing its run back because
-// its turn stalled: on every attempt but the last (store.MaxAttempts), so a
-// run that stalls every time fails rather than looping.
 func (st *attemptState) stalledBack(attempt int) bool {
 	return st.stalled && attempt < store.MaxAttempts
 }
@@ -86,8 +88,7 @@ type recovery struct {
 	baseKnown bool
 	inputs    []store.StoredInput
 	seen      map[string]bool
-	// stalled is a previous attempt the stall watchdog ended.
-	stalled bool
+	stalled   bool
 }
 
 // planRecovery decides whether this attempt continues the previous
@@ -212,8 +213,9 @@ func recoveryPrompt(rec *recovery, rc *store.RunContext, loc *time.Location) str
 	} else {
 		b.WriteString("orbit was restarted while you were working on this run, so your previous turn was interrupted. ")
 	}
-	b.WriteString("Continue from exactly where you stopped: do not redo work already done above, your inputs are where they were, " +
-		"and finish by returning the structured output as before.\n")
+	b.WriteString(
+		"Continue from exactly where you stopped: do not redo work already done above, your inputs are where they were, " +
+			"and finish by returning the structured output as before.\n")
 	var fresh []store.Message
 	for _, m := range rc.Messages {
 		if !rec.seen[m.ID] {
