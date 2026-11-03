@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/api"
 	"github.com/kensac/orbit/internal/auth"
 	"github.com/kensac/orbit/internal/auth/authtest"
@@ -34,6 +35,15 @@ type env struct {
 	s             *store.Store
 	e             *engine.Engine
 	is            *authtest.Issuer
+}
+
+type catalogDefineRunner struct{ output string }
+
+func (*catalogDefineRunner) Kind() string  { return "claude-code" }
+func (*catalogDefineRunner) Model() string { return "fake" }
+func (r *catalogDefineRunner) Run(context.Context, runner.Request, func(runner.Event)) (*runner.Result, error) {
+	cost := 0.01
+	return &runner.Result{Output: json.RawMessage(r.output), CostUSD: &cost, SessionID: "catalog-define"}, nil
 }
 
 const (
@@ -166,6 +176,63 @@ func TestAddCatalogConnectorDiscoversOAuthAndStartsSignIn(t *testing.T) {
 	}
 	if code, b := call(t, "GET", url, person, ""); code != http.StatusOK || len(b["connectors"].([]any)) != 1 {
 		t.Fatalf("catalog = %d %v", code, b)
+	}
+
+	manager, err := v.e.DefineAgent(ctx, engine.DefineRequest{Author: "kanishk", Spec: json.RawMessage(`{"name":"manager","charter":"Manage reports.","actions":{"agent:define":"auto"}}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var defineType actions.Type
+	for _, typ := range actions.Catalog(manager.Agent, v.e.Current().Config.Deployment) {
+		if typ.Name == actions.DefineType {
+			defineType = typ
+			break
+		}
+	}
+	if defineType.Name == "" {
+		t.Fatal("agent:define was not offered")
+	}
+	specProps := defineType.ParamsSchema["properties"].(map[string]any)["spec"].(map[string]any)["properties"].(map[string]any)
+	connectorItems := specProps["connectors"].(map[string]any)["items"].(map[string]any)
+	if enum := connectorItems["enum"].([]string); len(enum) != 1 || enum[0] != "acme" {
+		t.Fatalf("agent:define connector choices = %v", enum)
+	}
+	v.e.NewRunner = func(string, spec.RunnerSpec, func(string) (string, bool)) (runner.Runner, error) {
+		return &catalogDefineRunner{output: `{"summary":"s","report":"r","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[{"type":"agent:define","reason":"Enable the Acme connector for reports.","params":{"spec":{"name":"reports","charter":"Read Acme data.","connectors":["acme"]}}}]}`}, nil
+	}
+	if _, err := v.s.EnqueueRun(ctx, store.NewRun{Agent: manager.Agent.Name, SpecSHA: manager.Agent.SHA, Trigger: "manual"}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := v.s.ClaimRun(ctx, "catalog-define-test")
+	if err != nil || claimed == nil {
+		t.Fatalf("claim manager run = %v, %v", claimed, err)
+	}
+	if err := v.e.Execute(ctx, claimed); err != nil {
+		t.Fatal(err)
+	}
+	acts, err := v.s.ListActions(ctx, "manager", "pending", 10)
+	if err != nil || len(acts) != 1 {
+		t.Fatalf("pending agent:define = %+v, %v", acts, err)
+	}
+	act := acts[0]
+	if act.Type != actions.DefineType || act.Rule != string(spec.RuleApprove) || act.Status != "pending" {
+		t.Fatalf("enabling a catalog connector was not held for approval: %+v", act)
+	}
+	preview, err := v.e.PreviewAction(ctx, &act)
+	if err != nil || !strings.Contains(string(preview), "connector acme") {
+		t.Fatalf("agent:define preview = %s, %v", preview, err)
+	}
+	if got := v.e.Current().Config.Agents["reports"]; got != nil {
+		t.Fatalf("reports was enabled before approval: %+v", got.Connectors)
+	}
+	if err := v.s.DecideAction(ctx, act.ID, true, "kanishk"); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.e.ExecuteActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.e.Current().Config.Agents["reports"]; got == nil || len(got.Connectors) != 1 || got.Connectors[0] != "acme" {
+		t.Fatalf("approved catalog connector not enabled: %+v", got)
 	}
 	if code, _ := call(t, "POST", url, person, `{"name":"unsafe","url":"http://127.0.0.1/mcp"}`); code != http.StatusBadRequest {
 		t.Fatalf("non-HTTPS connector URL = %d", code)
