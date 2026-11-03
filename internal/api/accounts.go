@@ -200,6 +200,8 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	s.accountConfigMu.Lock()
+	defer s.accountConfigMu.Unlock()
 	size := loginBody{Cols: body.Cols, Rows: body.Rows}
 	if !store.ValidAccountLabel(body.Label) {
 		writeErr(w, http.StatusBadRequest, "label: 1 to 100 bytes")
@@ -306,6 +308,8 @@ func (s *Server) loginAccount(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	s.accountConfigMu.Lock()
+	defer s.accountConfigMu.Unlock()
 	c, ok := s.boxClient(w)
 	if !ok {
 		return

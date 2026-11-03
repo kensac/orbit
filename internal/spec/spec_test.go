@@ -631,3 +631,20 @@ sources:
 		}
 	}
 }
+
+func TestBoxPluginDigestPinsValidate(t *testing.T) {
+	valid := base + "box: {plugin_digests: {review@market: " + strings.Repeat("a", 64) + "}}\n"
+	if _, err := Load(write(t, map[string]string{"orbit.yaml": valid, "agents/a.yaml": "name: a\ncharter: x\n"})); err != nil {
+		t.Fatalf("valid plugin pin: %v", err)
+	}
+	for _, raw := range []string{
+		base + "box: {plugin_digests: {../escape@market: " + strings.Repeat("a", 64) + "}}\n",
+		base + "box: {plugin_digests: {review..test@market: " + strings.Repeat("a", 64) + "}}\n",
+		base + "box: {plugin_digests: {review@market: " + strings.Repeat("A", 64) + "}}\n",
+		base + "box: {plugin_digests: {review@market: short}}\n",
+	} {
+		if _, err := Load(write(t, map[string]string{"orbit.yaml": raw, "agents/a.yaml": "name: a\ncharter: x\n"})); err == nil {
+			t.Errorf("invalid plugin pin accepted: %s", raw)
+		}
+	}
+}

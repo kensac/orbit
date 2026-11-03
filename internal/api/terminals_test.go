@@ -48,12 +48,14 @@ type fakeSandboxd struct {
 	// mounts are each box's account slots; recreates counts recreates;
 	// prepared lists prepared slots; logins are what an account's status
 	// read answers.
-	mounts    map[string][]string
-	recreates int
-	prepared  []string
-	logins    map[string]sandbox.AccountStatus
-	configs   map[string]sandbox.ClaudeConfigStatus
-	bundles   [][]byte
+	mounts        map[string][]string
+	recreates     int
+	prepared      []string
+	logins        map[string]sandbox.AccountStatus
+	configs       map[string]sandbox.ClaudeConfigStatus
+	bundles       [][]byte
+	pluginBundles [][]byte
+	plugins       []sandbox.ClaudePluginInstallResult
 }
 
 func (f *fakeSandboxd) handler(t *testing.T) http.Handler {
@@ -126,6 +128,15 @@ func (f *fakeSandboxd) handler(t *testing.T) http.Handler {
 			st = sandbox.ClaudeConfigStatus{Digest: sandbox.ClaudeConfigDigest(nil), Files: []sandbox.ClaudeConfigFile{}}
 		}
 		_ = json.NewEncoder(w).Encode(st)
+	})
+	mux.HandleFunc("PUT /v1/boxes/{name}/accounts/{slot}/claude-plugins/{plugin}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		b, _ := io.ReadAll(r.Body)
+		f.pluginBundles = append(f.pluginBundles, bytes.Clone(b))
+		result := sandbox.ClaudePluginInstallResult{Plugin: r.PathValue("plugin"), Version: "1.4.0", Digest: r.Header.Get("X-Orbit-Plugin-SHA256"), Files: 2}
+		f.plugins = append(f.plugins, result)
+		_ = json.NewEncoder(w).Encode(result)
 	})
 	mux.HandleFunc("PUT /v1/boxes/{name}/accounts/{slot}/claude-config", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()

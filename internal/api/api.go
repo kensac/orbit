@@ -82,10 +82,12 @@ type Server struct {
 	// new snapshots (changesPoll) when set; tests shorten it.
 	ChangesPoll time.Duration
 
-	termMu      sync.Mutex
-	termClients map[string]int
-	wsOnce      sync.Once
-	ws          *workspaceState
+	termMu sync.Mutex
+	// accountConfigMu serializes per-account plugin changes with account terminal creation.
+	accountConfigMu sync.Mutex
+	termClients     map[string]int
+	wsOnce          sync.Once
+	ws              *workspaceState
 }
 
 // Handler returns the public listener's routes, the ones traefik serves.
@@ -197,6 +199,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/workspaces/{id}/accounts/{aid}/login", s.loginAccount)
 	api("GET /api/v1/workspaces/{id}/accounts/{aid}/claude-config", s.getAccountClaudeConfig)
 	api("PUT /api/v1/workspaces/{id}/accounts/{aid}/claude-config", s.putAccountClaudeConfig)
+	api("PUT /api/v1/workspaces/{id}/accounts/{aid}/claude-plugins/{plugin}", s.putAccountClaudePlugin)
 	// The ticket in Sec-WebSocket-Protocol is the credential (terminals.go).
 	mux.HandleFunc("GET /api/v1/terminals/{tid}/ws", s.terminalSocket)
 	s.memoryRoutes(api)

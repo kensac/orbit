@@ -27,6 +27,7 @@ import (
 //
 //	orbit sync claude [--skills-dir ~/.claude/skills] [--memory-dir <dir> --scope profile,topic:NAME] [--only a,b] [--dry-run | --apply <digest>]
 //	orbit sync claude --workspace <id> --account <id> [--claude-dir <dir>] [--apply <digest>]
+//	orbit sync claude --workspace <id> --account <id> --plugin <id> [--claude-dir <dir>] [--apply <digest>]
 //
 // It always plans first and prints the plan with its digest; --apply <digest> writes only when the plan is still that one.
 func syncCmd(ctx context.Context, args []string, stdout io.Writer) error {
@@ -47,6 +48,7 @@ func syncCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	claudeDir := fs.String("claude-dir", filepath.Join(home, ".claude"), "the local Claude config directory used by --bundle")
 	workspaceID := fs.String("workspace", "", "box workspace id for account-scoped Claude config import")
 	accountID := fs.String("account", "", "Claude account id for --workspace import")
+	pluginID := fs.String("plugin", "", "one locally installed Claude plugin ID to import into the selected account")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -54,10 +56,19 @@ func syncCmd(ctx context.Context, args []string, stdout io.Writer) error {
 		if *workspaceID == "" || *accountID == "" {
 			return errors.New("--workspace and --account must be used together")
 		}
+		if *pluginID != "" {
+			if *bundle != "" || *memoryDir != "" || *only != "" || *skillsDir != filepath.Join(home, ".claude", "skills") {
+				return errors.New("plugin import cannot be combined with --bundle, --skills-dir, --memory-dir or --only")
+			}
+			return importClaudePluginToBox(ctx, &api, *workspaceID, *accountID, *claudeDir, *pluginID, *apply, stdout)
+		}
 		if *bundle != "" || *memoryDir != "" || *only != "" || *skillsDir != filepath.Join(home, ".claude", "skills") {
 			return errors.New("box import cannot be combined with --bundle, --skills-dir, --memory-dir or --only")
 		}
 		return importClaudeConfigToBox(ctx, &api, *workspaceID, *accountID, *claudeDir, *apply, stdout)
+	}
+	if *pluginID != "" {
+		return errors.New("--plugin requires --workspace and --account")
 	}
 	if *bundle != "" {
 		if *memoryDir != "" || *only != "" || *skillsDir != filepath.Join(home, ".claude", "skills") {
@@ -120,6 +131,52 @@ func syncCmd(ctx context.Context, args []string, stdout io.Writer) error {
 		return fmt.Errorf("%d of the plan's writes failed", failed)
 	}
 	return nil
+}
+
+func importClaudePluginToBox(ctx context.Context, api *apiFlags, workspaceID, accountID, claudeDir, pluginID, apply string, stdout io.Writer) error {
+	if !store.IsUUID(workspaceID) || !store.IsUUID(accountID) {
+		return errors.New("--workspace and --account must be UUIDs")
+	}
+	bundle, err := claudesync.NewPluginBundle(claudeDir, pluginID)
+	if err != nil {
+		return err
+	}
+	endpoint := "/api/v1/workspaces/" + url.PathEscape(workspaceID) + "/accounts/" + url.PathEscape(accountID) + "/claude-plugins/" + url.PathEscape(pluginID)
+	plan := claudePluginPlanDigest(api.url, workspaceID, accountID, pluginID, bundle.Digest)
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, '\t', 0)
+	for _, file := range bundle.Files {
+		_, _ = fmt.Fprintf(tw, "include\t%s\t%d bytes\tmode %o\tsha256 %s\n", file.Path, file.Bytes, file.Mode, file.SHA256)
+	}
+	_ = tw.Flush()
+	_, _ = fmt.Fprintf(stdout, "\nplugin %s v%s, account %s, %d files, %d archive bytes\npayload sha256 %s\nTRUST: plugin code runs with this account's privileges and can access its local data\nplan %s\n", pluginID, bundle.Version, accountID, len(bundle.Files), len(bundle.Archive), bundle.Digest, plan)
+	if apply == "" {
+		_, _ = fmt.Fprintf(stdout, "dry run: nothing was sent; run again with --apply %s\n", plan)
+		return nil
+	}
+	if apply != plan {
+		return fmt.Errorf("the plugin import plan changed: --apply %s does not match current plan %s", apply, plan)
+	}
+	archiveHash := sha256.Sum256(bundle.Archive)
+	var result map[string]any
+	if err := api.putClaudePlugin(ctx, endpoint, bundle.Digest, hex.EncodeToString(archiveHash[:]), bundle.Archive, &result); err != nil {
+		return err
+	}
+	plugin, ok := result["plugin"].(map[string]any)
+	if !ok {
+		return errors.New("box returned an invalid plugin install result")
+	}
+	files, filesOK := plugin["files"].(float64)
+	if !filesOK || plugin["plugin"] != pluginID || plugin["digest"] != bundle.Digest || plugin["version"] != bundle.Version || int(files) != len(bundle.Files) {
+		return errors.New("box returned an invalid plugin install result")
+	}
+	_, _ = fmt.Fprintf(stdout, "installed\t%s\t%s\n", pluginID, bundle.Digest)
+	return nil
+}
+
+func claudePluginPlanDigest(apiURL, workspaceID, accountID, pluginID, payloadDigest string) string {
+	material := strings.Join([]string{"orbit-claude-plugin-plan-v1", strings.TrimRight(apiURL, "/"), workspaceID, accountID, pluginID, payloadDigest}, "\x00")
+	h := sha256.Sum256([]byte(material))
+	return hex.EncodeToString(h[:])
 }
 
 func importClaudeConfigToBox(ctx context.Context, api *apiFlags, workspaceID, accountID, claudeDir, apply string, stdout io.Writer) error {
@@ -206,6 +263,35 @@ func (f *apiFlags) putClaudeConfig(ctx context.Context, path, expected, bundleDi
 	req.Header.Set("Content-Type", "application/x-tar")
 	req.Header.Set("If-Match", expected)
 	req.Header.Set("X-Orbit-Bundle-SHA256", bundleDigest)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("PUT %s: %s: %s", path, resp.Status, strings.TrimSpace(string(body)))
+	}
+	return json.Unmarshal(body, out)
+}
+
+func (f *apiFlags) putClaudePlugin(ctx context.Context, path, pluginDigest, archiveDigest string, archive []byte, out any) error {
+	if f.token == "" {
+		return errors.New("no token: pass --token or set ORBIT_API_TOKEN")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, strings.TrimRight(f.url, "/")+path, bytes.NewReader(archive))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+f.token)
+	req.Header.Set("Content-Type", "application/x-tar")
+	req.Header.Set("X-Orbit-Plugin-SHA256", pluginDigest)
+	req.Header.Set("X-Orbit-Bundle-SHA256", archiveDigest)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err

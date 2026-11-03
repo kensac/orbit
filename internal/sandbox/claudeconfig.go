@@ -38,6 +38,14 @@ type ClaudeConfigStatus struct {
 	Files  []ClaudeConfigFile `json:"files"`
 }
 
+// ClaudePluginInstallResult reports the one account-scoped plugin that was installed.
+type ClaudePluginInstallResult struct {
+	Plugin  string `json:"plugin"`
+	Version string `json:"version"`
+	Digest  string `json:"digest"`
+	Files   int    `json:"files"`
+}
+
 // ClaudeConfigDigest returns the digest of a file manifest in path order.
 func ClaudeConfigDigest(files []ClaudeConfigFile) string {
 	ordered := slices.Clone(files)

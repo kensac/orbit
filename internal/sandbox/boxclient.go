@@ -172,6 +172,47 @@ func (c *Client) ApplyClaudeConfig(ctx context.Context, name, slot, expectedDige
 	return st, nil
 }
 
+// InstallClaudePlugin installs one operator-pinned local plugin into one account.
+func (c *Client) InstallClaudePlugin(ctx context.Context, name, slot, pluginID, pluginDigest, archiveDigest string, archive []byte) (ClaudePluginInstallResult, error) {
+	var result ClaudePluginInstallResult
+	if !ValidSlot(slot) || !ValidClaudePluginID(pluginID) {
+		return result, errors.New("invalid account slot or Claude plugin ID")
+	}
+	if !validSHA256(pluginDigest) || !validSHA256(archiveDigest) {
+		return result, errors.New("Claude plugin digests must be lowercase sha256 values")
+	}
+	if len(archive) == 0 || len(archive) > MaxClaudeBundleBytes {
+		return result, fmt.Errorf("Claude plugin archive must be 1 to %d bytes", MaxClaudeBundleBytes)
+	}
+	p, err := boxPath(name, "accounts", slot, "claude-plugins", pluginID)
+	if err != nil {
+		return result, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://"+c.host+PathBoxes+p, bytes.NewReader(archive))
+	if err != nil {
+		return result, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/x-tar")
+	req.Header.Set("X-Orbit-Plugin-SHA256", pluginDigest)
+	req.Header.Set("X-Orbit-Bundle-SHA256", archiveDigest)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return result, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return result, ErrNoBox
+	}
+	if resp.StatusCode >= 300 {
+		return result, readError(resp)
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&result); err != nil {
+		return result, fmt.Errorf("sandboxd: Claude plugin response: %w", err)
+	}
+	return result, nil
+}
+
 func validSHA256(value string) bool {
 	if len(value) != 64 {
 		return false

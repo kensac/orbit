@@ -429,3 +429,8 @@ Every agent is learned from (docs/ARCHITECTURE.md, Memory entries): a conversati
 orbit polls its config directory and reloads on any content change. A change
 that fails to load is refused and the previous configuration stays in force:
 check `orbit_config_valid` and the log after a deploy.
+
+
+### Account plugin imports
+
+`box.plugin_digests` is an operator allowlist keyed by `name@marketplace`. Each value is the lowercase SHA-256 digest of the complete canonical local plugin bundle. Only an exact pinned bundle may be imported into a selected account. The plugin runs with that account's privileges and can access that account's local data, so review its code before pinning it. Import does not copy settings, credentials or login state.

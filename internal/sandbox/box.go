@@ -45,6 +45,25 @@ var slotRE = regexp.MustCompile(`^[0-9a-f]{12}$`)
 // twelve lowercase hex digits, which orbit derives from the account's id.
 func ValidSlot(s string) bool { return slotRE.MatchString(s) }
 
+// ValidClaudePluginID reports whether id names a local Claude plugin and its marketplace.
+func ValidClaudePluginID(id string) bool {
+	name, market, ok := strings.Cut(id, "@")
+	return ok && strings.Count(id, "@") == 1 && validClaudePluginSegment(name) && validClaudePluginSegment(market)
+}
+
+func validClaudePluginSegment(s string) bool {
+	if s == "" || len(s) > 64 || strings.Contains(s, "..") {
+		return false
+	}
+	for i, c := range s {
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || i > 0 && (c == '.' || c == '_' || c == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // AccountDir is an account's directory in the box.
 func AccountDir(slot string) string { return AccountsRoot + "/" + slot }
 
