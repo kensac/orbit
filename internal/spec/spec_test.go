@@ -2,6 +2,7 @@ package spec
 
 import (
 	"errors"
+	"github.com/kensac/orbit/internal/extensions"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,6 +22,52 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if a.RuleFor("webhook:home-assistant") != RuleApprove || a.RuleFor("webhook:other") != RuleDeny {
 		t.Fatal("rules: named types take their rule, unnamed ones are denied")
+	}
+}
+
+func TestPinnedExtensionSourceRequiresDeploymentPinAndEarlierInputs(t *testing.T) {
+	packageDir, err := filepath.Abs("../extensions/testdata/reducer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := extensions.ValidateDir(packageDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orbit := base + "sandbox: {sandboxd: 'sandboxd:8080'}\nextensions:\n  enabled: true\n  packages:\n    daily-total: {path: '" + packageDir + "', sha256: " + pkg.Digest + "}\n"
+	agent := `name: a
+charter: x
+sources:
+  - {name: input, kind: http, url: https://example.com/data}
+  - name: derived
+    kind: extension
+    extension:
+      package: daily-total
+      operation: sum
+      inputs: {transactions: input}
+`
+	cfg, err := Load(write(t, map[string]string{"orbit.yaml": orbit, "agents/a.yaml": agent}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ExtensionPackages["daily-total"].Digest != pkg.Digest {
+		t.Fatal("package digest was not loaded")
+	}
+	bad := strings.Replace(agent, "transactions: input", "transactions: later", 1)
+	if _, err := Load(write(t, map[string]string{"orbit.yaml": orbit, "agents/a.yaml": bad})); err == nil || !strings.Contains(err.Error(), "earlier source") {
+		t.Fatalf("later source binding error = %v", err)
+	}
+	for name, tc := range map[string]struct{ deployment, agent, want string }{
+		"runtime disabled":  {strings.Replace(orbit, "enabled: true", "enabled: false", 1), agent, "package pins require enabled"},
+		"digest mismatch":   {strings.Replace(orbit, pkg.Digest, strings.Repeat("0", 64), 1), agent, "digest does not match"},
+		"undeclared input":  {orbit, strings.Replace(agent, "transactions: input", "missing: input", 1), "must name an earlier source"},
+		"invalid parameter": {orbit, strings.Replace(agent, "operation: sum", "operation: sum\n      parameters: {unknown: value}", 1), "extension parameters"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(write(t, map[string]string{"orbit.yaml": tc.deployment, "agents/a.yaml": tc.agent})); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 

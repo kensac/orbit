@@ -130,10 +130,13 @@ func ValidID(s string) bool { return idRE.MatchString(s) }
 const (
 	ProfileBuild       = "build"
 	ProfileWorkstation = "workstation"
+	ProfileExtension   = "extension"
 )
 
 // ValidProfile reports whether p names a profile ("" is build).
-func ValidProfile(p string) bool { return p == "" || p == ProfileBuild || p == ProfileWorkstation }
+func ValidProfile(p string) bool {
+	return p == "" || p == ProfileBuild || p == ProfileWorkstation || p == ProfileExtension
+}
 
 // ValidRunID reports whether s is an acceptable run id label.
 func ValidRunID(s string) bool { return runIDRE.MatchString(s) }
