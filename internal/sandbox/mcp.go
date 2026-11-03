@@ -41,8 +41,8 @@ func ValidMCPName(n string) bool {
 }
 
 var managedNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
-var credentialArgRE = regexp.MustCompile(`(?i)(^|[-_])(token|secret|password|passwd|api[-_]?key|authorization|credential|bearer)(=|$)`)
-var credentialValueRE = regexp.MustCompile(`(?i)(?:bearer\s+\S+|(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-(?:ant-)?[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}))`)
+var credentialArgRE = regexp.MustCompile(`(?i)(^|[-_])(user|token|secret|password|passwd|api[-_]?key|authorization|credential|bearer)(=|$)`)
+var credentialValueRE = regexp.MustCompile(`(?i)(?:authorization\s*:\s*(?:basic|bearer)\s+\S+|bearer\s+\S+|(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-(?:ant-)?[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}))`)
 
 // ValidManagedName reports whether n can name a server orbit manages.
 func ValidManagedName(n string) bool { return managedNameRE.MatchString(n) }
@@ -102,7 +102,12 @@ func rejectMCPCredentials(v any) error {
 			}
 		}
 	case []any:
-		for _, value := range x {
+		for i, value := range x {
+			if _, ok := value.(string); ok && i > 0 {
+				if flag, ok := x[i-1].(string); ok && credentialValueFlagRE.MatchString(flag) {
+					return fmt.Errorf("credential-bearing argument is not allowed; use per-account OAuth login")
+				}
+			}
 			if err := rejectMCPCredentials(value); err != nil {
 				return err
 			}
@@ -111,9 +116,14 @@ func rejectMCPCredentials(v any) error {
 		if credentialArgRE.MatchString(x) || credentialValueRE.MatchString(x) {
 			return fmt.Errorf("argument resembles a credential; use per-account OAuth login")
 		}
+		if u, err := url.Parse(x); err == nil && u.User != nil {
+			return fmt.Errorf("URL userinfo is not allowed; use per-account OAuth login")
+		}
 	}
 	return nil
 }
+
+var credentialValueFlagRE = regexp.MustCompile(`(?i)^(?:-u|--user|--username|--password|--passwd|--token|--secret|--api[-_]?key|--authorization|--credential)$`)
 
 // MCP statuses, from the mark `claude mcp list` prints.
 const (

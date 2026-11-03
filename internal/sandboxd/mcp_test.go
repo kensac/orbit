@@ -167,13 +167,16 @@ func TestAccountMCPSync(t *testing.T) {
 		t.Fatalf("managed record %s", b)
 	}
 	for name, m := range map[string]map[string]json.RawMessage{
-		"bad name":   {"a b": orbit},
-		"no type":    {"x": json.RawMessage(`{"url":"https://x"}`)},
-		"env":        {"x": json.RawMessage(`{"type":"stdio","command":"docs-mcp","env":{"API_KEY":"secret"}}`)},
-		"headers":    {"x": json.RawMessage(`{"type":"http","url":"https://x","headers":{"Authorization":"Bearer secret"}}`)},
-		"secret arg": {"x": json.RawMessage(`{"type":"stdio","command":"docs-mcp","args":["--api-key", "literal-secret"]}`)},
-		"url query":  {"x": json.RawMessage(`{"type":"http","url":"https://x/mcp?access_token=secret"}`)},
-		"not object": {"x": json.RawMessage(`[1]`)},
+		"bad name":          {"a b": orbit},
+		"no type":           {"x": json.RawMessage(`{"url":"https://x"}`)},
+		"env":               {"x": json.RawMessage(`{"type":"stdio","command":"docs-mcp","env":{"API_KEY":"secret"}}`)},
+		"headers":           {"x": json.RawMessage(`{"type":"http","url":"https://x","headers":{"Authorization":"Bearer secret"}}`)},
+		"secret arg":        {"x": json.RawMessage(`{"type":"stdio","command":"docs-mcp","args":["--api-key", "literal-secret"]}`)},
+		"basic auth arg":    {"x": json.RawMessage(`{"type":"stdio","command":"curl","args":["-H", "Authorization: Basic dXNlcjpwYXNz"]}`)},
+		"user password arg": {"x": json.RawMessage(`{"type":"stdio","command":"curl","args":["--user", "alice:swordfish"]}`)},
+		"userinfo arg":      {"x": json.RawMessage(`{"type":"stdio","command":"curl","args":["https://user:password@example.test/mcp"]}`)},
+		"url query":         {"x": json.RawMessage(`{"type":"http","url":"https://x/mcp?access_token=secret"}`)},
+		"not object":        {"x": json.RawMessage(`[1]`)},
 	} {
 		if err := sandbox.ValidateMCPServers(m); err == nil {
 			t.Errorf("%s: accepted", name)
