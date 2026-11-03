@@ -101,6 +101,7 @@ The Claude side also plans: more sources (Gmail, Calendar, Drive, GitHub, Promet
 | Area | Branch / PR | Notes |
 |---|---|---|
 | Run event ordering | Codex, `codex/event-sequence`, #72 (merged) | Serializes sequence allocation, message capture and complete event/journal persistence across concurrent callbacks |
+| Permission prompt ordering | Codex, #157, #159, #163 | The chat runner observes CLI mode lines before handling a later control request; #163 is stacked on #159 |
 
 ## Open for Codex
 

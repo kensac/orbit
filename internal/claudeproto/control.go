@@ -87,6 +87,8 @@ type Handler struct {
 	Hook func(ctx context.Context, req HookCallback) (json.RawMessage, error)
 	// MCP returns the server's JSON-RPC reply.
 	MCP func(ctx context.Context, req MCPMessage) (json.RawMessage, error)
+	// Observe, when set, sees every line but keep_alive on the reading goroutine, in stream order, before a control request on it is handed to CanUseTool: what the CLI reported before a request (its permission mode) is known when the request is decided, which a reader of Next, behind the queue, cannot promise.
+	Observe func(Line)
 	// Name appears in the refusal of an unhandled subtype ("orbit does not handle hook_callback requests in a build"); "orbit" when empty.
 	Name string
 }

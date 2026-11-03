@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -265,7 +266,7 @@ func TestTheLevelIsPutBackWhenAPlanIsApproved(t *testing.T) {
 	}
 	got := evs.of("orbit.permissions")
 	if len(got) != 2 || got[1]["when"] != "live" || got[1]["applied"] != "ask" {
-		t.Fatalf("orbit.permissions = %v", got)
+		t.Fatalf("orbit.permissions = %v: the level changed during planning must apply after ExitPlanMode's result", got)
 	}
 }
 
@@ -441,6 +442,61 @@ func TestLevelChangeWaitsForExitPlanModeResult(t *testing.T) {
 	writeAnswer := strings.Index(log, `answer ask-1-1 {"behavior":"allow"`)
 	if plan < 0 || exitAnswer < plan || leftPlan < exitAnswer || modeDefault < leftPlan || writeAnswer < modeDefault {
 		t.Fatalf("level change crossed ExitPlanMode's permission response: %q", log)
+	}
+}
+
+type runnerDiscardWriteCloser struct{ io.Writer }
+
+func (runnerDiscardWriteCloser) Close() error { return nil }
+
+func TestChatObservesModeBeforeControlRequest(t *testing.T) {
+	const workers = 32
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	stream := strings.Join([]string{
+		`{"type":"system","subtype":"init","permissionMode":"default"}`,
+		`{"type":"system","subtype":"status","permissionMode":"plan"}`,
+		`{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","tool_use_id":"t1","input":{}}}`,
+	}, "\n") + "\n"
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			lv := &procLevel{mode: "default"}
+			lv.set(spec.LevelEdits, spec.LevelEdits, "acceptEdits")
+			prompted := make(chan error, 1)
+			chat := &Chat{Level: spec.LevelEdits, CurrentLevel: lv.safeLevel,
+				BeginPlanExit: lv.beginPlanExit, WaitPlanExit: lv.waitPlanExitDone,
+				Prompt: func(context.Context, claudeproto.PermissionRequest) claudeproto.Permission {
+					if got := lv.reportedMode(); got != "plan" {
+						prompted <- errors.New("permission prompt ran before stream mode observation: " + got)
+						return claudeproto.Permission{}
+					}
+					prompted <- nil
+					return claudeproto.Permission{Allow: true}
+				},
+				RecordPermission: func(claudeproto.PermissionRequest, claudeproto.Permission) error { return nil }}
+			tools := &chatTools{}
+			tools.set(chat, nil)
+			tools.setObserver(lv.observe)
+			conn := claudeproto.NewConn(strings.NewReader(stream), runnerDiscardWriteCloser{io.Discard}, tools.handler())
+			select {
+			case err := <-prompted:
+				if err != nil {
+					errs <- err
+				}
+			case <-time.After(5 * time.Second):
+				errs <- errors.New("permission prompt was not called")
+			}
+			<-conn.Done()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
