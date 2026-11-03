@@ -1,3 +1,4 @@
+-- +goose Up
 -- Imported transcript snapshots are a separate, read-only archive. They are
 -- never operational messages, runs, questions or actions.
 CREATE TABLE conversation_archives (
