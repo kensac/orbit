@@ -30,6 +30,7 @@ var referenceTables = map[string]any{
 	"`mail`":                            Mail{},
 	"`mail.imap`":                       IMAP{},
 	"Agent":                             Agent{},
+	"`budget`":                          AgentBudget{},
 	"`triggers[]`":                      Trigger{},
 	"`sources[]`":                       Source{},
 	"`sources[].paginate`":              Paginate{},

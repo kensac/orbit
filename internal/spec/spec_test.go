@@ -24,6 +24,30 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 }
 
+func TestAgentBudgetsValidate(t *testing.T) {
+	for _, tc := range []struct {
+		budget string
+		valid  bool
+	}{
+		{"{period: day, max_cost_usd: 3.50}", true},
+		{"{period: week, max_runs: 12}", true},
+		{"{period: month, max_cost_usd: 3.50, max_runs: 12}", true},
+		{"{period: quarter, max_runs: 12}", false},
+		{"{period: day}", false},
+		{"{period: day, max_cost_usd: -1}", false},
+		{"{period: day, max_runs: -1}", false},
+		{"{period: day, max_cost_usd: .inf}", false},
+	} {
+		_, err := Load(write(t, map[string]string{
+			"orbit.yaml":    base,
+			"agents/a.yaml": "name: a\ncharter: x\nbudget: " + tc.budget + "\n",
+		}))
+		if (err == nil) != tc.valid {
+			t.Errorf("budget %s: err = %v, valid = %v", tc.budget, err, tc.valid)
+		}
+	}
+}
+
 func write(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()

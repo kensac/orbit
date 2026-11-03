@@ -218,6 +218,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `timezone` | IANA zone | `orbit.yaml` timezone | Zone for triggers and source templates; parsed once at load (`Agent.Location`), and one the tz database does not have fails it. |
 | `runner` | runner name | `defaults.runner` | The backend. |
 | `timeout` | duration | `defaults.timeout` | How long one run may take. |
+| `budget` | map (below) | none | API-equivalent cost and runner-started run limits per local period; scheduled runs are skipped once a limit is reached. |
 | `triggers` | list | none | When the agent wakes on its own (below). |
 | `sources` | list | none | Data orbit fetches before a run (below). |
 | `transforms` | list | none | Code over a source before the model sees it (below). |
@@ -241,6 +242,22 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `connectors` | list of connector names | none | `orbit.yaml` connectors whose tools the agent's runs may call; claude-code only. Each tool's rule is `mcp:<connector>:<tool>` in `actions`. Adding one widens the agent. |
 | `repos` | list (below) | none | Repositories every run reads: the tree at a commit under `inputs/repos/<name>/`, plus orbit's history and pull request tools. Each must be in `github.read_repositories`; needs `github` in `needs` and a claude-code or codex runner. |
 | `priority` | `normal`, `low` | `normal` | `low` is work that can wait: with `defer_low_priority`, its scheduled runs are held while the subscription is nearly spent. |
+
+### `budget`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `period` | `day`, `week`, `month` | required | Local calendar period in the agent's timezone; weeks start Monday. |
+| `max_cost_usd` | number | none | API-equivalent cost limit for runner-started runs in the period. |
+| `max_runs` | integer | none | Runner-started run limit in the period. |
+
+At least one limit is required. Once either limit is reached, scheduled runs
+are skipped before sources or a model are called; manual runs and messages
+still run. The first blocked run per agent and period creates one dismissible
+attention alert and Web Push notification. `/usage` reports current use and
+alerts at 80% of either limit. A run already underway may finish past a cost
+limit; cost is the backend's reported API-equivalent estimate, and runs with
+no cost report are visible in `runs_with_cost` coverage.
 
 ### `triggers[]`
 
