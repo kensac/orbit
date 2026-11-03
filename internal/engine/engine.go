@@ -1331,6 +1331,9 @@ func (e *Engine) executor(snap *Snapshot) *actions.Executor {
 		Define: e.defineAction, Schedule: e.scheduleAction, SkillWrite: e.skillWriteAction,
 		Connector: func(ctx context.Context, c actions.Call) (json.RawMessage, error) {
 			return e.executeConnector(ctx, snap, c)
+		},
+		Google: func(ctx context.Context, c actions.Call, g actions.GoogleCall) (json.RawMessage, error) {
+			return e.executeGoogleAction(ctx, snap, c, g)
 		}}
 }
 

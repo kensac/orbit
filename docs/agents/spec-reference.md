@@ -18,6 +18,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `credentials` | map of variable to credential | none | The variables sources and endpoint headers may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
 | `connectors` | map of name to connector | none | MCP servers agents may be given; orbit calls them on the agents' behalf and holds their credentials (below). |
+| `google_actions` | map | absent | Fixed connector tools for typed Gmail draft and Calendar create actions (below). |
 | `expires` | map of variable to `YYYY-MM-DD` | none | When a credential orbit cannot inspect stops working (the Claude Code subscription token), exported as `orbit_credential_expiry_timestamp_seconds{credential}` at midnight UTC of the date so an alert fires before it lapses. Nothing else reads it. |
 | `webhook_secrets` | map of variable to webhook secret | none | The signing secrets inbound webhooks are verified with, each bound to the agents whose webhook triggers may name it (below). |
 | `usage_poll` | map: `every` (default 5m, at least 1m), `token_env` (default `CLAUDE_CODE_OAUTH_TOKEN`) | absent | Poll the subscription's usage windows (configuration.md, Subscription usage and low-priority agents). |
@@ -152,6 +153,28 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `scopes` | list of strings | the server's `scopes_supported` | What an `oauth` sign-in asks for. |
 | `client_id` | string | none | An `oauth` client registered by hand; without it orbit registers itself (dynamic client registration). |
 | `client_secret_env` | env var | none | That client's secret, for a confidential client; needs `client_id`. |
+
+### `google_actions`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `gmail_draft` | map | absent | Fixed connector and write tool used by `gmail:draft`. |
+| `calendar_create` | map | absent | Fixed connector, write tool and calendar used by `calendar:create`. |
+
+### `google_actions.gmail_draft`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `connector` | connector name | required | Connector must authenticate and be named by any agent enabling `gmail:draft`. |
+| `tool` | tool name | required | Must be listed in that connector's `write_tools`; receives Google `users.drafts.create` arguments. |
+
+### `google_actions.calendar_create`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `connector` | connector name | required | Connector must authenticate and be named by any agent enabling `calendar:create`. |
+| `tool` | tool name | required | Must be listed in that connector's `write_tools`; receives Google `events.insert` arguments. |
+| `calendar_id` | string | `primary` | Fixed destination calendar. The agent cannot choose it. |
 
 ### `webhook_secrets.<VAR>`
 
@@ -364,6 +387,8 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint, with `path` params filling its path's placeholders; never a URL, method or header of the model's. No redirect is followed. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
 | `github:comment` | Posts a comment on an issue or a pull request as the App: `{repo, number, body}`, body at most 20000 bytes, attribution lines scrubbed. | `github.comment_repositories` |
+| `gmail:draft` | Creates a plain text Gmail draft with recipients, subject and body; never sends it. | `google_actions.gmail_draft`, the connector in `connectors` |
+| `calendar:create` | Creates one timed event with summary, start and end, and optional description, location and attendees. | `google_actions.calendar_create`, the connector in `connectors` |
 | `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |
 | `mcp:<connector>:<tool>` | The rule for one connector tool, overriding its default: `approve` for a tool in the connector's `write_tools`, `auto` for any other. A `deny` tool is not offered. An `approve` call is recorded as the action `connector:<connector>/<tool>` (configuration.md, Connectors). | the connector in `connectors` |
 | `schedule:add`, `schedule:pause`, `schedule:resume`, `schedule:remove` | Changes one trigger (or, pausing and resuming, every trigger) of this agent or one in `delegates`, as a new revertible version; times are the person's words, parsed by code (configuration.md, Changing schedules by talking). `approve` applies directly in a run answering the person's message. | a database or built-in target |

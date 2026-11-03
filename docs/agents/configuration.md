@@ -119,7 +119,7 @@ it, a request ticket or a `github:merge` rule fails validation.
 
 `comment_repositories` (optional) lists where `github:comment` may post: `{"repo", "number", "body"}` on an issue or a pull request, as the App, with an `issues: write` token minted for the comment and revoked after it. An agent with a `github:comment` rule fails validation without it. A comment is public to everyone who can see the repository, so give the action `approve` unless the agent's inputs are its own. The App needs the Issues write permission.
 
-`gmail:draft` and `calendar:create` are not action types: orbit holds no Google credential, and the connectors work (agents calling MCP servers through orbit, which holds the credentials) is where they belong. Until it lands, a draft or an event is a `notify` or a `webhook:<endpoint>` to something that holds the credential.
+`google_actions:` in `orbit.yaml` binds typed Gmail and Calendar actions to fixed write tools on authenticated connectors. Orbit builds Google API arguments from the action's typed fields, calls the configured connector itself and keeps its credential out of the model process. Each binding's tool must be in that connector's `write_tools`; agents that enable the action must also name its connector. An action's rule defaults to `deny`, and set it to `approve` when a person must review each draft or event.
 
 ## Repositories
 
@@ -353,6 +353,22 @@ connectors:
 - **Results.** A result over 32 KiB is written into the attempt's inputs (`inputs/.../connectors/<connector>-<tool>-<n>.json`) and stored as an artifact; the model is given its path. Every call is an `orbit.connector` event with its bounded result.
 - **Hosts.** A worker that runs an agent with connectors needs their credentials (`ORBIT_CONNECTOR_KEY`, the header variables, a `client_secret_env`); give such an agent a capability only those hosts advertise (docs/agents/deployment.md, Capabilities). `orbit validate` lists the variables.
 - `transport: stdio` is refused: a local server would run in sandboxd, which is not built.
+
+### Typed Google writes
+
+`google_actions.gmail_draft` fixes the connector and tool for `gmail:draft`.
+That tool receives Google `users.drafts.create` arguments with `userId: "me"`
+and a base64url encoded RFC 2822 plain text message. The action accepts `to`,
+optional `cc` and `bcc`, `subject` and `body`; it cannot send the draft.
+
+`google_actions.calendar_create` fixes the connector, tool and `calendar_id`
+for `calendar:create` (default `primary`). The tool receives Google
+`events.insert` arguments with the configured calendar and a code-built event.
+Start and end must be RFC 3339 timestamps with an end after the start; an
+optional IANA `time_zone` and at most 50 attendees are supported. Neither
+action accepts a connector, tool, URL, account or calendar destination from
+the agent. The connector must authenticate and list the fixed tool in
+`write_tools`. OAuth scopes must allow the requested Gmail or Calendar write.
 
 ## Sessions and continuations
 
