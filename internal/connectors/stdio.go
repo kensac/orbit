@@ -317,7 +317,10 @@ func (c *stdioConnection) Close() error {
 		c.err = c.Connection.Close()
 		cleanupStdio(c.executor, c.id)
 		select {
-		case <-c.done:
+		case attachErr := <-c.done:
+			if attachErr != nil && !errors.Is(attachErr, context.Canceled) && c.err == nil {
+				c.err = attachErr
+			}
 		case <-time.After(5 * time.Second):
 		}
 	})
