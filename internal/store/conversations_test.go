@@ -103,7 +103,7 @@ func TestConversationsAreIndependentThreads(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Attempt: 1, Status: "succeeded", Report: "r", SessionID: session},
-			store.Outcome{Questions: []string{"which?"}}); err != nil {
+			store.Outcome{Questions: []store.Question{{Body: "which?"}}}); err != nil {
 			t.Fatal(err)
 		}
 		var bodies []string
