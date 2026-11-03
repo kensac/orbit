@@ -216,6 +216,11 @@ func (p *projector) orbit() {
 		p.approval()
 		return
 	}
+	if p.ev.Kind == "orbit.stalled" {
+		p.stalled()
+		p.status()
+		return
+	}
 	if p.ev.Kind == "orbit.steer" {
 		var st Steer
 		if json.Unmarshal(p.ev.Payload, &st) != nil || st.MessageID == "" {
@@ -290,6 +295,25 @@ func (p *projector) approval() {
 		ap.ExpiresAt = ev.ExpiresAt
 	}
 	p.write(id, KindApproval, "", ap)
+}
+
+func (p *projector) stalled() {
+	id := p.a.OpenTurn
+	if id == "" {
+		if p.a.Turns == 0 {
+			return
+		}
+		id = "turn:" + strconv.Itoa(p.ev.Attempt) + "." + strconv.Itoa(p.a.Turns)
+	}
+	var t Turn
+	if !p.latest(id, &t) {
+		t = Turn{StartedAt: p.ev.At}
+	}
+	at := p.ev.At
+	t.State, t.Outcome, t.Reason, t.CompletedAt = TurnInterrupted, "", ReasonStalled, &at
+	p.a.OpenTurn = id
+	p.write(id, KindTurn, "", t)
+	p.a.OpenTurn = ""
 }
 
 // ---------------------------------------------------------------- claude code
