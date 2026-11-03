@@ -88,3 +88,37 @@ func TestPushSubscriptionsAPI(t *testing.T) {
 		t.Fatalf("test with no devices = %d %v", code, body)
 	}
 }
+
+func TestPresenceHeartbeat(t *testing.T) {
+	v := newEnv(t, nil)
+	me := v.person("kanishk")
+	base := v.srv.URL + "/api/v1"
+	code, r := call(t, "POST", base+"/agents/a/conversations", me, `{}`)
+	if code != 201 {
+		t.Fatalf("conversation = %d %v", code, r)
+	}
+	conv := r["conversation_id"].(string)
+	if code, body := call(t, "POST", base+"/presence", me, `{"conversation_id":"`+conv+`"}`); code != 200 || body["ok"] != true {
+		t.Fatalf("presence = %d %v", code, body)
+	}
+	watching, err := v.s.Watching(ctx, push.Presence)
+	if err != nil || watching["kanishk"] != conv {
+		t.Fatalf("watching = %v %v", watching, err)
+	}
+	if code, body := call(t, "POST", base+"/presence", me, `{"conversation_id":null}`); code != 200 || body["ok"] != true {
+		t.Fatalf("presence null = %d %v", code, body)
+	}
+	if watching, _ := v.s.Watching(ctx, push.Presence); len(watching) != 0 {
+		t.Fatalf("after null, watching = %v", watching)
+	}
+	for body, want := range map[string]int{
+		`{"conversation_id":"nope"}`:                                 400,
+		`{"conversation_id":"00000000-0000-0000-0000-000000000001"}`: 404,
+		`{"conversation":"x"}`:                                       400,
+		``:                                                           400,
+	} {
+		if code, _ := call(t, "POST", base+"/presence", me, body); code != want {
+			t.Errorf("presence %q = %d, want %d", body, code, want)
+		}
+	}
+}
