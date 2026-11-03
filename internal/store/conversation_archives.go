@@ -155,7 +155,8 @@ func (s *Store) ImportConversationArchives(ctx context.Context, archives []NewCo
 			}
 			sum := sha256.Sum256(canonical)
 			contentHash := hex.EncodeToString(sum[:])
-			lockKey := a.TargetAgent + "\x00" + a.SourceAgent + "\x00" + a.SourceConversationID
+			lockKey := fmt.Sprintf("%d:%s%d:%s%d:%s", len(a.TargetAgent), a.TargetAgent,
+				len(a.SourceAgent), a.SourceAgent, len(a.SourceConversationID), a.SourceConversationID)
 			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
 				return err
 			}
