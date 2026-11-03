@@ -32,6 +32,17 @@ func NextFires(a *spec.Agent, now time.Time) []NextFire {
 			continue
 		}
 		next := sched.Next(now.In(loc))
+		if a.QuietHours != nil {
+			// Search at most one calendar year for a runnable fire. This keeps
+			// projections bounded for schedules that only fire during quiet hours.
+			limit := now.In(loc).AddDate(1, 0, 0)
+			for !next.IsZero() && !next.After(limit) && a.QuietHours.Contains(next, loc) {
+				next = sched.Next(next)
+			}
+			if !next.IsZero() && a.QuietHours.Contains(next, loc) {
+				next = time.Time{}
+			}
+		}
 		if next.IsZero() {
 			continue
 		}

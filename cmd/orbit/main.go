@@ -920,7 +920,11 @@ func definitionGeneration(ctx context.Context, s *store.Store) string {
 	if err != nil {
 		return "db?"
 	}
-	return "db" + strconv.FormatInt(n, 10)
+	catalog, err := s.ConnectorCatalogGeneration(ctx)
+	if err != nil {
+		return "db?"
+	}
+	return "db" + strconv.FormatInt(n, 10) + ":connectors" + strconv.FormatInt(catalog, 10)
 }
 
 // configHash fingerprints every file under dir. A deploy's git pull swaps

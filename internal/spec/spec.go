@@ -277,9 +277,11 @@ type Agent struct {
 	Timeout  Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 	// Budget limits API-equivalent cost and runner-started runs in a local
 	// calendar period. Only unattended scheduled runs are stopped by it.
-	Budget   *AgentBudget `yaml:"budget,omitempty" json:"budget,omitempty"`
-	Triggers []Trigger    `yaml:"triggers" json:"triggers"`
-	Sources  []Source     `yaml:"sources,omitempty" json:"sources,omitempty"`
+	Budget *AgentBudget `yaml:"budget,omitempty" json:"budget,omitempty"`
+	// QuietHours suppresses scheduled runs in this agent's local timezone.
+	QuietHours *QuietHours `yaml:"quiet_hours,omitempty" json:"quiet_hours,omitempty"`
+	Triggers   []Trigger   `yaml:"triggers" json:"triggers"`
+	Sources    []Source    `yaml:"sources,omitempty" json:"sources,omitempty"`
 	// Transforms run over sources before the model sees them; each output
 	// is an input of its own (internal/transforms).
 	Transforms []Transform `yaml:"transforms,omitempty" json:"transforms,omitempty"`
@@ -891,7 +893,7 @@ func ParseSchedule(expr string) (cron.Schedule, error) { return cronParse.Parse(
 // Load reads orbit.yaml and every agents/*.yaml under dir, then validates the
 // whole configuration. An invalid file fails the load: a deployment never
 // runs with part of its configuration silently skipped.
-func Load(dir string) (*Config, error) { return load(dir, nil, false) }
+func Load(dir string) (*Config, error) { return load(dir, nil, nil, false) }
 
 // Definition is an agent defined in the database (agent_definitions): its
 // newest version, which LoadAll merges with the files.
@@ -908,7 +910,13 @@ type Definition struct {
 // database agent named like a file agent is a configuration error; a
 // built-in agent yields to a file or database agent of its name, so a
 // deployment can replace it.
-func LoadAll(dir string, defs []Definition) (*Config, error) { return load(dir, defs, true) }
+func LoadAll(dir string, defs []Definition) (*Config, error) { return load(dir, defs, nil, true) }
+
+// LoadAllWithConnectors loads the configuration orbit runs, adding the
+// user's stored OAuth connectors before cross-references are validated.
+func LoadAllWithConnectors(dir string, defs []Definition, stored map[string]Connector) (*Config, error) {
+	return load(dir, defs, stored, true)
+}
 
 // DecodeAgent reads one agent's JSON as strictly as a file is read: an
 // unknown field is an error.
@@ -925,10 +933,23 @@ func DecodeAgent(b []byte) (*Agent, error) {
 	return a, nil
 }
 
-func load(dir string, defs []Definition, all bool) (*Config, error) {
+func load(dir string, defs []Definition, stored map[string]Connector, all bool) (*Config, error) {
 	cfg := &Config{Agents: map[string]*Agent{}}
 	if err := decodeFile(filepath.Join(dir, "orbit.yaml"), &cfg.Deployment); err != nil {
 		return nil, err
+	}
+	if len(stored) > 0 {
+		if cfg.Deployment.Connectors == nil {
+			cfg.Deployment.Connectors = map[string]Connector{}
+		}
+		for name, c := range stored {
+			if _, exists := cfg.Deployment.Connectors[name]; exists {
+				return nil, fmt.Errorf("connector %q is defined in orbit.yaml and the catalog", name)
+			}
+			c.CatalogManaged = true
+			c.DefaultToolRule = RuleApprove
+			cfg.Deployment.Connectors[name] = c
+		}
 	}
 	files, err := filepath.Glob(filepath.Join(dir, "agents", "*.yaml"))
 	if err != nil {
@@ -1222,6 +1243,11 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		if b.MaxCostUSD == 0 && b.MaxRuns == 0 {
 			at("budget needs max_cost_usd or max_runs")
+		}
+	}
+	if q := a.QuietHours; q != nil {
+		if err := q.Validate(); err != nil {
+			at("quiet_hours: %v", err)
 		}
 	}
 	if r, ok := c.Deployment.Runners[a.Runner]; !ok {

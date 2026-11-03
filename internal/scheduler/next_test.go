@@ -40,6 +40,33 @@ func TestNextFiresOfAnRRule(t *testing.T) {
 	}
 }
 
+func TestNextFiresSkipQuietHours(t *testing.T) {
+	a := &spec.Agent{Name: "a", QuietHours: &spec.QuietHours{Start: "22:00", End: "07:00"}, Triggers: []spec.Trigger{
+		{Schedule: "0 23 * * *"}, {Schedule: "0 9 * * *"},
+	}}
+	if err := a.SetTimezone("America/New_York"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC) // 07:00 local.
+	got := NextFires(a, now)
+	if len(got) != 1 || got[0].TriggerIndex != 1 || !got[0].At.Equal(time.Date(2026, 11, 2, 14, 0, 0, 0, time.UTC)) {
+		t.Fatalf("next fires = %+v", got)
+	}
+}
+
+func TestNextFiresHasNoProjectionWhenAllFiresAreQuiet(t *testing.T) {
+	a := &spec.Agent{Name: "a", QuietHours: &spec.QuietHours{Start: "22:00", End: "07:00"}, Triggers: []spec.Trigger{
+		{Schedule: "0 23 * * *"},
+	}}
+	if err := a.SetTimezone("UTC"); err != nil {
+		t.Fatal(err)
+	}
+	got := NextFires(a, time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC))
+	if len(got) != 0 {
+		t.Fatalf("next fires = %+v, want none", got)
+	}
+}
+
 func TestAPausedTriggerSkipsItsFires(t *testing.T) {
 	a := &spec.Agent{Name: "a", Triggers: []spec.Trigger{
 		{Schedule: "0 9 * * *", Paused: true},
