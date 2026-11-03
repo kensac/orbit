@@ -259,6 +259,7 @@ type chatProc interface {
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
+	LastLine() time.Time
 }
 
 // chatTools routes a process's control requests to the turn in progress: a
@@ -592,6 +593,10 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		go steer.feed(turnCtx, req.Chat.Steer)
 	}
 	changed := watchLevel(ctx, turnCtx, p, req.Chat, emit)
+	stopWatch := req.Stall.watch(turnCtx, p.proc, func(ctx context.Context) error {
+		_, err := p.proc.Interrupt(ctx, false)
+		return err
+	})
 	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) {
 		if steer != nil {
 			steer.observe(l)
@@ -599,6 +604,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		p.lv.observe(l)
 		emit(Event{Kind: l.Kind, Payload: l.Raw})
 	})
+	stopWatch()
 	endTurn()
 	<-changed
 	imu.Lock()
@@ -618,6 +624,11 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		if serr := sb.sync(context.WithoutCancel(ctx)); serr != nil && err == nil {
 			err = fmt.Errorf("read the workspace back from the sandbox: %w", serr)
 		}
+	}
+	if req.Stall.Fired() {
+		emit(req.Stall.event())
+		dropOrKill(sess, p)
+		return nil, stallError(req.Stall)
 	}
 	if err != nil {
 		dropOrKill(sess, p)

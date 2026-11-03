@@ -43,6 +43,10 @@ It is proposed as an `agent:define` with `rule: "approve"`, whatever the agent's
 
 A person approving any action can also make its type `auto` for that agent ("approve and always allow", docs/api.md, Actions): a new revertible version, like an API change.
 
+## Agents from templates
+
+A template is an agent spec with `{{ name }}` slots and typed parameters, kept in a versioned library (docs/api.md, Templates). `POST /templates/{name}/agents` renders one with a person's values, dry-runs it and defines the agent. An agent with `actions: {template:create: approve}` (the built-in `orbit` has it) proposes the same in a conversation: code renders it, asks the person with a form for any `user_prompt` parameter, and records the result as an `agent:define` a person approves whatever the rule (`auto` and `approve` both only offer the type). The agent it creates is a database agent, held to the same limits as any (above).
+
 ## Secrets
 
 Never in YAML. Channels name variables with `*_env`; source urls, headers, query
