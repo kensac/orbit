@@ -32,7 +32,7 @@ func TestAttentionOpensAndClosesWithItsThing(t *testing.T) {
 	manual(t, s, "a")
 	c, _ := s.ClaimRun(ctx, "w")
 	ids, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Attempt: 1, Status: "succeeded", Report: "spent $2,700"}, store.Outcome{
-		Questions: []string{"Is the Enterprise charge deductible?"},
+		Questions: []store.Question{{Body: "Is the Enterprise charge deductible?"}},
 		Actions: []store.ProposedAction{
 			{Type: "webhook:pay", Params: json.RawMessage(`{"amount":2700}`), Reason: "rent is due", Rule: "approve"},
 			{Type: "notify", Params: json.RawMessage(`{}`), Rule: "auto"},

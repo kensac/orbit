@@ -32,7 +32,7 @@ func searchedRun(t *testing.T, s *store.Store, agent string, events []string, su
 		mem = &memory
 	}
 	if _, err := s.RecordOutcome(ctx, id, agent, store.RunResult{Attempt: c.Attempt, Status: store.StatusSucceeded,
-		Summary: summary, Report: report}, store.Outcome{Memory: mem, Questions: []string{"Should the electricity budget move?"}}); err != nil {
+		Summary: summary, Report: report}, store.Outcome{Memory: mem, Questions: []store.Question{{Body: "Should the electricity budget move?"}}}); err != nil {
 		t.Fatal(err)
 	}
 	return id
