@@ -118,6 +118,7 @@ Pick one, put your name and branch in the Owner column in your first PR, keep ea
 | 10 | Docs and onboarding: a user guide (what orbit can do, creating an agent in a minute, the chat, email, MCP), kept short | onboarding-guide, #52 | Built: [docs/guide/README.md](guide/README.md); API examples, approval results, email and MCP prerequisites; deployment availability stated explicitly |
 | 12 | Process lifetime: longer live window, close idle live processes under memory pressure, retain processes across unchanged-argument config reloads, and keep box-mode process lifetime tied to the box | `codex/process-lifetime` | Coordinating the box stop semantics with the W11 owner; persistent box cleanup must not destroy workspace state. |
 | 11 | Mergify merge queue: manual enqueue for ready PRs targeting `main`, squash merge after `check` and `scan` pass | `codex/mergify-merge-queue` | Queue configured with serial processing, one PR per check, and up to three speculative checks. GitHub ruleset configuration remains external. |
+| 12 | Agent-made HTML pages rendered inside portfolio chat only | `codex/page-publish` | Orbit adds a rule-gated `page:publish` action and conversation-scoped API; portfolio renderer is coordinated separately and remains open until its PR merges. |
 
 ## Standards (summary; AGENTS.md and docs/agents/ are authoritative)
 
