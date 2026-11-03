@@ -76,6 +76,9 @@ type Server struct {
 	// WorkspaceReadRate and WorkspaceWriteRate override the workspace's
 	// per-person rates (readRate, writeRate) when set; tests raise them.
 	WorkspaceReadRate, WorkspaceWriteRate float64
+	// ChangesPoll overrides how often a workspace change stream looks for
+	// new snapshots (changesPoll) when set; tests shorten it.
+	ChangesPoll time.Duration
 
 	termMu      sync.Mutex
 	termClients map[string]int
@@ -327,8 +330,9 @@ func (s *Server) thread(w http.ResponseWriter, r *http.Request) {
 	s.serveThread(w, r, id)
 }
 
-// threadPage reads a thread page for HTTP and MCP alike: the before cursor and limit in, items, has_more and next_before out (listPage), with the conversation's meter.
-func threadPage(before string, limit int, fold bool, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) (map[string]any, error) {
+// threadPage reads a thread page for HTTP and MCP alike, adding workspace
+// change summaries before optional folding.
+func (s *Server) threadPage(ctx context.Context, before string, limit int, fold bool, fetch func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error)) (map[string]any, error) {
 	var c *store.ThreadCursor
 	if before != "" {
 		var err error
@@ -340,9 +344,11 @@ func threadPage(before string, limit int, fold bool, fetch func(before *store.Th
 	if err != nil {
 		return nil, err
 	}
+	if err := s.withRunChanges(ctx, page.Items); err != nil {
+		return nil, err
+	}
 	items := page.Items
 	if fold {
-		// limit and the cursor count every run, so paging is unchanged; a fold never crosses a page.
 		items = store.FoldSkips(items)
 	}
 	out := listPage("items", items, page.HasMore, page.NextBefore)
@@ -486,11 +492,19 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 		f.Before = &t
 	}
 	runs, err := s.Store.ListRuns(r.Context(), f)
+	if err == nil {
+		err = s.withRunsChanges(r.Context(), runs)
+	}
 	respond(w, map[string]any{"runs": orEmpty(runs)}, err)
 }
 
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 	run, err := s.Store.GetRun(r.Context(), r.PathValue("id"))
+	if err == nil {
+		runs := []store.Run{*run}
+		err = s.withRunsChanges(r.Context(), runs)
+		run = &runs[0]
+	}
 	if err != nil {
 		respond(w, nil, err)
 		return

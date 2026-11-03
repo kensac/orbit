@@ -672,6 +672,8 @@ type Run struct {
 	// Tokens is every attempt's token counts together; Prefix the stable prefix the latest attempt sent, against the conversation's previous run.
 	Tokens *Tokens `json:"tokens,omitempty"`
 	Prefix *Prefix `json:"prefix,omitempty"`
+	// Changes is as ThreadRun's, filled by the API.
+	Changes *ChangeSummary `json:"changes"`
 }
 
 // runCols reads a run aliased r: stepsCount names it.
