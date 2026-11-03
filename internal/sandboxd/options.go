@@ -1,10 +1,13 @@
 package sandboxd
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"path"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kensac/orbit/internal/sandbox"
@@ -40,6 +43,14 @@ const (
 	// MaxSandboxes is how many may exist at once: two of MemoryBytes is what
 	// oci can give without starving its CI runners.
 	MaxSandboxes = 2
+	// ExtensionMemoryBytes and ExtensionPids bound native plugin execution in
+	// its separate no-network profile.
+	ExtensionMemoryBytes  = 256 << 20
+	ExtensionNanoCPUs     = 1_000_000_000
+	ExtensionPids         = 32
+	ExtensionTmpBytes     = 32 << 20
+	ExtensionOutBytes     = 16 << 20
+	MaxExtensionSandboxes = 2
 )
 
 // Labels sandboxd puts on what it creates. Every operation refuses a
@@ -49,6 +60,7 @@ const (
 	LabelManaged = "orbit.sandbox"
 	LabelRunID   = "orbit.sandbox.run_id"
 	LabelExpires = "orbit.sandbox.expires"
+	LabelProfile = "orbit.sandbox.profile"
 )
 
 // The Docker Engine API shapes sandboxd sends. Only fields sandboxd sets are
@@ -158,6 +170,30 @@ func containerSpec(cfg Config, runID string, now time.Time) containerCreate {
 		LabelManaged: "1",
 		LabelRunID:   runID,
 		LabelExpires: strconv.FormatInt(now.Add(Lifetime).Unix(), 10),
+	}
+	if cfg.ExtensionProfile {
+		labels[LabelProfile] = "extension"
+		return containerCreate{
+			Image: cfg.Image, User: user,
+			Entrypoint: []string{"sleep", strconv.Itoa(int(Lifetime / time.Second))},
+			Env:        []string{"HOME=/tmp", "TMPDIR=/tmp", "LANG=C.UTF-8"},
+			WorkingDir: sandbox.WorkDir, Hostname: "sandbox", Labels: labels,
+			NetworkDisabled: true,
+			HostConfig: hostConfig{
+				Privileged: false, ReadonlyRootfs: true, CapDrop: []string{"ALL"},
+				SecurityOpt: []string{"no-new-privileges:true"}, NetworkMode: "none",
+				IpcMode: "private", CgroupnsMode: "private",
+				Mounts: []mount{{Type: "volume", Target: sandbox.WorkDir, VolumeOptions: volumeOptions{Labels: map[string]string{LabelManaged: "1", LabelRunID: runID}}}},
+				Tmpfs: map[string]string{
+					"/tmp":      "rw,nosuid,nodev,size=" + strconv.Itoa(ExtensionTmpBytes) + ",mode=1777",
+					"/work/out": "rw,nosuid,nodev,size=" + strconv.Itoa(ExtensionOutBytes) + ",mode=0700,uid=" + strconv.Itoa(UID) + ",gid=" + strconv.Itoa(UID),
+				},
+				Memory: cfg.ExtensionMemoryBytes, MemorySwap: cfg.ExtensionMemoryBytes, NanoCpus: ExtensionNanoCPUs,
+				PidsLimit: ExtensionPids, Ulimits: []ulimit{{Name: "nofile", Soft: 256, Hard: 256}},
+				OomScoreAdj: 500, Init: true, RestartPolicy: restartPolicy{Name: "no"},
+			},
+			NetworkingConfig: networkingConfig{EndpointsConfig: map[string]struct{}{}},
+		}
 	}
 	proxy := "http://" + cfg.Proxy
 	credHost, _, _ := net.SplitHostPort(cfg.CredProxy)
@@ -269,18 +305,28 @@ type containerState struct {
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
 	HostConfig struct {
-		Privileged     bool     `json:"Privileged"`
-		ReadonlyRootfs bool     `json:"ReadonlyRootfs"`
-		CapAdd         []string `json:"CapAdd"`
-		CapDrop        []string `json:"CapDrop"`
-		SecurityOpt    []string `json:"SecurityOpt"`
-		NetworkMode    string   `json:"NetworkMode"`
-		Binds          []string `json:"Binds"`
-		PidMode        string   `json:"PidMode"`
-		IpcMode        string   `json:"IpcMode"`
-		UsernsMode     string   `json:"UsernsMode"`
-		Memory         int64    `json:"Memory"`
-		PidsLimit      *int64   `json:"PidsLimit"`
+		Privileged      bool              `json:"Privileged"`
+		ReadonlyRootfs  bool              `json:"ReadonlyRootfs"`
+		CapAdd          []string          `json:"CapAdd"`
+		CapDrop         []string          `json:"CapDrop"`
+		SecurityOpt     []string          `json:"SecurityOpt"`
+		NetworkMode     string            `json:"NetworkMode"`
+		UTSMode         string            `json:"UTSMode"`
+		CgroupnsMode    string            `json:"CgroupnsMode"`
+		Binds           []string          `json:"Binds"`
+		PidMode         string            `json:"PidMode"`
+		IpcMode         string            `json:"IpcMode"`
+		UsernsMode      string            `json:"UsernsMode"`
+		Tmpfs           map[string]string `json:"Tmpfs"`
+		Devices         []any             `json:"Devices"`
+		PublishAllPorts bool              `json:"PublishAllPorts"`
+		PortBindings    map[string]any    `json:"PortBindings"`
+		ExtraHosts      []string          `json:"ExtraHosts"`
+		Runtime         string            `json:"Runtime"`
+		Memory          int64             `json:"Memory"`
+		MemorySwap      int64             `json:"MemorySwap"`
+		NanoCpus        int64             `json:"NanoCpus"`
+		PidsLimit       *int64            `json:"PidsLimit"`
 	} `json:"HostConfig"`
 	Mounts []mountState `json:"Mounts"`
 	State  struct {
@@ -309,6 +355,30 @@ type mountState struct {
 // altered an option is caught before anything runs in it.
 func verifyCreated(cfg Config, c containerState) error {
 	h := c.HostConfig
+	wantNetwork := cfg.Network
+	wantMemory, wantMemorySwap, wantCPUs, wantPids := int64(MemoryBytes), int64(MemoryBytes), int64(NanoCPUs), int64(Pids)
+	if cfg.ExtensionProfile {
+		wantNetwork, wantMemory, wantMemorySwap, wantPids, wantCPUs = "none", cfg.ExtensionMemoryBytes, cfg.ExtensionMemoryBytes, int64(ExtensionPids), int64(ExtensionNanoCPUs)
+		if cfg.ExtensionMemoryBytes < 1 || cfg.ExtensionMemoryBytes > ExtensionMemoryBytes {
+			return errors.New("extension memory limit is outside the allowed range")
+		}
+		if c.Config.Labels[LabelProfile] != sandbox.ProfileExtension {
+			return fmt.Errorf("profile label is %q", c.Config.Labels[LabelProfile])
+		}
+		if len(c.NetworkSettings.Networks) != 0 {
+			return fmt.Errorf("extension sandbox has network attachments: %v", c.NetworkSettings.Networks)
+		}
+		if len(h.SecurityOpt) != 1 || h.SecurityOpt[0] != "no-new-privileges:true" || h.UTSMode != "" || h.CgroupnsMode != "private" || len(h.Devices) != 0 || h.PublishAllPorts || len(h.PortBindings) != 0 || len(h.ExtraHosts) != 0 {
+			return fmt.Errorf("extension host options exceed the fixed profile")
+		}
+		wantTmpfs := map[string]string{
+			"/tmp":      "rw,nosuid,nodev,size=" + strconv.Itoa(ExtensionTmpBytes) + ",mode=1777",
+			"/work/out": "rw,nosuid,nodev,size=" + strconv.Itoa(ExtensionOutBytes) + ",mode=0700,uid=" + strconv.Itoa(UID) + ",gid=" + strconv.Itoa(UID),
+		}
+		if len(h.Tmpfs) != len(wantTmpfs) || h.Tmpfs["/tmp"] != wantTmpfs["/tmp"] || h.Tmpfs["/work/out"] != wantTmpfs["/work/out"] {
+			return fmt.Errorf("extension tmpfs mounts are %v", h.Tmpfs)
+		}
+	}
 	switch {
 	case c.Config.Labels[LabelManaged] != "1":
 		return fmt.Errorf("label %s missing", LabelManaged)
@@ -324,19 +394,24 @@ func verifyCreated(cfg Config, c containerState) error {
 		return fmt.Errorf("capabilities dropped: %v, want [ALL]", h.CapDrop)
 	case !contains(h.SecurityOpt, "no-new-privileges:true"):
 		return fmt.Errorf("no-new-privileges missing from %v", h.SecurityOpt)
-	case h.NetworkMode != cfg.Network:
-		return fmt.Errorf("network is %q, want %q", h.NetworkMode, cfg.Network)
+	case h.NetworkMode != wantNetwork:
+		return fmt.Errorf("network is %q, want %q", h.NetworkMode, wantNetwork)
 	case len(h.Binds) != 0:
 		return fmt.Errorf("bind mounts present: %v", h.Binds)
 	case h.PidMode != "" || h.UsernsMode != "":
 		return fmt.Errorf("host namespace shared (pid %q, userns %q)", h.PidMode, h.UsernsMode)
 	case h.IpcMode != "private":
 		return fmt.Errorf("ipc mode is %q", h.IpcMode)
-	case h.Memory != MemoryBytes:
+	case h.Memory != wantMemory:
 		return fmt.Errorf("memory limit is %d", h.Memory)
-	case h.PidsLimit == nil || *h.PidsLimit != Pids:
-		return fmt.Errorf("pids limit is not %d", Pids)
+	case h.MemorySwap != wantMemorySwap:
+		return fmt.Errorf("memory swap limit is %d", h.MemorySwap)
+	case h.NanoCpus != wantCPUs:
+		return fmt.Errorf("cpu limit is %d", h.NanoCpus)
+	case h.PidsLimit == nil || *h.PidsLimit != wantPids:
+		return fmt.Errorf("pids limit is not %d", wantPids)
 	}
+	seenTmpfs := map[string]bool{}
 	for _, m := range c.Mounts {
 		if m.Type != "volume" && m.Type != "tmpfs" {
 			return fmt.Errorf("mount of type %s at %s", m.Type, m.Destination)
@@ -344,6 +419,12 @@ func verifyCreated(cfg Config, c containerState) error {
 		if m.Type == "volume" && m.Destination != sandbox.WorkDir {
 			return fmt.Errorf("volume at %s", m.Destination)
 		}
+		if m.Type == "tmpfs" {
+			seenTmpfs[m.Destination] = true
+		}
+	}
+	if cfg.ExtensionProfile && (!seenTmpfs["/tmp"] || !seenTmpfs["/work/out"] || len(seenTmpfs) != 2) {
+		return fmt.Errorf("extension tmpfs mounts are %v", seenTmpfs)
 	}
 	return nil
 }
@@ -355,4 +436,14 @@ func contains(xs []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func validateProfileAttach(c containerState, ar sandbox.AttachRequest) error {
+	if c.Config.Labels[LabelProfile] != sandbox.ProfileExtension {
+		return nil
+	}
+	if len(ar.Argv) != 1 || !strings.HasPrefix(ar.Argv[0], sandbox.WorkDir+"/extension/") || path.Clean(ar.Argv[0]) != ar.Argv[0] || ar.Env != nil {
+		return fmt.Errorf("an extension sandbox accepts only one package entrypoint and no environment")
+	}
+	return nil
 }

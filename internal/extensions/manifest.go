@@ -27,6 +27,9 @@ const (
 var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 var versionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
+// ValidID reports whether a package id uses the manifest's bounded name form.
+func ValidID(s string) bool { return namePattern.MatchString(s) }
+
 // Manifest is the validation-only v1 package contract. It does not grant authority.
 type Manifest struct {
 	Protocol   string      `json:"protocol"`

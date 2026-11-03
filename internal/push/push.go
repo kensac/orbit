@@ -142,6 +142,7 @@ func (s *Sender) Deliver(ctx context.Context) error {
 		watching = nil
 	}
 	for author, devices := range byAuthor(subs) {
+
 		send := unseen(items, watching[author])
 		if len(send) == 0 {
 			continue

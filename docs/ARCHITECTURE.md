@@ -20,7 +20,7 @@ trigger (schedule: cron or RRULE | webhook | manual | message | continue | task 
   -> memory entries the agent reads: an index in the prompt, the entries in full as an input
   -> session plan: continue the agent's Claude Code session, or start fresh
   -> a fresh session: the recent thread, packed into a byte budget, as conversation.md
-  -> sources fetched by the harness (templates and by_trigger windows filled in code), written to <workdir>/inputs/, stored as artifacts
+  -> sources fetched by the harness (templates and by_trigger windows filled in code); pinned extension sources receive only bound earlier sources and run in sandboxd's network-disabled profile; results are written to <workdir>/inputs/ and stored as artifacts
      `lake` reads sorted, bounded gzip NDJSON objects with S3 GET and list requests; transforms reduce the JSON rows before the model sees them
   -> transforms run over sources, each output an input (a source only transforms read is withheld)
   -> repositories (repos): each fetched into orbit's mirror, its tree at the ref's commit under inputs/repos/<name>, _repos.json an input
@@ -241,6 +241,7 @@ Separately from channels, everything waiting on a person is an `attention`
 row (store/attention.go), written in the transaction that created it, for
 attended runs too. It feeds the app's inbox (`GET /attention`) and, for
 unattended runs and for a chat run's permission request (its turn waits on the person), Web Push to the person's devices (`internal/push`), which
+
 carries a title and a link only; bursts fold into one summary push, and a person whose app is showing the conversation (a 30 s heartbeat, `POST /presence`, fresh for 60 s) is not pushed for it. A push of one pending action or permission request carries Approve and Reject or Deny buttons, signed single-use links the service worker POSTs to (`POST /api/v1/push/act`) without the app's session; when a pushed row closes, a close push with its tag takes the notification off the devices it reached (not Apple's, which revoke subscriptions that receive pushes showing nothing).
 
 ## Memory, questions, messages
