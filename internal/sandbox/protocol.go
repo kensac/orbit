@@ -44,6 +44,9 @@ const WorkDir = "/work"
 // disk with its readback.
 const (
 	MaxArchiveBytes = 256 << 20
+	// MaxClaudeConfigBytes bounds the laptop-to-box Claude config bundle; it
+	// is enough for a large skill library without copying an entire home.
+	MaxClaudeConfigBytes = 32 << 20
 	// MaxArgs and MaxArgvBytes bound an attach command line: the CLI's
 	// largest argument is the output schema, tens of KB.
 	MaxArgs      = 256
