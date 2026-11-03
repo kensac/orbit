@@ -37,7 +37,7 @@ func TestPromQueryIsReadOnlyAndBounded(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	ctx := context.Background()
 
-	b, err := f.PromQuery(ctx, src, Vars(now), PromQuery{Expr: `up{job="${SECRET}"}`, Time: now})
+	b, err := f.PromQuery(ctx, src, Vars{Now: now}, PromQuery{Expr: `up{job="${SECRET}"}`, Time: now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,13 +47,13 @@ func TestPromQueryIsReadOnlyAndBounded(t *testing.T) {
 	if last.Get("query") != `up{job="${SECRET}"}` || last.Get("time") != "2026-11-02T12:00:00Z" || last.Get("limit") != "500" || last.Get("timeout") != "20s" {
 		t.Fatalf("the model's query is sent as written, never rendered: %v", last)
 	}
-	if _, err := f.PromQuery(ctx, src, Vars(now), PromQuery{Expr: "rate(x[5m])", Start: now.Add(-6 * time.Hour), End: now}); err != nil {
+	if _, err := f.PromQuery(ctx, src, Vars{Now: now}, PromQuery{Expr: "rate(x[5m])", Start: now.Add(-6 * time.Hour), End: now}); err != nil {
 		t.Fatal(err)
 	}
 	if paths[1] != "GET /api/v1/query_range" || last.Get("step") != "86" || last.Get("start") != "2026-11-02T06:00:00Z" {
 		t.Fatalf("range: %v %v", paths, last)
 	}
-	b, err = f.PromQuery(ctx, src, Vars(now), PromQuery{Expr: "warn"})
+	b, err = f.PromQuery(ctx, src, Vars{Now: now}, PromQuery{Expr: "warn"})
 	if err != nil || !strings.Contains(string(b), `"warnings":["results truncated due to limit"]`) {
 		t.Fatalf("warnings = %s %v", b, err)
 	}
@@ -66,20 +66,20 @@ func TestPromQueryIsReadOnlyAndBounded(t *testing.T) {
 		{Expr: "x", Start: now.Add(-24 * time.Hour), End: now, Step: 15 * time.Second}: "more than 1000 points per series; use a step of at least 1m27s",
 		{Expr: "x", Start: now.Add(-time.Hour), End: now, Step: time.Millisecond}:      "step is at least 1s",
 	} {
-		if _, err := f.PromQuery(ctx, src, Vars(now), *q); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := f.PromQuery(ctx, src, Vars{Now: now}, *q); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%+v: %v, want %q", q.Expr[:min(len(q.Expr), 10)], err, want)
 		}
 	}
 	if len(paths) != n {
 		t.Fatal("a refused query reached Prometheus")
 	}
-	if _, err := f.PromQuery(ctx, src, Vars(now), PromQuery{Expr: "big"}); err == nil || !strings.Contains(err.Error(), "larger than 256 KiB") {
+	if _, err := f.PromQuery(ctx, src, Vars{Now: now}, PromQuery{Expr: "big"}); err == nil || !strings.Contains(err.Error(), "larger than 256 KiB") {
 		t.Fatalf("big = %v", err)
 	}
-	if _, err := f.PromQuery(ctx, src, Vars(now), PromQuery{Expr: "bad("}); err == nil || !strings.Contains(err.Error(), "parse error") {
+	if _, err := f.PromQuery(ctx, src, Vars{Now: now}, PromQuery{Expr: "bad("}); err == nil || !strings.Contains(err.Error(), "parse error") {
 		t.Fatalf("bad = %v", err)
 	}
-	if _, err := f.PromQuery(ctx, spec.Source{Name: "h", Kind: "http", URL: srv.URL}, Vars(now), PromQuery{Expr: "up"}); err == nil {
+	if _, err := f.PromQuery(ctx, spec.Source{Name: "h", Kind: "http", URL: srv.URL}, Vars{Now: now}, PromQuery{Expr: "up"}); err == nil {
 		t.Fatal("an http source is not a Prometheus")
 	}
 }
