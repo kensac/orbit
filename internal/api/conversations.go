@@ -36,6 +36,9 @@ func (s *Server) conversationPage(ctx context.Context, agent string, archived bo
 		}
 	}
 	page, err := s.Store.ListConversations(ctx, agent, archived, c, limit)
+	if err == nil {
+		err = s.withWorkspaceIDs(ctx, page.Conversations)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -103,8 +106,22 @@ func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getConversation(w http.ResponseWriter, r *http.Request) {
-	c, err := s.Store.GetConversation(r.Context(), r.PathValue("id"))
+	c, err := s.conversationShape(r.Context(), r.PathValue("id"))
 	respond(w, map[string]any{"conversation": c}, err)
+}
+
+// conversationShape is one conversation as the API shows it, its
+// workspace_id filled.
+func (s *Server) conversationShape(ctx context.Context, id string) (*store.Conversation, error) {
+	c, err := s.Store.GetConversation(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	list := []store.Conversation{*c}
+	if err := s.withWorkspaceIDs(ctx, list); err != nil {
+		return nil, err
+	}
+	return &list[0], nil
 }
 
 func (s *Server) updateConversation(w http.ResponseWriter, r *http.Request) {
@@ -121,14 +138,12 @@ func (s *Server) updateConversation(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	c, err := s.Store.GetConversation(r.Context(), id)
+	c, err := s.conversationShape(r.Context(), id)
 	respond(w, map[string]any{"conversation": c}, err)
 }
 
 func (s *Server) conversationThread(w http.ResponseWriter, r *http.Request) {
-	servePage(w, r, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
-		return s.Store.ConversationThread(r.Context(), r.PathValue("id"), before, limit)
-	})
+	s.serveThread(w, r, r.PathValue("id"))
 }
 
 func (s *Server) conversationMessage(w http.ResponseWriter, r *http.Request) {

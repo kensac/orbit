@@ -341,23 +341,6 @@ func (s *Store) GetExternalSession(ctx context.Context, id string) (*ExternalSes
 	return &e, err
 }
 
-// FindExternalSession returns an imported session by orbit's id or by its source's session id, or ErrNotFound.
-func (s *Store) FindExternalSession(ctx context.Context, ref string) (*ExternalSession, error) {
-	if !IsUUID(ref) {
-		return nil, ErrNotFound
-	}
-	rows, err := s.Pool.Query(ctx, `SELECT `+externalSessionCols+` FROM external_sessions
-		WHERE id = $1::text::uuid OR session_id = $1::text ORDER BY id = $1::text::uuid DESC LIMIT 1`, ref)
-	if err != nil {
-		return nil, err
-	}
-	e, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByPos[ExternalSession])
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	return &e, err
-}
-
 // StoredLine is one line of an imported session, in its stored form.
 type StoredLine struct {
 	N       int    `json:"n"`

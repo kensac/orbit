@@ -1,14 +1,8 @@
 package api_test
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/kensac/orbit/internal/spec"
-	"github.com/kensac/orbit/internal/store"
 )
 
 // A synthetic session; nothing here is from a real transcript.
@@ -67,61 +61,5 @@ func TestSessionImportAPI(t *testing.T) {
 	}
 	if code, _ := call(t, "GET", pub+"/sessions/"+strings.Repeat("0", 8)+"-0000-4000-8000-000000000000", tok, ""); code != 404 {
 		t.Fatalf("unknown session = %d", code)
-	}
-}
-
-func TestAConversationStartsFromAnImportedSession(t *testing.T) {
-	v := newEnv(t, nil)
-	pub, tok := v.srv.URL+"/api/v1", v.person("kanishk")
-	// An agent that resumes sessions, beside a, which does not.
-	if err := os.WriteFile(filepath.Join(v.e.ConfigDir, "agents", "chat.yaml"), []byte("name: chat\ncharter: x\nsession: {resume: true}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := spec.Load(v.e.ConfigDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := v.e.SetConfig(cfg); err != nil {
-		t.Fatal(err)
-	}
-	specs := map[string]store.AgentSpec{}
-	for _, name := range []string{"a", "chat"} {
-		b, _ := json.Marshal(cfg.Agents[name])
-		specs[name] = store.AgentSpec{SHA: cfg.Agents[name].SHA, JSON: b, Enabled: true}
-	}
-	if err := v.s.SyncAgents(ctx, specs); err != nil {
-		t.Fatal(err)
-	}
-	line := `{"type":"user","sessionId":"` + apiSession + `","uuid":"u1","message":{"role":"user","content":"Plan the gizmo release"}}`
-	code, out := call(t, "POST", pub+"/sessions/import", tok, `{"sessions":[{"session_id":"`+apiSession+`","from_offset":0,"from_prefix_sha256":"","to_offset":120,"to_prefix_sha256":"`+strings.Repeat("a", 64)+`","lines":[`+line+`]}]}`)
-	if code != 200 {
-		t.Fatalf("import = %d %v", code, out)
-	}
-	id := out["results"].([]any)[0].(map[string]any)["id"].(string)
-
-	// chat resumes sessions; a does not.
-	if code, out := call(t, "POST", pub+"/conversations", tok, `{"agent":"a","from_session":"`+apiSession+`"}`); code != 400 || !strings.Contains(out["error"].(string), "does not resume") {
-		t.Fatalf("from a non-session agent = %d %v", code, out)
-	}
-	if code, _ := call(t, "POST", pub+"/conversations", tok, `{"agent":"chat","from_session":"99999999-9999-4999-8999-999999999999"}`); code != 404 {
-		t.Fatalf("from an unknown session = %d", code)
-	}
-	code, out = call(t, "POST", pub+"/conversations", tok, `{"agent":"chat","from_session":"`+apiSession+`","body":"Continue it here.","wake":false}`)
-	if code != 201 {
-		t.Fatalf("create = %d %v", code, out)
-	}
-	code, out = call(t, "GET", pub+"/conversations/"+out["conversation_id"].(string), tok, "")
-	c := out["conversation"].(map[string]any)
-	if code != 200 || c["from_session"] != id || c["title"] != "Continue it here." {
-		t.Fatalf("conversation = %d %v", code, c)
-	}
-	// Without a body, the session names it.
-	code, out = call(t, "POST", pub+"/conversations", tok, `{"agent":"chat","from_session":"`+id+`"}`)
-	if code != 201 {
-		t.Fatalf("create by orbit's id = %d %v", code, out)
-	}
-	_, out = call(t, "GET", pub+"/conversations/"+out["conversation_id"].(string), tok, "")
-	if c := out["conversation"].(map[string]any); c["title"] != "Plan the gizmo release" {
-		t.Fatalf("conversation = %v", c)
 	}
 }
