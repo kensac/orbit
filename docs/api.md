@@ -368,7 +368,8 @@ conversation:
    "started_at": "...", "finished_at": "...", "steps": 4,
    "turn": {"state": "completed", "outcome": "success", "started_at": "...", "completed_at": "..."},
    "summary": "...", "report": "<markdown>",
-   "questions": [{"id": "uuid-of-the-question-message", "body": "...", "open": true}],
+   "questions": [{"id": "uuid-of-the-question-message", "body": "...", "open": true},
+                 {"id": "uuid-of-a-form", "body": "Which account?", "open": true, "fields": [<field>]}],
    "error": null, "cost_usd": 0.03, "tokens": {"input": 12, "output": 840, "cache_read": 41200, "cache_creation": 3100, "cache_hit_ratio": 0.929773, "num_turns": 3, "model": "claude-opus-5-5"},
    "gate": null,
    "actions": [{"id": "uuid", "type": "notify", "status": "pending", "reason": "...", "params": {}}],
@@ -378,7 +379,14 @@ conversation:
    "needs_input": true,
    "agent_status": {"state": "waiting", "kind": "approval", "since": "...", "source": "run", "run_id": "uuid"}},
   {"kind": "message", "id": "uuid-of-the-question-message", "at": "...", "from": "agent",
-   "body": "<a question>", "run_id": "uuid", "open": true}
+   "body": "<a question>", "run_id": "uuid", "open": true},
+  {"kind": "message", "id": "uuid-of-a-form", "at": "...", "from": "agent",
+   "body": "Which account?", "run_id": "uuid", "open": true,
+   "fields": [{"name": "account", "label": "Account", "type": "select",
+               "options": ["checking", "savings"], "default": "checking", "required": true}]},
+  {"kind": "message", "id": "uuid", "at": "...", "from": "person", "reply_to": "uuid-of-a-form",
+   "body": "Answers to \"Which account?\":\n1. Account: savings", "author": "kanishk",
+   "answers": {"account": "savings"}, "attachments": [], "...": "as above"}
  ],
  "has_more": true,
  "next_before": "opaque-cursor",
@@ -421,6 +429,8 @@ conversation:
   same conversation (a `reply_to` from another one is a 400). `open` is true
   until a message names the question in `reply_to` or any later message
   reaches its conversation (the next run there sees the person's words).
+- **Forms.** A question may carry `fields`, a form for its answer (absent on a question without one, and on a person's message): each field is `name` (`^[a-z][a-z0-9_]{0,62}$`, what an answer is keyed by), `label` (one line, at most 200 bytes; absent or empty shows `name`), `type` (`string`, `number`, `boolean`, `date` as `YYYY-MM-DD`, `select`, `file`), `options` (a select's choices, 1 to 50, each one line of at most 200 bytes; only on a select), `default` (a valid answer, or absent or `null` for none; never on a file) and `required`. At most 12 fields. Code checks every form when the question is recorded (`forms.Validate`): a run's form that does not validate is dropped and the question kept, so the person answers in words; the chat `ask` tool refuses it, naming why, so the agent can fix it. A client renders the form and replies with `answers` (below). A run's `questions[]` carries the same `fields`. Channels that cannot show a form (mail, ntfy, webhooks) list it under the question as a numbered list: `1. Account (one of: checking, savings; default: checking; required)`.
+- **Answers.** A person's reply that answered a form carries `answers`, by field name, as code normalized them (a number as its exact decimal, a date as `YYYY-MM-DD`, a file as its upload's id); absent otherwise. Its `body` is what the person typed followed by `Answers to "<the question's first line>":` and a numbered list, `1. Label: value` (a boolean as `yes` or `no`, a file as `uploads/<name>`, a field left empty as `(no answer)`): that is what the agent reads.
 - **Waiting on the person.** `needs_input` on a run is true while one of its
   questions is open or one of its actions is `pending`: the run finished,
   and the agent is waiting for an answer or an approval. It is a state
@@ -438,6 +448,7 @@ conversation:
 ```json
 {"body": "text", "reply_to": "optional message id", "wake": true,
  "attachments": ["optional upload ids"], "delivery": "queue",
+ "answers": {"optional": "values for the form of the question reply_to names"},
  "client_message_id": "optional, minted by the client"}
 ```
 
@@ -445,6 +456,8 @@ posts to the default conversation, and returns
 `201 {"message_id": "uuid", "run_id": "uuid", "delivered": "queued"}`. `run_id` is present
 when the message woke a run (`wake`, default: the agent's `wake_on_message`).
 Stream that run to show the reply as it is written.
+
+`answers` fills the form of the question `reply_to` names: an object keyed by field name, each value the JSON type its field takes (a string for `string`, `date`, `select` and `file`, a number, a boolean). It is checked against the form in the message's transaction: a name the form lacks, a value of the wrong type or outside a select's options, a date that is not a calendar day, a required field left out or empty, `answers` without `reply_to`, a `reply_to` whose question has no form, or a file answer that is not an upload of the conversation is a `400` naming it. A field left out takes its `default`. A file answer's upload is attached to the message (after `attachments`). With `answers`, `body` may be empty; at least one of `body`, `attachments` and `answers` is required.
 
 **Delivery.** `delivery` is `queue` (the default) or `steer` (anything else is 400). A queued message waits for the conversation's next run, as above, even while a run is working. A steered one goes into the reply being written: when the conversation has a running run of a chat agent (one nobody asked to stop), the answer is `"delivered": "steered"` with that run's `run_id`, no run is woken, and the running reply takes the message within a few seconds, at its next tool call (the agent sees it mid-turn and answers it in the same reply); keep streaming that run. Its journal then has a `steer` item, and the thread's message carries `steered_into` (and `run_id`) naming the run. A steered message the reply ends without taking (it made no further tool call, or the person stopped it) is answered by the conversation's next run, which orbit queues when the run ends: its thread message stays without `run_id` until that run starts (a message already written into the turn gets an `orbit.steer_withdrawn` status in the reply's journal). With nothing running, for an agent that is not a chat agent, or with `attachments`, a steer is queued exactly as `queue` would be (`wake` applies) and the answer says `"delivered": "queued"`. `delivered` is always present.
 
@@ -782,7 +795,7 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
  "created_at": "...", "updated_at": "...", "finished_at": "..."}
 ```
 
-- `status`: `waiting` (a dependency is not done; a failed dependency holds it until that one is retried or this one cancelled), `blocked` (its decision is pending), `working` (a run in its conversation is queued or running), `needs_input` (its agent asked the delegating agent something, `questions`, or said it is blocked, `outcome`), `done` (`report` is the reply of the run that finished it), `failed` or `cancelled` (`error` says why; a task whose run said it could not do the work keeps that run's reply in `report`). A message from the delegating agent moves a `done` task back to `working`; `report` keeps the previous reply until the next.
+- `status`: `waiting` (a dependency is not done; a failed dependency holds it until that one is retried or this one cancelled), `blocked` (its decision is pending), `working` (a run in its conversation is queued or running), `needs_input` (its agent asked the delegating agent something, `questions`, each with `fields` when it has a form as in a thread, or said it is blocked, `outcome`), `done` (`report` is the reply of the run that finished it), `failed` or `cancelled` (`error` says why; a task whose run said it could not do the work keeps that run's reply in `report`). A message from the delegating agent moves a `done` task back to `working`; `report` keeps the previous reply until the next.
 - `depends_on` is the keys of the tasks it waits for: of its batch (`action_id`), or of an earlier task its conversation delegated (the newest of that key when the task was created). `decision` is `null` without one; otherwise approve or reject its `action_id` like any action (`POST /actions/{id}/approve`), and the task starts or is cancelled within seconds.
 - `outcome` and `outcome_reason` are what the newest run in its conversation said of its work: `outcome` is `succeeded`, `failed` (it could not do the work; the task fails) or `blocked` (it cannot go on until something outside its reach changes; the task needs input), `outcome_reason` why, or `null` when it gave none. Both are `null` while that run has not finished, and for a run that gave no outcome (a chat turn, which counts as succeeded).
 - `attempt` is its current attempt: 1, and one more for each `task:retry` of the delegating agent, which reopens a failed task on the same row, with a new brief or another agent (`agent` and `conversation_id` are then the current attempt's). `attempts` are the attempts a retry ended, oldest first, as they were then. `failures` counts attempts that failed by the agent's work (not a run lost with its worker); from 3 a retry waits for a person's approval, which shows as a pending `task:retry` action.
@@ -1073,7 +1086,7 @@ After a conversation goes quiet, orbit runs a short learning pass over it (trigg
 | `list_agents` | none | each configured agent: `name`, `description`, `enabled`, `needs_input`, `open_questions`, `pending_actions`, `last_run`, `agent_status` |
 | `list_conversations` | `agent`, `archived`, `limit`, `before` | as `GET /agents/{name}/conversations`: `conversations`, `has_more`, `next_before` |
 | `create_conversation` | `agent`, `title`, `message`, `wait_seconds` | `conversation_id`, `message_id`, `run_id`, and `reply` as `send_message` |
-| `send_message` | `body`, and `agent` (its default conversation) or `conversation_id`; `reply_to`, `wait_seconds` | `message_id`, `run_id`, `reply`: the run as a thread run item (`report`, `questions`, `actions`, `status`) |
+| `send_message` | `body`, and `agent` (its default conversation) or `conversation_id`; `reply_to`, `answers` (a question's form, as for messages), `wait_seconds` | `message_id`, `run_id`, `reply`: the run as a thread run item (`report`, `questions`, `actions`, `status`) |
 | `wait_for_reply` | `run_id`, `wait_seconds` | `reply`, the run as a thread run item |
 | `read_thread` | `agent` or `conversation_id`, `limit` (default 20, at most 200), `before`, `unfold` | as a thread page: `items`, `has_more`, `next_before`, `meter`; identical skips folded unless `unfold` (A conversation's thread, Folded skips) |
 | `list_actions` | `agent`, `status` (default `pending`; `all` for every status), `run_id`, `limit`, `before` | as `GET /actions`: `actions`, `has_more`, `next_before` |

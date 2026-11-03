@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
+	"github.com/kensac/orbit/internal/forms"
 	"github.com/kensac/orbit/internal/status"
 	"github.com/kensac/orbit/internal/tokens"
 )
@@ -1059,7 +1060,7 @@ type ProposedAction struct {
 // Outcome is everything a successful run writes besides its row.
 type Outcome struct {
 	Memory    *string
-	Questions []string
+	Questions []Question
 	Actions   []ProposedAction
 	// Plan is a plan the run proposed for its ticket (tickets.go).
 	Plan *PlanProposal
@@ -1074,6 +1075,12 @@ type PlanProposal struct {
 	TicketID string
 	Body     string
 	Version  int
+}
+
+// Question is a question a run asks, with the form its answer fills when it has one (fields checked by forms.Validate before it is recorded).
+type Question struct {
+	Body   string
+	Fields []forms.Field
 }
 
 // RecordOutcome stores memory, questions and actions together with the run's
@@ -1097,9 +1104,21 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 		for _, q := range o.Questions {
 			// A question is asked in the asking run's conversation.
 			var id string
-			if err := tx.QueryRow(ctx, `INSERT INTO messages (agent, direction, body, run_id, conversation_id, created_at)
+			fields, err := questionFields(q.Fields)
+			if err != nil {
+				return err
+			}
+			// As for a message's answers, fields is named only for a question with a form.
+			insert, args := `INSERT INTO messages (agent, direction, body, run_id, conversation_id, created_at)
 				SELECT $1, 'from_agent', $2, $3, conversation_id, clock_timestamp() FROM runs WHERE id = $3
-				RETURNING id::text`, agent, q, runID).Scan(&id); err != nil {
+				RETURNING id::text`, []any{agent, q.Body, runID}
+			if fields != nil {
+				insert = `INSERT INTO messages (agent, direction, body, run_id, conversation_id, created_at, fields)
+				SELECT $1, 'from_agent', $2, $3, conversation_id, clock_timestamp(), $4 FROM runs WHERE id = $3
+				RETURNING id::text`
+				args = append(args, fields)
+			}
+			if err := tx.QueryRow(ctx, insert, args...).Scan(&id); err != nil {
 				return err
 			}
 			if err := newAttention(ctx, tx, AttentionQuestion, "question:"+id, runID, " has a question", nil, &id, nil, nil); err != nil {
@@ -1126,6 +1145,17 @@ func (s *Store) RecordOutcome(ctx context.Context, runID, agent string, res RunR
 		return nil
 	})
 	return ids, err
+}
+
+// questionFields is a question's form as stored: NULL without one. A form the engine let through is checked again here, so no writer stores one the thread cannot render.
+func questionFields(fields []forms.Field) ([]byte, error) {
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	if err := forms.Validate(fields); err != nil {
+		return nil, fmt.Errorf("%w: question form: %w", ErrInvalid, err)
+	}
+	return json.Marshal(fields)
 }
 
 // insertAction stores one proposal with the state its rule gives it: auto
