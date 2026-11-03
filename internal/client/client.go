@@ -21,7 +21,12 @@ type Client struct {
 
 // HTTPClient refuses redirects so credentials never follow an API redirect.
 func HTTPClient() *http.Client {
-	return &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return HTTPClientWithResponseTimeout(30 * time.Second)
+}
+
+// HTTPClientWithResponseTimeout refuses redirects and permits callers to bound a long-running response.
+func HTTPClientWithResponseTimeout(timeout time.Duration) *http.Client {
+	return &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: timeout}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
 // ValidateURL requires TLS and forbids embedded credentials and query parameters.
