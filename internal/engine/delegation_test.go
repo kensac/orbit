@@ -987,7 +987,7 @@ func TestADelegateInstantiatesATypedTemplateWithANarrowConnectorSet(t *testing.T
 	tasks := d.tasks(t, runID)
 	if len(tasks) != 1 || tasks[0].Template == nil || tasks[0].Template.Name != "weekly" || tasks[0].Template.Version != 1 || tasks[0].Agent != "template:weekly" || tasks[0].Status != store.TaskDone {
 		actions, _ := d.s.ListActions(ctx, "planner", "", 20)
-		t.Fatalf("template task = %+v; actions = %+v", tasks, actions)
+		t.Fatalf("template task = %+v; delegate errors = %v", tasks, actionErrors(actions))
 	}
 	if got := fr.last("specialist"); !strings.Contains(got.System, "fresh worker") || !strings.Contains(got.System, "template weekly version 1") {
 		t.Fatalf("template worker prompt lacks its provenance: %s", got.System)
@@ -1058,7 +1058,7 @@ func TestTemplateTaskRetryReusesItsPinnedWorkerSpec(t *testing.T) {
 	tasks := d.tasks(t, delegatedRun)
 	if len(tasks) != 1 || tasks[0].Status != store.TaskDone || tasks[0].Attempt != 2 || tasks[0].Failures != 1 || tasks[0].Template == nil || tasks[0].Template.Version != 1 {
 		actions, _ := d.s.ListActions(ctx, "planner", "", 20)
-		t.Fatalf("retried template task = %+v; actions = %+v", tasks, actions)
+		t.Fatalf("retried template task = %+v; delegate errors = %v", tasks, actionErrors(actions))
 	}
 	var distinctSpecs, attempts, agentNames int
 	if err := d.s.Pool.QueryRow(ctx, `SELECT count(DISTINCT r.spec_sha), count(*), count(DISTINCT r.agent)
@@ -1068,4 +1068,14 @@ func TestTemplateTaskRetryReusesItsPinnedWorkerSpec(t *testing.T) {
 	if distinctSpecs != 1 || attempts != 2 || agentNames != 1 {
 		t.Fatalf("retry changed pinned worker identity: distinct specs=%d attempts=%d agents=%d", distinctSpecs, attempts, agentNames)
 	}
+}
+
+func actionErrors(actions []store.Action) []string {
+	var errors []string
+	for _, action := range actions {
+		if action.Type == "delegate" && action.Error != nil {
+			errors = append(errors, *action.Error)
+		}
+	}
+	return errors
 }
