@@ -1,7 +1,8 @@
 // Package boxkeep is the periodic work orbit does on agents' running boxes
 // (docs/workspace.md): keeping a GitHub installation token in each one for
-// its gh and git, and polling each logged-in account's usage when that is
-// switched on. It only ever acts through sandboxd's fixed operations, and
+// its gh and git, orbit's skills library in its shared profile and the MCP
+// servers orbit manages in each of its accounts, and polling each logged-in
+// account's usage when that is switched on. It only ever acts through sandboxd's fixed operations, and
 // never starts a stopped box.
 package boxkeep
 
@@ -95,6 +96,9 @@ type Keeper struct {
 	// the App that mints the box token from it.
 	GitHub func() *spec.GitHub
 	App    func(*spec.GitHub) (*github.App, error)
+	// MCPServers are the MCP servers orbit manages in every account
+	// (box.mcp_servers), by name.
+	MCPServers func() map[string]json.RawMessage
 	// Tick is how often Run looks (default a minute); Now is time.Now.
 	Tick time.Duration
 	Now  func() time.Time
@@ -104,7 +108,16 @@ type Keeper struct {
 	minted   time.Time
 	written  map[string]wrote
 	cleared  map[string]string
+	synced   map[string]string
 	nextPoll time.Time
+	// round is the running boxes Once found, shared by its steps.
+	round *round
+}
+
+type round struct {
+	c     *sandbox.Client
+	boxes []store.Box
+	sts   map[string]sandbox.BoxStatus
 }
 
 // wrote is the box (its container id) a token was last written to, and when.
@@ -141,13 +154,18 @@ func (k *Keeper) Run(ctx context.Context) {
 	}
 }
 
-// Once does what is due: the GitHub token of every running box, and the
-// usage poll when its interval has passed.
+// Once does what is due: the GitHub token of every running box, the skills
+// library and managed MCP servers where they changed, and the usage poll
+// when its interval has passed.
 func (k *Keeper) Once(ctx context.Context) {
 	if len(k.Agents()) == 0 {
 		return
 	}
+	c, boxes, sts := k.running(ctx)
+	k.round = &round{c: c, boxes: boxes, sts: sts}
+	defer func() { k.round = nil }()
 	k.GHOnce(ctx)
+	k.SyncOnce(ctx)
 	if k.PollUsage > 0 && !k.now().Before(k.nextPoll) {
 		k.nextPoll = k.now().Add(k.PollUsage)
 		k.PollOnce(ctx)
@@ -224,6 +242,9 @@ func (k *Keeper) token(ctx context.Context, g *spec.GitHub) (*github.Token, erro
 // running is each box row whose agent has a box now and whose box is
 // running, with sandboxd's client.
 func (k *Keeper) running(ctx context.Context) (*sandbox.Client, []store.Box, map[string]sandbox.BoxStatus) {
+	if r := k.round; r != nil {
+		return r.c, r.boxes, r.sts
+	}
 	c, err := k.Boxes()
 	if err != nil {
 		k.Log.Warn("boxes: sandboxd", "err", err)
