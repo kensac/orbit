@@ -588,6 +588,27 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			}).Run(claimCtx)
 		}()
 
+		// Conversations named by their first line get a model's title
+		// (orbit.yaml titles), off the other loops: each is a backend call.
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			t := time.NewTicker(titlesEvery)
+			defer t.Stop()
+			for {
+				select {
+				case <-claimCtx.Done():
+					return
+				case <-t.C:
+				}
+				if !drain.Draining() {
+					if err := eng.TitleConversations(claimCtx); err != nil && claimCtx.Err() == nil {
+						log.Error("titles", "err", err)
+					}
+				}
+			}
+		}()
+
 		// The scheduler only enqueues, so it keeps leading through a drain
 		// (fires stay on time, the ready instance claims them) and lets go
 		// of the lock when this process ends.
@@ -824,6 +845,11 @@ func boxClient(deployment func() spec.Deployment) func() (*sandbox.Client, error
 		return c, nil
 	}
 }
+
+// titlesEvery is how often new conversations are titled: a title within half
+// a minute of the first message, while the first reply is still being
+// written, is soon enough.
+const titlesEvery = 30 * time.Second
 
 func httpServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: writeTimeout}
