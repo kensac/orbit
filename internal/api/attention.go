@@ -48,6 +48,26 @@ func actorOrOperator(r *http.Request) string {
 	return "operator"
 }
 
+// setPresence serves POST /presence: the conversation the caller's app is
+// showing now, or null. Pushes for it skip the caller's devices while the
+// heartbeat is fresh (push.Presence).
+func (s *Server) setPresence(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		ConversationID *string `json:"conversation_id"`
+	}
+	if !decode(w, r, 1<<10, &b, bodyRequired) {
+		return
+	}
+	if b.ConversationID != nil {
+		if _, err := s.Store.GetConversation(r.Context(), *b.ConversationID); err != nil {
+			respond(w, nil, err)
+			return
+		}
+	}
+	err := s.Store.SetPresence(r.Context(), actorOrOperator(r), b.ConversationID)
+	respond(w, map[string]any{"ok": err == nil}, err)
+}
+
 // pushInfo serves GET /push: whether push is configured and the key a
 // browser subscribes with.
 func (s *Server) pushInfo(w http.ResponseWriter, _ *http.Request) {
