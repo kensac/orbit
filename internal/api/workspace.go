@@ -58,6 +58,7 @@ type capabilities struct {
 	Git       bool     `json:"git"`
 	Watch     bool     `json:"watch"`
 	Presets   []string `json:"presets"`
+	Accounts  bool     `json:"accounts,omitempty"`
 }
 
 // snapshotCapabilities are the snapshot backend's: reads, writes and the
