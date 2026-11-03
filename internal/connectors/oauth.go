@@ -341,14 +341,17 @@ var ErrNotSignedIn = errors.New("not signed in: a person connects it first (POST
 func (o *OAuthAuth) load(ctx context.Context) (*Token, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.token == nil {
-		st, err := o.Store.LatestToken(ctx, o.Conn)
-		if err != nil {
-			return nil, err
-		}
-		if st == nil {
-			return nil, ErrNotSignedIn
-		}
+	// Read the current grant on every request so a revocation made by any
+	// orbit instance takes effect before another bearer token is sent.
+	st, err := o.Store.LatestToken(ctx, o.Conn)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		o.token, o.version = nil, 0
+		return nil, ErrNotSignedIn
+	}
+	if o.token == nil || o.version != st.Version {
 		t := &Token{}
 		if err := o.Sealer.Open(SealKind, st.Sealed, t); err != nil {
 			return nil, err
