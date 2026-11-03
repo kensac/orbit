@@ -318,6 +318,54 @@ func TestEvaluationReplayRejectsInvalidInputBeforeBackend(t *testing.T) {
 
 const replayOutput = `{"summary":"ok","report":"ok","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[]}`
 
+func TestEvaluationGradeUsesIndependentConfiguredRunnerWithoutCapabilities(t *testing.T) {
+	fr := &fakeRunner{output: `{"passed":true,"reason":"output gives the requested amount"}`}
+	e, s, _ := harness(t, fr)
+	cfg := *e.Current().Config
+	grader := *cfg.Agents["finance"]
+	grader.Name, grader.Runner = "grader", "grader-backend"
+	oldRunner := cfg.Deployment.Runners[cfg.Agents["finance"].Runner]
+	graderRunner := oldRunner
+	graderRunner.Model = "independent-grader"
+	cfg.Agents = map[string]*spec.Agent{"finance": cfg.Agents["finance"], "grader": &grader}
+	cfg.Deployment.Runners = map[string]spec.RunnerSpec{grader.Runner: graderRunner, cfg.Agents["finance"].Runner: oldRunner}
+	if err := e.SetConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.ListRuns(ctx, store.RunFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := e.Grade(ctx, "grader", "finance", []engine.GradeCase{{Name: "one", Rubric: "mentions the requested amount", Output: json.RawMessage(`{"summary":"amount is 4"}`)}})
+	if err != nil || len(results) != 1 || !results[0].Passed || results[0].CostUSD == nil || *results[0].CostUSD != 0.25 {
+		t.Fatalf("grade = %+v, %v", results, err)
+	}
+	if !strings.Contains(string(fr.got.Inputs[0].Content), "mentions the requested amount") || !strings.Contains(string(fr.got.Inputs[0].Content), `"summary":"amount is 4"`) {
+		t.Fatalf("grader inputs = %+v", fr.got.Inputs)
+	}
+	if fr.got.System == grader.Charter || len(fr.got.Tools) != 0 || fr.got.Harness != nil || fr.got.Session != nil || fr.got.Connectors != nil || fr.got.SkillsPlugin != "" {
+		t.Fatalf("grader inherited charter or capabilities: %+v", fr.got)
+	}
+	if _, err := e.Grade(ctx, "grader", "grader", []engine.GradeCase{{Name: "one", Rubric: "check", Output: json.RawMessage(`{}`)}}); err == nil {
+		t.Fatal("accepted self-grader")
+	}
+	if _, err := e.Grade(ctx, "grader", "finance", []engine.GradeCase{{Name: "bad", Rubric: "", Output: json.RawMessage(`{}`)}}); err == nil {
+		t.Fatal("accepted empty rubric")
+	}
+	shared := *e.Current().Config
+	shared.Deployment.Runners = map[string]spec.RunnerSpec{grader.Runner: oldRunner, cfg.Agents["finance"].Runner: oldRunner}
+	if err := e.SetConfig(&shared); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Grade(ctx, "grader", "finance", []engine.GradeCase{{Name: "one", Rubric: "check", Output: json.RawMessage(`{}`)}}); err == nil {
+		t.Fatal("accepted identical grader backend configuration")
+	}
+	after, err := s.ListRuns(ctx, store.RunFilter{})
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("grading persisted a run: before %d after %d err %v", len(before), len(after), err)
+	}
+}
+
 const goodOutput = `{
   "summary": "October spend was $5,914",
   "report": "Spend was fine.",
