@@ -310,6 +310,6 @@ func TestARunThatStallsOnEveryAttemptFails(t *testing.T) {
 	}
 	run, _ := s.GetRun(ctx, id)
 	if run.Status != "failed" || run.Error == nil || !strings.Contains(*run.Error, "stalled") || !strings.Contains(*run.Error, "attempt 3 of 3") {
-		t.Fatalf("run %s: %v", run.Status, run.Error)
+		t.Fatalf("run %s: %q", run.Status, deref(run.Error))
 	}
 }

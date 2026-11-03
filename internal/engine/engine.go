@@ -207,6 +207,9 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 	if cr := (cancelledRun{}); errors.As(err, &cr) || errors.Is(context.Cause(actx), errCancelled) {
 		return e.cancelled(ctx, snap, a, c, start, cr.out, res)
 	}
+	if err != nil && st.stalled && c.Attempt >= store.MaxAttempts {
+		err = fmt.Errorf("%w (attempt %d of %d)", err, c.Attempt, store.MaxAttempts)
+	}
 	if err != nil {
 		if h := e.holdFor(context.WithoutCancel(ctx), a, c, err); h != nil {
 			return e.failHeld(ctx, snap, a, c, start, err, res, h)
