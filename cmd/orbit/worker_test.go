@@ -36,6 +36,17 @@ func TestAWorkerNamesTheCredentialsItLacks(t *testing.T) {
 	if got := missingEnv(cfg, sure, lookup("CLAUDE_CODE_OAUTH_TOKEN")); !reflect.DeepEqual(got, []string{"SURE_API_KEY"}) {
 		t.Fatalf("missing = %v, want the Sure key", got)
 	}
+	if got := missingEnv(cfg, sure, func(k string) (string, bool) {
+		if k == "CLAUDE_CODE_OAUTH_TOKEN" {
+			return "token", true
+		}
+		if k == "SURE_API_KEY" {
+			return "", true
+		}
+		return "", false
+	}); !reflect.DeepEqual(got, []string{"SURE_API_KEY"}) {
+		t.Fatalf("empty variable is missing: %v", got)
+	}
 	// The backend credential is either variable, and a worker with neither is told both names. The fixture is the test's own: one claude-code agent that needs nothing, so a bare worker covers it.
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "agents"), 0o755)
@@ -50,6 +61,25 @@ func TestAWorkerNamesTheCredentialsItLacks(t *testing.T) {
 	}
 	if got := missingEnv(own, bare, lookup()); !reflect.DeepEqual(got, []string{"CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY"}) {
 		t.Fatalf("missing = %v, want both backend names", got)
+	}
+}
+
+func TestWorkerSettingsDefaultsAndRejectsInvalidValues(t *testing.T) {
+	lookup := func(values map[string]string) func(string) (string, bool) {
+		return func(k string) (string, bool) {
+			v, ok := values[k]
+			return v, ok
+		}
+	}
+	workers, caps, err := workerSettings(lookup(nil))
+	if err != nil || workers != 2 || caps.Any || len(caps.List) != 0 {
+		t.Fatalf("defaults = %d, %+v, %v", workers, caps, err)
+	}
+	if _, _, err := workerSettings(lookup(map[string]string{"ORBIT_WORKERS": "0"})); err == nil {
+		t.Fatal("zero workers accepted")
+	}
+	if _, _, err := workerSettings(lookup(map[string]string{"ORBIT_CAPABILITIES": "INVALID"})); err == nil {
+		t.Fatal("invalid capability accepted")
 	}
 }
 

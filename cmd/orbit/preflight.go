@@ -21,8 +21,15 @@ import (
 func preflightCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("preflight", flag.ContinueOnError)
 	config := fs.String("config", "", "also load this configuration directory, as the new instance would")
+	worker := fs.Bool("worker", false, "check worker readiness without claiming runs or writing")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *worker && *config != "" {
+		return fmt.Errorf("preflight: --worker and --config cannot be combined")
+	}
+	if *worker {
+		return withStore(ctx, func(s *store.Store) error { return workerPreflight(ctx, s, os.Stdout, os.LookupEnv) })
 	}
 	if *config != "" {
 		if err := validate([]string{*config}); err != nil {
