@@ -313,3 +313,20 @@ func decideAction(ctx context.Context, db execer, id string, approve bool, by st
 	}
 	return nil
 }
+
+// FormAnswers are the answers of the person's newest reply, in a conversation, to a question of the agent's whose text is exactly question: how code finds again what a person answered to a question code wrote (engine/templates.go). nil when there is none.
+func (s *Store) FormAnswers(ctx context.Context, conversationID, question string) (map[string]json.RawMessage, error) {
+	var raw []byte
+	err := s.Pool.QueryRow(ctx, `SELECT r.answers FROM messages r JOIN messages q ON q.id = r.reply_to
+		WHERE r.conversation_id = $1 AND r.direction = 'to_agent' AND r.answers IS NOT NULL
+		  AND q.direction = 'from_agent' AND q.body = $2
+		ORDER BY r.created_at DESC, r.id DESC LIMIT 1`, conversationID, question).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]json.RawMessage
+	return out, json.Unmarshal(raw, &out)
+}
