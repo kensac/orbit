@@ -67,6 +67,8 @@ type liveProc struct {
 	proc    liveProcess
 	// tools serves the turn in progress its orbit tools (a chat run's) and connectors.
 	tools *chatTools
+	// lv is a chat process's permission level.
+	lv    procLevel
 	// model and effort are the run's overrides the process runs with
 	// (Request.Model, Request.Effort; "" is the runner's own).
 	model, effort string
