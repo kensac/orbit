@@ -120,7 +120,7 @@ func TestBoardFollowsAConversation(t *testing.T) {
 	}
 	c, _ = s.ClaimRun(ctx, "w")
 	if _, err := s.RecordOutcome(ctx, c.ID, "a", store.RunResult{Attempt: 1, Status: "succeeded", Report: "Which card?"}, store.Outcome{
-		Questions: []string{"Which card?"},
+		Questions: []store.Question{{Body: "Which card?"}},
 		Actions:   []store.ProposedAction{{Type: "notify", Params: json.RawMessage(`{}`), Reason: "tell you", Rule: "approve"}},
 	}); err != nil {
 		t.Fatal(err)

@@ -132,7 +132,7 @@ func (e *Engine) promTool(ctx context.Context, agent string, raw json.RawMessage
 		}
 	}
 	f := &sources.Fetcher{Client: e.Client, Env: e.Env, Credentials: snap.Config.Deployment.Credentials, Restricted: a.Restricted()}
-	b, err := f.PromQuery(ctx, *src, sources.Vars(now), q)
+	b, err := f.PromQuery(ctx, *src, sources.Vars{Now: now}, q)
 	if err != nil {
 		return "", err
 	}

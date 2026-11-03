@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,33 +35,102 @@ type Fetched struct {
 // Env resolves ${VAR} references in source settings.
 type Env func(string) (string, bool)
 
-// Vars are run-time values a source URL or query may reference with
-// {{name}}: {{now}}, {{today}}, {{month_start}}, {{prev_month_start}},
-// {{prev_month_end}}, {{days_ago_N}} (N in 1..366), all as YYYY-MM-DD in
-// the agent's timezone except {{now}} (RFC 3339).
-func Vars(now time.Time) map[string]string {
+// Vars are what a source's {{...}} templates are filled from: the run's
+// time, in the agent's timezone, and its trigger (spec.Source.ByTrigger).
+type Vars struct {
+	Now time.Time
+	// Trigger is the run's (schedule, manual, message, ...).
+	Trigger string
+}
+
+// Template bounds: ten years back, beyond any history a source here keeps,
+// and small enough that a typo cannot ask for year 1.
+const (
+	maxDaysAgo   = 3660
+	maxMonthsAgo = 120
+)
+
+// templateRE is one template: a name, optionally followed by a count.
+var templateRE = regexp.MustCompile(`\{\{([^{}]*)\}\}`)
+
+// Expand fills s's templates, all dates as YYYY-MM-DD in Now's zone:
+//
+//   - {{now}} (RFC 3339), {{today}}, {{month_start}}, {{prev_month_start}},
+//     {{prev_month_end}}, {{days_ago_N}} (N in 1..366);
+//   - {{days_ago N}}: N days before today, N in 0..maxDaysAgo;
+//   - {{months_ago_start N}} and {{months_ago_end N}}: the first and last
+//     day of the month N months before this one, N in 0..maxMonthsAgo
+//     ({{months_ago_start 1}} is {{prev_month_start}}).
+//
+// Anything else in {{...}}, or an unclosed {{, is an error naming it.
+func (v Vars) Expand(s string) (string, error) {
+	var bad error
+	out := templateRE.ReplaceAllStringFunc(s, func(m string) string {
+		r, err := v.one(strings.TrimSpace(m[2 : len(m)-2]))
+		if err != nil && bad == nil {
+			bad = fmt.Errorf("template %s in %q: %w", m, s, err)
+		}
+		return r
+	})
+	if bad != nil {
+		return "", bad
+	}
+	if i := strings.Index(out, "{{"); i >= 0 {
+		return "", fmt.Errorf("unknown template variable in %q", out[i:])
+	}
+	return out, nil
+}
+
+var errUnknownTemplate = errors.New("unknown template variable")
+
+func (v Vars) one(t string) (string, error) {
 	d := func(t time.Time) string { return t.Format("2006-01-02") }
+	now := v.Now
 	ms := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
-	v := map[string]string{
-		"now":              now.Format(time.RFC3339),
-		"today":            d(now),
-		"month_start":      d(ms),
-		"prev_month_start": d(ms.AddDate(0, -1, 0)),
-		"prev_month_end":   d(ms.AddDate(0, 0, -1)),
+	name, arg, hasArg := strings.Cut(t, " ")
+	if !hasArg {
+		switch name {
+		case "now":
+			return now.Format(time.RFC3339), nil
+		case "today":
+			return d(now), nil
+		case "month_start":
+			return d(ms), nil
+		case "prev_month_start":
+			return d(ms.AddDate(0, -1, 0)), nil
+		case "prev_month_end":
+			return d(ms.AddDate(0, 0, -1)), nil
+		}
+		if n, ok := strings.CutPrefix(name, "days_ago_"); ok {
+			if k, err := strconv.Atoi(n); err == nil && k >= 1 && k <= 366 && strconv.Itoa(k) == n {
+				return d(now.AddDate(0, 0, -k)), nil
+			}
+		}
+		return "", errUnknownTemplate
 	}
-	for n := 1; n <= 366; n++ {
-		v["days_ago_"+strconv.Itoa(n)] = d(now.AddDate(0, 0, -n))
+	limit := map[string]int{"days_ago": maxDaysAgo, "months_ago_start": maxMonthsAgo, "months_ago_end": maxMonthsAgo}[name]
+	if limit == 0 {
+		return "", errUnknownTemplate
 	}
-	return v
+	arg = strings.TrimSpace(arg)
+	n, err := strconv.Atoi(arg)
+	if err != nil || n < 0 || n > limit || strconv.Itoa(n) != arg {
+		return "", fmt.Errorf("%s takes a whole number from 0 to %d", name, limit)
+	}
+	switch name {
+	case "days_ago":
+		return d(now.AddDate(0, 0, -n)), nil
+	case "months_ago_start":
+		return d(ms.AddDate(0, -n, 0)), nil
+	}
+	return d(ms.AddDate(0, -n+1, -1)), nil
 }
 
 // render fills a setting's templates, then its ${VAR}s, adding every credential (spec.Credentials) it expands to used. A restricted fetcher refuses any other variable.
-func (f *Fetcher) render(s string, vars map[string]string, used map[string]bool) (string, error) {
-	for k, v := range vars {
-		s = strings.ReplaceAll(s, "{{"+k+"}}", v)
-	}
-	if i := strings.Index(s, "{{"); i >= 0 {
-		return "", fmt.Errorf("unknown template variable in %q", s[i:])
+func (f *Fetcher) render(s string, vars Vars, used map[string]bool) (string, error) {
+	s, err := vars.Expand(s)
+	if err != nil {
+		return "", err
 	}
 	for _, r := range spec.EnvRefs(s) {
 		if _, ok := f.Credentials[r]; ok {
@@ -102,7 +172,7 @@ type Fetcher struct {
 var ErrAbsent = errors.New("no webhook delivery started this run")
 
 // Fetch fetches one source.
-func (f *Fetcher) Fetch(ctx context.Context, s spec.Source, vars map[string]string) (*Fetched, error) {
+func (f *Fetcher) Fetch(ctx context.Context, s spec.Source, vars Vars) (*Fetched, error) {
 	switch s.Kind {
 	case "http":
 		return f.http(ctx, s, vars)
@@ -144,7 +214,7 @@ func (f *Fetcher) file(s spec.Source) (*Fetched, error) {
 	return &Fetched{Name: s.Name, MediaType: mediaTypeFor(s.Path, b), Content: b, Meta: map[string]any{"path": s.Path}}, nil
 }
 
-func (f *Fetcher) http(ctx context.Context, s spec.Source, vars map[string]string) (*Fetched, error) {
+func (f *Fetcher) http(ctx context.Context, s spec.Source, vars Vars) (*Fetched, error) {
 	used := map[string]bool{}
 	base, err := f.render(s.URL, vars, used)
 	if err != nil {
@@ -155,7 +225,7 @@ func (f *Fetcher) http(ctx context.Context, s spec.Source, vars map[string]strin
 		return nil, err
 	}
 	q := u.Query()
-	for k, v := range s.Query {
+	for k, v := range s.QueryFor(vars.Trigger) {
 		rv, err := f.render(v, vars, used)
 		if err != nil {
 			return nil, fmt.Errorf("query %s: %w", k, err)
@@ -247,7 +317,7 @@ func (f *Fetcher) http(ctx context.Context, s spec.Source, vars map[string]strin
 		Meta: map[string]any{"url": redact(u), "pages": pages, "items": len(items)}}, nil
 }
 
-func (f *Fetcher) prometheus(ctx context.Context, s spec.Source, vars map[string]string) (*Fetched, error) {
+func (f *Fetcher) prometheus(ctx context.Context, s spec.Source, vars Vars) (*Fetched, error) {
 	used := map[string]bool{}
 	base, err := f.render(s.URL, vars, used)
 	if err != nil {
