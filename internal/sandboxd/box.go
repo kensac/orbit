@@ -88,7 +88,7 @@ func boxSpec(cfg Config, name string, accounts []string) containerCreate {
 		Labels:     map[string]string{LabelBox: name},
 		HostConfig: hostConfig{
 			CapDrop:      append([]string(nil), boxCapDrop...),
-			NetworkMode:  cfg.Network,
+			NetworkMode:  cfg.WorkstationNetwork,
 			IpcMode:      "private",
 			CgroupnsMode: "private",
 			// Named volumes, filled from the image on first use (NoCopy
@@ -107,7 +107,7 @@ func boxSpec(cfg Config, name string, accounts []string) containerCreate {
 			RestartPolicy: restartPolicy{Name: "unless-stopped"},
 			Runtime:       cfg.BoxRuntime,
 		},
-		NetworkingConfig: networkingConfig{EndpointsConfig: map[string]struct{}{cfg.Network: {}}},
+		NetworkingConfig: networkingConfig{EndpointsConfig: map[string]struct{}{cfg.WorkstationNetwork: {}}},
 	}
 }
 
@@ -128,8 +128,8 @@ func verifyBox(cfg Config, name string, c containerState) error {
 		return fmt.Errorf("capabilities added: %v", h.CapAdd)
 	case !contains(h.CapDrop, "MKNOD") || !contains(h.CapDrop, "NET_RAW"):
 		return fmt.Errorf("capabilities dropped: %v, want %v", h.CapDrop, boxCapDrop)
-	case h.NetworkMode != cfg.Network:
-		return fmt.Errorf("network is %q, want %q", h.NetworkMode, cfg.Network)
+	case h.NetworkMode != cfg.WorkstationNetwork:
+		return fmt.Errorf("network is %q, want %q", h.NetworkMode, cfg.WorkstationNetwork)
 	case len(h.Binds) != 0:
 		return fmt.Errorf("bind mounts present: %v", h.Binds)
 	case h.PidMode != "" || h.UsernsMode != "":

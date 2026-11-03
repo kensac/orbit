@@ -10,6 +10,7 @@ import (
 
 	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 // codex runs `codex exec` headless with a read-only sandbox. Auth is
@@ -97,7 +98,7 @@ func (c *codex) Run(ctx context.Context, req Request, emit func(Event)) (*Result
 			}
 		}
 	})
-	res := &Result{Usage: usage, SessionID: threadID}
+	res := &Result{Usage: usage, Tokens: tokens.FromCodex(usage, c.rs.Model), SessionID: threadID}
 	if failure != "" {
 		return res, fmt.Errorf("%w: codex: %s", ErrBackend, firstLine(failure))
 	}

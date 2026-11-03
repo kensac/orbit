@@ -89,6 +89,17 @@ func TestConversationsOverTheAPI(t *testing.T) {
 	if code, _ := call(t, "POST", base+"/conversations/"+id+"/messages", kanishk, `{"body":"x","reply_to":"`+r["message_id"].(string)+`"}`); code != 400 {
 		t.Fatalf("reply across conversations = %d", code)
 	}
+	// delivery: a steer to an agent whose runs cannot take one is queued, and says so.
+	if code, _ := call(t, "POST", base+"/conversations/"+id+"/messages", kanishk, `{"body":"x","delivery":"now"}`); code != 400 {
+		t.Fatalf("an unknown delivery = %d", code)
+	}
+	code, r = call(t, "POST", base+"/conversations/"+id+"/messages", kanishk, `{"body":"also","delivery":"steer"}`)
+	if code != 201 || r["delivered"] != "queued" || r["run_id"] == nil {
+		t.Fatalf("a steer to a report agent = %d %v", code, r)
+	}
+	if _, r = call(t, "POST", base+"/conversations/"+id+"/messages", kanishk, `{"body":"plain","wake":false}`); r["delivered"] != "queued" || r["run_id"] != nil {
+		t.Fatalf("a queued message = %v", r)
+	}
 }
 
 var longTitle = strings.Repeat("x", 300)

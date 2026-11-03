@@ -99,9 +99,23 @@ func TestTimezoneAndFortnightAnchor(t *testing.T) {
 		t.Fatalf("%s %s", a, b)
 	}
 }
+func TestABareTimeIsTheTwentyFourHourClock(t *testing.T) {
+	for text, want := range map[string]string{
+		"every weekday at 8": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=8;BYMINUTE=0;BYSECOND=0",
+		"daily at 9:30":      "FREQ=DAILY;BYHOUR=9;BYMINUTE=30;BYSECOND=0",
+		"daily at 20":        "FREQ=DAILY;BYHOUR=20;BYMINUTE=0;BYSECOND=0",
+		"daily at 0":         "FREQ=DAILY;BYHOUR=0;BYMINUTE=0;BYSECOND=0",
+	} {
+		tr, err := Parse(text, time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC), time.UTC)
+		if err != nil || tr.RRule != want {
+			t.Errorf("%q = %q, %v; want %q", text, tr.RRule, err, want)
+		}
+	}
+}
+
 func TestRejectsAmbiguityAndUnsupportedText(t *testing.T) {
 	for _, text := range []string{
-		"every weekday at 8", "daily at 9:00", "daily at noon", "daily at 24:00", "daily at 00am", "daily at 13pm", "daily at 09:60", "daily at 9:60pm", "daily at 9am EST", "every mon at 9am", "every weekend at 9am", "every other week at 9am", "the 11st of every month at 9am", "the 0th of every month at 9am", "the 32nd of every month at 9am", "the 01st of every month at 9am", "daily at 9am then send email",
+		"daily at noon", "daily at 24:00", "daily at 00am", "daily at 13pm", "daily at 09:60", "daily at 9:60pm", "daily at 9am EST", "every mon at 9am", "every weekend at 9am", "every other week at 9am", "the 11st of every month at 9am", "the 0th of every month at 9am", "the 32nd of every month at 9am", "the 01st of every month at 9am", "daily at 9am then send email",
 	} {
 		if _, err := Parse(text, time.Now(), time.UTC); err == nil {
 			t.Errorf("accepted %q", text)
