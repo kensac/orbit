@@ -49,11 +49,9 @@ A template is an agent spec with `{{ name }}` slots and typed parameters, kept i
 
 ## Secrets
 
-Never in YAML. Channels name variables with `*_env`; source urls, headers, query
-values, Prometheus expressions and endpoint headers use `${VAR}`. An unset variable is an error, never
-an empty string.
+Never put secret values in YAML. Channels name variables with `*_env`; source urls, headers, query values, Prometheus expressions, lake credential fields and endpoint headers use `${VAR}`. An unset variable is an error, never an empty string.
 
-`credentials:` in `orbit.yaml` names the variables sources and endpoint headers may send, each bound to the URLs it may go to:
+`credentials:` in `orbit.yaml` names the variables sources and endpoint headers may send, each bound to the URLs it may go to. Lake access-key ID, secret key and session token references are checked against the same endpoint prefix before each signed request:
 
 ```yaml
 credentials:
@@ -107,6 +105,31 @@ expires:
 ```
 
 Each entry is `orbit_credential_expiry_timestamp_seconds{credential="CLAUDE_CODE_OAUTH_TOKEN"}` (midnight UTC of the date) on every instance that loads the configuration, refreshed on reload; nothing else reads it. Update it with the token.
+
+## S3 lake sources
+
+A `lake` source reads one bounded prefix of gzip newline-delimited JSON from an S3-compatible bucket. It signs only `ListObjectsV2` and `GET` requests with SigV4, returns a JSON array in object-key order, and can feed the existing transforms. Configure a read-only key as environment variables and bind both to the endpoint in `credentials:`; the key values never enter an agent definition or model process.
+
+```yaml
+credentials:
+  LAKE_ACCESS_KEY_ID: {url_prefix: http://garage:3900/}
+  LAKE_SECRET_ACCESS_KEY: {url_prefix: http://garage:3900/}
+
+# In agents/<name>.yaml:
+sources:
+  - name: aircraft
+    kind: lake
+    url: http://garage:3900
+    bucket: adsb
+    prefix: positions/date={{today}}/
+    region: garage
+    access_key_id: ${LAKE_ACCESS_KEY_ID}
+    secret_access_key: ${LAKE_SECRET_ACCESS_KEY}
+    max_objects: 100
+    max_bytes: 8388608
+```
+
+The prefix may use the source date templates. `max_objects` defaults to 100 and is capped at 1000. More objects fail the fetch rather than producing partial data. Compressed object bytes, decompressed NDJSON and resulting JSON are each bounded by `max_bytes`. Lake sources do not run SQL or execute a model-written query; reduce their records with `transforms:`.
 
 ## GitHub
 

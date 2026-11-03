@@ -612,6 +612,14 @@ type Source struct {
 	Limit int `yaml:"limit,omitempty" json:"limit,omitempty"`
 	// Since is how far back a loki query reads, ending now.
 	Since Duration `yaml:"since,omitempty" json:"since,omitempty"`
+	// lake: endpoint, bucket, prefix, region and credentials for a read-only S3-compatible lake.
+	Bucket          string `yaml:"bucket,omitempty" json:"bucket,omitempty"`
+	Prefix          string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+	Region          string `yaml:"region,omitempty" json:"region,omitempty"`
+	AccessKeyID     string `yaml:"access_key_id,omitempty" json:"access_key_id,omitempty"`
+	SecretAccessKey string `yaml:"secret_access_key,omitempty" json:"secret_access_key,omitempty"`
+	SessionToken    string `yaml:"session_token,omitempty" json:"session_token,omitempty"`
+	MaxObjects      int    `yaml:"max_objects,omitempty" json:"max_objects,omitempty"`
 	// MaxBytes bounds one source's fetched size.
 	MaxBytes int64 `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
 	// ByTrigger overrides query values for runs of one trigger: a person's
@@ -834,7 +842,7 @@ var (
 	// Kinds every adapter registry must cover. Kept here so validation does
 	// not import the adapters (which import spec).
 	channelKinds = []string{"ntfy", "smtp", "webhook", "log"}
-	sourceKinds  = []string{"http", "prometheus", "loki", "github", "file", "webhook"}
+	sourceKinds  = []string{"http", "prometheus", "loki", "github", "lake", "file", "webhook"}
 	runnerKinds  = []string{"claude-code", "codex", "anthropic"}
 	notifyWhen   = []string{"", "always", "agent", "never"}
 	verifyChecks = []string{"figures"}
@@ -1211,6 +1219,8 @@ func (c *Config) validateAgent(a *Agent) []error {
 			}
 		case "github":
 			errs = append(errs, c.validateGitHubSource(a, s)...)
+		case "lake":
+			errs = append(errs, c.validateLakeSource(a, s)...)
 		case "file":
 			if s.Path == "" {
 				at("source %q: path is required", s.Name)
@@ -1231,6 +1241,9 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		if s.Kind != "loki" && s.Since != 0 {
 			at("source %q: since is for a loki source", s.Name)
+		}
+		if s.Kind != "lake" && (s.Bucket != "" || s.Prefix != "" || s.Region != "" || s.AccessKeyID != "" || s.SecretAccessKey != "" || s.SessionToken != "" || s.MaxObjects != 0) {
+			at("source %q: bucket, prefix, region, S3 credentials and max_objects are for a lake source", s.Name)
 		}
 	}
 	for _, t := range a.Transforms {
