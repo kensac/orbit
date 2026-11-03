@@ -32,7 +32,7 @@ an agent's beliefs changed.
 ## State machines
 
 - run: `queued -> running -> succeeded | failed | skipped | cancelled` (cancelled: a person stopped it, `cancel_requested_at`), `queued -> cancelled`,
-  `running -> queued` (a hand-back, a lost worker under `MaxAttempts`).
+  `running -> queued` (a hand-back, a stalled turn or a lost worker under `MaxAttempts`).
   Every write by a running attempt also guards `attempt = <its own>`, so an
   attempt superseded by a newer claim writes nothing. `skipped` is a run that ended without a backend call, and names what ended it in `gate` (`runs_skipped_names_gate`): an agent's gate (`unchanged`, `items_above`; configuration.md), a schedule fire claimed past its grace (`missed`; configuration.md, Triggers) or a build that delivered an earlier attempt's pushed commit (`pushed`). It counts as a success for staleness (`orbit_agent_last_success_timestamp_seconds`, `/health`'s `last_success`), except `missed`, where the agent did nothing; `orbit_runs_skipped_total` counts them by gate.
 - attempt (`run_attempts`, one per claim, written in `ClaimRun`'s
