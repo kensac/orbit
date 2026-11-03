@@ -342,7 +342,9 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 			_, _ = conn.Write(h[:])
 			_, _ = conn.Write(p)
 		}
-		if f.home != "" && len(e.Cmd) > 3 && e.Cmd[0] == "sh" && runScripts[e.Cmd[3]] {
+		runsFixedScript := len(e.Cmd) > 3 && e.Cmd[0] == "sh" && runScripts[e.Cmd[3]]
+		runsAccountSettings := len(e.Cmd) > 2 && e.Cmd[0] == "python3" && e.Cmd[1] == "-c" && e.Cmd[2] == accountSettingsScript
+		if f.home != "" && (runsFixedScript || runsAccountSettings) {
 			var stdin []byte
 			if e.AttachStdin {
 				stdin, _ = io.ReadAll(buf.Reader)
@@ -379,7 +381,12 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 // runScript runs a box's fixed script here, as the box would: HOME is the
 // fake's home and the exec's environment is added.
 func (f *fakeDocker) runScript(t *testing.T, e execCreate, stdin []byte) (stdout, stderr []byte, code int) {
-	cmd := exec.Command(e.Cmd[0], e.Cmd[1:]...)
+	argv := append([]string(nil), e.Cmd...)
+	if len(argv) > 4 && argv[0] == "python3" && argv[1] == "-c" && argv[2] == accountSettingsScript {
+		argv[3] = filepath.Join(f.home, ".claude", "settings.json")
+		argv[4] = filepath.Join(f.home, ".claude-accounts", filepath.Base(argv[4]))
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = append([]string{"HOME=" + f.home, "PATH=" + os.Getenv("PATH")}, e.Env...)
 	cmd.Stdin = bytes.NewReader(stdin)
 	var out, errb bytes.Buffer

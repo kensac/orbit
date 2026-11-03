@@ -200,14 +200,18 @@ func TestAccountScripts(t *testing.T) {
 	if err := h.client.PrepareAccount(ctx, "orbit", slotA); err != nil {
 		t.Fatal(err)
 	}
-	for _, e := range []string{"settings.json", "CLAUDE.md", "skills", "commands", "agents"} {
+	for _, e := range []string{"CLAUDE.md", "skills", "commands", "agents"} {
 		target, err := os.Readlink(filepath.Join(dir, e))
 		if err != nil || target != "../../.claude/"+e {
 			t.Errorf("%s: link %q %v", e, target, err)
 		}
 	}
-	if b, err := os.ReadFile(filepath.Join(dir, "settings.json")); err != nil || strings.TrimSpace(string(b)) != "{}" {
-		t.Fatalf("shared settings through the link: %q %v", b, err)
+	settings := filepath.Join(dir, "settings.json")
+	if info, err := os.Lstat(settings); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("account settings are not private: %v %v", info, err)
+	}
+	if b, err := os.ReadFile(settings); err != nil || strings.TrimSpace(string(b)) != "{}" {
+		t.Fatalf("account settings defaults: %q %v", b, err)
 	}
 	// A file the CLI wrote in place of a link stays; preparing again is
 	// harmless.
@@ -249,4 +253,67 @@ func TestAccountScripts(t *testing.T) {
 	if _, err := parseAccountStatus([]byte(`{"logged_in": true, "access_token": "x"}`)); err == nil {
 		t.Fatal("an unknown field in the status was passed on")
 	}
+}
+
+func TestAccountSettingsOverridesArePrivateAndFollowSharedDefaults(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(shared), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shared, []byte("{\n // common defaults\n \"model\":\"sonnet\",\n \"enabledPlugins\":{\"shared@market\":true,},\n}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := filepath.Join(root, "accounts", slotA)
+	b := filepath.Join(root, "accounts", slotB)
+	for _, account := range []string{a, b} {
+		if err := os.MkdirAll(account, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := syncAccountSettingsForTest(shared, account); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set := func(account, raw string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(account, "settings.json"), []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set(a, `{"model":"haiku","enabledPlugins":{"shared@market":true,"review@local-market":true}}`)
+	if err := os.WriteFile(shared, []byte(`{"model":"opus","enabledPlugins":{"shared@market":false,"new@market":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncAccountSettingsForTest(shared, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncAccountSettingsForTest(shared, b); err != nil {
+		t.Fatal(err)
+	}
+	read := func(account string) map[string]any {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(account, "settings.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var settings map[string]any
+		if err := json.Unmarshal(data, &settings); err != nil {
+			t.Fatal(err)
+		}
+		return settings
+	}
+	settingsA, settingsB := read(a), read(b)
+	pluginsA := settingsA["enabledPlugins"].(map[string]any)
+	pluginsB := settingsB["enabledPlugins"].(map[string]any)
+	if settingsA["model"] != "haiku" || pluginsA["review@local-market"] != true || pluginsA["shared@market"] != false || pluginsA["new@market"] != true {
+		t.Fatalf("account A settings = %v", settingsA)
+	}
+	if settingsB["model"] != "opus" || pluginsB["review@local-market"] != nil || pluginsB["new@market"] != true {
+		t.Fatalf("account B settings = %v", settingsB)
+	}
+}
+
+func syncAccountSettingsForTest(shared, account string) error {
+	cmd := exec.Command("python3", "-c", accountSettingsScript, shared, account)
+	return cmd.Run()
 }

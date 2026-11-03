@@ -31,9 +31,8 @@ const boxRunLimit = 1 << 20
 
 // prepareScript makes an account's directory the box user's (a new volume
 // mounted where the image has no directory is root's, hence sudo, which the
-// box allows) and links the shared profile into it. An entry the CLI
-// replaced with a file of its own is left alone; a missing or linked one is
-// linked again, so the step is safe to repeat.
+// box allows) and links the shared files into it. settings.json is merged
+// separately so account plugin enablement stays private.
 const prepareScript = `set -eu
 d=$HOME/.claude-accounts/$1
 p=$HOME/.claude
@@ -42,7 +41,7 @@ p=$HOME/.claude
 chmod 0700 "$d"
 mkdir -p "$p/skills" "$p/commands" "$p/agents"
 [ -e "$p/settings.json" ] || [ -L "$p/settings.json" ] || printf '{}\n' > "$p/settings.json"
-for e in settings.json CLAUDE.md skills commands agents; do
+for e in CLAUDE.md skills commands agents; do
 	if [ -L "$d/$e" ] || [ ! -e "$d/$e" ]; then ln -sfn "../../.claude/$e" "$d/$e"; fi
 done`
 
@@ -162,6 +161,11 @@ func (s *Server) accountPrepare(w http.ResponseWriter, r *http.Request) {
 		return
 	case code != 0:
 		writeError(w, http.StatusBadGateway, scriptError("prepare", code, stderr))
+		return
+	}
+	_, stderr, code, err = s.boxRun(r.Context(), c.ID, []string{"python3", "-c", accountSettingsScript, "/home/agent/.claude/settings.json", "/home/agent/.claude-accounts/" + slot}, nil, nil)
+	if err != nil || code != 0 {
+		writeError(w, http.StatusBadGateway, scriptError("account settings", code, stderr))
 		return
 	}
 	s.log.Info("sandboxd: account prepared", "box", name, "account", slot)
