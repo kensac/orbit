@@ -103,6 +103,7 @@ Pick one, put your name and branch in the Owner column in your first PR, keep ea
 | 8 | Voice: dictation in the chat (browser) and spoken replies | | portfolio repo, app/orbit/ |
 | 9 | Plugin system for sources, actions and tools without editing orbit (a manifest plus an executable or WASM module, run in the sandbox) | plugin-design #56; codex/plugin-manifest #62 | Manifest/package validation and standalone `orbitextension validate` command; `codex/jsonstrict`, #110 shares the existing bounded JSON/number policy without enabling invocation; `codex/extension-protocol`, #108 adds an inert bounded source-envelope codec with shared JSON/number policy, no schema-instance validation; no installation, execution or grants; design: [docs/plugins.md](plugins.md) |
 | 10 | Docs and onboarding: a user guide (what orbit can do, creating an agent in a minute, the chat, email, MCP), kept short | onboarding-guide, #52 | Built: [docs/guide/README.md](guide/README.md); API examples, approval results, email and MCP prerequisites; deployment availability stated explicitly |
+| 11 | Mergify merge queue: manual enqueue for ready PRs targeting `main`, squash merge after `check` and `scan` pass | `codex/mergify-merge-queue` | Queue configured with serial processing, one PR per check, and up to three speculative checks. GitHub ruleset configuration remains external. |
 
 ## Standards (summary; AGENTS.md and docs/agents/ are authoritative)
 
