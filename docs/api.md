@@ -502,6 +502,16 @@ token's person. Only with the operator token, an `"author"` field names it
 
 `POST /agents/{name}/runs` `{"prompt": "optional"}` starts a run without a
 message, in the default conversation: `202 {"run_id": "uuid"}`.
+`POST /agents/{name}/replay` `{"cases": [{"name", "input": <JSON>}]}`
+evaluates each saved input sequentially against one snapshot of the current
+charter and active skills, returning `{"results": [{"name", "output",
+"cost_usd"}]}` in request order. It creates no runs or artifacts and sends
+no sources, memory, messages, connectors or agent tools to the backend.
+Claude Code gets read-only file access to private temporary input and skill
+files. This is not a full run replay: behavior that depends on sources,
+memory, messages, tools, sessions or hooks is absent. Requests have at most
+32 cases, 8 MiB per input, 32 MiB total input and 512 KiB per output. Each
+case runs under the agent's configured timeout.
 `GET /agents/{name}/messages` lists the default conversation's messages.
 
 ## Streaming a run
