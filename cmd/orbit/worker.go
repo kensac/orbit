@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -151,6 +152,12 @@ func missingEnv(cfg *spec.Config, caps spec.Capabilities, lookup func(string) (s
 				want[r] = true
 			}
 		}
+		if agentNeedsSandboxService(a) {
+			_, tokenEnv := cfg.Deployment.SandboxService()
+			if tokenEnv != "" {
+				want[tokenEnv] = true
+			}
+		}
 		rs := cfg.Deployment.Runners[a.Runner]
 		switch {
 		case rs.APIKeyEnv != "":
@@ -170,6 +177,37 @@ func missingEnv(cfg *spec.Config, caps spec.Capabilities, lookup func(string) (s
 	}
 	sort.Strings(out)
 	return out
+}
+
+func agentNeedsSandboxService(a *spec.Agent) bool {
+	if a.Sandbox != "" {
+		return true
+	}
+	for _, source := range a.Sources {
+		if source.Kind == "extension" {
+			return true
+		}
+	}
+	return false
+}
+
+func workerCoverageError(cfg *spec.Config, caps spec.Capabilities) error {
+	for _, agent := range cfg.Agents {
+		if !agent.IsEnabled() || !caps.Covers(agent) {
+			continue
+		}
+		if slices.Contains(agent.Needs, spec.NeedsGitHub) {
+			key := "ORBIT_GITHUB_APP_PRIVATE_KEY"
+			if cfg.Deployment.GitHub != nil && cfg.Deployment.GitHub.PrivateKeyEnv != "" {
+				key = cfg.Deployment.GitHub.PrivateKeyEnv
+			}
+			return fmt.Errorf("worker preflight: agent %q requires GitHub access through %s, which is control-only", agent.Name, key)
+		}
+		if agentNeedsSandboxService(agent) && !slices.Contains(agent.Needs, "sandbox") {
+			return fmt.Errorf("worker preflight: agent %q uses sandboxd but does not require the sandbox capability; add needs: [sandbox] so only hosts with sandbox access can claim it", agent.Name)
+		}
+	}
+	return nil
 }
 
 func workerSettings(lookup func(string) (string, bool)) (int, spec.Capabilities, error) {
@@ -207,6 +245,9 @@ func workerPreflight(ctx context.Context, s *store.Store, w io.Writer, lookup fu
 	}
 	if err != nil {
 		return fmt.Errorf("worker preflight: reading control configuration: %w", err)
+	}
+	if err := workerCoverageError(cfg, caps); err != nil {
+		return err
 	}
 	missing := missingEnv(cfg, caps, lookup)
 	if len(missing) > 0 {

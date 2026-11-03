@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/kensac/orbit/internal/spec"
@@ -80,6 +81,71 @@ func TestWorkerSettingsDefaultsAndRejectsInvalidValues(t *testing.T) {
 	}
 	if _, _, err := workerSettings(lookup(map[string]string{"ORBIT_CAPABILITIES": "INVALID"})); err == nil {
 		t.Fatal("invalid capability accepted")
+	}
+}
+
+func TestWorkerPreflightRejectsControlOnlyGitHubCoverage(t *testing.T) {
+	cfg := &spec.Config{
+		Deployment: spec.Deployment{GitHub: &spec.GitHub{PrivateKeyEnv: "ORBIT_GITHUB_APP_PRIVATE_KEY"}},
+		Agents: map[string]*spec.Agent{
+			"repo-reader": {Name: "repo-reader", Needs: []string{spec.NeedsGitHub}},
+		},
+	}
+	caps, err := spec.ParseCapabilities("github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = workerCoverageError(cfg, caps)
+	if err == nil || !strings.Contains(err.Error(), "ORBIT_GITHUB_APP_PRIVATE_KEY") {
+		t.Fatalf("GitHub-capable worker error = %v", err)
+	}
+	all, err := spec.ParseCapabilities("*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workerCoverageError(cfg, all); err == nil {
+		t.Fatal("wildcard worker accepted a control-only GitHub agent")
+	}
+	bare, _ := spec.ParseCapabilities("")
+	if err := workerCoverageError(cfg, bare); err != nil {
+		t.Fatalf("worker unable to claim GitHub agent: %v", err)
+	}
+}
+
+func TestWorkerPreflightChecksSandboxTokenOnlyForClaimableSandboxAgents(t *testing.T) {
+	cfg := &spec.Config{
+		Deployment: spec.Deployment{
+			Sandbox: &spec.SandboxService{Sandboxd: "sandboxd:8080", TokenEnv: "WORKER_SANDBOX_TOKEN"},
+		},
+		Agents: map[string]*spec.Agent{
+			"plain":     {Name: "plain"},
+			"sandbox":   {Name: "sandbox", Needs: []string{"sandbox"}, Sandbox: spec.SandboxWorkstation},
+			"extension": {Name: "extension", Needs: []string{"sandbox"}, Sources: []spec.Source{{Kind: "extension"}}},
+		},
+	}
+	bare, _ := spec.ParseCapabilities("")
+	if got := missingEnv(cfg, bare, func(string) (string, bool) { return "", false }); len(got) != 0 {
+		t.Fatalf("sandbox token required from worker without sandbox capability: %v", got)
+	}
+	sandboxCaps, err := spec.ParseCapabilities("sandbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workerCoverageError(cfg, sandboxCaps); err != nil {
+		t.Fatal(err)
+	}
+	if got := missingEnv(cfg, sandboxCaps, func(string) (string, bool) { return "", false }); !reflect.DeepEqual(got, []string{"WORKER_SANDBOX_TOKEN"}) {
+		t.Fatalf("missing sandbox token = %v", got)
+	}
+
+	bad := &spec.Config{
+		Deployment: cfg.Deployment,
+		Agents: map[string]*spec.Agent{
+			"unscoped": {Name: "unscoped", Sandbox: spec.SandboxWorkstation},
+		},
+	}
+	if err := workerCoverageError(bad, bare); err == nil || !strings.Contains(err.Error(), "needs: [sandbox]") {
+		t.Fatalf("unscoped sandbox agent error = %v", err)
 	}
 }
 
