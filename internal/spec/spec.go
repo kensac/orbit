@@ -1606,3 +1606,35 @@ func hasKey(m map[string]string, k string) bool {
 	_, ok := m[k]
 	return ok
 }
+
+// ClaudeEfforts are the effort levels Claude Code takes (--effort and the
+// effortLevel setting; 2.1.316's --help, and its apply_flag_settings accepts
+// an unknown level and ignores it, so orbit checks).
+var ClaudeEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+
+// modelName is a model as a runner is given it: an alias (opus, sonnet) or an
+// id (claude-opus-4-5, gpt-5-codex), with Claude Code's [1m] suffix allowed.
+var modelName = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,99}(\[1m\])?$`)
+
+// CheckModel says whether a runner of kind can be told model and effort per
+// conversation ("" is the runner's own). Every kind takes a model; only
+// claude-code takes an effort.
+func CheckModel(kind, model, effort string) error {
+	if model != "" {
+		if !modelName.MatchString(model) {
+			return fmt.Errorf("model %q is not a model name (lowercase letters, digits, . _ : -)", model)
+		}
+		if kind == "anthropic" && !strings.HasPrefix(model, "claude-") {
+			return fmt.Errorf("model %q: an anthropic runner takes a model id (claude-...)", model)
+		}
+	}
+	if effort != "" {
+		if kind != "claude-code" {
+			return fmt.Errorf("effort: a %s runner takes none (only claude-code)", kind)
+		}
+		if !slices.Contains(ClaudeEfforts, effort) {
+			return fmt.Errorf("effort %q is not one of %s", effort, strings.Join(ClaudeEfforts, ", "))
+		}
+	}
+	return nil
+}

@@ -723,3 +723,25 @@ sources:
 		}
 	}
 }
+func TestCheckModel(t *testing.T) {
+	for _, c := range []struct {
+		kind, model, effort string
+		ok                  bool
+	}{
+		{"claude-code", "opus", "high", true},
+		{"claude-code", "claude-opus-4-5", "", true},
+		{"claude-code", "sonnet[1m]", "max", true},
+		{"claude-code", "", "", true},
+		{"claude-code", "Opus", "", false},
+		{"claude-code", "opus; rm", "", false},
+		{"claude-code", "", "extreme", false},
+		{"codex", "gpt-5-codex", "", true},
+		{"codex", "", "high", false},
+		{"anthropic", "claude-sonnet-4-5", "", true},
+		{"anthropic", "sonnet", "", false},
+	} {
+		if err := CheckModel(c.kind, c.model, c.effort); (err == nil) != c.ok {
+			t.Errorf("%s %q %q: %v", c.kind, c.model, c.effort, err)
+		}
+	}
+}
