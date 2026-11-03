@@ -28,6 +28,11 @@ sources:
       start_date: "{{prev_month_start}}"
       end_date: "{{today}}"
       per_page: "100"
+    # A person's question may compare months: a message run reads the last three.
+    by_trigger:
+      message:
+        query:
+          start_date: "{{months_ago_start 3}}"
     paginate:
       page_param: page
       items_path: transactions
@@ -56,6 +61,7 @@ gates:
 actions:
   notify: auto
   webhook:home-assistant: approve
+  webhook:sure-categorize: approve
   # Wake again later to finish a long task; each wake waits for approval.
   continue: approve
 # Every dollar amount in a report must come from the inputs or orbit's

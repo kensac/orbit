@@ -44,6 +44,7 @@ channels: {c: {kind: log}}
 func TestUsage(t *testing.T) {
 	v := newEnv(t, nil)
 	withTrigger(t, v, "America/New_York")
+	v.e.Current().Config.Agents["a"].Budget = &spec.AgentBudget{Period: "month", MaxCostUSD: 0.02, MaxRuns: 2}
 	sha := v.e.Current().Config.Agents["a"].SHA
 	id, err := v.s.EnqueueRun(ctx, store.NewRun{Agent: "a", SpecSHA: sha, Trigger: "manual"})
 	if err != nil {
@@ -81,6 +82,34 @@ func TestUsage(t *testing.T) {
 	if o := sub["overage"].(map[string]any); o["status"] != "rejected" || o["disabled_reason"] != "org_level_disabled" {
 		t.Fatalf("overage = %v", o)
 	}
+	if w["source"] != "stream" || w["status"] != "allowed" {
+		t.Fatalf("window = %v, want the stream's reading", w)
+	}
+	if p := sub["poll"].(map[string]any); p["enabled"] != false || p["last_at"] != nil {
+		t.Fatalf("poll = %v, want off and never polled", p)
+	}
+	if d := u["deferral"].(map[string]any); d["enabled"] != false || d["threshold"] != 0.8 || len(d["held"].([]any)) != 0 {
+		t.Fatalf("deferral = %v", d)
+	}
+
+	// A poll newer than the stream's report wins its window, and names
+	// itself; a failed poll after it keeps the reading and says why.
+	if err := v.s.RecordUsageSample(ctx, "control", 200, json.RawMessage(
+		`{"seven_day":{"utilization":31,"resets_at":"2100-01-01T00:00:00+00:00"},"five_hour":null}`), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.s.RecordUsageSample(ctx, "control", 500, nil, errors.New("HTTP 500: overloaded")); err != nil {
+		t.Fatal(err)
+	}
+	_, u = call(t, "GET", v.internal.URL+"/api/v1/usage", token, "")
+	sub = u["subscription"].(map[string]any)
+	w = sub["windows"].([]any)[0].(map[string]any)
+	if w["source"] != "poll" || w["utilization"] != 0.31 || w["status"] != nil || w["run_id"] != nil {
+		t.Fatalf("window = %v, want the poll's reading", w)
+	}
+	if p := sub["poll"].(map[string]any); p["last_ok_at"] == nil || p["last_error"] != "HTTP 500: overloaded" {
+		t.Fatalf("poll = %v", p)
+	}
 	c := u["cost"].(map[string]any)
 	total := c["total"].(map[string]any)
 	if total["api_equivalent_usd"] != 0.017097 || total["runs"] != 1.0 || total["by_status"].(map[string]any)["succeeded"] != 1.0 {
@@ -91,6 +120,15 @@ func TestUsage(t *testing.T) {
 	}
 	if a := c["by_agent"].([]any); len(a) != 1 || a[0].(map[string]any)["agent"] != "a" {
 		t.Fatalf("by_agent = %v", a)
+	}
+	budgets := u["budgets"].([]any)
+	if len(budgets) != 1 {
+		t.Fatalf("budgets = %v", budgets)
+	}
+	b := budgets[0].(map[string]any)
+	if b["agent"] != "a" || b["period"] != "month" || b["runs"] != 1.0 || b["runs_with_cost"] != 1.0 ||
+		b["alert"] != true || b["exceeded"] != false || b["cost_utilization"].(float64) < 0.8 {
+		t.Fatalf("budget status = %v", b)
 	}
 
 	code, u = call(t, "GET", v.internal.URL+"/api/v1/usage?from=2020-01-01&to=2020-01-03", token, "")
@@ -140,5 +178,17 @@ func TestHealthAndAgentNextFires(t *testing.T) {
 	code, d := call(t, "GET", v.internal.URL+"/api/v1/agents/a", token, "")
 	if code != 200 || len(d["next_fires"].([]any)) != 1 || d["agent"].(map[string]any)["spec"] == nil {
 		t.Fatalf("agent detail = %d %v", code, d)
+	}
+	if hs := h["holds"].([]any); len(hs) != 0 || a["held"] != false {
+		t.Fatalf("holds = %v, held = %v", hs, a["held"])
+	}
+	// A held runner is listed, and so is every agent on it.
+	if _, err := v.s.OpenHold(ctx, store.NewHold{Runner: "r", Kind: store.HoldAuth, Reason: "Not logged in", FirstProbe: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	_, h = call(t, "GET", v.srv.URL+"/api/v1/health", v.person("kanishk"), "")
+	hs := h["holds"].([]any)
+	if len(hs) != 1 || hs[0].(map[string]any)["runner"] != "r" || hs[0].(map[string]any)["kind"] != "auth" || h["agents"].([]any)[0].(map[string]any)["held"] != true {
+		t.Fatalf("holds = %v, agents = %v", hs, h["agents"])
 	}
 }

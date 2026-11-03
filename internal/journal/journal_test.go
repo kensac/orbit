@@ -106,7 +106,7 @@ func TestAClaudeCodeTurnBecomesTypedItems(t *testing.T) {
 		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"done","is_error":true}]}}`,
 		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t4","name":"TodoWrite","input":{"todos":[`+
 			`{"content":"read","status":"completed"},{"content":"sum","status":"in_progress"}]}}]}}`,
-		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t5","name":"StructuredOutput","input":{"summary":"s","questions":["Which card?"]}}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t5","name":"StructuredOutput","input":{"summary":"s","questions":["Which card?",{"question":"Which month?","fields":[{"name":"m","type":"date"}]}]}}]}}`,
 		`{"type":"result","subtype":"success","is_error":false,"duration_ms":4200,"total_cost_usd":0.02,"usage":{"output_tokens":90}}`,
 	)
 
@@ -171,6 +171,10 @@ func TestAClaudeCodeTurnBecomesTypedItems(t *testing.T) {
 	var q Question
 	if m.latest(t, "question:1.10.0", &q); q.Text != "Which card?" {
 		t.Fatalf("question = %+v", q)
+	}
+	// A question with a form is an item by its text; the form is the thread's.
+	if m.latest(t, "question:1.10.1", &q); q.Text != "Which month?" {
+		t.Fatalf("question with a form = %+v", q)
 	}
 	var st Status
 	if m.latest(t, "status:1.1.0", &st); st.Code != "system.init" || !strings.Contains(st.Detail.Head, `"claude-x"`) {
@@ -257,6 +261,23 @@ func TestApprovalsAreRequestThenDecision(t *testing.T) {
 	var st Status
 	if m.latest(t, "status:1.3.0", &st); st.Code != "control_request" {
 		t.Fatalf("other control request = %+v", st)
+	}
+}
+
+func TestASteerIsAnItemInItsTurn(t *testing.T) {
+	m := &memJournal{}
+	m.feed(t, 1,
+		`{"type":"system","subtype":"init","session_id":"s"}`,
+		`orbit.steer {"message_id":"m2","text":"also banana","author":"kanishk"}`,
+		`{"type":"command_lifecycle","command_uuid":"m2","state":"started"}`,
+		`{"type":"result","subtype":"success"}`)
+	var st Steer
+	it := m.latest(t, "steer:m2", &st)
+	if it.Kind != KindSteer || *it.Turn != "turn:1.1" || st.Text != "also banana" || st.Author != "kanishk" {
+		t.Fatalf("steer = %s %v %+v", it.Kind, it.Turn, st)
+	}
+	if it, _ := m.look("status:1.3.0"); it != nil {
+		t.Fatal("a lifecycle frame is an item")
 	}
 }
 
@@ -418,5 +439,71 @@ func TestUpcastKeepsNewerRowsAsStored(t *testing.T) {
 	}
 	if _, err := Upcast(0, "message", body); err == nil {
 		t.Fatal("a version 0 row read without error")
+	}
+}
+
+func TestALevelAppliedIsAPermissionsItem(t *testing.T) {
+	m := &memJournal{}
+	m.feed(t, 1, `orbit.permissions {"level":"auto","applied":"ask","mode":"default","when":"start","source":"conversation","version":3,"set_by":"kanishk","reason":"auto mode unavailable"}`,
+		`orbit.permissions {"level":"locked","applied":"locked","mode":"dontAsk","when":"live","source":"agent"}`,
+		`orbit.permissions {"nothing":true}`)
+	if len(m.items) != 3 || m.items[0].Kind != KindPermissions || m.items[1].Kind != KindPermissions || m.items[2].Kind != KindStatus {
+		t.Fatalf("items:\n%s", m.dump())
+	}
+	var p Permissions
+	_ = json.Unmarshal(m.items[0].Body, &p)
+	if p.Level != "auto" || p.Applied != "ask" || p.Version != 3 || p.SetBy != "kanishk" || p.Reason == "" || m.items[0].ID != "permissions:1.1.0" {
+		t.Fatalf("first = %s %+v", m.items[0].ID, p)
+	}
+}
+
+func TestAChatApprovalCarriesTheCLIsReasonAndThePersonsDecision(t *testing.T) {
+	m := &memJournal{}
+	m.feed(t, 1,
+		// orbit's opening of the approval can land before the request line it answers.
+		`orbit.approval {"request_id":"q1","approval_id":"ap-1","kind":"tool","tool":"Bash","level":"ask","state":"pending","expires_at":"2026-11-02T08:00:00Z"}`,
+		`{"type":"control_request","request_id":"q1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"npm test"},"decision_reason":"runs a command","decision_reason_type":"rule","blocked_path":"/x","matched_ask_rule":{"source":"cliArg","tool_name":"Bash"},"permission_suggestions":[{"type":"addRules"}],"title":"Run npm test"}}`,
+		`orbit.approval {"request_id":"q1","approval_id":"ap-1","kind":"tool","state":"allowed","scope":"conversation","decided_by":"kanishk"}`,
+		`orbit.permission {"request_id":"q1","tool":"Bash","allowed":true,"message":""}`)
+	var ap Approval
+	it := m.latest(t, "approval:q1", &ap)
+	if it.Revision != 3 || ap.State != ApprovalAllowed || ap.ApprovalID != "ap-1" || ap.Scope != "conversation" || ap.DecidedBy != "kanishk" ||
+		ap.DecisionReason != "runs a command" || ap.DecisionReasonType != "rule" || ap.BlockedPath != "/x" || ap.Title != "Run npm test" ||
+		!strings.Contains(string(ap.MatchedRule), "cliArg") || !strings.Contains(string(ap.Suggestions), "addRules") || ap.ExpiresAt == nil || ap.Level != "ask" {
+		t.Fatalf("approval = r%d %+v", it.Revision, ap)
+	}
+	var second Approval
+	_ = json.Unmarshal(m.items[2].Body, &second)
+	if second.State != ApprovalPending || second.ApprovalID != "ap-1" || second.Tool != "Bash" {
+		t.Fatalf("the request line kept orbit's opening: %s", m.items[2].Body)
+	}
+}
+
+func TestAStalledTurnIsInterruptedWhateverEndedIt(t *testing.T) {
+	// The interrupt's result closed the turn first; the watchdog's event
+	// after it says the turn did not finish its work.
+	m := &memJournal{}
+	m.feed(t, 1, `{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"}]}}`,
+		`{"type":"result","subtype":"error_during_execution","is_error":true}`,
+		`orbit.stalled {"idle_ms":600000,"stall_ms":600000}`)
+	var tb Turn
+	m.latest(t, "turn:1.1", &tb)
+	if tb.State != TurnInterrupted || tb.Reason != ReasonStalled || tb.Outcome != "" || tb.CompletedAt == nil {
+		t.Fatalf("turn = %+v", tb)
+	}
+	// A kill left the turn open; the event closes it, and the attempt's
+	// end finds nothing open.
+	m = &memJournal{}
+	m.feed(t, 1, `{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"}]}}`,
+		`orbit.stalled {"idle_ms":600000,"stall_ms":600000}`)
+	m.latest(t, "turn:1.1", &tb)
+	if tb.State != TurnInterrupted || tb.Reason != ReasonStalled || m.state.OpenTurn != "" {
+		t.Fatalf("turn = %+v, open %q", tb, m.state.OpenTurn)
+	}
+	if ws, _ := Close(&m.state, "handed_back", t0.Add(time.Hour), m.look); ws != nil {
+		t.Fatalf("the hand-back closed the turn again: %+v", ws)
+	}
+	if !strings.Contains(m.dump(), `"code":"orbit.stalled"`) {
+		t.Fatalf("no status item for the event: %s", m.dump())
 	}
 }

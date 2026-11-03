@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 	"github.com/kensac/orbit/internal/testdb"
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 var ctx = context.Background()
@@ -39,6 +41,12 @@ type fakeRunner struct {
 	// seen, when set, is called with the request while the run's workdir
 	// exists.
 	seen func(runner.Request)
+	// stalls is how many calls end as the stall watchdog ends a turn.
+	stalls int
+	// events are emitted after the first, as the CLI's stream would (tool calls the journal records).
+	events []runner.Event
+	// said are assistant lines emitted before the output.
+	said []string
 }
 
 func (f *fakeRunner) Kind() string  { return "claude-code" }
@@ -69,6 +77,16 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 		}
 	}
 	emit(runner.Event{Kind: "assistant", Payload: []byte(`{"type":"assistant","session_id":"` + sid + `"}`)})
+	if f.calls <= f.stalls {
+		emit(runner.Event{Kind: "orbit.stalled", Payload: []byte(`{"idle_ms":600000,"stall_ms":600000}`)})
+		return nil, fmt.Errorf("%w: no line from the CLI for 10m0s and no tool call running", runner.ErrStalled)
+	}
+	for _, ev := range f.events {
+		emit(ev)
+	}
+	for _, l := range f.said {
+		emit(runner.Event{Kind: "assistant", Payload: []byte(l)})
+	}
 	if f.block != nil {
 		close(f.started)
 		<-ctx.Done()
@@ -83,7 +101,8 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request, emit func(runn
 		return nil, ctx.Err()
 	}
 	cost := 0.25
-	return &runner.Result{Output: json.RawMessage(f.output), CostUSD: &cost, SessionID: sid}, f.err
+	used := &tokens.Usage{Count: tokens.Count{Input: 10, Output: 5, CacheRead: 300, CacheCreation: 90}, Model: "claude-fake", NumTurns: 2}
+	return &runner.Result{Output: json.RawMessage(f.output), CostUSD: &cost, SessionID: sid, Tokens: used}, f.err
 }
 
 // hooks collects what the webhook channel and endpoint receive.
@@ -100,6 +119,13 @@ func harness(t *testing.T, fr *fakeRunner) (*engine.Engine, *store.Store, *hooks
 
 // harnessWith appends extra to the agent's YAML.
 func harnessWith(t *testing.T, fr *fakeRunner, extra string) (*engine.Engine, *store.Store, *hooks) {
+	t.Helper()
+	return harnessFiles(t, fr, extra, nil)
+}
+
+// harnessFiles is harnessWith plus files: "orbit.yaml" is appended to the
+// deployment, any other name is written into the configuration directory.
+func harnessFiles(t *testing.T, fr *fakeRunner, extra string, files map[string]string) (*engine.Engine, *store.Store, *hooks) {
 	t.Helper()
 	s := testdb.New(t)
 	h := &hooks{}
@@ -146,7 +172,12 @@ channels:
   hook: {kind: webhook, url: %[1]s/notify}
 endpoints:
   ep: {url: %[1]s/endpoint}
-`, srv.URL))
+%[2]s`, srv.URL, files["orbit.yaml"]))
+	for name, body := range files {
+		if name != "orbit.yaml" {
+			write(name, body)
+		}
+	}
 	write("agents/finance.yaml", fmt.Sprintf(`
 name: finance
 charter: Review my spending.
@@ -203,6 +234,90 @@ func claim(t *testing.T, e *engine.Engine, s *store.Store) *store.ClaimedRun {
 	return c
 }
 
+func TestEvaluationReplayUsesOnlyCurrentCharterAndInput(t *testing.T) {
+	fr := &fakeRunner{output: replayOutput}
+	e, s, _ := harness(t, fr)
+	_, _, err := s.PutSkill(ctx, store.SkillWrite{Name: "eval-guide", Create: true,
+		Content: "---\nname: eval-guide\ndescription: Evaluation guide\n---\n\nCurrent saved skill."},
+		store.SkillProvenance{Source: store.SkillByPerson})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Current().Config.Agents["finance"].Skills = []string{"eval-guide"}
+	var replaySkill string
+	var prompts []string
+	charter := e.Current().Config.Agents["finance"].Charter
+	fr.seen = func(req runner.Request) {
+		prompts = append(prompts, req.Prompt)
+		if req.SkillsPlugin != "" {
+			b, err := os.ReadFile(filepath.Join(req.SkillsPlugin, "skills", "eval-guide", "SKILL.md"))
+			if err != nil {
+				t.Error(err)
+			}
+			replaySkill = string(b)
+		}
+		if fr.calls == 1 {
+			updated := *e.Current().Config
+			agents := make(map[string]*spec.Agent, len(updated.Agents))
+			for name, agent := range updated.Agents {
+				copyAgent := *agent
+				agents[name] = &copyAgent
+			}
+			agents["finance"].Charter = "changed while replaying"
+			updated.Agents = agents
+			if err := e.SetConfig(&updated); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	before, err := s.ListRuns(ctx, store.RunFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := json.RawMessage(`{"records":[{"amount":12}]}`)
+	results, err := e.Replay(ctx, "finance", []engine.EvaluationCase{{Name: "first", Input: input}, {Name: "second", Input: input}})
+	if err != nil || len(results) != 2 || string(results[1].Output) != replayOutput || results[1].CostUSD == nil || *results[1].CostUSD != 0.25 {
+		t.Fatalf("replay = %+v, %v", results, err)
+	}
+	if fr.got.Prompt == "" || !strings.Contains(fr.got.Prompt, charter) || strings.Contains(fr.got.Prompt, "changed while replaying") {
+		t.Fatalf("prompt omitted current charter: %s", fr.got.Prompt)
+	}
+	if len(prompts) != 2 || !strings.Contains(prompts[1], charter) || strings.Contains(prompts[1], "changed while replaying") {
+		t.Fatalf("replay did not pin its configuration snapshot: %+v", prompts)
+	}
+	if len(fr.got.Inputs) != 1 || string(fr.got.Inputs[0].Content) != string(input) {
+		t.Fatalf("replay inputs = %+v", fr.got.Inputs)
+	}
+	if !strings.Contains(replaySkill, "Current saved skill.") {
+		t.Fatalf("replay omitted active skill: %q", replaySkill)
+	}
+	if len(fr.got.Tools) != 0 || fr.got.Harness != nil || fr.got.Session != nil || fr.got.Connectors != nil || fr.got.SkillsPlugin == "" {
+		t.Fatalf("replay received capabilities or state: %+v", fr.got)
+	}
+	after, err := s.ListRuns(ctx, store.RunFilter{})
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("replay persisted a run: before %d, after %d, err %v", len(before), len(after), err)
+	}
+}
+
+func TestEvaluationReplayRejectsInvalidInputBeforeBackend(t *testing.T) {
+	fr := &fakeRunner{output: replayOutput}
+	e, _, _ := harness(t, fr)
+	for _, input := range []json.RawMessage{nil, json.RawMessage(`not json`), json.RawMessage(strings.Repeat("x", engine.MaxEvaluationInput+1))} {
+		if _, err := e.Replay(ctx, "finance", []engine.EvaluationCase{{Name: "invalid", Input: input}}); err == nil {
+			t.Errorf("accepted input of %d bytes", len(input))
+		}
+	}
+	if _, err := e.Replay(ctx, "finance", []engine.EvaluationCase{{Name: "valid-first", Input: json.RawMessage(`{}`)}, {Name: "invalid-second", Input: json.RawMessage(`bad`)}}); err == nil {
+		t.Fatal("accepted a suite with an invalid later case")
+	}
+	if fr.calls != 0 {
+		t.Fatalf("backend called %d times for invalid inputs", fr.calls)
+	}
+}
+
+const replayOutput = `{"summary":"ok","report":"ok","notify":{"send":false,"priority":"default","title":""},"memory":{"update":false,"content":""},"questions":[],"actions":[]}`
+
 const goodOutput = `{
   "summary": "October spend was $5,914",
   "report": "Spend was fine.",
@@ -227,6 +342,15 @@ func TestRunEndToEnd(t *testing.T) {
 	run, _ := s.GetRun(ctx, c.ID)
 	if run.Status != "succeeded" || *run.Summary != "October spend was $5,914" || *run.CostUSD != 0.25 {
 		t.Fatalf("run = %s err=%v", run.Status, *run.Error)
+	}
+	// The backend's tokens are the attempt's, and the prefix it was sent is recorded with it.
+	want := runner.PrefixOf("claude-code", "fake", fr.got.Prompt[len("# Charter\n\n"):strings.Index(fr.got.Prompt, "\n\n# This run")], fr.got)
+	if tk := run.Tokens; tk == nil || tk.Input != 10 || tk.CacheRead != 300 || tk.NumTurns != 2 || tk.Model != "claude-fake" ||
+		tk.CacheHitRatio == nil || *tk.CacheHitRatio != 0.75 {
+		t.Fatalf("tokens = %+v", run.Tokens)
+	}
+	if run.Prefix == nil || run.Prefix.SHA != want.SHA || run.Prefix.Parts["charter"] != want.Parts["charter"] || run.Prefix.Changed != nil {
+		t.Fatalf("prefix = %+v, want %+v", run.Prefix, want)
 	}
 	// The source was fetched with the credential, both pages merged, and
 	// written where the prompt says it is.
@@ -304,6 +428,24 @@ func TestRunEndToEnd(t *testing.T) {
 	}
 	if len(h.calls) != 1 || body["x"] != 1.0 {
 		t.Fatalf("endpoint calls = %v", h.calls)
+	}
+}
+
+func TestAStubReportIsReplacedByTheFinalProse(t *testing.T) {
+	answer := "## UX issues\n\n1. The send button is hidden.\n2. Steps count changes on expand."
+	fr := &fakeRunner{output: strings.Replace(goodOutput, `"Spend was fine."`, `"Listed the issues in the chat reply."`, 1),
+		said: []string{
+			`{"type":"assistant","message":{"content":[{"type":"text","text":"Reading."},{"type":"tool_use","id":"t1","name":"Read","input":{}}]}}`,
+			`{"type":"assistant","message":{"content":[{"type":"text","text":` + strconv.Quote(answer) + `}]}}`,
+		}}
+	e, s, _ := harness(t, fr)
+	c := claim(t, e, s)
+	if err := e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	run, _ := s.GetRun(ctx, c.ID)
+	if run.Status != "succeeded" || *run.Report != answer || *run.Summary != "October spend was $5,914" {
+		t.Fatalf("run = %s report=%q summary=%q", run.Status, *run.Report, *run.Summary)
 	}
 }
 

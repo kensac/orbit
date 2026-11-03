@@ -8,8 +8,10 @@ import (
 	"maps"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/budget"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/metrics"
 	"github.com/kensac/orbit/internal/runner"
@@ -20,17 +22,53 @@ import (
 // gateSkip is a gate's verdict that a run has nothing to judge: the run
 // ends skipped, naming the gate, and no backend is called.
 type gateSkip struct {
-	gate, summary string
+	gate, summary, alertKey string
+}
+
+// budgetGate refuses a first scheduled attempt before it reads inputs or
+// calls a backend when the agent has reached either configured period limit.
+func (e *Engine) budgetGate(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, now time.Time) (*gateSkip, error) {
+	if a.Budget == nil || c.Trigger != "schedule" || c.Attempt != 1 {
+		return nil, nil
+	}
+	start, end, err := budget.Window(a.Budget.Period, now, a.Location())
+	if err != nil {
+		return nil, err
+	}
+	used, err := e.Store.BudgetUsage(ctx, a.Name, start, end, c.ID)
+	if err != nil {
+		return nil, err
+	}
+	cost, err := used.APIEquivalentUSD.Float64()
+	if err != nil {
+		return nil, fmt.Errorf("read budget cost for %s: %w", a.Name, err)
+	}
+	if !budget.Reached(cost, used.Runs, a.Budget.MaxCostUSD, a.Budget.MaxRuns) {
+		return nil, nil
+	}
+	var limits []string
+	if a.Budget.MaxRuns > 0 {
+		limits = append(limits, fmt.Sprintf("%d/%d runs", used.Runs, a.Budget.MaxRuns))
+	}
+	if a.Budget.MaxCostUSD > 0 {
+		limits = append(limits, fmt.Sprintf("$%s/$%.2f API-equivalent cost", used.APIEquivalentUSD, a.Budget.MaxCostUSD))
+	}
+	return &gateSkip{
+		gate: store.GateBudget,
+		summary: fmt.Sprintf("%s budget period starting %s reached its limit (%s)", a.Budget.Period,
+			start.In(a.Location()).Format(time.DateOnly), strings.Join(limits, ", ")),
+		alertKey: fmt.Sprintf("budget:%s:%s", a.Name, start.Format(time.RFC3339)),
+	}, nil
 }
 
 func (g *gateSkip) Error() string { return "skipped by gate " + g.gate + ": " + g.summary }
 
-// gated reports whether a run's gates apply: a scheduled run with no
-// person's message waiting. A message, a manual run, a continuation, a
-// build and a recovered attempt always reach the backend, because someone
-// asked for judgment (or already paid for part of it).
+// gated reports whether a run's gates apply: a scheduled or webhook run
+// with no person's message waiting. A message, a manual run, a
+// continuation, a build and a recovered attempt always reach the backend,
+// because someone asked for judgment (or already paid for part of it).
 func gated(a *spec.Agent, c *store.ClaimedRun, rc *store.RunContext, recovering bool) bool {
-	return len(a.Gates) > 0 && c.Trigger == "schedule" && len(rc.Messages) == 0 && !recovering
+	return len(a.Gates) > 0 && (c.Trigger == "schedule" || c.Trigger == store.TriggerWebhook) && len(rc.Messages) == 0 && !recovering
 }
 
 // gate runs the agent's gates in order over what the model would be shown
@@ -63,7 +101,12 @@ func (e *Engine) gate(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, w
 					"inputs unchanged since run %s, the last that succeeded", last.RunID)}, nil
 			}
 		case "items_above":
-			doc, err := harness.Decode(docs[g.Input])
+			raw, ok := docs[g.Input]
+			if !ok {
+				// A webhook source (or a transform of one) on a run no delivery started.
+				return &gateSkip{gate: g.Kind, summary: g.Input + " is absent: no webhook delivery started this run"}, nil
+			}
+			doc, err := harness.Decode(raw)
 			if err != nil {
 				return nil, fmt.Errorf("gate %d: %s is not JSON: %w", i, g.Input, err)
 			}
@@ -80,15 +123,40 @@ func (e *Engine) gate(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, w
 	return nil, nil
 }
 
-// skip ends a run a gate stopped: skipped, naming the gate, with no
-// notification (a quiet day sends nothing, as it costs nothing).
+// skip ends a run a gate stopped: skipped, naming the gate. A budget skip
+// also creates its period alert; ordinary gates keep a quiet day quiet.
 func (e *Engine) skip(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, start time.Time, g *gateSkip) error {
-	rr := store.RunResult{Attempt: c.Attempt, Status: store.StatusSkipped, Gate: g.gate,
+	rr := store.RunResult{Attempt: c.Attempt, Status: store.StatusSkipped, Gate: g.gate, BudgetAlertKey: g.alertKey,
 		Summary: "Skipped: " + g.summary, Report: "orbit did not call the model: " + g.summary + "."}
 	if err := e.Store.FinishRun(ctx, c.ID, rr); err != nil {
 		return err
 	}
 	metrics.RunSkipped(a.Name, g.gate)
+	if g.gate == store.GateMissed || g.gate == store.GateBudget {
+		// A missed or budget-blocked fire did no work, so it is not a success for staleness.
+		metrics.RunMissed(a.Name, time.Since(start))
+		return nil
+	}
 	metrics.RunFinished(a.Name, store.StatusSkipped, runnerKind(snap, a), time.Since(start), nil)
 	return nil
+}
+
+// missed is the verdict on a schedule fire claimed later than its grace (spec.MissedGraceFor): the run ends skipped, gate missed, before anything is read or fetched. Only a first attempt is judged: a later one continues work an attempt that started in time began.
+func missed(a *spec.Agent, c *store.ClaimedRun, now time.Time) *gateSkip {
+	if c.Trigger != "schedule" || c.ScheduledFor == nil || c.TriggerIndex == nil || c.Attempt != 1 {
+		return nil
+	}
+	i := *c.TriggerIndex
+	if i < 0 || i >= len(a.Triggers) || a.Triggers[i].IsWebhook() {
+		// The trigger changed since the fire; its grace is unknown, so the run goes ahead.
+		return nil
+	}
+	loc := a.Location()
+	grace := spec.MissedGraceFor(a.Triggers[i], loc, *c.ScheduledFor)
+	late := now.Sub(*c.ScheduledFor)
+	if late <= grace {
+		return nil
+	}
+	return &gateSkip{gate: store.GateMissed, summary: fmt.Sprintf("the fire at %s was claimed %s late, past its grace of %s",
+		c.ScheduledFor.In(loc).Format("2006-01-02 15:04 MST"), late.Round(time.Second), grace)}
 }

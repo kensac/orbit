@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,6 +21,30 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if a.RuleFor("webhook:home-assistant") != RuleApprove || a.RuleFor("webhook:other") != RuleDeny {
 		t.Fatal("rules: named types take their rule, unnamed ones are denied")
+	}
+}
+
+func TestAgentBudgetsValidate(t *testing.T) {
+	for _, tc := range []struct {
+		budget string
+		valid  bool
+	}{
+		{"{period: day, max_cost_usd: 3.50}", true},
+		{"{period: week, max_runs: 12}", true},
+		{"{period: month, max_cost_usd: 3.50, max_runs: 12}", true},
+		{"{period: quarter, max_runs: 12}", false},
+		{"{period: day}", false},
+		{"{period: day, max_cost_usd: -1}", false},
+		{"{period: day, max_runs: -1}", false},
+		{"{period: day, max_cost_usd: .inf}", false},
+	} {
+		_, err := Load(write(t, map[string]string{
+			"orbit.yaml":    base,
+			"agents/a.yaml": "name: a\ncharter: x\nbudget: " + tc.budget + "\n",
+		}))
+		if (err == nil) != tc.valid {
+			t.Errorf("budget %s: err = %v, valid = %v", tc.budget, err, tc.valid)
+		}
 	}
 }
 
@@ -323,6 +348,9 @@ func TestLoadAllMergesTheDatabaseAndBuiltins(t *testing.T) {
 	if b := cfg.Agents["b"]; b.Origin != OriginDatabase || b.Version != 3 || b.IsEnabled() || b.Runner != "r" {
 		t.Fatalf("b = %+v: defaults apply to database agents", b)
 	}
+	if o := cfg.Agents[BuiltinName]; o == nil || !o.ReadsAllTopics() {
+		t.Fatal("the builtin does not read every topic")
+	}
 	if o := cfg.Agents[BuiltinName]; o == nil || o.Origin != OriginBuiltin || o.Runner != "r" {
 		t.Fatalf("builtin = %+v", o)
 	}
@@ -341,6 +369,9 @@ func TestLoadAllMergesTheDatabaseAndBuiltins(t *testing.T) {
 }
 
 func TestContextFieldsAreValidatedAtLoad(t *testing.T) {
+	if _, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\ntopics: [\"*\"]\n"})); err != nil {
+		t.Fatalf("every topic: %v", err)
+	}
 	good := "topics: [finance]\nskills: [close]\nlearn: {idle: 1h}\nhooks:\n  - {event: PreToolUse, matcher: WebFetch, deny: no}\n  - {event: Stop, say: check}\n  - {event: PostToolUse, run: [gofmt, -l, .], timeout: 5s}\n"
 	if _, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": "name: a\ncharter: x\n" + good})); err != nil {
 		t.Fatalf("good: %v", err)
@@ -348,6 +379,7 @@ func TestContextFieldsAreValidatedAtLoad(t *testing.T) {
 	for _, bad := range []string{
 		"topics: [Finance]",
 		"topics: [a, a]",
+		`topics: ["*", a]`,
 		"skills: [Bad]",
 		"learn: {idle: 1m}",
 		"learn: {runner: ghost}",
@@ -434,6 +466,78 @@ func TestAPrecheckIsForFileAgentsOnly(t *testing.T) {
 	}
 }
 
+func TestWebhookTriggersAreBoundToTheirSecrets(t *testing.T) {
+	hooks := "\nwebhook_secrets:\n  HOOK_GH: {scheme: github, agents: [a]}\n  HOOK_STD: {scheme: standard, agents: [b]}\n"
+	load := func(agent string) error {
+		_, err := Load(write(t, map[string]string{"orbit.yaml": base + hooks, "agents/a.yaml": "name: a\ncharter: x\n" + agent}))
+		return err
+	}
+	ok := "triggers: [{webhook: issues, secret: HOOK_GH, max_bytes: 4096}, {schedule: \"0 9 * * *\"}]\nsources: [{name: event, kind: webhook}]\n"
+	if err := load(ok); err != nil {
+		t.Fatal(err)
+	}
+	for bad, want := range map[string]string{
+		"triggers: [{webhook: issues}]":                                                                  "needs a secret",
+		"triggers: [{webhook: issues, secret: NOPE}]":                                                    "NOPE is not in orbit.yaml's webhook_secrets",
+		"triggers: [{webhook: issues, secret: HOOK_STD}]":                                                "HOOK_STD is not bound to this agent",
+		"triggers: [{webhook: Issues, secret: HOOK_GH}]":                                                 `webhook "Issues" must match`,
+		"triggers: [{webhook: issues, secret: HOOK_GH, schedule: \"@daily\"}]":                           "takes no schedule",
+		"triggers: [{webhook: i, secret: HOOK_GH}, {webhook: i, secret: HOOK_GH}]":                       "named by trigger 0 already",
+		"triggers: [{webhook: issues, secret: HOOK_GH, max_bytes: 999999999}]":                           "max_bytes must be between",
+		"triggers: [{schedule: \"@daily\", secret: HOOK_GH}]":                                            "secret and max_bytes are for a webhook trigger",
+		"sources: [{name: e, kind: webhook}]":                                                            "needs a webhook trigger",
+		"triggers: [{webhook: i, secret: HOOK_GH}]\nsources: [{name: e, kind: webhook, url: http://x/}]": "takes no url",
+	} {
+		if err := load(bad); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err = %v, want %q", bad, err, want)
+		}
+	}
+	_, err := Load(write(t, map[string]string{"orbit.yaml": base + "\nwebhook_secrets:\n  bad-name: {scheme: gitlab, agents: []}\n"}))
+	for _, want := range []string{`webhook secret "bad-name": the name is an environment variable`, "scheme must be one of", "agents must name"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want %q", err, want)
+		}
+	}
+	// A webhook trigger has no schedule, so the scheduler passes it by.
+	if _, err := TriggerSchedule(Trigger{Webhook: "issues"}, time.UTC); !errors.Is(err, ErrWebhookTrigger) {
+		t.Fatalf("TriggerSchedule(webhook) = %v", err)
+	}
+}
+
+func TestMissedGraceDefaultsToThePeriodUpToAnHour(t *testing.T) {
+	at := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		t    Trigger
+		want time.Duration
+	}{
+		{Trigger{Schedule: "*/5 * * * *"}, 5 * time.Minute},
+		{Trigger{Schedule: "0 9 * * *"}, time.Hour},
+		{Trigger{Schedule: "0 9 * * *", MissedGrace: Duration(3 * time.Hour)}, 3 * time.Hour},
+		{Trigger{RRule: "FREQ=MINUTELY;INTERVAL=20", Start: "2026-11-02T09:00"}, 20 * time.Minute},
+		{Trigger{RRule: "FREQ=DAILY;COUNT=1", Start: "2026-11-02T09:00"}, time.Hour},
+	} {
+		if got := MissedGraceFor(c.t, time.UTC, at); got != c.want {
+			t.Errorf("%+v: grace %s, want %s", c.t, got, c.want)
+		}
+	}
+	load := func(trig string) error {
+		_, err := Load(write(t, map[string]string{"orbit.yaml": base + "\nwebhook_secrets: {H: {scheme: github, agents: [a]}}\n",
+			"agents/a.yaml": "name: a\ncharter: x\ntriggers: [" + trig + "]\n"}))
+		return err
+	}
+	if err := load(`{schedule: "@daily", missed_grace: 6h}`); err != nil {
+		t.Fatal(err)
+	}
+	for bad, want := range map[string]string{
+		`{schedule: "@daily", missed_grace: 10s}`:   "missed_grace must be between 1m0s and 168h0m0s",
+		`{webhook: w, secret: H, missed_grace: 1h}`: "missed_grace is for a schedule trigger",
+	} {
+		if err := load(bad); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", bad, err, want)
+		}
+	}
+}
+
 func TestTimezonesAreParsedOnceAndCheckedAtLoad(t *testing.T) {
 	cfg, err := Load(write(t, map[string]string{"orbit.yaml": "timezone: Europe/Berlin\n" + base,
 		"agents/a.yaml": "name: a\ncharter: x\ntimezone: America/New_York\ntriggers: []\n",
@@ -471,6 +575,59 @@ func TestRunURL(t *testing.T) {
 	} {
 		if got := (Deployment{PublicURL: public}).RunURL("r-1"); got != want {
 			t.Errorf("RunURL under %q = %q, want %q", public, got, want)
+		}
+	}
+}
+
+func TestSourceByTrigger(t *testing.T) {
+	cfg, err := Load(write(t, map[string]string{"orbit.yaml": base, "agents/a.yaml": `
+name: a
+charter: x
+sources:
+  - name: s
+    kind: http
+    url: http://x/api
+    query: {start: "{{prev_month_start}}", end: "{{today}}"}
+    by_trigger:
+      message: {query: {start: "{{months_ago_start 3}}"}}
+      webhook: {query: {scope: all}}
+`}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := cfg.Agents["a"].Sources[0]
+	if q := s.QueryFor("message"); q["start"] != "{{months_ago_start 3}}" || q["end"] != "{{today}}" {
+		t.Fatalf("message query = %v", q)
+	}
+	if q := s.QueryFor("schedule"); q["start"] != "{{prev_month_start}}" {
+		t.Fatalf("schedule query = %v", q)
+	}
+	if q := s.QueryFor("webhook"); q["scope"] != "all" {
+		t.Fatalf("webhook query = %v", q)
+	}
+	_, err = Load(write(t, map[string]string{"orbit.yaml": base, "agents/b.yaml": `
+name: b
+charter: x
+sources:
+  - name: s
+    kind: http
+    url: http://x/api
+    paginate: {page_param: page, items_path: items}
+    by_trigger:
+      mail: {query: {start: x}}
+      manual: {query: {}}
+      message: {query: {page: "2"}}
+  - name: p
+    kind: prometheus
+    url: http://x
+    expr: up
+    by_trigger:
+      message: {query: {start: x}}
+`}))
+	for _, want := range []string{`unknown trigger "mail"`, "by_trigger.manual: query is required", `may not set the page parameter "page"`,
+		`source "p": by_trigger is only for http sources`} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q: %v", want, err)
 		}
 	}
 }

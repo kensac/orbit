@@ -12,15 +12,18 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/kensac/orbit/internal/credproxy"
 	"github.com/kensac/orbit/internal/sandbox"
 )
 
@@ -49,13 +52,21 @@ type fakeDocker struct {
 	// sessions are the tmux sessions has-session reports alive.
 	sessions map[string]bool
 	exits    map[string]int
+	// home, when set, is the HOME a box's fixed scripts (sh -c with a
+	// $0 of runScripts) really run against on this machine.
+	home string
 }
+
+// runScripts are the $0 names of a box's fixed scripts the fake runs.
+var runScripts = map[string]bool{"orbit-account": true}
 
 type fakeContainer struct {
 	spec    containerCreate
 	labels  map[string]string
 	running bool
-	files   []entry
+	// health is the healthcheck status; "" is a container without one.
+	health string
+	files  []entry
 }
 
 func newID() string {
@@ -71,7 +82,7 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		_ = json.NewEncoder(w).Encode(dockerInfo{SecurityOptions: []string{"name=seccomp,profile=builtin"}})
 	})
 	mux.HandleFunc("GET "+p+"/networks/{name}", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(networkState{Name: r.PathValue("name"), Internal: r.PathValue("name") == "orbit-sandbox"})
+		_ = json.NewEncoder(w).Encode(networkState{Name: r.PathValue("name"), Internal: r.PathValue("name") == "orbit-sandbox" || r.PathValue("name") == "orbit-workstation"})
 	})
 	mux.HandleFunc("GET "+p+"/images/", func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, testImage+"/json") {
@@ -159,6 +170,16 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 			st.Mounts = append(st.Mounts, mountState{Type: m.Type, Name: m.Source, Destination: m.Target})
 		}
 		st.State.Running = c.running
+		if c.health != "" {
+			st.State.Health = &struct {
+				Status string `json:"Status"`
+			}{c.health}
+		}
+		if c.running {
+			st.NetworkSettings.Networks = map[string]struct {
+				IPAddress string `json:"IPAddress"`
+			}{h.NetworkMode: {IPAddress: "10.250.251.7"}}
+		}
 		if f.tamper != nil {
 			f.tamper(&st)
 		}
@@ -314,7 +335,6 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 			f.fakeCommand(r.PathValue("id"), e.Cmd)
 			return
 		}
-		in, _ := io.ReadAll(buf.Reader)
 		frame := func(stream byte, p []byte) {
 			var h [8]byte
 			h[0] = stream
@@ -322,6 +342,20 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 			_, _ = conn.Write(h[:])
 			_, _ = conn.Write(p)
 		}
+		if f.home != "" && len(e.Cmd) > 3 && e.Cmd[0] == "sh" && runScripts[e.Cmd[3]] {
+			var stdin []byte
+			if e.AttachStdin {
+				stdin, _ = io.ReadAll(buf.Reader)
+			}
+			out, errb, code := f.runScript(t, e, stdin)
+			frame(1, out)
+			frame(2, errb)
+			f.mu.Lock()
+			f.exits[r.PathValue("id")] = code
+			f.mu.Unlock()
+			return
+		}
+		in, _ := io.ReadAll(buf.Reader)
 		frame(1, in)
 		frame(2, []byte("bye"))
 	})
@@ -340,6 +374,26 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		f.mu.Unlock()
 		mux.ServeHTTP(w, r)
 	})
+}
+
+// runScript runs a box's fixed script here, as the box would: HOME is the
+// fake's home and the exec's environment is added.
+func (f *fakeDocker) runScript(t *testing.T, e execCreate, stdin []byte) (stdout, stderr []byte, code int) {
+	cmd := exec.Command(e.Cmd[0], e.Cmd[1:]...)
+	cmd.Env = append([]string{"HOME=" + f.home, "PATH=" + os.Getenv("PATH")}, e.Env...)
+	cmd.Stdin = bytes.NewReader(stdin)
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	err := cmd.Run()
+	var ee *exec.ExitError
+	switch {
+	case errors.As(err, &ee):
+		code = ee.ExitCode()
+	case err != nil:
+		t.Errorf("script %v: %v", e.Cmd[3:], err)
+		code = -1
+	}
+	return out.Bytes(), errb.Bytes(), code
 }
 
 // socketDir is short: a unix socket path is limited to about 100 bytes, and
@@ -413,6 +467,8 @@ func TestServerFlow(t *testing.T) {
 	running := h.fd.containers[cr.ID].running
 	h.fd.mu.Unlock()
 	want := containerSpec(testConfig(), "run-1", time.Now())
+	// A copy: the fake container shares the created spec's label map.
+	created.Labels = maps.Clone(created.Labels)
 	created.Labels[LabelExpires], want.Labels[LabelExpires] = "", ""
 	if gb, wb := mustJSON(t, created), mustJSON(t, want); gb != wb {
 		t.Fatalf("docker received a different spec:\n%s\nwant\n%s", gb, wb)
@@ -432,10 +488,17 @@ func TestServerFlow(t *testing.T) {
 	if code != 7 || stdout.String() != "ping" || stderr.String() != "bye" {
 		t.Fatalf("attach: code %d stdout %q stderr %q", code, stdout.String(), stderr.String())
 	}
+	// The process gets a token in the credential's place, sealed for this sandbox's address and expiry.
 	h.fd.mu.Lock()
 	for _, e := range h.fd.execs {
-		if e.User != "10001:10001" || e.Privileged || e.WorkingDir != "/work" || len(e.Env) != 1 || e.Env[0] != "CLAUDE_CODE_OAUTH_TOKEN=tok" {
+		if e.User != "10001:10001" || e.Privileged || e.WorkingDir != "/work" || len(e.Env) != 1 || !strings.HasPrefix(e.Env[0], "CLAUDE_CODE_OAUTH_TOKEN=orbit-cp1.") {
 			t.Fatalf("exec spec %+v", e)
+		}
+		sealer, _ := credproxy.NewSealer(testConfig().CredProxyKey)
+		g, err := sealer.Open(strings.TrimPrefix(e.Env[0], "CLAUDE_CODE_OAUTH_TOKEN="))
+		if err != nil || g.Credential != "tok" || g.Kind != credproxy.KindOAuth || g.Addr.String() != "10.250.251.7" ||
+			!g.Expires.Equal(cr.ExpiresAt) || g.Sandbox != cr.ID || g.RunID != "run-1" {
+			t.Fatalf("grant %+v, %v", g, err)
 		}
 	}
 	h.fd.mu.Unlock()
@@ -646,6 +709,10 @@ func TestCheckRefusesOpenNetwork(t *testing.T) {
 	if err := h.srv.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "not internal") {
 		t.Fatalf("check on a non-internal network: %v", err)
 	}
+	h.srv.cfg.Network, h.srv.cfg.WorkstationProxy, h.srv.cfg.WorkstationNetwork = "orbit-sandbox", "orbit-egress-open:3128", "open-ish"
+	if err := h.srv.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "open-ish is not internal") {
+		t.Fatalf("check on a non-internal workstation network: %v", err)
+	}
 }
 
 func bufioReader(c net.Conn) *bufio.Reader { return bufio.NewReader(c) }
@@ -655,14 +722,55 @@ func TestProfiles(t *testing.T) {
 	if _, err := s.profile("workstation"); err == nil {
 		t.Fatal("an unconfigured workstation profile was accepted")
 	}
-	s.cfg.WorkstationProxy = "orbit-egress-open:3128"
-	for name, want := range map[string]string{"": "orbit-egress:3128", "build": "orbit-egress:3128", "workstation": "orbit-egress-open:3128"} {
+	s.cfg.Network, s.cfg.WorkstationProxy, s.cfg.WorkstationNetwork = "orbit-sandbox", "orbit-egress-open:3128", "orbit-workstation"
+	for name, want := range map[string][2]string{
+		"":            {"orbit-egress:3128", "orbit-sandbox"},
+		"build":       {"orbit-egress:3128", "orbit-sandbox"},
+		"workstation": {"orbit-egress-open:3128", "orbit-workstation"},
+	} {
 		cfg, err := s.profile(name)
-		if err != nil || cfg.Proxy != want {
-			t.Errorf("%q: %q %v, want %q", name, cfg.Proxy, err, want)
+		if err != nil || cfg.Proxy != want[0] || cfg.Network != want[1] {
+			t.Errorf("%q: %q on %q, %v, want %v", name, cfg.Proxy, cfg.Network, err, want)
 		}
+	}
+	s.cfg.CredProxy, s.cfg.WorkstationCredProxy = "10.251.0.3:3129", "10.251.1.3:3129"
+	if b, _ := s.profile("build"); b.CredProxy != "10.251.0.3:3129" {
+		t.Errorf("build credproxy %q", b.CredProxy)
+	}
+	if w, _ := s.profile("workstation"); w.CredProxy != "10.251.1.3:3129" {
+		t.Errorf("workstation credproxy %q", w.CredProxy)
 	}
 	if _, err := s.profile("root"); err == nil {
 		t.Fatal("an unknown profile was accepted")
+	}
+}
+
+// TestWorkstationOwnNetwork: a workstation sandbox joins its own network with the open proxy, never the builds' network, so no build shares a network with that proxy.
+func TestWorkstationOwnNetwork(t *testing.T) {
+	h := newHarness(t)
+	h.srv.cfg.WorkstationProxy, h.srv.cfg.WorkstationNetwork = "orbit-egress-open:3128", "orbit-workstation"
+	ctx := context.Background()
+	if err := h.srv.Check(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range []string{sandbox.ProfileBuild, sandbox.ProfileWorkstation} {
+		if _, err := h.client.CreateProfile(ctx, "run-"+profile, profile, workTar(t)); err != nil {
+			t.Fatalf("%s: %v", profile, err)
+		}
+	}
+	h.fd.mu.Lock()
+	defer h.fd.mu.Unlock()
+	got := map[string]string{}
+	for _, c := range h.fd.created {
+		proxy := ""
+		for _, e := range c.Env {
+			if v, ok := strings.CutPrefix(e, "HTTPS_PROXY="); ok {
+				proxy = v
+			}
+		}
+		got[c.Labels[LabelRunID]] = c.HostConfig.NetworkMode + " " + proxy
+	}
+	if got["run-build"] != "orbit-sandbox http://orbit-egress:3128" || got["run-workstation"] != "orbit-workstation http://orbit-egress-open:3128" {
+		t.Fatalf("networks and proxies: %v", got)
 	}
 }

@@ -295,7 +295,7 @@ func skillChanges(cur *store.Skill, w actions.SkillWrite) *actions.SkillChanges 
 		}
 	}
 	if w.Op == "write" {
-		ch.Diff, ch.Added, ch.Removed = lineDiff(before, w.Content, skillChangesDiffMax)
+		ch.Diff, ch.Added, ch.Removed = changedLines(before, w.Content, skillChangesDiffMax)
 	}
 	return ch
 }
@@ -325,8 +325,8 @@ func isScript(f store.SkillFile) bool {
 // lineDiffMax bounds the lines a diff compares exactly; a longer SKILL.md is shown as a whole replacement.
 const lineDiffMax = 4000
 
-// lineDiff is a unified-style diff of b against a by lines (a longest common subsequence): each changed line prefixed + or -, and the counts. It is cut at limit bytes, saying how many changed lines it leaves out.
-func lineDiff(a, b string, limit int) (string, int, int) {
+// changedLines is a diff of b against a by lines (a longest common subsequence): each changed line prefixed + or -, and the counts. It is cut at limit bytes, saying how many changed lines it leaves out.
+func changedLines(a, b string, limit int) (string, int, int) {
 	al, bl := splitLines(a), splitLines(b)
 	var ops []string
 	if len(al) > lineDiffMax || len(bl) > lineDiffMax {

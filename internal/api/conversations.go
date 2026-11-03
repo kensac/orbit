@@ -2,10 +2,13 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/kensac/orbit/internal/engine"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 )
@@ -33,6 +36,9 @@ func (s *Server) conversationPage(ctx context.Context, agent string, archived bo
 		}
 	}
 	page, err := s.Store.ListConversations(ctx, agent, archived, c, limit)
+	if err == nil {
+		err = s.withWorkspaceIDs(ctx, page.Conversations)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -51,6 +57,8 @@ func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
 		// Agent is POST /conversations's: the agent to talk to, the
 		// built-in general agent when empty.
 		Agent string `json:"agent"`
+		// FromSession starts the conversation from an imported session (its orbit id or its source's session id): its first runs resume that session.
+		FromSession string `json:"from_session"`
 	}
 	if !decode(w, r, 64<<10, &body, bodyOptional) {
 		return
@@ -71,9 +79,25 @@ func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
 	if body.Wake != nil {
 		wake = *body.Wake
 	}
+	var seed *store.SessionSeed
+	if body.FromSession != "" {
+		cfg := s.Engine.Current().Config
+		if cfg.Deployment.Runners[a.Runner].Kind != "claude-code" || a.Session == nil || !a.Session.Resume {
+			respond(w, nil, fmt.Errorf("%w: agent %s does not resume Claude Code sessions (it needs a claude-code runner and session.resume)", store.ErrInvalid, a.Name))
+			return
+		}
+		var err error
+		if seed, _, err = s.Engine.SessionSeed(r.Context(), body.FromSession); err != nil {
+			if errors.Is(err, engine.ErrSeedTooLarge) {
+				err = fmt.Errorf("%w: %w", store.ErrInvalid, err)
+			}
+			respond(w, nil, err)
+			return
+		}
+	}
 	res, replayed, err := s.Store.CreateConversation(r.Context(), store.NewConversation{
 		Agent: a.Name, SpecSHA: a.SHA, Title: body.Title, Body: strings.TrimSpace(body.Body),
-		Author: actor(r, body.Author), Wake: wake, ClientID: body.ClientRequestID,
+		Author: actor(r, body.Author), Wake: wake, ClientID: body.ClientRequestID, Seed: seed,
 	})
 	if err == nil && res.RunID != "" && !replayed {
 		s.Wake()
@@ -82,8 +106,22 @@ func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getConversation(w http.ResponseWriter, r *http.Request) {
-	c, err := s.Store.GetConversation(r.Context(), r.PathValue("id"))
+	c, err := s.conversationShape(r.Context(), r.PathValue("id"))
 	respond(w, map[string]any{"conversation": c}, err)
+}
+
+// conversationShape is one conversation as the API shows it, its
+// workspace_id filled.
+func (s *Server) conversationShape(ctx context.Context, id string) (*store.Conversation, error) {
+	c, err := s.Store.GetConversation(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	list := []store.Conversation{*c}
+	if err := s.withWorkspaceIDs(ctx, list); err != nil {
+		return nil, err
+	}
+	return &list[0], nil
 }
 
 func (s *Server) updateConversation(w http.ResponseWriter, r *http.Request) {
@@ -100,14 +138,12 @@ func (s *Server) updateConversation(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	c, err := s.Store.GetConversation(r.Context(), id)
+	c, err := s.conversationShape(r.Context(), id)
 	respond(w, map[string]any{"conversation": c}, err)
 }
 
 func (s *Server) conversationThread(w http.ResponseWriter, r *http.Request) {
-	servePage(w, r, func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
-		return s.Store.ConversationThread(r.Context(), r.PathValue("id"), before, limit)
-	})
+	s.serveThread(w, r, r.PathValue("id"))
 }
 
 func (s *Server) conversationMessage(w http.ResponseWriter, r *http.Request) {

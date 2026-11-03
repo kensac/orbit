@@ -1,0 +1,33 @@
+name: triage
+description: Triages new GitHub issues as they are opened.
+charter: |
+  You triage issues in my repositories. For each new issue, say what it
+  asks for, whether it duplicates one you remember, and how urgent it is.
+# GitHub POSTs to /hooks/triage/issues, signed with ORBIT_HOOK_GITHUB
+# (orbit.yaml's webhook_secrets). A retried delivery runs once.
+triggers:
+  - webhook: issues
+    secret: ORBIT_HOOK_GITHUB
+    prompt: A GitHub issue event arrived.
+    max_bytes: 262144
+sources:
+  # The delivery's body, as received.
+  - name: event
+    kind: webhook
+# Code keeps only an opened issue's fields (items "." is the event itself,
+# one record); the model never sees the full payload.
+transforms:
+  - name: opened
+    source: event
+    kind: json-project
+    params:
+      items: "."
+      where: [{field: action, op: eq, value: opened}]
+      fields: [issue.number, issue.title, issue.body, issue.user.login, repository.full_name]
+# Every other action (edited, labeled, closed) ends skipped with no model call.
+gates:
+  - kind: items_above
+    input: opened
+    n: 0
+notify:
+  when: agent

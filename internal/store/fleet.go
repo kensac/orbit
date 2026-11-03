@@ -24,7 +24,7 @@ type Claim struct {
 	Builds bool
 }
 
-// ClaimRunFor is ClaimRun limited to what one executor may run: the oldest queued run whose agent has nothing running, whose agent's current spec needs only capabilities in c, and, unless c.Builds, that is not a build. Needs are read from the spec JSON (`needs`), so an agent defined by any writer of agent_specs is covered, and an agent with no needs is claimed anywhere.
+// ClaimRunFor is ClaimRun limited to what one executor may run: the oldest queued run whose agent has nothing running, whose agent's current spec needs only capabilities in c, that, unless c.Builds, is not a build, and that is not an unattended run of a held runner (holds.go). Needs are read from the spec JSON (`needs`), so an agent defined by any writer of agent_specs is covered, and an agent with no needs is claimed anywhere.
 func (s *Store) ClaimRunFor(ctx context.Context, c Claim) (*ClaimedRun, error) {
 	caps := c.Capabilities
 	if caps == nil {
@@ -38,7 +38,7 @@ func (s *Store) ClaimRunFor(ctx context.Context, c Claim) (*ClaimedRun, error) {
 		AND ($2::bool OR COALESCE((
 		    SELECT sp.spec->'needs' FROM agents a JOIN agent_specs sp ON sp.sha = a.spec_sha
 		    WHERE a.name = q.agent), '[]'::jsonb) <@ $3::jsonb)
-		AND ($4::bool OR q.trigger <> 'build')`, c.Any, string(capsJSON), c.Builds)
+		AND ($4::bool OR q.trigger <> 'build')`+holdFilter, c.Any, string(capsJSON), c.Builds)
 }
 
 // ---------------------------------------------------------------- config

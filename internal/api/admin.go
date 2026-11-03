@@ -1,14 +1,18 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
 	"time"
 
-	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/budget"
+	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/scheduler"
+	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
+	"github.com/kensac/orbit/internal/usage"
 )
 
 // defaultUsageDays is the range GET /usage covers without from and to:
@@ -19,7 +23,8 @@ const defaultUsageDays = 30
 // subscription's windows, and the API-equivalent cost of runs over a range
 // of days in the deployment's timezone (docs/api.md).
 func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
-	d := s.Engine.Current().Config.Deployment
+	cfg := s.Engine.Current().Config
+	d := cfg.Deployment
 	tz, loc := d.Timezone, d.Location()
 	now := time.Now()
 	from, to, err := usageRange(r.URL.Query().Get("from"), r.URL.Query().Get("to"), now.In(loc))
@@ -27,17 +32,32 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	events, err := s.Store.RateLimitEvents(r.Context())
+	reading, err := usage.Read(r.Context(), s.Store, now)
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	obs := make([]runner.RateLimitObservation, len(events))
-	for i, e := range events {
-		obs[i] = runner.RateLimitObservation{RunID: e.RunID, At: e.At, Payload: e.Payload}
+	held, err := s.Store.HeldRuns(r.Context())
+	if err != nil {
+		respond(w, nil, err)
+		return
 	}
-	windows, overage := runner.RateLimits(obs, now)
 	costs, err := s.Store.Costs(r.Context(), from, to, tz)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	budgets, err := s.agentBudgets(r, cfg, now)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	toks, err := s.Store.TokenUsage(r.Context(), from, to, tz)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	skills, err := s.Store.SkillUses(r.Context(), from, to, tz, harness.ToolSkill)
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -47,11 +67,94 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		"from":     from,
 		"to":       to,
 		"subscription": map[string]any{
-			"windows": windows,
-			"overage": overage,
+			"windows": orEmpty(reading.Windows),
+			"overage": reading.Overage,
+			"poll":    s.pollStatus(reading),
 		},
-		"cost": costs,
+		"deferral": map[string]any{
+			"enabled":   cfg.Deployment.DeferLowPriority,
+			"threshold": usage.DeferLowAbove,
+			"held":      orEmpty(held),
+		},
+		"cost":    costs,
+		"budgets": budgets,
+		"tokens":  toks,
+		"skills":  skills,
 	}, nil)
+}
+
+type agentBudgetStatus struct {
+	Agent            string      `json:"agent"`
+	Period           string      `json:"period"`
+	PeriodStart      time.Time   `json:"period_start"`
+	ResetsAt         time.Time   `json:"resets_at"`
+	APIEquivalentUSD json.Number `json:"api_equivalent_usd"`
+	Runs             int         `json:"runs"`
+	RunsWithCost     int         `json:"runs_with_cost"`
+	MaxCostUSD       *float64    `json:"max_cost_usd,omitempty"`
+	MaxRuns          *int        `json:"max_runs,omitempty"`
+	CostUtilization  float64     `json:"cost_utilization"`
+	RunUtilization   float64     `json:"run_utilization"`
+	Alert            bool        `json:"alert"`
+	Exceeded         bool        `json:"exceeded"`
+}
+
+func (s *Server) agentBudgets(r *http.Request, cfg *spec.Config, now time.Time) ([]agentBudgetStatus, error) {
+	names := make([]string, 0, len(cfg.Agents))
+	for name := range cfg.Agents {
+		if cfg.Agents[name].Budget != nil {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	out := make([]agentBudgetStatus, 0, len(names))
+	for _, name := range names {
+		a := cfg.Agents[name]
+		start, end, err := budget.Window(a.Budget.Period, now, a.Location())
+		if err != nil {
+			return nil, err
+		}
+		used, err := s.Store.BudgetUsage(r.Context(), name, start, end, "")
+		if err != nil {
+			return nil, err
+		}
+		cost, err := used.APIEquivalentUSD.Float64()
+		if err != nil {
+			return nil, err
+		}
+		item := agentBudgetStatus{Agent: name, Period: a.Budget.Period, PeriodStart: start,
+			ResetsAt: end, APIEquivalentUSD: used.APIEquivalentUSD, Runs: used.Runs,
+			RunsWithCost: used.RunsWithCost, CostUtilization: budget.Utilization(cost, a.Budget.MaxCostUSD),
+			Alert:    budget.Alert(cost, used.Runs, a.Budget.MaxCostUSD, a.Budget.MaxRuns),
+			Exceeded: budget.Reached(cost, used.Runs, a.Budget.MaxCostUSD, a.Budget.MaxRuns)}
+		if a.Budget.MaxCostUSD > 0 {
+			item.MaxCostUSD = &a.Budget.MaxCostUSD
+		}
+		if a.Budget.MaxRuns > 0 {
+			item.MaxRuns = &a.Budget.MaxRuns
+			item.RunUtilization = float64(used.Runs) / float64(a.Budget.MaxRuns)
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+// pollStatus is the usage poller's state as /usage reports it.
+func (s *Server) pollStatus(r *usage.Reading) map[string]any {
+	out := map[string]any{"enabled": false, "every": nil, "last_ok_at": nil, "last_at": nil, "last_error": nil}
+	if p := s.Engine.Current().Config.Deployment.UsagePoll; p != nil {
+		out["enabled"], out["every"] = true, time.Duration(p.Every).String()
+	}
+	if r.LastPollOK != nil {
+		out["last_ok_at"] = r.LastPollOK.PolledAt
+	}
+	if l := r.LastPoll; l != nil {
+		out["last_at"] = l.PolledAt
+		if !l.OK {
+			out["last_error"] = l.Error
+		}
+	}
+	return out
 }
 
 // usageRange resolves from and to (YYYY-MM-DD, inclusive). Either may be
@@ -87,9 +190,12 @@ func usageRange(fromQ, toQ string, today time.Time) (string, string, error) {
 type healthAgent struct {
 	Name        string               `json:"name"`
 	Enabled     bool                 `json:"enabled"`
+	Priority    string               `json:"priority"`
 	Timezone    string               `json:"timezone"`
 	LastSuccess *store.LastSuccess   `json:"last_success"`
 	NextFires   []scheduler.NextFire `json:"next_fires"`
+	// Held is true while the agent's runner is held: its unattended runs wait queued.
+	Held bool `json:"held"`
 }
 
 // health serves GET /health: configuration, queue, running runs, pending
@@ -104,12 +210,25 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if s.ConfigState != nil {
 		cfgStatus = s.ConfigState.Status()
 	}
+	holds, err := s.Store.OpenHolds(r.Context())
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	held := map[string]bool{}
+	for _, hd := range holds {
+		held[hd.Runner] = true
+	}
 	cfg := s.Engine.Current().Config
 	now := time.Now()
 	agents := make([]healthAgent, 0, len(cfg.Agents))
 	for _, a := range cfg.Agents {
-		agents = append(agents, healthAgent{Name: a.Name, Enabled: a.IsEnabled(), Timezone: a.Timezone,
-			LastSuccess: h.LastSuccess[a.Name], NextFires: scheduler.NextFires(a, now)})
+		priority := spec.PriorityNormal
+		if a.Low() {
+			priority = spec.PriorityLow
+		}
+		agents = append(agents, healthAgent{Name: a.Name, Enabled: a.IsEnabled(), Priority: priority, Timezone: a.Timezone,
+			LastSuccess: h.LastSuccess[a.Name], NextFires: scheduler.NextFires(a, now), Held: held[a.Runner]})
 	}
 	sort.Slice(agents, func(i, j int) bool { return agents[i].Name < agents[j].Name })
 	respond(w, map[string]any{
@@ -118,6 +237,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		"queue":           h.Queue,
 		"running":         h.Running,
 		"pending_actions": h.PendingActions,
+		"holds":           holds,
 		"agents":          agents,
 	}, nil)
 }

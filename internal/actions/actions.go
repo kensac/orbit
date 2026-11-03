@@ -10,13 +10,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"maps"
 	"net/http"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/build"
 	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/notify"
 	"github.com/kensac/orbit/internal/spec"
@@ -55,23 +55,100 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 		if a.RuleFor(TaskCancelType) != spec.RuleDeny {
 			out = append(out, taskCancelType())
 		}
+		if a.RuleFor(TaskRetryType) != spec.RuleDeny {
+			out = append(out, taskRetryType(targets))
+		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(d.Endpoints)) {
 		typ := "webhook:" + name
 		if a.RuleFor(typ) != spec.RuleDeny {
-			out = append(out, webhookType(name))
+			out = append(out, webhookType(name, d.Endpoints[name]))
 		}
 	}
 	if d.GitHub != nil && a.RuleFor(MergeType) != spec.RuleDeny {
 		out = append(out, mergeType(d))
 	}
+	if d.GitHub != nil && a.Chat {
+		if a.RuleFor(CloneType) != spec.RuleDeny {
+			out = append(out, cloneType(d))
+		}
+		if a.RuleFor(PRType) != spec.RuleDeny {
+			out = append(out, prType(d))
+		}
+	}
+	if d.GitHub != nil && len(d.GitHub.CommentRepositories) > 0 && a.RuleFor(CommentType) != spec.RuleDeny {
+		out = append(out, commentType(d))
+	}
 	if a.RuleFor(DefineType) != spec.RuleDeny {
 		out = append(out, defineType(a))
+	}
+	if a.RuleFor(SaveType) != spec.RuleDeny {
+		out = append(out, saveType())
+	}
+	for _, t := range ScheduleTypes {
+		if a.RuleFor(t) != spec.RuleDeny {
+			out = append(out, scheduleType(t, a))
+		}
 	}
 	if a.RuleFor(SkillWriteType) != spec.RuleDeny {
 		out = append(out, skillWriteType())
 	}
+	if a.RuleFor(TemplateCreateType) != spec.RuleDeny {
+		out = append(out, templateCreateType())
+	}
 	return out
+}
+
+// TemplateCreateType creates an agent from a template in orbit's library. It is never executed as itself: when proposed, code renders the template with the parameters (engine/templates.go) and records the result as an agent:define that waits for a person, or, when the person must still give a user_prompt parameter, asks them with a form instead.
+const TemplateCreateType = "template:create"
+
+// TemplateCreate is template:create's params.
+type TemplateCreate struct {
+	Template string `json:"template"`
+	// Version is the template's version; 0 or absent is its current one.
+	Version int `json:"version,omitempty"`
+	// Name, when set, is the new agent's name in place of the one the template renders.
+	Name       string                     `json:"name,omitempty"`
+	Parameters map[string]json.RawMessage `json:"parameters"`
+}
+
+func templateCreateType() Type {
+	return Type{
+		Name: TemplateCreateType,
+		Description: "Create an agent from a template in orbit's library: template is its name, parameters its values by name " +
+			"(the template's parameters say each one's type). orbit renders it, checks the agent loads, and asks your person to approve it; " +
+			"a parameter only your person can give is asked of them with a form, and their answers come back to you to propose again.",
+		ParamsSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"template":   map[string]any{"type": "string", "pattern": `^[a-z][a-z0-9-]{0,62}$`},
+				"version":    map[string]any{"type": "integer", "minimum": 0},
+				"name":       map[string]any{"type": "string", "pattern": spec.AgentNamePattern},
+				"parameters": map[string]any{"type": "object"},
+			},
+			"required":             []string{"template", "parameters"},
+			"additionalProperties": false,
+		},
+		Validate: func(p json.RawMessage) error {
+			_, err := DecodeTemplateCreate(p)
+			return err
+		},
+	}
+}
+
+// DecodeTemplateCreate reads template:create's params.
+func DecodeTemplateCreate(p json.RawMessage) (TemplateCreate, error) {
+	var v TemplateCreate
+	if err := strictDecode(p, &v); err != nil {
+		return v, err
+	}
+	if v.Template == "" {
+		return v, fmt.Errorf("template:create: template is required")
+	}
+	if v.Version < 0 {
+		return v, fmt.Errorf("template:create: version is 0 (the current one) or more")
+	}
+	return v, nil
 }
 
 // DefineType creates or changes an agent defined in the database, this
@@ -82,6 +159,14 @@ const DefineType = "agent:define"
 
 type defineParams struct {
 	Spec json.RawMessage `json:"spec"`
+	// Template names the template version a define was rendered from (template:create); a record for the person approving it, not an input to the change.
+	Template *TemplateRef `json:"template,omitempty"`
+}
+
+// TemplateRef names one version of a template.
+type TemplateRef struct {
+	Name    string `json:"name"`
+	Version int    `json:"version"`
 }
 
 func defineType(a *spec.Agent) Type {
@@ -217,33 +302,6 @@ type notifyParams struct {
 	Priority string `json:"priority"`
 }
 
-func webhookType(endpoint string) Type {
-	return Type{
-		Name:        "webhook:" + endpoint,
-		Description: fmt.Sprintf("Send a JSON body to the %q endpoint.", endpoint),
-		ParamsSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"body": map[string]any{"type": "object"},
-			},
-			"required":             []string{"body"},
-			"additionalProperties": false,
-		},
-		Validate: func(p json.RawMessage) error {
-			var v struct {
-				Body json.RawMessage `json:"body"`
-			}
-			if err := strictDecode(p, &v); err != nil {
-				return err
-			}
-			if len(v.Body) == 0 || v.Body[0] != '{' {
-				return fmt.Errorf("webhook: body must be a JSON object")
-			}
-			return nil
-		},
-	}
-}
-
 // ContinueMinDelay is the shortest wait a continuation may ask for. The
 // executors poll every few seconds, so anything shorter is a busy loop
 // rather than a checkpoint.
@@ -314,17 +372,23 @@ type Executor struct {
 	Env        func(string) (string, bool)
 	// MergeOptions tunes github:merge's wait for mergeability (tests).
 	MergeOptions github.MergeOptions
-	// Tasks carries out delegation (delegate, task:message, task:cancel);
+	// Tasks carries out delegation (delegate, task:message, task:cancel, task:retry);
 	// nil fails them.
 	Tasks TaskOps
 	// Continue enqueues a continuation for agent, asked for by run fromRun.
 	// It returns the queued run's id, and queued false when one was
 	// already waiting (whose id it returns instead).
 	Continue func(ctx context.Context, agent, fromRun string, after time.Duration, note string) (id string, queued bool, err error)
+	// Git is where github:clone and github:pr run git.
+	Git build.Git
 	// Define applies an agent:define for the call's run.
 	Define func(ctx context.Context, c Call, spec json.RawMessage) (json.RawMessage, error)
 	// SkillWrite applies a skill:write for the call's run.
 	SkillWrite func(ctx context.Context, c Call, w SkillWrite) (json.RawMessage, error)
+	// Connector calls a connector's tool for an approved connector:<conn>/<tool> action, adding the connector's credential (engine/connectors.go).
+	Connector func(ctx context.Context, c Call) (json.RawMessage, error)
+	// Schedule applies a schedule action or run:now for the call's run.
+	Schedule func(ctx context.Context, c Call, p ScheduleParams) (json.RawMessage, error)
 }
 
 // Call is one action to execute: its type and parameters, and the agent
@@ -336,6 +400,9 @@ type Call struct {
 	RunID  string
 	Type   string
 	Params json.RawMessage
+	// Workspace is the run's conversation's workspace, for github:clone
+	// and github:pr; nil for an agent without one.
+	Workspace Workspace
 	// Rule is the rule it was recorded under: auto, or approve when a person approved it.
 	Rule spec.Rule
 }
@@ -378,51 +445,20 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 		}
 		return json.RawMessage(`{"sent":true}`), nil
 	case strings.HasPrefix(typ, "webhook:"):
-		name := strings.TrimPrefix(typ, "webhook:")
-		ep, ok := e.Deployment.Endpoints[name]
-		if !ok {
-			return nil, fmt.Errorf("endpoint %q is not configured", name)
-		}
-		var p struct {
-			Body json.RawMessage `json:"body"`
-		}
-		if err := strictDecode(params, &p); err != nil {
-			return nil, err
-		}
-		method := ep.Method
-		if method == "" {
-			method = http.MethodPost
-		}
-		req, err := http.NewRequestWithContext(ctx, method, ep.URL, bytes.NewReader(p.Body))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		for k, v := range ep.Headers {
-			rv, err := spec.ExpandEnv(v, e.Env)
-			if err != nil {
-				return nil, fmt.Errorf("endpoint %q header %s: %w", name, k, err)
-			}
-			req.Header.Set(k, rv)
-		}
-		resp, err := e.Client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		result, _ := json.Marshal(map[string]any{"status": resp.StatusCode, "body": string(b)})
-		if resp.StatusCode/100 != 2 {
-			return result, fmt.Errorf("%s %s: %s", method, name, resp.Status)
-		}
-		return result, nil
+		return e.webhook(ctx, strings.TrimPrefix(typ, "webhook:"), params)
 	case typ == MergeType:
 		return e.merge(ctx, params)
+	case typ == CloneType:
+		return e.clone(ctx, c)
+	case typ == PRType:
+		return e.publish(ctx, c)
+	case typ == CommentType:
+		return e.comment(ctx, params)
 	case typ == store.DecisionType:
 		// A person approved it; the task it holds starts at the next
 		// reconcile. Nothing else happens here.
 		return json.RawMessage(`{"decided":true}`), nil
-	case typ == DelegateType, typ == TaskMessageType, typ == TaskCancelType:
+	case IsTaskType(typ):
 		if e.Tasks == nil {
 			return nil, fmt.Errorf("%s: not available in this process", typ)
 		}
@@ -436,6 +472,14 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 			return nil, fmt.Errorf("skill:write: not available in this process")
 		}
 		return e.SkillWrite(ctx, c, w)
+	case strings.HasPrefix(typ, spec.ConnectorActionPrefix):
+		if e.Connector == nil {
+			return nil, fmt.Errorf("%s: not available in this process", typ)
+		}
+		return e.Connector(ctx, c)
+	case typ == TemplateCreateType:
+		// Proposals of it are recorded as agent:define (engine/templates.go); one stored as itself is never run.
+		return nil, fmt.Errorf("template:create: recorded as an agent:define when proposed; nothing to execute")
 	case typ == DefineType:
 		sp, err := DecodeDefine(params)
 		if err != nil {
@@ -445,6 +489,15 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 			return nil, fmt.Errorf("agent:define: not available in this process")
 		}
 		return e.Define(ctx, c, sp)
+	case IsScheduleType(typ):
+		p, err := DecodeSchedule(typ, params)
+		if err != nil {
+			return nil, err
+		}
+		if e.Schedule == nil {
+			return nil, fmt.Errorf("%s: not available in this process", typ)
+		}
+		return e.Schedule(ctx, c, p)
 	}
 	return nil, fmt.Errorf("unknown action type %q", typ)
 }
@@ -476,4 +529,65 @@ func strictDecode(p json.RawMessage, into any) error {
 	dec := json.NewDecoder(bytes.NewReader(p))
 	dec.DisallowUnknownFields()
 	return dec.Decode(into)
+}
+
+// SaveType saves the conversation it is proposed in as a new agent. The model drafts only the words (SaveParams); orbit builds the rest from what the conversation did and proposes the result as an agent:define for a person to approve (engine/save.go), so this type is never stored or executed itself.
+const SaveType = "agent:save"
+
+// SaveParams are agent:save's params: what needs judgment.
+type SaveParams struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Charter     string   `json:"charter"`
+	Starters    []string `json:"starters,omitempty"`
+}
+
+func saveType() Type {
+	return Type{
+		Name: SaveType,
+		Description: "Save this conversation as a new agent the person can reuse. You write only its name, a one-line description, " +
+			"its charter (the standing instruction: what to do, from what, and how to report) and up to " + fmt.Sprint(spec.MaxStarters) + " starter prompts. " +
+			"orbit adds what this conversation actually did: the tools used, the pages fetched (as sources), the action types the person approved (each waiting for approval), " +
+			"and any schedule asked for with schedule:add. The person reviews the whole agent before it exists.",
+		ParamsSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name":        map[string]any{"type": "string", "pattern": spec.AgentNamePattern},
+				"description": map[string]any{"type": "string", "maxLength": 200},
+				"charter":     map[string]any{"type": "string", "minLength": 1, "maxLength": 20000},
+				"starters": map[string]any{"type": "array", "maxItems": spec.MaxStarters,
+					"items": map[string]any{"type": "string", "minLength": 1, "maxLength": spec.MaxStarterLen}},
+			},
+			"required":             []string{"name", "description", "charter"},
+			"additionalProperties": false,
+		},
+		Validate: func(p json.RawMessage) error {
+			_, err := DecodeSave(p)
+			return err
+		},
+	}
+}
+
+// DecodeSave reads agent:save's params.
+func DecodeSave(p json.RawMessage) (SaveParams, error) {
+	var v SaveParams
+	if err := strictDecode(p, &v); err != nil {
+		return v, err
+	}
+	switch {
+	case !agentNameRE.MatchString(v.Name):
+		return v, fmt.Errorf("agent:save: name %q is not an agent name (%s)", v.Name, spec.AgentNamePattern)
+	case strings.TrimSpace(v.Charter) == "":
+		return v, fmt.Errorf("agent:save: charter is required")
+	case len(v.Description) > 200 || len(v.Charter) > 20000:
+		return v, fmt.Errorf("agent:save: description is at most 200 bytes, charter 20000")
+	case len(v.Starters) > spec.MaxStarters:
+		return v, fmt.Errorf("agent:save: at most %d starters", spec.MaxStarters)
+	}
+	for _, s := range v.Starters {
+		if strings.TrimSpace(s) == "" || len(s) > spec.MaxStarterLen {
+			return v, fmt.Errorf("agent:save: each starter is 1 to %d bytes", spec.MaxStarterLen)
+		}
+	}
+	return v, nil
 }

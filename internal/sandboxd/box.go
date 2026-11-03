@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -47,13 +48,22 @@ func boxContainer(name string) string { return "orbit-box-" + name }
 
 func boxVolume(name, which string) string { return "orbit-box-" + name + "-" + which }
 
+// accountVolume is an account's volume: its credentials and its private
+// runtime state live there and nowhere else (docs/agents/security.md).
+func accountVolume(name, slot string) string { return boxVolume(name, "acct-"+slot) }
+
 // boxSpec is the one container a box is. Its inputs are sandboxd's
-// configuration and the agent's name (ValidBoxName).
-func boxSpec(cfg Config, name string) containerCreate {
+// configuration, the agent's name (ValidBoxName) and the account slots it
+// mounts (sandbox.ValidSlot, sorted and unique).
+func boxSpec(cfg Config, name string, accounts []string) containerCreate {
 	proxy := "http://" + cfg.WorkstationProxy
-	vol := func(which, target string) mount {
-		return mount{Type: "volume", Source: boxVolume(name, which), Target: target,
+	vol := func(source, target string) mount {
+		return mount{Type: "volume", Source: source, Target: target,
 			VolumeOptions: volumeOptions{Labels: map[string]string{LabelBox: name}}}
+	}
+	mounts := []mount{vol(boxVolume(name, "home"), sandbox.BoxHome), vol(boxVolume(name, "work"), sandbox.WorkDir)}
+	for _, a := range accounts {
+		mounts = append(mounts, vol(accountVolume(name, a), sandbox.AccountDir(a)))
 	}
 	return containerCreate{
 		Image: cfg.BoxImage,
@@ -78,12 +88,13 @@ func boxSpec(cfg Config, name string) containerCreate {
 		Labels:     map[string]string{LabelBox: name},
 		HostConfig: hostConfig{
 			CapDrop:      append([]string(nil), boxCapDrop...),
-			NetworkMode:  cfg.Network,
+			NetworkMode:  cfg.WorkstationNetwork,
 			IpcMode:      "private",
 			CgroupnsMode: "private",
 			// Named volumes, filled from the image on first use (NoCopy
-			// false), so the home starts as the image's.
-			Mounts:     []mount{vol("home", sandbox.BoxHome), vol("work", sandbox.WorkDir)},
+			// false), so the home starts as the image's. An account's
+			// volume is mounted inside the home, at its directory.
+			Mounts:     mounts,
 			Memory:     BoxMemoryBytes,
 			MemorySwap: BoxMemoryBytes,
 			NanoCpus:   BoxNanoCPUs,
@@ -96,7 +107,7 @@ func boxSpec(cfg Config, name string) containerCreate {
 			RestartPolicy: restartPolicy{Name: "unless-stopped"},
 			Runtime:       cfg.BoxRuntime,
 		},
-		NetworkingConfig: networkingConfig{EndpointsConfig: map[string]struct{}{cfg.Network: {}}},
+		NetworkingConfig: networkingConfig{EndpointsConfig: map[string]struct{}{cfg.WorkstationNetwork: {}}},
 	}
 }
 
@@ -117,8 +128,8 @@ func verifyBox(cfg Config, name string, c containerState) error {
 		return fmt.Errorf("capabilities added: %v", h.CapAdd)
 	case !contains(h.CapDrop, "MKNOD") || !contains(h.CapDrop, "NET_RAW"):
 		return fmt.Errorf("capabilities dropped: %v, want %v", h.CapDrop, boxCapDrop)
-	case h.NetworkMode != cfg.Network:
-		return fmt.Errorf("network is %q, want %q", h.NetworkMode, cfg.Network)
+	case h.NetworkMode != cfg.WorkstationNetwork:
+		return fmt.Errorf("network is %q, want %q", h.NetworkMode, cfg.WorkstationNetwork)
 	case len(h.Binds) != 0:
 		return fmt.Errorf("bind mounts present: %v", h.Binds)
 	case h.PidMode != "" || h.UsernsMode != "":
@@ -132,29 +143,76 @@ func verifyBox(cfg Config, name string, c containerState) error {
 	}
 	want := map[string]string{sandbox.BoxHome: boxVolume(name, "home"), sandbox.WorkDir: boxVolume(name, "work")}
 	for _, m := range c.Mounts {
-		if m.Type != "volume" || want[m.Destination] == "" || m.Name != want[m.Destination] {
+		v := want[m.Destination]
+		if slot, ok := strings.CutPrefix(m.Destination, sandbox.AccountsRoot+"/"); ok && sandbox.ValidSlot(slot) {
+			v = accountVolume(name, slot)
+		}
+		if m.Type != "volume" || v == "" || m.Name != v {
 			return fmt.Errorf("mount of %s %q at %s", m.Type, m.Name, m.Destination)
 		}
 	}
 	return nil
 }
 
-// ttyArgv is a preset's command. The tmux client is started by a fixed
-// script that prints its pid first, so a detach can hang up exactly that
-// client (others on the session stay attached); the session name is a
-// positional argument, never part of the script.
-func ttyArgv(preset, session string) []string {
-	script := `echo "$$"; exec tmux new-session -A -s "$1"`
-	if preset == sandbox.TTYClaude {
-		script += ` claude`
+// mountedAccounts are the account slots a verified box mounts, sorted.
+func mountedAccounts(c containerState) []string {
+	var out []string
+	for _, m := range c.Mounts {
+		if slot, ok := strings.CutPrefix(m.Destination, sandbox.AccountsRoot+"/"); ok && sandbox.ValidSlot(slot) {
+			out = append(out, slot)
+		}
 	}
-	return []string{"sh", "-c", script, "orbit-tty", session}
+	slices.Sort(out)
+	return out
+}
+
+// mergeAccounts is the sorted union of what a box mounts and what a request
+// names: a recreate never unmounts an account.
+func mergeAccounts(a, b []string) []string {
+	out := slices.Concat(a, b)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// ttyScript starts the tmux client: it prints its pid first, so a detach
+// can hang up exactly that client (others on the session stay attached),
+// then runs tmux with the arguments after the session name. The session
+// name and every argument are positional, never part of the script.
+const ttyScript = `echo "$$"; s=$1; shift; exec tmux new-session -A -s "$s" "$@"`
+
+// accountScript runs a command with an account's own login: the
+// subscription token and every ANTHROPIC_ variable are removed from its
+// environment, whatever the tmux server inherited.
+const accountScript = `unset CLAUDE_CODE_OAUTH_TOKEN; for v in $(env | sed -n 's/^\(ANTHROPIC_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done; exec "$@"`
+
+// ttyArgv is a preset's command, for the box's own profile or for an
+// account (its slot). An account's session has CLAUDE_CONFIG_DIR set to its
+// directory and the subscription token marked removed (so windows opened in
+// it later lack it too), and its command runs through accountScript.
+func ttyArgv(preset, session, account string) []string {
+	argv := []string{"sh", "-c", ttyScript, "orbit-tty", session}
+	var cmd []string
+	switch preset {
+	case sandbox.TTYClaude:
+		cmd = []string{"claude"}
+	case sandbox.TTYLogin:
+		cmd = []string{"claude", "auth", "login"}
+	}
+	if account == "" {
+		return append(argv, cmd...)
+	}
+	if cmd == nil {
+		cmd = []string{"bash", "-l"}
+	}
+	argv = append(argv, "-e", "CLAUDE_CONFIG_DIR="+sandbox.AccountDir(account), "sh", "-c", accountScript, "orbit-account")
+	argv = append(argv, cmd...)
+	return append(argv, ";", "set-environment", "-t", "="+session, "-r", "CLAUDE_CODE_OAUTH_TOKEN")
 }
 
 // ttyExecSpec is the one TTY process shape: a preset's argv, the allowed
 // environment and the terminal type, everything else fixed.
 func ttyExecSpec(tr sandbox.TTYRequest) execCreate {
-	e := execSpec(sandbox.AttachRequest{Argv: ttyArgv(tr.Preset, tr.Session), Env: tr.Env})
+	e := execSpec(sandbox.AttachRequest{Argv: ttyArgv(tr.Preset, tr.Session, tr.Account), Env: tr.Env})
 	e.Tty = true
 	e.AttachStderr = false
 	e.Env = append(e.Env, "TERM=xterm-256color")
@@ -189,6 +247,7 @@ func (s *Server) status(name string, c *containerState) sandbox.BoxStatus {
 		return st
 	}
 	st.ID, st.Image, st.State = c.ID, c.Config.Image, sandbox.BoxStopped
+	st.Accounts = mountedAccounts(*c)
 	if c.State.Running {
 		st.State = sandbox.BoxRunning
 	}
@@ -223,12 +282,43 @@ func (s *Server) boxGet(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ensureRequest reads a box request's optional body.
+func ensureRequest(w http.ResponseWriter, r *http.Request) (sandbox.EnsureRequest, bool) {
+	var req sandbox.EnsureRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "box request: "+err.Error())
+		return req, false
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return req, false
+	}
+	return req, true
+}
+
 // boxEnsure creates the box, or starts it. A stopped box whose image is no
-// longer the configured one is recreated on it (its volumes, home and work,
-// are kept); a running one keeps its image until it is stopped, so moving
-// the pin never cuts a person's terminals.
+// longer the configured one, or that lacks an account asked for, is
+// recreated (its volumes, home, work and accounts, are kept, and it mounts
+// every account it did); a running one keeps its image and mounts until it
+// is stopped, so moving the pin never cuts a person's terminals.
 func (s *Server) boxEnsure(w http.ResponseWriter, r *http.Request) {
+	s.boxUp(w, r, false)
+}
+
+// boxRecreate replaces the container whatever its state, for a mount a
+// running box lacks. Its volumes stay.
+func (s *Server) boxRecreate(w http.ResponseWriter, r *http.Request) {
+	s.boxUp(w, r, true)
+}
+
+func (s *Server) boxUp(w http.ResponseWriter, r *http.Request, recreate bool) {
 	name, ok := boxName(w, r)
+	if !ok {
+		return
+	}
+	req, ok := ensureRequest(w, r)
 	if !ok {
 		return
 	}
@@ -239,38 +329,47 @@ func (s *Server) boxEnsure(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	s.boxMu.Lock()
 	defer s.boxMu.Unlock()
+	accounts := mergeAccounts(nil, req.Accounts)
 	c, err := s.boxState(ctx, name)
 	switch {
 	case errors.Is(err, errNotFound):
 	case err != nil:
 		writeError(w, http.StatusConflict, err.Error())
 		return
-	case c.State.Running:
+	case c.State.Running && !recreate:
 		writeJSON(w, http.StatusOK, s.status(name, &c))
 		return
-	case c.Config.Image != s.cfg.BoxImage:
-		if err := s.d.remove(ctx, c.ID); err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
-			return
+	default:
+		mounted := mountedAccounts(c)
+		accounts = mergeAccounts(mounted, req.Accounts)
+		if recreate || c.Config.Image != s.cfg.BoxImage || !slices.Equal(accounts, mounted) {
+			if err := s.d.remove(ctx, c.ID); err != nil {
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			s.log.Info("sandboxd: box recreated", "box", name, "image", s.cfg.BoxImage, "accounts", len(accounts))
+			err = errNotFound
 		}
-		s.log.Info("sandboxd: box recreated on a new image", "box", name, "image", s.cfg.BoxImage)
-		err = errNotFound
+	}
+	if len(accounts) > sandbox.MaxAccounts {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("a box mounts at most %d accounts", sandbox.MaxAccounts))
+		return
 	}
 	if errors.Is(err, errNotFound) {
-		id, err := s.d.createNamed(ctx, boxContainer(name), boxSpec(s.cfg, name))
+		id, err := s.d.createNamed(ctx, boxContainer(name), boxSpec(s.cfg, name, accounts))
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
 		if c, err = s.boxState(ctx, name); err != nil {
-			// Named volumes stay: they are the box's home and work.
+			// Named volumes stay: they are the box's home, work and accounts.
 			if rerr := s.d.remove(context.WithoutCancel(ctx), id); rerr != nil {
 				s.log.Error("sandboxd: remove after a failed box create", "box", name, "err", rerr)
 			}
 			writeError(w, http.StatusInternalServerError, "the daemon did not create the box asked for: "+err.Error())
 			return
 		}
-		s.log.Info("sandboxd: box created", "box", name, "id", id, "image", s.cfg.BoxImage, "runtime", s.cfg.BoxRuntime)
+		s.log.Info("sandboxd: box created", "box", name, "id", id, "image", s.cfg.BoxImage, "runtime", s.cfg.BoxRuntime, "accounts", len(accounts))
 	}
 	if err := s.d.start(ctx, c.ID); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -422,6 +521,10 @@ func (s *Server) tty(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "tty request: "+err.Error())
 		return
 	}
+	if tr.Account != "" && !slices.Contains(mountedAccounts(c), tr.Account) {
+		writeError(w, http.StatusConflict, "the box does not mount account "+tr.Account+": recreate it")
+		return
+	}
 	ctx := r.Context()
 	execID, err := s.d.createExec(ctx, c.ID, ttyExecSpec(tr))
 	if err != nil {
@@ -457,7 +560,7 @@ func (s *Server) tty(w http.ResponseWriter, r *http.Request) {
 		s.hangUp(c.ID, pid)
 		return
 	}
-	s.log.Info("sandboxd: tty attached", "box", name, "session", tr.Session, "preset", tr.Preset, "exec", execID)
+	s.log.Info("sandboxd: tty attached", "box", name, "session", tr.Session, "preset", tr.Preset, "account", tr.Account, "exec", execID)
 
 	// orbit's side: input and resizes until it closes, then hang up the
 	// tmux client so its exec ends.

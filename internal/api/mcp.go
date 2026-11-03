@@ -98,9 +98,11 @@ type mcpCreateConversationIn struct {
 type mcpSendMessageIn struct {
 	Agent          string `json:"agent,omitempty" jsonschema:"the agent's name; the message goes to its default conversation unless conversation_id is set"`
 	ConversationID string `json:"conversation_id,omitempty" jsonschema:"the conversation to post in (from list_conversations or create_conversation)"`
-	Body           string `json:"body" jsonschema:"the message, Markdown"`
+	Body           string `json:"body,omitempty" jsonschema:"the message, Markdown; may be empty when answers are given"`
 	ReplyTo        string `json:"reply_to,omitempty" jsonschema:"the id of the agent question this answers"`
 	WaitSeconds    int    `json:"wait_seconds,omitempty" jsonschema:"how long to wait for the reply (default 45, at most 300, -1 does not wait)"`
+	// Answers fill a question's form, as POST .../messages takes them.
+	Answers map[string]any `json:"answers,omitempty" jsonschema:"answers to the form of the question reply_to names, by field name (the question's fields in read_thread)"`
 }
 
 type mcpWaitIn struct {
@@ -113,6 +115,7 @@ type mcpReadThreadIn struct {
 	ConversationID string `json:"conversation_id,omitempty" jsonschema:"read this conversation"`
 	Limit          int    `json:"limit,omitempty" jsonschema:"the newest this many items (default 20, at most 200)"`
 	Before         string `json:"before,omitempty" jsonschema:"next_before from a previous page, to page back"`
+	Unfold         bool   `json:"unfold,omitempty" jsonschema:"list every skipped run instead of folding a streak of identical skips into its newest"`
 }
 
 type mcpListActionsIn struct {
@@ -125,6 +128,11 @@ type mcpListActionsIn struct {
 
 type mcpDecideIn struct {
 	ActionID string `json:"action_id" jsonschema:"the action's id, from list_actions or a reply"`
+}
+
+type mcpApproveIn struct {
+	ActionID string `json:"action_id" jsonschema:"the action's id, from list_actions or a reply"`
+	Always   bool   `json:"always,omitempty" jsonschema:"also let this agent do this type of action without asking from now on (a new, revertible version of the agent)"`
 }
 
 func (s *Server) addMCPTools(srv *mcp.Server) {
@@ -142,7 +150,7 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 					continue
 				}
 				m := map[string]any{"name": a.Name, "enabled": a.Enabled, "needs_input": a.NeedsInput,
-					"open_questions": a.Unread, "pending_actions": a.Pending, "last_run": a.LastRun}
+					"open_questions": a.Unread, "pending_actions": a.Pending, "last_run": a.LastRun, "agent_status": a.AgentStatus}
 				if sa, ok := cfg.Agents[a.Name]; ok {
 					m["description"] = sa.Description
 				}
@@ -194,8 +202,8 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 		"The reply is the run's report, any questions it asked, and any actions it proposed. If the run is still going " +
 		"when the wait ends, call wait_for_reply with the run_id."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in mcpSendMessageIn) (*mcp.CallToolResult, any, error) {
-			if strings.TrimSpace(in.Body) == "" {
-				return nil, nil, errors.New("body is required")
+			if strings.TrimSpace(in.Body) == "" && in.Answers == nil {
+				return nil, nil, errors.New("body or answers is required")
 			}
 			var a *spec.Agent
 			var err error
@@ -216,9 +224,16 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 			if in.ReplyTo != "" {
 				replyTo = &in.ReplyTo
 			}
+			var answers map[string]json.RawMessage
+			if in.Answers != nil {
+				answers = map[string]json.RawMessage{}
+				for k, v := range in.Answers {
+					answers[k], _ = json.Marshal(v)
+				}
+			}
 			res, replayed, err := s.Store.PostMessageOnce(ctx, store.PostMessage{
 				Agent: a.Name, SpecSHA: a.SHA, Body: in.Body, Author: mcpPerson(req), ReplyTo: replyTo,
-				Wake: a.MessagesTrigger, ConversationID: conv,
+				Wake: a.MessagesTrigger, ConversationID: conv, Answers: answers,
 			})
 			if err != nil {
 				return nil, nil, mcpErr(err)
@@ -258,20 +273,21 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 			if limit <= 0 {
 				limit = mcpThreadLimit
 			}
-			var fetch func(*store.ThreadCursor, int) (*store.ThreadPage, error)
+			id := in.ConversationID
 			switch {
-			case in.ConversationID != "":
-				fetch = func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
-					return s.Store.ConversationThread(ctx, in.ConversationID, before, limit)
+			case id != "":
+				if !store.IsUUID(id) {
+					return nil, nil, mcpErr(requestError("not a valid id"))
 				}
 			case in.Agent != "":
-				fetch = func(before *store.ThreadCursor, limit int) (*store.ThreadPage, error) {
-					return s.Store.Thread(ctx, in.Agent, before, limit)
+				var err error
+				if id, err = s.Store.DefaultConversationID(ctx, in.Agent); err != nil {
+					return nil, nil, mcpErr(err)
 				}
 			default:
 				return nil, nil, errors.New("give agent or conversation_id")
 			}
-			out, err := threadPage(in.Before, limit, fetch)
+			out, err := s.readThread(ctx, id, in.Before, limit, !in.Unfold, false)
 			if err != nil {
 				return nil, nil, mcpErr(err)
 			}
@@ -307,8 +323,25 @@ func (s *Server) addMCPTools(srv *mcp.Server) {
 			return mcpJSON(map[string]any{"action": a})
 		}
 	}
-	mcp.AddTool(srv, &mcp.Tool{Name: "approve_action", Description: "Approve an action an agent proposed; orbit executes it."},
-		decide(true))
+	mcp.AddTool(srv, &mcp.Tool{Name: "approve_action", Description: "Approve an action an agent proposed; orbit executes it. always: true also makes the type auto for that agent."},
+		func(ctx context.Context, req *mcp.CallToolRequest, in mcpApproveIn) (*mcp.CallToolResult, any, error) {
+			if !in.Always {
+				return decide(true)(ctx, req, mcpDecideIn{ActionID: in.ActionID})
+			}
+			by := mcpPerson(req)
+			if by == "" {
+				by = "operator"
+			}
+			out, err := s.approveAlways(ctx, in.ActionID, by, "")
+			if err != nil {
+				return nil, nil, mcpErr(err)
+			}
+			a, err := s.Store.GetAction(ctx, in.ActionID)
+			if err != nil {
+				return nil, nil, mcpErr(err)
+			}
+			return mcpJSON(map[string]any{"action": a, "always": out["always"]})
+		})
 	mcp.AddTool(srv, &mcp.Tool{Name: "reject_action", Description: "Reject an action an agent proposed; it never executes."},
 		decide(false))
 }
@@ -356,6 +389,9 @@ func (s *Server) mcpWait(ctx context.Context, req *mcp.CallToolRequest, id strin
 		}
 	}
 	run, err := s.Store.ThreadRunByID(ctx, id)
+	if err == nil {
+		err = s.withRunChanges(ctx, []store.ThreadItem{{Run: run}})
+	}
 	if err != nil {
 		return mcpErr(err)
 	}
