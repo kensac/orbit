@@ -262,8 +262,7 @@ func importRecords(ctx context.Context, api Importer, endpoint, field string, re
 	return json.Marshal(map[string]any{"results": results})
 }
 
-func loadBundle(filename string) (bundleResources, error) {
-	var out bundleResources
+func loadBundle(filename string) (out bundleResources, retErr error) {
 	manifest, err := Inspect(filename)
 	if err != nil {
 		return out, err
@@ -272,7 +271,11 @@ func loadBundle(filename string) (bundleResources, error) {
 	if err != nil {
 		return out, err
 	}
-	defer archive.Close()
+	defer func() {
+		if err := archive.Close(); err != nil && retErr == nil {
+			retErr = err
+		}
+	}()
 	out.manifest = manifest
 	out.values = make(map[string]json.RawMessage, len(manifest.Resources))
 	files := make(map[string]*zip.File, len(archive.File))
