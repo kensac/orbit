@@ -20,6 +20,10 @@ func (s *Server) gradeEvaluation(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if body.Target == r.PathValue("name") {
+		writeErr(w, http.StatusBadRequest, "grader must be separate from the replay target")
+		return
+	}
 	snap := s.Engine.Current()
 	if snap == nil || snap.Config == nil {
 		writeErr(w, http.StatusServiceUnavailable, "configuration unavailable")
