@@ -25,6 +25,7 @@ type Case struct {
 	Name       string          `json:"name"`
 	Inputs     json.RawMessage `json:"inputs"`
 	Checks     []Check         `json:"checks"`
+	Grade      string          `json:"grade,omitempty"`
 	MaxCostUSD *json.Number    `json:"max_cost_usd,omitempty"`
 }
 
@@ -45,10 +46,28 @@ type Result struct {
 
 // Report contains every check failure and the exact sum of reported costs.
 type Report struct {
-	Passed       bool         `json:"passed"`
-	Cases        []CaseReport `json:"cases"`
-	KnownCostUSD string       `json:"known_cost_usd"`
-	MissingCosts int          `json:"missing_costs"`
+	Passed              bool          `json:"passed"`
+	Cases               []CaseReport  `json:"cases"`
+	KnownCostUSD        string        `json:"known_cost_usd"`
+	MissingCosts        int           `json:"missing_costs"`
+	Grades              []GradeReport `json:"grades,omitempty"`
+	GradingCostUSD      string        `json:"grading_cost_usd,omitempty"`
+	MissingGradingCosts int           `json:"missing_grading_costs,omitempty"`
+}
+
+// GradeResult is one independent model judgment. It never includes candidate output.
+type GradeResult struct {
+	Name    string       `json:"name"`
+	Passed  bool         `json:"passed"`
+	Reason  string       `json:"reason"`
+	CostUSD *json.Number `json:"cost_usd,omitempty"`
+}
+
+// GradeReport is a bounded, output-free summary of one model judgment.
+type GradeReport struct {
+	Name   string `json:"name"`
+	Passed bool   `json:"passed"`
+	Reason string `json:"reason"`
 }
 
 // CaseReport records one run's regressions without copying potentially sensitive output.
@@ -107,6 +126,9 @@ func Evaluate(s Suite, results []Result) (Report, error) {
 		}
 		if len(c.Checks) == 0 {
 			return report, fmt.Errorf("case %q: no checks", c.Name)
+		}
+		if len(c.Grade) > 4000 || (c.Grade != "" && strings.TrimSpace(c.Grade) == "") {
+			return report, fmt.Errorf("case %q: grade rubric is blank or exceeds 4000 bytes", c.Name)
 		}
 		var maxCost *big.Rat
 		if c.MaxCostUSD != nil {
@@ -181,6 +203,48 @@ func Evaluate(s Suite, results []Result) (Report, error) {
 	}
 	report.KnownCostUSD = decimal(total)
 	return report, nil
+}
+
+// ApplyGrades adds judgments to an already computed deterministic report.
+// Grader cost is accumulated exactly from backend-reported decimal values.
+func ApplyGrades(s Suite, report *Report, grades []GradeResult) error {
+	if report == nil {
+		return errors.New("evaluation report is required")
+	}
+	want := map[string]bool{}
+	for _, c := range s.Cases {
+		if c.Grade != "" {
+			want[c.Name] = true
+		}
+	}
+	got := map[string]bool{}
+	total := new(big.Rat)
+	report.Grades = make([]GradeReport, 0, len(grades))
+	report.MissingGradingCosts = 0
+	for _, g := range grades {
+		if !want[g.Name] || got[g.Name] || strings.TrimSpace(g.Reason) == "" || len(g.Reason) > 512 {
+			return fmt.Errorf("unexpected, duplicate or oversized grade %q", g.Name)
+		}
+		got[g.Name] = true
+		if g.CostUSD != nil {
+			cost, err := money(*g.CostUSD)
+			if err != nil {
+				return fmt.Errorf("grade %q cost_usd: %w", g.Name, err)
+			}
+			total.Add(total, cost)
+		} else {
+			report.MissingGradingCosts++
+		}
+		report.Grades = append(report.Grades, GradeReport{Name: g.Name, Passed: g.Passed, Reason: g.Reason})
+		if !g.Passed {
+			report.Passed = false
+		}
+	}
+	if len(got) != len(want) {
+		return errors.New("missing model grade")
+	}
+	report.GradingCostUSD = decimal(total)
+	return nil
 }
 
 func money(n json.Number) (*big.Rat, error) {

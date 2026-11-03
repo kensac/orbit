@@ -143,6 +143,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/agents/{name}/memory", s.memoryHistory)
 	api("POST /api/v1/agents/{name}/runs", s.startRun)
 	api("POST /api/v1/agents/{name}/replay", s.replayEvaluation)
+	api("POST /api/v1/agents/{name}/grade", s.gradeEvaluation)
 	api("GET /api/v1/agents/{name}/messages", s.listMessages)
 	api("POST /api/v1/agents/{name}/messages", s.sendMessage)
 	api("GET /api/v1/runs", s.listRuns)
