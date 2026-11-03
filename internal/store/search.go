@@ -28,8 +28,11 @@ const maxSearchOffset = 1000
 // SearchQuery is one search. Q is web-search syntax (websearch_to_tsquery:
 // words, "quoted phrases", or, -excluded). Every other field narrows it.
 type SearchQuery struct {
-	Q              string
-	Agent          string
+	Q     string
+	Agent string
+	// EntryTopics, with Agent, widen it to the memory entries the agent reads beside its own: the profile's and these topics' (a run's own search).
+	EntryTopics    []string
+	EntryProfile   bool
 	ConversationID string
 	RunID          string
 	Kinds          []string
@@ -103,6 +106,10 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchPage, error) 
 	if len(q.Kinds) > 0 {
 		kinds = q.Kinds
 	}
+	entryTopics := q.EntryTopics
+	if entryTopics == nil {
+		entryTopics = []string{}
+	}
 	rows, err := s.Pool.Query(ctx, `
 		WITH q AS (SELECT websearch_to_tsquery('english', $1) AS q),
 		m AS (
@@ -112,7 +119,8 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchPage, error) 
 		           END AS newest
 		    FROM search_docs d, q
 		    WHERE d.tsv @@ q.q
-		      AND ($2 = '' OR d.agent = $2)
+		      AND ($2 = '' OR d.agent = $2 OR (d.kind = 'memory_entry' AND d.agent IS NULL AND (
+		          (d.scope = 'profile' AND $12::boolean) OR (d.scope = 'topic' AND d.owner = ANY ($13::text[])))))
 		      AND ($3 = '' OR d.conversation_id = $3::uuid)
 		      AND ($4 = '' OR d.run_id = $4::uuid)
 		      AND ($5::text[] IS NULL OR d.kind = ANY ($5))
@@ -134,7 +142,8 @@ func (s *Store) Search(ctx context.Context, q SearchQuery) (*SearchPage, error) 
 		           'MaxFragments=2, MaxWords=30, MinWords=12, FragmentDelimiter=" ... ", StartSel=' || $10 || ', StopSel=' || $11)
 		FROM page p, q
 		ORDER BY p.rank DESC, p.at DESC, p.id DESC`,
-		q.Q, q.Agent, q.ConversationID, q.RunID, kinds, q.From, q.To, limit, offset, snipStart, snipStop)
+		q.Q, q.Agent, q.ConversationID, q.RunID, kinds, q.From, q.To, limit, offset, snipStart, snipStop,
+		q.EntryProfile, entryTopics)
 	if err != nil {
 		return nil, err
 	}

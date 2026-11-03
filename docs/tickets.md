@@ -22,6 +22,7 @@ This document is the design. What exists today:
 | the ticket loop: build enqueue, PR and checks polling, proposing the merge, reruns of failed jobs (its own and a person's), fix attempts with the failure report, done on deploy, reconciliation, closing an abandoned ticket's PR, the self-hosting rules | **Built**, tested against a fake GitHub and real Postgres | `internal/tickets` |
 | review comments: drafts, edits as new versions, one structured message per review, the revise build that applies them, delivered when it succeeds | **Built**, tested against real Postgres and a fake GitHub | `internal/store/reviews.go`, `internal/api/reviews.go`, `migrations/20261102032212_review_comments.sql` |
 | stacked tickets: built on the ticket below, merge held, restacked by code onto its new head and onto the default branch once it merges | **Built**; the restack against a real git remote, the loop against a fake GitHub and real Postgres | `internal/tickets/stack.go`, `internal/build/restack.go` |
+| races: two or three builds of one approved plan on lanes `orbit/<id>-a`, `-b`, `-c`, each with its own model or effort, scored in code, picked by a person (`ticket:pick`), refused while the subscription is nearly spent | **Built**; the store and loop tested against real Postgres and a fake GitHub, the lane builds against a fake sandboxd and a real git remote | `internal/store/race.go`, `internal/tickets/race.go`, `migrations/20261102065523_race_builds.sql` |
 | `skipped` as a run status for gates | **Built** for a build that redelivers an earlier attempt's push | `store.FinishBuild` |
 
 Nothing has run against the real GitHub API yet; the fake
@@ -65,11 +66,12 @@ Nothing about a thread is built twice. What tickets add is the lifecycle:
 | `tickets` | one row per ticket: kind, title, the agent discussing it, the target repository, status, the approved plan, the branch, PR and merge commit, and `conversation_id` (unique: one ticket per conversation) | the lifecycle has states no conversation has |
 | `ticket_events` | every transition: from, to, who, when, detail | the history of a ticket is a record, never overwritten (a `tickets.status` alone would lose it) |
 | `ticket_plans` | every plan version an agent proposed, and which one was approved | a plan is approved by version; a later plan must never inherit an earlier approval |
+| `ticket_lanes` | a race's lanes: each one's variant and the loop's latest reading of its PR | a lane exists before its first build, and keeps its variant across its builds |
 | `ticket_review_comments`, `ticket_build_comments` | line comments on a PR's diff, the message that carried them, and the build runs given them | a comment is anchored to a file, lines and a commit, and delivered exactly once (Lifecycle) |
 
 **Scoping** is the conversation's: two tickets with the same agent never see
 each other's words, and ticket work never touches the agent's other
-conversations. Memory, schedules, rules and `runs_one_running` stay per
+conversations. Memory, schedules, rules and the running run (`runs_one_running_lane`) stay per
 agent, so an agent's tickets queue behind each other rather than race on
 its memory.
 
@@ -225,6 +227,15 @@ from one that did.
 - **Conflicts.** A replay that conflicts fails the ticket, naming the files; retrying rebuilds it from its plan on the new base.
 - Every restack is a `ticket_events` row from `review` to `review` with its `restacked` detail (`store.Restacked`, guarded on the head it started from). A crash between the push and that row leaves the PR's head ahead of the ticket's, which the loop reads as a head that moved, and fails the ticket for a person; retrying rebuilds it.
 
+**Races.** A request filed with `race: 2` or `3` builds its approved plan that many times, so a person compares finished PRs instead of trusting one attempt (`internal/store/race.go`, `internal/tickets/race.go`):
+
+- **Lanes.** Each build is a lane, `a`, `b`, `c`, written when the ticket is filed (`ticket_lanes`), with an optional variant from the ticket's `variants`: a `model` (the CLI's `--model`) or an `effort` (`--effort`, as the Agent SDK passes `Options.effort`), else the build agent's runner's. A lane builds on its own branch, `orbit/<ticket-short-id>-<lane>` (`build.LaneBranch`), in its own kept clone (`build.LaneKey`), and opens its own PR whose body says it is one lane of a race.
+- **Start.** On approval the loop enqueues one build run per lane and moves the ticket to `building` in one transaction (`store.StartRace`). They are runs of the build agent, so they run one at a time (`runs_one_running`), each from the default branch's head when it starts; each lane records its own `base_sha`. **While the subscription is nearly spent** (any window not yet reset above `usage.DeferLowAbove`, 0.8, the deferral threshold, whether or not `defer_low_priority` is on) filing a race is refused (409) and an approved one waits in `approved`, because a race spends two or three builds on one plan.
+- **Settle.** Each lane's outcome is kept on its build's row (`ticket_builds`: branch, base, head, PR, lines added and deleted, the changed paths, and `diff_policy`: `passed` when it delivered, `failed` when the policy refused its diff). Once every lane's newest build ended, the ticket goes to `review` if at least one delivered a PR, else to `failed` naming each lane's error (`settleRace`, in the transaction of the last lane's `FinishBuild` or `FailBuild`, or by the loop for a lane the reaper failed or a person cancelled).
+- **Score.** Before the pick the loop reads each lane PR's state and required checks at its head (`ticket_lanes.checks`), and merges, reruns and fixes nothing. Code ranks the lanes (`store.RankLanes`): delivered a PR (the diff policy passed) first; then required checks green at the PR's head, then pending, then failed or not read yet, then a PR that is no longer open; then a lane that touched tests (`store.TestPath`: `_test.go`, `.test.`, `.spec.`, or a `test`, `tests`, `testdata` or `__tests__` directory) before one that did not; then fewer lines changed; then lower cost; then the lane's letter. The ticket review shows every lane with its numbers, its rank and why (`GET /tickets/{id}`, `race`), and the first one as the recommendation when it delivered.
+- **Pick.** A person picks one lane (`POST /tickets/{id}/pick`). The pick is a `ticket:pick` action on the lane's build run with rule `approve`, approved and executed by that person in the transaction that gives the ticket the lane's branch, PR, base and head (`store.PickLane`); no rule makes it automatic and no agent's catalog offers it. From then on the ticket is that lane's: its checks gate the merge, and its fixes, revisions and retries build on its branch with its variant. The loop closes every other lane's open PR with the delivery token and keeps the branches (never deleted), recording each in `ticket_lanes.pr_closed_at`; abandoning a race closes every lane's PR.
+- A retry of a race that failed before any pick races again from every lane; a person can pick a lane whose PR was merged on GitHub before the pick, and the ticket is then reconciled as merged. A race cannot be stacked, and nothing stacks on a race.
+
 **Reconciliation.** A crash can separate a side effect from its row: the
 merge succeeded on GitHub but `FinishAction` never ran, so the action is
 failed as orphaned. The ticket loop is idempotent and reads GitHub's state:
@@ -239,6 +250,10 @@ reconciles at a time, stopped by a drain) holds no state between ticks:
 | ticket | GitHub or the store says | the loop |
 |---|---|---|
 | `approved` | | enqueues the build (waits while the repository has one building) |
+| `approved`, a race | the subscription is nearly spent / not | waits / enqueues every lane |
+| `building`, a race | every lane's newest build ended | `review` with at least one PR delivered, else `failed` |
+| `review`, a race before the pick | | reads each lane PR's state and checks for the comparison; nothing else |
+| `review`, `merged`, a picked race | another lane's PR is open | closes it, keeps its branch |
 | `building` | the build run failed or was cancelled without moving it (the reaper ran out of attempts) | `failed` with the run's error |
 | `review` | PR merged / closed / head moved off what orbit built | `merged` / `failed` / `failed` |
 | `review` | a submitted review waits | a revise (`building`) |
@@ -267,9 +282,9 @@ same id for a different request is a 409.
 
 | method | path | body | result |
 |---|---|---|---|
-| `POST` | `/tickets` | `{"kind": "request", "title": "...", "body": "...", "agent": "orbit", "repo": "kensac/orbit", "wake": true, "client_request_id": "...", "stack_on": "optional ticket id"}` | `201 {"ticket_id", "conversation_id", "message_id", "run_id"}`; 400 for a `stack_on` that is not an unmerged request of the same repository |
+| `POST` | `/tickets` | `{"kind": "request", "title": "...", "body": "...", "agent": "orbit", "repo": "kensac/orbit", "wake": true, "client_request_id": "...", "stack_on": "optional ticket id", "race": 2, "variants": [{"model": "...", "effort": "high"}]}` | `201 {"ticket_id", "conversation_id", "message_id", "run_id"}`; 400 for a `stack_on` that is not an unmerged request of the same repository, or a bad race (Races); 409 for a race while the subscription is nearly spent |
 | `GET` | `/tickets?status=&agent=&before=&limit=` | | `{"tickets": [...]}`, newest first |
-| `GET` | `/tickets/{id}` | | `{"ticket", "plans", "events", "reruns"}` |
+| `GET` | `/tickets/{id}` | | `{"ticket", "plans", "events", "reruns"}`, and `race` (the lanes, scored and ranked, the recommendation and the pick) for a race |
 | `POST` | `/tickets/{id}/plans/{version}/approve` | `{"client_request_id"}` | `{"ok": true}`; 409 unless it is the newest plan of a `planned` ticket |
 | `POST` | `/tickets/{id}/abandon` | `{"reason"}` | `{"ok": true}`; 409 once merged or terminal |
 | `POST` | `/tickets/{id}/retry` | | `{"ok": true}`; `failed -> approved` |
@@ -280,6 +295,7 @@ same id for a different request is a 409.
 | `POST` | `/tickets/{id}/comments/{comment}/withdraw` | | `{"ok": true}`; 409 unless it is a draft |
 | `POST` | `/tickets/{id}/review` | `{"body", "client_request_id"}` | `201 {"message_id", "comments"}`; 400 with nothing to send; 409 unless the PR is in `review` or `failed` |
 | `POST` | `/tickets/{id}/checks/rerun` | | `202 {"rerun": {...}}`; the loop reruns the PR's failed checks; 409 without a PR in `review` or `failed`, or while one waits |
+| `POST` | `/tickets/{id}/pick` | `{"lane": "a", "client_request_id"}` | `{"ok": true, "action_id"}`; the person's `ticket:pick` of one race lane; 409 unless the ticket is a race in `review` with no pick and the lane delivered a PR |
 
 A ticket's thread and its messages are its conversation's:
 `GET /conversations/{conversation_id}/thread` and
@@ -298,7 +314,7 @@ in `orbit.yaml`. A ticket in the API:
  "created_at": "...", "updated_at": "..."}
 ```
 
-Fields not yet set (`merge_sha`, `error`, `stack_on`, ...) are omitted, not `null`; the full shape is in docs/api.md, Tickets.
+Fields not yet set (`merge_sha`, `error`, `stack_on`, `race`, `picked_lane`, ...) are omitted, not `null`; the full shape is in docs/api.md, Tickets.
 
 ## GitHub access: one App, per-run tokens
 
@@ -329,10 +345,12 @@ The permission sets are named in code, one per use:
 |---|---|
 | reading (a build's clone, a fetch into the mirror of a repository an agent reads) | `contents: read` |
 | an agent's `pr_list` and `pr_view` (docs/api.md, Repositories) | `pull_requests: read`, `checks: read`, `statuses: read` |
+| an agent's `github` source, one per fetch: `issues`, `pulls`, `checks`, `releases` | `issues: read`; `pull_requests: read`; `checks: read`, `statuses: read`; `contents: read` |
 | build delivery (push `orbit/*`, open the PR, close it on abandon) | `contents: write`, `pull_requests: write` |
 | merge (read the PR and its checks, update the body, merge) | `contents: write`, `pull_requests: write`, `checks: read`, `statuses: read` |
 | failure report (read failing checks and their job logs) | `checks: read`, `actions: read` |
 | rerun (run failed Actions jobs again) | `actions: write` |
+| `github:comment` (a comment on an issue or pull request of `github.comment_repositories`) | `issues: write` |
 
 `metadata: read` is implicit in every token. No set includes `workflows`, so
 a pushed change to `.github/workflows/` is refused by GitHub itself: a build
@@ -448,7 +466,7 @@ only egress is `orbit egress`, an allowlisting CONNECT proxy in its own
 container on that network and one other (`HTTPS_PROXY`), which allows the
 backend's API host and the package registries the repository's build needs
 (for Go: `proxy.golang.org`, `sum.golang.org`), on port 443 only, to public
-addresses only, and nothing else. It refuses to load an allowlist naming
+addresses only, for TLS whose server name is the allowed host, and nothing else. It refuses to load an allowlist naming
 GitHub: the checkout is already inside, and a sandbox that cannot reach
 GitHub cannot push even with a token it found.
 
@@ -465,22 +483,30 @@ needs today.
 ### No orbit secrets inside
 
 The container receives: the checkout (no `.git/config` credentials), the
-CLI command line, the prompt on stdin, and the backend credential
-(`CLAUDE_CODE_OAUTH_TOKEN`, else `ANTHROPIC_API_KEY`, chosen as for an ordinary run), which the CLI needs to reach its own backend
+CLI command line, the prompt on stdin, and a credential proxy token in the backend credential's place
+(`CLAUDE_CODE_OAUTH_TOKEN`, else `ANTHROPIC_API_KEY`, chosen as for an ordinary run), with which the CLI reaches its own backend through `orbit credproxy`
 (AGENTS.md rule 2). It never receives a GitHub token, the App key, orbit's
 database URL, the API token, or any source or channel secret.
 
-The backend credential is still reachable by code the model runs: `go test`
+Whatever the process holds is reachable by code the model runs: `go test`
 executes whatever the model wrote, as the same user as the CLI, and can read
-`/proc/<cli pid>/environ`. Two measures, in order of preference:
+`/proc/<cli pid>/environ`. Two measures:
 
-1. **Keep the token out of the container**: point the CLI at a credential
-   proxy in sandboxd (`ANTHROPIC_BASE_URL`) that adds the real credential on
-   the way out, and give the container a placeholder. To be verified against
-   the real CLI with a subscription token before it is relied on.
+1. **Keep the credential out of the container**: sandboxd gives the CLI a token only `orbit credproxy` can open, bound to the container's address and expiry, and points it there (`ANTHROPIC_BASE_URL`); the proxy adds the real credential on the way out (internal/credproxy; what it guarantees: docs/agents/security.md). Verified against the real CLI (below) before it was built.
 2. **Catch it on the way out**: the diff policy refuses any diff containing
-   the exact credential value (orbit knows it) or a secret pattern, before
+   the exact credential value (orbit knows it), a credential proxy token or another secret pattern, before
    anything is committed, since orbit's repository is public.
+
+### Credential proxy: what the CLI does (seen on 2.1.316)
+
+Seen on 2026-11-02 against the real CLI (2.1.316, the `deploy/cli` pin) on macOS, with a throwaway reverse proxy on loopback forwarding to `https://api.anthropic.com` and replacing whatever credential arrived with the real one. The CLI ran with an empty HOME, `env -i`, `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` (and once `http://localhost:<port>`), `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and `HTTPS_PROXY`/`HTTP_PROXY` pointing at a listener that refuses and logs every request, with `NO_PROXY` naming the proxy's host, as a sandbox's environment would. Reproduce: the same environment, any placeholder, and a proxy that logs paths and header names, never values.
+
+- **Subscription OAuth token** (`CLAUDE_CODE_OAUTH_TOKEN=<any string>`; no `sk-ant-` prefix is needed): every request is `POST /v1/messages?beta=true` to the base URL with `Authorization: Bearer <placeholder>` and `anthropic-beta` including `oauth-2025-04-20`. With the proxy putting the real token (the keychain login's access token) in `Authorization`, these all succeeded: a one-word reply, a streamed reply of about 100 `content_block_delta` events arriving over 4 seconds (`text/event-stream`, the body forwarded as it arrived, with the CLI's `Accept-Encoding: gzip` passed through and with `identity`), a turn with a `Read` tool call (two requests), and orbit's own shape (`--input-format stream-json`, `--json-schema`, `--strict-mcp-config`, `--setting-sources ""`) returning `structured_output`.
+- **API key** (`ANTHROPIC_API_KEY=<any string>`): the same single path, with `x-api-key: <placeholder>`, no `Authorization` and no OAuth beta; `apiKeySource` in the init event is `ANTHROPIC_API_KEY`. The CLI side is seen: the placeholder is sent only to the base URL, and a streamed tool turn completed when the proxy authenticated the request upstream. Not seen: upstream accepting a real API key put in `x-api-key` by a proxy (no API key on the test machine); that is the API's ordinary header, not CLI behaviour.
+- **Nothing bypassed the base URL**: the refusing listener behind `HTTPS_PROXY` received no request in any run, and the only path the proxy saw was `/v1/messages`. `NO_PROXY` was honoured for an IP and for a hostname.
+- **A refusal fails the turn at once**: a proxy answer of 403 gave one request and the result `Failed to authenticate. API Error: 403 denied` (`is_error: true`, exit 1), with no retry.
+
+So the proxy allows only `POST /v1/messages` (and `POST /v1/messages/count_tokens`, the same API's token count) and forwards the response body unbuffered, and the per-run placeholder is itself the token the proxy checks (internal/credproxy).
 
 ### Tool policy inside the sandbox
 
@@ -712,9 +738,8 @@ confirmed them.
 - **Which PRs orbit merges.** Default: only its own `orbit/*` branches in
   the same repository, not Renovate's or anyone else's. Owner to confirm.
 - **Keeping the backend credential out of the build container** (the
-  credential proxy above). Open. **Precondition:** until it is verified
-  against the real CLI, build runs target only `kensac/orbit`, whose
-  diff is reviewed before every merge, and no other repository.
+  credential proxy above). Built; deploying it is the owner's (deployment.md). **Precondition:** until it is deployed, build runs target only `kensac/orbit`, whose
+  diff is reviewed before every merge, and no other repository (`internal/spec/build.go` holds it). Lifting it after is the owner's call: an allowed host is still a channel for what a build read.
 
 ## Configuration
 
@@ -749,11 +774,11 @@ build:
 
 Validated at load (`internal/spec/build.go`): the github block exists,
 every repository is in `github.repositories` and, until the credential
-proxy is verified, is `kensac/orbit`; the agent exists, uses a
+proxy is deployed and the owner lifts the precondition, is `kensac/orbit`; the agent exists, uses a
 claude-code runner and has a timeout of at most `spec.MaxBuildTimeout`
 (50m, inside the sandbox's one-hour lifetime); commands are plain words;
 protected paths are relative globs. The build's model and turn limit are
-the agent's runner's `model` and `max_turns`; its credential is the one an ordinary run would get (`build.SandboxEnv`: orbit's `CLAUDE_CODE_OAUTH_TOKEN`, else its `ANTHROPIC_API_KEY`, never both), the only secret the sandbox receives. The egress
+the agent's runner's `model` and `max_turns`; its credential is the one an ordinary run would get (`build.SandboxEnv`: orbit's `CLAUDE_CODE_OAUTH_TOKEN`, else its `ANTHROPIC_API_KEY`, never both), which the sandbox receives only as a credential proxy token. The egress
 allowlist and the image are sandboxd's and egress's own configuration
 (docs/agents/deployment.md).
 
