@@ -1,0 +1,26 @@
+#!/bin/sh
+# Claude Code's status line in a box, set by /etc/claude-code/managed-settings.json.
+# It records the rate limits the CLI reports for the account in use in
+# $CLAUDE_CONFIG_DIR/.orbit/usage.json (the box's own profile without one),
+# where orbit reads them (docs/workspace.md, Accounts), then prints the
+# person's own line, ~/.claude/statusline-command given the same input, or
+# a short default. It never fails the line: a write it cannot make is skipped.
+input=$(cat)
+dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+if printf '%s' "$input" | jq -e '.rate_limits | type == "object"' >/dev/null 2>&1; then
+	tmp=
+	if mkdir -p "$dir/.orbit" 2>/dev/null && tmp=$(mktemp "$dir/.orbit/usage.XXXXXX" 2>/dev/null) &&
+		printf '%s' "$input" | jq -c --argjson now "$(date +%s)" '{observed_at: $now, rate_limits: .rate_limits}' >"$tmp" 2>/dev/null &&
+		mv -f "$tmp" "$dir/.orbit/usage.json" 2>/dev/null; then
+		:
+	elif [ -n "$tmp" ]; then
+		rm -f "$tmp"
+	fi
+fi
+own=$HOME/.claude/statusline-command
+if [ -x "$own" ]; then
+	printf '%s' "$input" | "$own"
+	exit 0
+fi
+printf '%s' "$input" | jq -r '[(.model.display_name // empty)] + ((.rate_limits // {}) | [(.five_hour.used_percentage | numbers | "5h \(.)%"), (.seven_day.used_percentage | numbers | "7d \(.)%")]) | join("  ")' 2>/dev/null
+exit 0

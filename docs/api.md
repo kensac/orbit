@@ -1092,13 +1092,17 @@ A box holds Claude accounts besides its own profile: each is a directory, `/home
  "email": "k@example.com", "account_uuid": "uuid", "org_id": "uuid", "org_name": "...",
  "subscription_type": "max", "rate_limit_tier": "default_claude_max_20x",
  "access_expires_at": "...", "refresh_expires_at": "...", "checked_at": "...",
- "last_used_at": "...", "created_by": "kanishk", "created_at": "..."}
+ "last_used_at": "...",
+ "usage": {"source": "statusline", "observed_at": "...",
+           "windows": [{"window": "five_hour", "used_percentage": 12.5, "resets_at": "..."}]},
+ "created_by": "kanishk", "created_at": "..."}
 ```
 
 - `slot` names the account's volume (`orbit-box-<agent>-acct-<slot>`) and directory: 12 hex digits of its `id`.
 - `logged_in`, `email`, `account_uuid`, `org_id`, `org_name`, `subscription_type`, `rate_limit_tier` and the expiries are what the account's files said when `checked_at` was: `logged_in` is whether its credentials hold a refresh token; `access_expires_at` is the access token's expiry (the CLI refreshes it itself), `refresh_expires_at` the refresh token's, past which the account needs a new login. A read that finds no login sets `logged_in` false and clears the expiries but keeps the identity fields, so a logged-out account still says whose it was. Each is `null` until read, or when the CLI did not write it.
 - `last_used_at` is the newest attach of a terminal under the account, `null` before one.
-- An account is read from the box on every list and get while the box is running (a stopped box is not started for it), and when a terminal under it ends; otherwise the fields are as last read.
+- `usage` is the newest observation of the account's subscription windows, `null` before one. `source` is `statusline`: the box image's status line (`orbit-statusline`, which managed settings give every Claude Code in the box) records the `rate_limits` the CLI hands it into the account's `.orbit/usage.json` whenever an interactive Claude Code runs under the account, and orbit reads that file; or `poll`: orbit asked the undocumented `/api/oauth/usage` from inside the box with the account's access token, only when `ORBIT_ACCOUNT_USAGE_POLL` is set (off by default; docs/agents/deployment.md). `observed_at` is when the status line ran or the poll answered. `windows` are sorted by name: `window` is the CLI's or the endpoint's name (`five_hour`, `seven_day`, `seven_day_opus`, ...), `used_percentage` 0 to 100 (`null` when not reported), `resets_at` `null` when not reported. An older observation never replaces a newer one, whichever its source, and it is not refreshed by a stopped box: after a window's `resets_at` has passed, its `used_percentage` is out of date.
+- An account (its login and its status line's usage record) is read from the box on every list and get while the box is running (a stopped box is not started for it), and when a terminal under it ends; otherwise the fields are as last read.
 
 Routes require the workspace to be a box (`409`, `no_shell`, otherwise). Mutations and account login require membership of `ORBIT_WORKSPACE_GROUP` (`403`, `group`); account reads use the authenticated workspace access.
 
