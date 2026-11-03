@@ -167,12 +167,25 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 		st.HostConfig.CapDrop = h.CapDrop
 		st.HostConfig.SecurityOpt = h.SecurityOpt
 		st.HostConfig.NetworkMode = h.NetworkMode
+		st.HostConfig.UTSMode = h.UTSMode
+		st.HostConfig.CgroupnsMode = h.CgroupnsMode
 		st.HostConfig.IpcMode = h.IpcMode
 		st.HostConfig.Memory = h.Memory
+		st.HostConfig.MemorySwap = h.MemorySwap
+		st.HostConfig.NanoCpus = h.NanoCpus
+		st.HostConfig.Tmpfs = h.Tmpfs
+		st.HostConfig.Devices = h.Devices
+		st.HostConfig.PublishAllPorts = h.PublishAllPorts
+		st.HostConfig.PortBindings = h.PortBindings
+		st.HostConfig.ExtraHosts = h.ExtraHosts
+		st.HostConfig.Runtime = h.Runtime
 		pl := h.PidsLimit
 		st.HostConfig.PidsLimit = &pl
 		for _, m := range h.Mounts {
 			st.Mounts = append(st.Mounts, mountState{Type: m.Type, Name: m.Source, Destination: m.Target})
+		}
+		for destination := range h.Tmpfs {
+			st.Mounts = append(st.Mounts, mountState{Type: "tmpfs", Destination: destination})
 		}
 		st.State.Running = c.running
 		if c.health != "" {
@@ -180,10 +193,10 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 				Status string `json:"Status"`
 			}{c.health}
 		}
-		if c.running {
-			st.NetworkSettings.Networks = map[string]struct {
-				IPAddress string `json:"IPAddress"`
-			}{h.NetworkMode: {IPAddress: "10.250.251.7"}}
+		if c.running && h.NetworkMode != "none" {
+			st.NetworkSettings.Networks = map[string]networkAttachment{
+				h.NetworkMode: {IPAddress: "10.250.251.7"},
+			}
 		}
 		if f.tamper != nil {
 			f.tamper(&st)

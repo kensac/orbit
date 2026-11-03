@@ -15,7 +15,9 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `github` | map | absent | The GitHub App orbit acts as. Without it, tickets naming a repository and `github:merge` fail validation. |
 | `build` | map | absent | How approved tickets become PRs. Without it no ticket is built. |
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
+| `extensions` | map | absent | Off-by-default, digest-pinned native source operations executed by sandboxd; package pins and explicit agent grants are below. |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
+| `telegram` | map | absent | Two-way Telegram bot reader; updates from explicitly allowed private users start or continue conversations. |
 | `credentials` | map of variable to credential | none | The variables sources and endpoint headers may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
 | `connectors` | map of name to connector | none | MCP servers agents may be given; orbit calls them on the agents' behalf and holds their credentials (below). |
 | `google_actions` | map | absent | Fixed connector tools for typed Gmail draft and Calendar create actions (below). |
@@ -42,7 +44,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
-| `kind` | `ntfy`, `smtp`, `webhook`, `log` | required | The adapter. `log` writes to orbit's log and takes no other field. |
+| `kind` | `ntfy`, `smtp`, `webhook`, `telegram`, `log` | required | The adapter. `log` writes to orbit's log and takes no other field. |
 | `url` | URL | required for ntfy, webhook | The ntfy server, or the URL a webhook channel POSTs to. |
 | `topic` | string | | ntfy topic. One of `topic` or `topic_env` is required for ntfy. |
 | `topic_env` | env var | | ntfy topic read from the environment, so it stays out of git. Wins over `topic`. |
@@ -53,6 +55,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `password_env` | env var | none | SMTP password. |
 | `from` | address | required for smtp | Sender. |
 | `to` | list of addresses | required for smtp | Recipients; also the mail allowlist when `mail.allow` is empty. |
+| `chat_id` | Telegram chat id | required for telegram | Default recipient for outbound Telegram notifications. |
 | `headers` | map | none | Webhook channel headers; values may use `${VAR}`. |
 
 ### `endpoints.<name>`
@@ -137,6 +140,20 @@ Names match `^[a-z][a-z0-9-]{0,62}$`.
 | `sandboxd` | `host:port` or `unix:/path` | `build.sandboxd` | The sandbox service for chat agents with `sandbox`. |
 | `token_env` | env var | `ORBIT_SANDBOX_TOKEN` | sandboxd's bearer token. |
 
+### `extensions`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `enabled` | bool | `false` | Enables native, pure-source extension operations; requires sandboxd. |
+| `packages` | map of package id to pin | none | Deployment-approved package directory and exact package digest. |
+
+### `extensions.packages.<id>`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `path` | absolute path | required | Directory containing the validated package bytes. |
+| `sha256` | lowercase sha256 | required | Exact package digest; no tag or floating version is accepted. |
+
 ### `box`
 
 | Field | Type | Default | What it does |
@@ -155,11 +172,13 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
-| `transport` | `http` | `http` | MCP streamable HTTP. `stdio` is refused: it is not built (it would run in sandboxd). |
-| `url` | http(s) URL | required | The server's MCP endpoint. orbit follows no redirect from it. |
+| `transport` | `http` or `stdio` | `http` | MCP streamable HTTP, or a package-pinned local stdio server in sandboxd's networkless extension profile. |
+| `url` | http(s) URL | required for `http` | The HTTP server's MCP endpoint. Stdio connectors cannot set it; orbit follows no redirect from HTTP endpoints. |
+| `package` | extension package ID | required for `stdio` | Exact package pin in `extensions.packages`; stdio packages may declare only local `tool` operations without input slots or endpoint bindings. |
 | `description` | string | none | What the server is for, shown to the model. |
 | `auth` | map | `kind: none` | How orbit signs the server's requests (below). |
 | `write_tools` | list of tool names | none | The server's tools that change the world: each waits for a person unless the agent's rules say otherwise. Every other tool runs at once. |
+| `default_tool_rule` | `auto` or `approve` | none | Internal deployment setting used for person-added connectors; an explicit agent tool rule takes precedence. |
 
 ### `connectors.<name>.auth`
 
@@ -221,6 +240,14 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `password_env` | env var | required | IMAP password. |
 | `mailbox` | string | `INBOX` | Folder read. Every unseen mail in it is read and marked seen, so it must be orbit's own. |
 
+### `telegram`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `channel` | channel name | required | A configured `channels.<name>` with kind `telegram`; its `token_env` names the bot token. |
+| `agent` | agent name | required | Agent for a Telegram message that is not a reply to a known Orbit message. |
+| `allow_users` | list of Telegram user ids | required | Only these users in private chats may message Orbit. |
+
 ### `board`
 
 | Field | Type | Default | What it does |
@@ -242,6 +269,8 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `runner` | runner name | `defaults.runner` | The backend. |
 | `timeout` | duration | `defaults.timeout` | How long one run may take. |
 | `budget` | map (below) | none | API-equivalent cost and runner-started run limits per local period; scheduled runs are skipped once a limit is reached. |
+| `quiet_hours` | map (below) | none | Suppress a scheduled run if its fire or claim time is within the local interval. |
+| `calendar_skip` | map (below) | none | Check a named read-only connector tool for an overlapping event before a scheduled run. |
 | `triggers` | list | none | When the agent wakes on its own (below). |
 | `sources` | list | none | Data orbit fetches before a run (below). |
 | `transforms` | list | none | Code over a source before the model sees it (below). |
@@ -261,6 +290,7 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `sandbox` | `workstation`, `build` | none | Needs `chat` and a sandboxd. Runs the CLI in a sandboxd container per conversation: `workstation` has every Claude Code tool and egress to any public host; `build` has its `tools` and the build allowlist (security.md, Sandboxed chats). A `workstation` agent also has a box for terminals (docs/workspace.md). |
 | `permissions` | map (below) | full in a `sandbox`, else locked | How a chat session asks before a tool runs, and how far a conversation may raise it. |
 | `needs` | list of capabilities | none | What a host must have to run the agent (`docker-network:hetzner`); without any, every host. |
+| `delegate_templates` | array of template names or `*` | none | Active templates this agent may use for typed delegate tasks. Template workers are fresh and their connectors are narrowed to the intersection of the parent and rendered template, optionally further narrowed per task. |
 | `delegates` | list of agent names, or `["*"]` | none | Agents this one may hand tasks to; the `delegate` action also needs a rule. |
 | `connectors` | list of connector names | none | `orbit.yaml` connectors whose tools the agent's runs may call; claude-code only. Each tool's rule is `mcp:<connector>:<tool>` in `actions`. Adding one widens the agent. |
 | `repos` | list (below) | none | Repositories every run reads: the tree at a commit under `inputs/repos/<name>/`, plus orbit's history and pull request tools. Each must be in `github.read_repositories`; needs `github` in `needs` and a claude-code or codex runner. |
@@ -304,7 +334,8 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | Field | Type | Default | What it does |
 |---|---|---|---|
 | `name` | `^[a-z][a-z0-9-]{0,62}$` | required | The input's name; unique among sources and transforms. |
-| `kind` | `http`, `prometheus`, `loki`, `github`, `lake`, `file`, `webhook` | required | How it is fetched (below). `webhook` takes only `name` and `max_bytes`. |
+| `kind` | `http`, `prometheus`, `loki`, `github`, `lake`, `file`, `webhook`, `extension` | required | How it is fetched (below). `webhook` takes only `name` and `max_bytes`. |
+| `extension` | map | required for extension | The explicitly granted package operation and its parameter/input bindings (below). |
 | `url` | URL | required for http, prometheus, loki, lake | Target; may use `${VAR}` and `{{today}}`-style templates except for lake, which requires a fixed S3-compatible endpoint. A credential in any field of the source is sent only under its `url_prefix`. |
 | `headers` | map | none | http and loki request headers; values may use `${VAR}`. |
 | `query` | map | none | http query values; may use `${VAR}` and templates. |
@@ -327,6 +358,15 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | `max_bytes` | int | `8388608` (8 MiB) | The most one source may fetch; more fails the run. |
 | `by_trigger` | map of trigger to override | none | http only: query values for runs of one trigger (`schedule`, `manual`, `message`, `continue`, `task`, `delegation`, `webhook`) over the source's own (below). |
 
+### `sources[].extension`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `package` | pinned package id | required | Package id in `extensions.packages`. This source entry is the agent's grant. |
+| `operation` | operation name | required | A package operation declared with kind `source`. |
+| `parameters` | object | `{}` | Static JSON parameters validated against the pinned operation schema. |
+| `inputs` | map of slot to source name | none | Binds every operation input slot to an earlier source in this agent. |
+
 | Kind | Reaches | Risk |
 |---|---|---|
 | `http` | any URL with `GET`, with the headers given | Whatever the URL returns is model input, so it may carry instructions. |
@@ -336,6 +376,7 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | `lake` | S3-compatible object store with signed ListObjectsV2 and GET requests only | Objects are untrusted input. The key must be read-only and its environment variables must be declared under `credentials:` with a `url_prefix` for this endpoint; for a private HTTP endpoint, keep the service on a trusted private network. The compressed objects, decompressed rows and final JSON are all bounded by `max_bytes`. |
 | `file` | any file orbit's user can read | Exposes orbit's host files to the model: name only files meant for it. Only a file agent may have one. |
 | `webhook` | the body of the delivery that started the run, as received; absent on any other run | The sender writes it: it is untrusted input, as http's is. Needs a webhook trigger. |
+| `extension` | a derived JSON source produced by a pinned native package operation in sandboxd's network-disabled profile | Package code is untrusted. It receives only declared earlier source inputs, no credentials or network, and cannot write outside its invocation workdir. |
 
 ### `sources[].paginate`
 
@@ -456,8 +497,34 @@ claude-code runners only.
 |---|---|---|---|
 | `resume` | bool | `false` | Continue the previous run's session when it succeeded under the same spec within `idle`. |
 | `idle` | duration | `6h` | The resume window, at most `24h`. |
-| `live` | duration | `0` (none) | Keep one process open this long after a message-started run and feed later runs into it; at most `1h` and at most `idle`. |
+| `live` | duration | `0` (none) | Keep one process open this long after a message-started run and feed later runs into it; at most `24h` and at most `idle`. Linux memory pressure closes idle processes sooner. |
 | `stall` | duration | `10m` | A chat or live turn with no line from the CLI (keep_alive included) for this long, and no tool call running, is interrupted and the run handed back to continue the session (ARCHITECTURE.md, Stall watchdog); `1m` to `24h`. Needs no `resume`. |
+
+### `quiet_hours`
+
+Uses the agent's `timezone`. Start is inclusive and end is exclusive. If end is earlier than start, the interval crosses midnight. Scheduled runs whose fire time or first claim time is within the interval are skipped before sources or a backend are called; manual runs and messages are unaffected. Times are wall-clock across daylight saving changes.
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `start` | local time `HH:MM` | required | The first minute in the quiet interval. |
+| `end` | local time `HH:MM` | required | The first minute outside the quiet interval; must differ from start. |
+
+### `calendar_skip`
+
+Uses the configured connector credential in orbit's process. Checked only on the first attempt of a scheduled run, after quiet hours, missed-fire and budget checks, before source fetches or a backend call. Manual, message, webhook and recovered attempts are unaffected. The connector must be named by the agent, and the selected tool must be read-only according to its MCP metadata and not listed in `write_tools`. A query failure or malformed response fails the run closed.
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `connector` | connector name | required | Configured connector to query. |
+| `tool` | tool name | required | Read-only event listing tool. |
+| `window_before` | duration | `0` | Time before the scheduled fire included in the overlap window. |
+| `window_after` | duration | required | Positive time after the scheduled fire; combined window may not exceed 24h. |
+| `arguments` | JSON object | required | Fixed tool arguments containing both `{{window_start}}` and `{{window_end}}`; these are rendered as UTC RFC3339 values. |
+| `events_path` | dotted JSON path | `items` | Array of event objects in the result. |
+| `start_path` | dotted JSON path | `start` | Event start, as RFC3339 text or a Google Calendar `dateTime`/`date` object. |
+| `end_path` | dotted JSON path | `end` | Event end, parsed the same way as the start. |
+
+An event overlaps when its start is before the window end and its end is after the window start. Canceled and transparent events are ignored. Event data stays in orbit and is reduced to a skip decision; the skip summary contains only the window.
 
 ### `learn`
 

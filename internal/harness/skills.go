@@ -25,8 +25,9 @@ const skillReadMax = 256 << 10
 var SkillSchema = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
-		"name": map[string]any{"type": "string", "description": "The skill's name, as its stub names it."},
-		"file": map[string]any{"type": "string", "description": "A file of the skill, as SKILL.md lists it; omit for SKILL.md itself."},
+		"name":      map[string]any{"type": "string", "description": "The skill's name, as its stub names it."},
+		"file":      map[string]any{"type": "string", "description": "A file of the skill, as SKILL.md lists it; omit for SKILL.md itself."},
+		"reference": map[string]any{"type": "string", "description": "One of the skill's references by name, as reading its SKILL.md lists them (references/<name>.md); in place of file."},
 		"offset": map[string]any{"type": "integer", "minimum": 0,
 			"description": "Byte offset to read a large file from; the result says when there is more."},
 	},
@@ -43,14 +44,32 @@ func skillsAvailable(state string) bool {
 	return err == nil && st.IsDir()
 }
 
-// ReadSkill returns a skill's SKILL.md (file empty) with the list of its files, or one of its files from offset. Paths are confined to the skill's directory after symlinks.
-func ReadSkill(state, name, file string, offset int64) (map[string]any, error) {
+// referencesDir is where a skill keeps its references, as Claude Code's skills do: documents SKILL.md points to, read when a step needs one.
+const referencesDir = "references"
+
+// referenceTitleScan bounds how much of a reference is read for its first heading.
+const referenceTitleScan = 8 << 10
+
+// ReadSkill returns a skill's SKILL.md (file and reference empty) with the list of its files and its named references, or one of its files, or one reference by name, from offset. Paths are confined to the skill's directory after symlinks.
+func ReadSkill(state, name, file, reference string, offset int64) (map[string]any, error) {
 	if name == "" || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
 		return nil, fmt.Errorf("no skill named %q", name)
 	}
 	root := filepath.Join(SkillsDir(state), name)
 	if st, err := os.Stat(root); err != nil || !st.IsDir() {
 		return nil, fmt.Errorf("no skill named %q in this run", name)
+	}
+	if reference != "" {
+		if file != "" {
+			return nil, errors.New("give file or reference, not both")
+		}
+		file = referencesDir + "/" + reference + ".md"
+		if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(file))); err != nil {
+			file = referencesDir + "/" + reference
+		}
+		if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(file))); err != nil {
+			return nil, fmt.Errorf("skill %s has no reference %q", name, reference)
+		}
 	}
 	rel := "SKILL.md"
 	if file != "" {
@@ -105,6 +124,7 @@ func ReadSkill(state, name, file string, offset int64) (map[string]any, error) {
 		})
 		sort.Strings(files)
 		out["files"] = files
+		out["references"] = skillReferences(root)
 		out["base_dir"] = "(served by " + ToolSkill + ": pass a file's path as file)"
 	}
 	return out, nil
@@ -118,4 +138,58 @@ func textPrefix(b []byte) bool {
 		}
 	}
 	return false
+}
+
+// SkillReference is one of a skill's references as its SKILL.md read lists it: a name to load it by, and its first Markdown heading.
+type SkillReference struct {
+	Name  string `json:"name"`
+	Title string `json:"title"`
+}
+
+// skillReferences lists the regular files under a skill's references/, by name (the path below it, without .md), each with its first heading ("" for none, or for a binary file).
+func skillReferences(root string) []SkillReference {
+	out := []SkillReference{}
+	base := filepath.Join(root, referencesDir)
+	_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(base, p)
+		if err != nil {
+			return nil
+		}
+		ref := SkillReference{Name: strings.TrimSuffix(filepath.ToSlash(rel), ".md")}
+		if f, err := os.Open(p); err == nil { //nolint:gosec // a regular file under the skill's own directory, found by walking it
+			buf := make([]byte, referenceTitleScan)
+			n, _ := io.ReadFull(f, buf)
+			_ = f.Close()
+			if textPrefix(buf[:n]) {
+				ref.Title = firstHeading(string(buf[:n]))
+			}
+		}
+		out = append(out, ref)
+		return nil
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// firstHeading is the text of a Markdown document's first ATX heading ("# Title"), outside code fences.
+func firstHeading(doc string) string {
+	fence := false
+	for _, line := range strings.Split(doc, "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~") {
+			fence = !fence
+			continue
+		}
+		if fence || !strings.HasPrefix(t, "#") {
+			continue
+		}
+		h := strings.TrimLeft(t, "#")
+		if len(t)-len(h) <= 6 && (h == "" || h[0] == ' ' || h[0] == '\t') {
+			return strings.TrimSpace(strings.TrimRight(strings.TrimSpace(h), "#"))
+		}
+	}
+	return ""
 }

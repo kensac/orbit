@@ -6,6 +6,7 @@ package engine
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"encoding/hex"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/build"
+	"github.com/kensac/orbit/internal/extensions"
 	"github.com/kensac/orbit/internal/forms"
 	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/harness"
@@ -34,6 +36,7 @@ import (
 	"github.com/kensac/orbit/internal/notify"
 	"github.com/kensac/orbit/internal/repos"
 	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/sources"
 	"github.com/kensac/orbit/internal/spec"
@@ -157,7 +160,23 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 	snap := e.Current()
 	start := time.Now()
 	log := e.Log.With("run", c.ID, "agent", c.Agent)
+	var task *store.Task
+	if c.Trigger == store.TriggerTask {
+		var err error
+		task, err = e.Store.TaskForConversation(ctx, c.ConversationID)
+		if err != nil {
+			return e.fail(ctx, snap, nil, c, start, err, nil)
+		}
+	}
 	a, ok := snap.Config.Agents[c.Agent]
+	if !ok && task != nil && task.Template != nil {
+		var err error
+		a, err = e.taskWorkerAgent(ctx, snap, c, task)
+		if err != nil {
+			return e.fail(ctx, snap, nil, c, start, err, nil)
+		}
+		ok = true
+	}
 	if !ok {
 		return e.fail(ctx, snap, nil, c, start, fmt.Errorf("agent %q is no longer configured", c.Agent), nil)
 	}
@@ -174,11 +193,19 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		return e.executeLearn(ctx, actx, snap, a, c, start, log)
 	}
 
+	if sk := quietHours(a, c, time.Now()); sk != nil {
+		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
+	}
 	if sk := missed(a, c, time.Now()); sk != nil {
 		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
 	}
 	if sk, err := e.budgetGate(ctx, a, c, time.Now()); err != nil {
 		return e.fail(ctx, snap, a, c, start, fmt.Errorf("check agent budget: %w", err), nil)
+	} else if sk != nil {
+		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
+	}
+	if sk, err := e.calendarSkip(ctx, snap, a, c); err != nil {
+		return e.fail(ctx, snap, a, c, start, fmt.Errorf("check calendar: %w", err), nil)
 	} else if sk != nil {
 		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
 	}
@@ -333,7 +360,11 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := e.Store.SetRunner(ctx, c.ID, c.Attempt, r.Kind(), r.Model(), a.SHA); err != nil {
+	model, effort, dropped, err := e.conversationModel(ctx, c.ConversationID, r.Kind())
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := e.Store.SetRunnerAt(ctx, c.ID, c.Attempt, r.Kind(), cmp.Or(model, r.Model()), effort, a.SHA); err != nil {
 		return nil, nil, err
 	}
 
@@ -469,6 +500,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		events.emit(kind, b)
 	}
 
+	if dropped != "" {
+		emit("orbit.model_skipped", map[string]any{"reason": dropped})
+	}
 	if c.Attempt > 1 && claudeCode {
 		emit("orbit.recovery", map[string]any{"recovers_attempt": recFrom(rec), "skipped_because": skipped})
 	}
@@ -477,6 +511,54 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		GitHub: func(ctx context.Context, repo string, perms github.Permissions) (*github.Token, error) {
 			return e.readToken(ctx, snap.Config.Deployment, repo, perms)
 		}}
+	if ext := snap.Config.Deployment.Extensions; ext != nil && ext.Enabled {
+		addr, tokenEnv := snap.Config.Deployment.SandboxService()
+		fetcher.Extension = func(ctx context.Context, source spec.Source, prior map[string]*sources.Fetched) (*sources.Fetched, error) {
+			grant := source.Extension
+			if grant == nil {
+				return nil, errors.New("extension source has no package operation grant")
+			}
+			pin, ok := snap.Config.Deployment.Extensions.Packages[grant.Package]
+			pkg := snap.Config.ExtensionPackages[grant.Package]
+			if !ok || pkg == nil {
+				return nil, fmt.Errorf("extension package %q is not pinned", grant.Package)
+			}
+			if e.Env == nil {
+				return nil, errors.New("extension sandbox token environment is unavailable")
+			}
+			token, _ := e.Env(tokenEnv)
+			client, err := sandbox.NewClient(addr, token)
+			if err != nil {
+				return nil, fmt.Errorf("extension sandboxd: %w", err)
+			}
+			parameters := grant.Parameters
+			if parameters == nil {
+				parameters = map[string]any{}
+			}
+			parameterBytes, err := json.Marshal(parameters)
+			if err != nil {
+				return nil, fmt.Errorf("extension parameters: %w", err)
+			}
+			input := make(map[string]extensions.Input, len(grant.Inputs))
+			for slot, sourceName := range grant.Inputs {
+				fetched := prior[sourceName]
+				if fetched == nil {
+					return nil, fmt.Errorf("extension input %q source %q has no fetched result", slot, sourceName)
+				}
+				input[slot] = extensions.Input{MediaType: fetched.MediaType, Content: fetched.Content}
+			}
+			result, err := extensions.Invoke(ctx, client, extensions.Invocation{PackageID: grant.Package, Directory: pin.Path,
+				Digest: pin.SHA256, Operation: grant.Operation, Parameters: parameterBytes, Inputs: input})
+			if err != nil {
+				return nil, err
+			}
+			if int64(len(result)) > source.MaxBytes {
+				return nil, fmt.Errorf("extension result exceeds source max_bytes %d", source.MaxBytes)
+			}
+			return &sources.Fetched{Name: source.Name, MediaType: "application/json", Content: result,
+				Meta: map[string]any{"extension": grant.Package, "operation": grant.Operation, "sha256": pin.SHA256}}, nil
+		}
+	}
 	if c.Trigger == store.TriggerWebhook {
 		d, err := e.Store.WebhookForRun(ctx, c.ID)
 		if err != nil {
@@ -501,11 +583,12 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 	}
 	raw := map[string][]byte{} // every source fetched, for its transforms
+	fetchedByName := map[string]*sources.Fetched{}
 	for _, s := range a.Sources {
 		if rec != nil {
 			break
 		}
-		f, err := fetcher.Fetch(ctx, s, vars)
+		f, err := fetcher.FetchWithInputs(ctx, s, vars, fetchedByName)
 		if errors.Is(err, sources.ErrAbsent) {
 			// Its transforms are skipped and a gate on it counts no records (transform.go, gate.go).
 			emit("orbit.source_absent", map[string]any{"source": s.Name, "reason": err.Error()})
@@ -523,6 +606,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			ext = ".md"
 		}
 		raw[s.Name] = f.Content
+		fetchedByName[s.Name] = f
 		if a.Withheld(s.Name) {
 			// Only its transforms read it: kept as the record of what was
 			// fetched, never written where the model can read it.
@@ -614,7 +698,10 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}
 	}
 
-	types := actions.Catalog(a, snap.Config.Deployment)
+	types, err := e.actionCatalog(ctx, a, snap.Config.Deployment)
+	if err != nil {
+		return nil, nil, err
+	}
 	schema := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, true)
 	envelope := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, false)
 	schema, envelope = withEntries(schema, true), withEntries(envelope, false)
@@ -655,7 +742,12 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	} else if len(a.Hooks) > 0 {
 		emit("orbit.hooks_skipped", map[string]any{"reason": "the agent's hooks need claude-code with orbit's harness binary"})
 	}
-	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, hr != nil && !chat, inputs)
+	withTool := hr != nil && !chat
+	var builtin []store.Skill
+	if withTool {
+		builtin = builtinSkills(types)
+	}
+	skills, skillsPlugin, inputs, err := e.prepareSkills(ctx, c, a, r.Kind(), home, workdir, inputsDir, withTool, builtin, inputs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -682,17 +774,19 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		}}
 	}
 	if chat {
-		out, res, err := e.chatTurn(ctx, snap, a, c, r, chatTurn{stall: stall, workdir: workdir, home: home, inputsDir: inputsDir, now: now,
+		out, res, err := e.chatTurn(ctx, snap, a, c, r, chatTurn{stall: stall, model: model, effort: effort, workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached,
 				WorkspaceChanges: wsNote}, fresh: wsFresh,
 			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, steer: &st.steer, rec: rec, instructor: st.instructor,
-			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny), plugin: skillsPlugin, repos: repoRun, connectors: conns, pinned: pinned, skills: skills, record: record})
+			extra: entriesContract(topics, false) + skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny), plugin: skillsPlugin, repos: repoRun, connectors: conns, pinned: pinned, skills: skills, record: record})
 		if out != nil {
 			out.connectorCalls = gw.pendingCalls()
 		}
+
 		return out, res, st.sawStall(err)
 	}
-	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
+	via := len(builtin) > 0
+	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr, via)
 	if tk != nil {
 		system += ticketContract(tk, planning)
 	}
@@ -702,7 +796,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if known != "" {
 		system += knownContract
 	}
-	system += entriesContract(topics)
+	system += entriesContract(topics, via)
 	system += skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny)
 	system += connSection
 	delegated, err := e.Store.ConversationTasks(ctx, c.ConversationID, c.ID)
@@ -731,9 +825,9 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 
 	req := runner.Request{
 		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
-		Tools: a.Tools, WebAllow: webAllow(a), OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin, Connectors: conns, Stall: stall,
+		Tools: a.Tools, WebAllow: webAllow(a), OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin, Connectors: conns, Stall: stall, Model: model, Effort: effort,
 	}
-	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
+	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), cmp.Or(model, r.Model()), a.Charter, req)); err != nil {
 		return nil, nil, err
 	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
@@ -852,7 +946,11 @@ func leafErrors(o *jsonschema.OutputUnit) string {
 
 func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, start time.Time, out *Output, res *runner.Result) error {
 	types := map[string]actions.Type{}
-	for _, t := range actions.Catalog(a, snap.Config.Deployment) {
+	catalog, err := e.actionCatalog(ctx, a, snap.Config.Deployment)
+	if err != nil {
+		return err
+	}
+	for _, t := range catalog {
 		types[t.Name] = t
 	}
 	o := store.Outcome{Questions: e.outcomeQuestions(c, out.Questions)}
@@ -953,13 +1051,18 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			Title: a.Name + ": " + out.Summary, Body: withQuestions(out.Report, o.Questions), Priority: pr, Link: link,
 		}))
 	}
+	telegramReply := e.telegramForRun(ctx, snap, c.ID)
+	if telegramReply != nil && !routed {
+		m := e.telegramReplyMessage(a.Name+": "+out.Summary, withQuestions(out.Report, o.Questions), pr, link, telegramReply)
+		e.deliver(ctx, snap, a, &c.ID, nil, purposeTelegramReply, m)
+	}
 	if Attended(c.Trigger) {
 		// The person is reading the conversation this run answered in:
 		// its reply, questions and approvals are there, not in a channel.
 		return nil
 	}
-	send := reply == nil && (a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send))
-	if !routed && (send || (reply == nil && len(o.Questions) > 0)) {
+	send := reply == nil && telegramReply == nil && (a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send))
+	if !routed && (send || (reply == nil && telegramReply == nil && len(o.Questions) > 0)) {
 		title := out.Notify.Title
 		if title == "" {
 			title = out.Summary
@@ -1034,6 +1137,7 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 	fillResult(&rr, r)
 	// Read before FinishRun, which hands a failed run's messages back to the inbox.
 	reply := e.mailForRun(ctx, snap, c.ID)
+	telegramReply := e.telegramForRun(ctx, snap, c.ID)
 	if err := e.Store.FinishRun(context.WithoutCancel(ctx), c.ID, rr); err != nil {
 		return err
 	}
@@ -1053,6 +1157,12 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 		}))
 		return nil
 	}
+	if telegramReply != nil {
+		e.deliver(ctx, snap, a, &c.ID, nil, purposeTelegramReply, e.telegramReplyMessage(
+			a.Name+" could not answer", "The run answering your Telegram message failed: "+shortError(runErr)+"\n\nYour message is kept in Orbit. Reply to try again.",
+			notify.High, snap.Config.Deployment.RunURL(c.ID), telegramReply))
+		return nil
+	}
 	if !Attended(c.Trigger) {
 		e.deliver(ctx, snap, a, &c.ID, nil, "failure", notify.Message{
 			Title: a.Name + " run failed", Body: runErr.Error(), Priority: notify.High,
@@ -1064,12 +1174,37 @@ func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 
 // Mail replies are delivered to the agent's mail channel alone (mailChannel), whatever its notify.when.
 const (
-	purposeMailReply   = "mail_reply"
-	purposeMailFailure = "mail_failure"
+	purposeMailReply     = "mail_reply"
+	purposeMailFailure   = "mail_failure"
+	purposeTelegramReply = "telegram_reply"
 )
 
 func isMailReply(purpose string) bool {
 	return purpose == purposeMailReply || purpose == purposeMailFailure
+}
+
+func (e *Engine) telegramForRun(ctx context.Context, snap *Snapshot, runID string) *store.RunTelegram {
+	if snap.Config.Deployment.Telegram == nil {
+		return nil
+	}
+	r, err := e.Store.TelegramForRun(context.WithoutCancel(ctx), runID)
+	if err != nil {
+		e.Log.Warn("telegram message for run", "run", runID, "err", err)
+		return nil
+	}
+	return r
+}
+
+func (e *Engine) telegramReplyMessage(title, body string, priority notify.Priority, link string, r *store.RunTelegram) notify.Message {
+	return notify.Message{Title: title, Body: body, Priority: priority, Link: link,
+		ConversationID: "", TelegramChatID: r.ChatID, TelegramReplyTo: r.MessageID}
+}
+
+func telegramChannel(cfg *spec.Config) string {
+	if cfg.Deployment.Telegram == nil {
+		return ""
+	}
+	return cfg.Deployment.Telegram.Channel
 }
 
 // mailForRun is the mail run c answers, or nil: orbit has no mailbox, the run read none, or the lookup failed (logged; the run is then answered as if no mail had come).
@@ -1188,6 +1323,18 @@ func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, run
 			return
 		}
 		channels = []string{name}
+	} else if purpose == purposeTelegramReply {
+		name := telegramChannel(snap.Config)
+		if name == "" {
+			e.Log.Warn("telegram reply not sent: no telegram channel", "agent", a.Name)
+			return
+		}
+		channels = []string{name}
+	}
+	if m.ConversationID == "" && runID != nil && snap.Config.Deployment.Telegram != nil {
+		if conv, err := e.Store.RunConversation(ctx, *runID); err == nil {
+			m.ConversationID = conv
+		}
 	}
 	ctx = context.WithoutCancel(ctx)
 	if e.Outbox {
@@ -1208,8 +1355,19 @@ func (e *Engine) deliver(ctx context.Context, snap *Snapshot, a *spec.Agent, run
 	for _, name := range channels {
 		ch := snap.Channels[name]
 		sendCtx, cancel := context.WithTimeout(ctx, time.Minute)
-		err := ch.Send(sendCtx, m)
+		var receipt notify.Receipt
+		var err error
+		if rc, ok := ch.(notify.ReceiptChannel); ok {
+			receipt, err = rc.SendWithReceipt(sendCtx, m)
+		} else {
+			err = ch.Send(sendCtx, m)
+		}
 		cancel()
+		if err == nil && receipt.MessageID > 0 && m.ConversationID != "" {
+			if perr := e.Store.RecordTelegramOutbound(ctx, receipt.ChatID, receipt.MessageID, m.ConversationID); perr != nil {
+				e.Log.Warn("record telegram reply target", "channel", name, "err", perr)
+			}
+		}
 		metrics.Delivery(name, err)
 		if err != nil {
 			e.Log.Warn("delivery failed", "channel", name, "purpose", purpose, "err", err)
@@ -1304,7 +1462,11 @@ func (e *Engine) ExecuteActions(ctx context.Context) error {
 		if err != nil || act == nil {
 			return err
 		}
-		call := actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)}
+		conversationID, err := e.Store.RunConversation(ctx, act.RunID)
+		if err != nil {
+			return err
+		}
+		call := actions.Call{ID: act.ID, Agent: act.Agent, RunID: act.RunID, ConversationID: conversationID, Type: act.Type, Params: act.Params, Rule: spec.Rule(act.Rule)}
 		var after func()
 		if a, ok := snap.Config.Agents[act.Agent]; ok && a.Chat {
 			call.Workspace, after = e.storedWorkspace(ctx, act.RunID)
@@ -1364,4 +1526,29 @@ func recFrom(r *recovery) int {
 		return 0
 	}
 	return r.from
+}
+
+// conversationModel is the model and effort a conversation's runs use
+// instead of the runner's own ("" for the runner's). A conversation's pair
+// that its runner no longer takes (the agent moved to another runner since it
+// was set) is not used, and dropped says why, for an orbit.model_skipped
+// event.
+func (e *Engine) conversationModel(ctx context.Context, conversationID, kind string) (model, effort, dropped string, err error) {
+	if conversationID == "" {
+		return "", "", "", nil
+	}
+	conv, err := e.Store.GetConversation(ctx, conversationID)
+	if err != nil {
+		return "", "", "", err
+	}
+	if conv.Model != nil {
+		model = *conv.Model
+	}
+	if conv.Effort != nil {
+		effort = *conv.Effort
+	}
+	if err := spec.CheckModel(kind, model, effort); err != nil {
+		return "", "", "the conversation's " + err.Error(), nil
+	}
+	return model, effort, "", nil
 }

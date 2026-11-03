@@ -103,3 +103,33 @@ func TestReplayCasesUsesOneCurrentAgentRequestPerCase(t *testing.T) {
 		t.Fatalf("replay results = %+v, calls %d, err %v", results, calls, err)
 	}
 }
+
+func TestGradeCasesSendsOnlyRubricAndCandidateToSeparateAgent(t *testing.T) {
+	var calls int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/agents/evaluator/grade" || r.Header.Get("Authorization") != "Bearer current-token" {
+			t.Errorf("request = %s %s, authorization %q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+		}
+		body, readErr := io.ReadAll(r.Body)
+		var request struct {
+			Target string `json:"target_agent"`
+			Cases  []struct {
+				Name   string          `json:"name"`
+				Rubric string          `json:"rubric"`
+				Output json.RawMessage `json:"output"`
+			} `json:"cases"`
+		}
+		if err := json.Unmarshal(body, &request); readErr != nil || err != nil || request.Target != "finance" || len(request.Cases) != 1 || request.Cases[0].Rubric != "mentions total" || string(request.Cases[0].Output) != `{"summary":"$4"}` {
+			t.Errorf("grade request = %s, read err %v, decode err %v", body, readErr, err)
+		}
+		_, _ = fmt.Fprint(w, `{"grades":[{"name":"one","passed":true,"reason":"total present","cost_usd":0.125}]}`)
+	}))
+	defer server.Close()
+	suite := eval.Suite{Version: 1, Cases: []eval.Case{{Name: "one", Grade: "mentions total"}}}
+	results := []eval.Result{{Name: "one", Output: json.RawMessage(`{"summary":"$4"}`)}}
+	grades, err := gradeCases(context.Background(), client.Client{BaseURL: server.URL, Token: "current-token", HTTP: server.Client()}, suite, results, "evaluator", "finance")
+	if err != nil || len(grades) != 1 || grades[0].Name != "one" || !grades[0].Passed || grades[0].CostUSD == nil || grades[0].CostUSD.String() != "0.125" || calls != 1 {
+		t.Fatalf("grades = %+v, calls %d, err %v", grades, calls, err)
+	}
+}

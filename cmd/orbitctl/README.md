@@ -6,6 +6,19 @@ The authentik provider must enable the device-code grant for a public client, pu
 
 Every invocation displays the verification URL and user code, waits for sign-in, and executes its command with the access token held in memory. Tokens are never written to disk or printed. This initial client signs in for each invocation; there is no persistent login session or refresh storage.
 
+### Smoke the real provider
+
+Run `orbitctl auth-smoke` from a terminal where you can complete the device sign-in. It requests a device code from the configured provider, then makes one authenticated `GET /api/v1/agents` request to confirm Orbit accepts the access token. The response body is discarded; success prints only `Authentik sign-in accepted by Orbit.`. The token stays in memory and is not written or printed.
+
+The verification URL and one-time user code are printed to stderr so you can finish sign-in. Do not pipe or save stderr, which contains that code. This command is read-only and can be run again whenever provider or audience settings change. It does not replace a full test run against Postgres.
+
+```sh
+ORBIT_URL=https://orbit.example \
+ORBIT_OIDC_ISSUER=https://auth.example/application/o/orbit/ \
+ORBIT_OIDC_CLIENT_ID=your-public-client-id \
+orbitctl auth-smoke
+```
+
 ```sh
 orbitctl agents
 orbitctl conversations assistant

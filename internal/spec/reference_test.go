@@ -25,6 +25,8 @@ var referenceTables = map[string]any{
 	"`build`":                           Build{},
 	"`build.repositories.<owner/name>`": BuildRepo{},
 	"`sandbox` (orbit.yaml)":            SandboxService{},
+	"`extensions`":                      ExtensionsConfig{},
+	"`extensions.packages.<id>`":        ExtensionPin{},
 	"`credentials.<VAR>`":               Credential{},
 	"`connectors.<name>`":               Connector{},
 	"`connectors.<name>.auth`":          ConnectorAuth{},
@@ -35,10 +37,15 @@ var referenceTables = map[string]any{
 	"`box`":                             BoxConfig{},
 	"`mail`":                            Mail{},
 	"`mail.imap`":                       IMAP{},
+	"`telegram`":                        Telegram{},
+	"`board`":                           Board{},
 	"Agent":                             Agent{},
 	"`budget`":                          AgentBudget{},
+	"`quiet_hours`":                     QuietHours{},
+	"`calendar_skip`":                   CalendarSkip{},
 	"`triggers[]`":                      Trigger{},
 	"`sources[]`":                       Source{},
+	"`sources[].extension`":             ExtensionSource{},
 	"`sources[].paginate`":              Paginate{},
 	"`sources[].by_trigger.<trigger>`":  SourceOverride{},
 	"`transforms[]`":                    Transform{},
@@ -52,7 +59,7 @@ var referenceTables = map[string]any{
 
 var (
 	headingRE  = regexp.MustCompile(`^#{2,3} (.+)$`)
-	fieldRowRE = regexp.MustCompile("^\\| `([a-z_]+)` \\|")
+	fieldRowRE = regexp.MustCompile("^\\| `([a-z0-9_]+)` \\|")
 )
 
 // TestReferenceCoversSpec holds the reference to the structs: each mapped

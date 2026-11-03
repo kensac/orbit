@@ -7,19 +7,28 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/kensac/orbit/internal/extensions"
 )
 
-// Connector is an MCP server orbit reaches for its agents (docs/agents/configuration.md, Connectors). orbit is the gateway: a run's CLI sees the server's tools as its own, and every call goes through orbit's process, which adds the credential, so no token enters the CLI or a sandbox.
+// Connector is an MCP server orbit reaches for its agents (docs/agents/configuration.md, Connectors). orbit is the gateway: a run's CLI sees the server's tools as its own, and every call goes through orbit's process; stdio packages run without a credential in sandboxd's networkless extension profile.
 type Connector struct {
-	// Transport is how orbit speaks to the server: "http" (MCP streamable HTTP), the only one today.
+	// Transport is how orbit speaks to the server: "http" (MCP streamable HTTP) or "stdio" (a pinned local package).
 	Transport string `yaml:"transport,omitempty" json:"transport,omitempty"`
 	// URL is the server's MCP endpoint.
-	URL string `yaml:"url" json:"url"`
+	URL string `yaml:"url,omitempty" json:"url,omitempty"`
+	// Package names an exact package pin under extensions.packages for a local stdio server.
+	Package string `yaml:"package,omitempty" json:"package,omitempty"`
 	// Description tells the model what the server is for.
 	Description string        `yaml:"description,omitempty" json:"description,omitempty"`
 	Auth        ConnectorAuth `yaml:"auth,omitempty" json:"auth,omitempty"`
 	// WriteTools are the server's tools that change the world. A call to one waits for a person unless the agent's rules say otherwise; every other tool runs at once.
 	WriteTools []string `yaml:"write_tools,omitempty" json:"write_tools,omitempty"`
+	// DefaultToolRule overrides the static connector default for every tool.
+	// The catalog uses approve until a person creates a narrower agent rule.
+	DefaultToolRule Rule `yaml:"default_tool_rule,omitempty" json:"default_tool_rule,omitempty"`
+	// CatalogManaged marks a connector loaded from the person-added catalog.
+	CatalogManaged bool `yaml:"-" json:"catalog_managed,omitempty"`
 }
 
 // ConnectorAuth is how orbit signs a connector's requests.
@@ -46,6 +55,9 @@ const (
 // ConnectorTransportHTTP is MCP's streamable HTTP transport.
 const ConnectorTransportHTTP = "http"
 
+// ConnectorTransportStdio runs a pinned native server through sandboxd.
+const ConnectorTransportStdio = "stdio"
+
 // ConnectorRulePrefix starts an agent's per-tool rule, mcp:<connector>:<tool>, in its actions.
 const ConnectorRulePrefix = "mcp:"
 
@@ -60,6 +72,9 @@ var ReservedConnectorNames = []string{"orbit"}
 
 // ConnectorToolRE is a tool name orbit offers: the Messages API's tool name alphabet. A tool named otherwise is not offered.
 var ConnectorToolRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// ConnectorNameRE validates names used for server definitions and catalog entries.
+var ConnectorNameRE = regexp.MustCompile(AgentNamePattern)
 
 // ConnectorRuleKey is the actions key of one connector tool's rule.
 func ConnectorRuleKey(conn, tool string) string { return ConnectorRulePrefix + conn + ":" + tool }
@@ -81,6 +96,9 @@ func ParseConnectorAction(typ string) (conn, tool string, ok bool) {
 func (a *Agent) ToolRule(c Connector, conn, tool string) Rule {
 	if r, ok := a.Actions[ConnectorRuleKey(conn, tool)]; ok {
 		return r
+	}
+	if c.DefaultToolRule != "" {
+		return c.DefaultToolRule
 	}
 	if slices.Contains(c.WriteTools, tool) {
 		return RuleApprove
@@ -111,19 +129,60 @@ func (c *Config) validateConnectors() []error {
 		if !nameRE.MatchString(n) {
 			at("name must match %s", nameRE)
 		}
+		if cn.DefaultToolRule != "" && cn.DefaultToolRule != RuleApprove && cn.DefaultToolRule != RuleAuto {
+			at("default_tool_rule must be auto or approve")
+		}
 		if slices.Contains(ReservedConnectorNames, n) {
 			at("name is orbit's own MCP server's")
 		}
-		switch cn.Transport {
-		case "", ConnectorTransportHTTP:
-		case "stdio":
-			at("transport stdio is not supported yet: a stdio server would run in sandboxd, and only http is built")
-		default:
-			at("transport must be http")
+		transport := cn.Transport
+		if transport == "" {
+			transport = ConnectorTransportHTTP
 		}
-		u, err := url.Parse(cn.URL)
-		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.Fragment != "" {
-			at("url %q must be an http(s) URL with a host, and no user or fragment", cn.URL)
+		switch transport {
+		case ConnectorTransportHTTP:
+			if cn.Package != "" {
+				at("package is only valid for stdio transport")
+			}
+			u, err := url.Parse(cn.URL)
+			if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.Fragment != "" {
+				at("url %q must be an http(s) URL with a host, and no user or fragment", cn.URL)
+			}
+		case ConnectorTransportStdio:
+			if cn.URL != "" {
+				at("stdio transport takes a package and no url")
+			}
+			if !extensions.ValidID(cn.Package) {
+				at("stdio transport needs a valid package id")
+			}
+			if cn.AuthKind() != ConnectorAuthNone || cn.Auth.Header != "" || cn.Auth.Value != "" || len(cn.Auth.Scopes) > 0 || cn.Auth.ClientID != "" || cn.Auth.ClientSecretEnv != "" {
+				at("stdio transport takes no authentication configuration")
+			}
+			if c.Deployment.Extensions == nil || !c.Deployment.Extensions.Enabled {
+				at("stdio transport requires extensions.enabled: true")
+			} else {
+				if _, ok := c.Deployment.Extensions.Packages[cn.Package]; !ok {
+					at("stdio package %q is not pinned under extensions.packages", cn.Package)
+				}
+				pkg := c.ExtensionPackages[cn.Package]
+				if pkg == nil {
+					at("stdio package %q is unavailable", cn.Package)
+				} else if err := extensions.ValidateStdioServer(pkg); err != nil {
+					at("stdio package %q: %v", cn.Package, err)
+				} else {
+					declared := map[string]bool{}
+					for _, op := range pkg.Manifest.Operations {
+						declared[op.Name] = true
+					}
+					for _, tool := range cn.WriteTools {
+						if !declared[tool] {
+							at("write_tools: %q is not declared by stdio package %q", tool, cn.Package)
+						}
+					}
+				}
+			}
+		default:
+			at("transport must be http or stdio")
 		}
 		for _, t := range cn.WriteTools {
 			if !ConnectorToolRE.MatchString(t) {
@@ -239,6 +298,36 @@ func (c *Config) validateAgentConnectors(a *Agent) []error {
 		}
 		if !seen[conn] {
 			at("action %q: the agent does not list connector %q", typ, conn)
+			continue
+		}
+		cn := c.Deployment.Connectors[conn]
+		if cn.Transport == ConnectorTransportStdio {
+			pkg := c.ExtensionPackages[cn.Package]
+			declared := false
+			if pkg != nil {
+				for _, op := range pkg.Manifest.Operations {
+					if op.Name == tool {
+						declared = true
+						break
+					}
+				}
+			}
+			if !declared {
+				at("action %q: the stdio package does not declare tool %q", typ, tool)
+			}
+		}
+	}
+	if q := a.CalendarSkip; q != nil {
+		cn, ok := c.Deployment.Connectors[q.Connector]
+		if !ok {
+			at("calendar_skip.connector %q is not a connector in orbit.yaml", q.Connector)
+		} else {
+			if !seen[q.Connector] {
+				at("calendar_skip.connector %q must also appear in connectors", q.Connector)
+			}
+			if slices.Contains(cn.WriteTools, q.Tool) {
+				at("calendar_skip.tool %q must not be listed in connectors.%s.write_tools", q.Tool, q.Connector)
+			}
 		}
 	}
 	if g := c.Deployment.GoogleActions; g != nil {

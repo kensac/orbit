@@ -11,11 +11,12 @@ import (
 
 // Attention kinds: what a person is being asked for.
 const (
-	AttentionApproval = "approval" // an action waits for approve or reject
-	AttentionQuestion = "question" // a run asked something
-	AttentionFailure  = "failure"  // a run failed
-	AttentionDecision = "decision" // a ticket's plan, or a delegated task's decision, waits for a person
-	AttentionBudget   = "budget"   // a scheduled run reached an agent's period budget
+	AttentionApproval   = "approval"   // an action waits for approve or reject
+	AttentionQuestion   = "question"   // a run asked something
+	AttentionFailure    = "failure"    // a run failed
+	AttentionDecision   = "decision"   // a ticket's plan, or a delegated task's decision, waits for a person
+	AttentionPermission = "permission" // a chat run's Claude Code asks to use a tool or to leave plan mode (approvals)
+	AttentionBudget     = "budget"     // a scheduled run reached an agent's period budget
 )
 
 // Attention is one thing waiting on a person (migration 20261102032140). Title is
@@ -32,6 +33,7 @@ type Attention struct {
 	MessageID      *string   `json:"message_id"`
 	TicketID       *string   `json:"ticket_id"`
 	PlanVersion    *int      `json:"plan_version"`
+	ApprovalID     *string   `json:"approval_id"`
 	Title          string    `json:"title"`
 	Detail         string    `json:"detail"`
 	Push           bool      `json:"push"`
@@ -58,7 +60,9 @@ func newAttention(ctx context.Context, db execer, kind, key, runID, suffix strin
 // plan the ticket's newest while it is planned (a delegated task's
 // decision: its task:decision action pending), and a failure stands until a
 // later run of its conversation succeeds or the person writes there. Any
-// row a person dismissed is closed.
+// row a person dismissed is closed. A permission request is open while its
+// approval is pending and unexpired: a decision, a withdrawal and a timeout
+// all close it.
 const attentionOpen = `a.dismissed_at IS NULL AND CASE a.kind
 	WHEN 'approval' THEN EXISTS (SELECT 1 FROM actions x WHERE x.id = a.action_id AND x.status = 'pending')
 	WHEN 'question' THEN EXISTS (SELECT 1 FROM messages m WHERE m.id = a.message_id AND ` + openQuestion + `)
@@ -70,11 +74,12 @@ const attentionOpen = `a.dismissed_at IS NULL AND CASE a.kind
 	                                AND l.status = 'succeeded' AND l.created_at > (SELECT f.created_at FROM runs f WHERE f.id = a.run_id))
 	                AND NOT EXISTS (SELECT 1 FROM messages p WHERE p.conversation_id = a.conversation_id AND p.direction = 'to_agent'
 	                                AND p.created_at > (SELECT COALESCE(f.finished_at, f.created_at) FROM runs f WHERE f.id = a.run_id))
+	WHEN 'permission' THEN EXISTS (SELECT 1 FROM approvals p WHERE p.id = a.approval_id AND p.state = 'pending' AND p.expires_at > now())
 	WHEN 'budget' THEN true
 	ELSE false END`
 
 const attentionCols = `a.id::text, a.key, a.kind, a.agent, a.run_id::text, a.conversation_id::text, a.action_id::text,
-	a.message_id::text, a.ticket_id::text, a.plan_version, a.title`
+	a.message_id::text, a.ticket_id::text, a.plan_version, a.approval_id::text, a.title`
 
 // ListAttention returns what is open, newest first, with each thing's
 // detail.
@@ -89,6 +94,7 @@ func (s *Store) ListAttention(ctx context.Context, limit int) ([]Attention, erro
 	           WHEN 'budget' THEN (SELECT r.summary FROM runs r WHERE r.id = a.run_id)
 		           WHEN 'decision' THEN COALESCE((SELECT t.title FROM tickets t WHERE t.id = a.ticket_id),
 		                                         (SELECT x.reason FROM actions x WHERE x.id = a.action_id))
+		           WHEN 'permission' THEN (SELECT p.tool FROM approvals p WHERE p.id = a.approval_id)
 		       END, ''),
 		       a.push, a.created_at
 		FROM attention a
@@ -161,7 +167,7 @@ func (s *Store) ClaimPush(ctx context.Context, gap, maxAge time.Duration) ([]Att
 			var c claimed
 			a := &c.Attention
 			err := row.Scan(&a.ID, &a.Key, &a.Kind, &a.Agent, &a.RunID, &a.ConversationID, &a.ActionID, &a.MessageID,
-				&a.TicketID, &a.PlanVersion, &a.Title, &a.Detail, &a.Push, &a.CreatedAt, &c.Open)
+				&a.TicketID, &a.PlanVersion, &a.ApprovalID, &a.Title, &a.Detail, &a.Push, &a.CreatedAt, &c.Open)
 			return c, err
 		})
 		if err != nil {
