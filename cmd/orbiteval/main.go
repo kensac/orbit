@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/kensac/orbit/internal/client"
@@ -34,6 +35,7 @@ func evaluateCmd(args []string, out io.Writer) error {
 	suitePath := fs.String("suite", "", "saved reference suite JSON")
 	resultsPath := fs.String("results", "", "captured results JSON array")
 	replay := fs.Bool("replay", false, "run suite cases through the current agent charter and skills")
+	grader := fs.String("grade-with", "", "independent configured agent to grade rubric cases after replay")
 	endpoint := fs.String("url", os.Getenv("ORBIT_URL"), "Orbit HTTPS URL (required for --replay)")
 	issuer := fs.String("issuer", os.Getenv("ORBIT_OIDC_ISSUER"), "device provider issuer")
 	clientID := fs.String("client-id", os.Getenv("ORBIT_OIDC_CLIENT_ID"), "public device provider client ID")
@@ -42,11 +44,11 @@ func evaluateCmd(args []string, out io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 0 || *suitePath == "" || (!*replay && *resultsPath == "") || (*replay && (*agent == "" || *endpoint == "")) {
+	if fs.NArg() != 0 || *suitePath == "" || (!*replay && *resultsPath == "") || (*replay && (*agent == "" || *endpoint == "")) || (*grader != "" && !*replay) || (*grader != "" && *grader == *agent) {
 		return errors.New("usage: orbiteval --suite suite.json --results results.json | --replay --url https://orbit --agent name")
 	}
 	var suite eval.Suite
-	var results []eval.Result
+	var report eval.Report
 	f, err := os.Open(*suitePath)
 	if err != nil {
 		return err
@@ -64,7 +66,7 @@ func evaluateCmd(args []string, out io.Writer) error {
 			return err
 		}
 		var err error
-		results, err = replaySuite(suite, *endpoint, *issuer, *clientID, *agent, *timeout, os.Stderr)
+		report, err = replaySuiteWithGrades(suite, *endpoint, *issuer, *clientID, *agent, *grader, *timeout, os.Stderr)
 		if err != nil {
 			return err
 		}
@@ -73,6 +75,7 @@ func evaluateCmd(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		var results []eval.Result
 		err = eval.Decode(f, &results)
 		closeErr := f.Close()
 		if err != nil {
@@ -81,10 +84,10 @@ func evaluateCmd(args []string, out io.Writer) error {
 		if closeErr != nil {
 			return closeErr
 		}
-	}
-	report, err := eval.Evaluate(suite, results)
-	if err != nil {
-		return err
+		report, err = eval.Evaluate(suite, results)
+		if err != nil {
+			return err
+		}
 	}
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
@@ -97,39 +100,132 @@ func evaluateCmd(args []string, out io.Writer) error {
 	return nil
 }
 
-func replaySuite(suite eval.Suite, endpoint, issuer, clientID, agent string, timeout time.Duration, notice io.Writer) ([]eval.Result, error) {
+func replaySuiteWithGrades(suite eval.Suite, endpoint, issuer, clientID, agent, grader string, timeout time.Duration, notice io.Writer) (eval.Report, error) {
 	if len(suite.Cases) == 0 || len(suite.Cases) > replayMaxCases {
-		return nil, fmt.Errorf("replay supports 1 to %d cases", replayMaxCases)
+		return eval.Report{}, fmt.Errorf("replay supports 1 to %d cases", replayMaxCases)
 	}
 	totalInput := 0
 	for _, c := range suite.Cases {
 		if len(c.Inputs) > replayMaxInputBytes {
-			return nil, fmt.Errorf("case %q input exceeds %d bytes", c.Name, replayMaxInputBytes)
+			return eval.Report{}, fmt.Errorf("case %q input exceeds %d bytes", c.Name, replayMaxInputBytes)
 		}
 		totalInput += len(c.Inputs)
 		if totalInput > replayMaxTotalBytes {
-			return nil, fmt.Errorf("replay inputs exceed %d bytes", replayMaxTotalBytes)
+			return eval.Report{}, fmt.Errorf("replay inputs exceed %d bytes", replayMaxTotalBytes)
 		}
 	}
 	if err := client.ValidateURL(endpoint); err != nil {
-		return nil, err
+		return eval.Report{}, err
 	}
 	segment, err := client.Segment(agent)
 	if err != nil {
-		return nil, err
+		return eval.Report{}, err
+	}
+	graderSegment := ""
+	if grader != "" {
+		graderSegment, err = client.Segment(grader)
+		if err != nil {
+			return eval.Report{}, err
+		}
+		if grader == agent {
+			return eval.Report{}, errors.New("grader must be a different configured agent than the replay target")
+		}
+		hasRubric := false
+		for _, c := range suite.Cases {
+			hasRubric = hasRubric || c.Grade != ""
+		}
+		if !hasRubric {
+			return eval.Report{}, errors.New("--grade-with requires at least one case with a grade rubric")
+		}
 	}
 	if timeout <= 0 || timeout > 30*time.Minute {
-		return nil, errors.New("replay timeout must be positive and at most 30 minutes")
+		return eval.Report{}, errors.New("replay timeout must be positive and at most 30 minutes")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	hc := client.HTTPClientWithResponseTimeout(timeout)
 	token, err := client.Login(ctx, hc, issuer, clientID, notice)
 	if err != nil {
-		return nil, err
+		return eval.Report{}, err
 	}
 	c := client.Client{BaseURL: endpoint, Token: token, HTTP: hc}
-	return replayCases(ctx, c, suite, segment)
+	results, err := replayCases(ctx, c, suite, segment)
+	if err != nil {
+		return eval.Report{}, err
+	}
+	report, err := eval.Evaluate(suite, results)
+	if err != nil || graderSegment == "" {
+		return report, err
+	}
+	grades, err := gradeCases(ctx, c, suite, results, graderSegment, agent)
+	if err != nil {
+		return eval.Report{}, err
+	}
+	if err := eval.ApplyGrades(suite, &report, grades); err != nil {
+		return eval.Report{}, err
+	}
+	return report, nil
+}
+
+func gradeCases(ctx context.Context, c client.Client, suite eval.Suite, results []eval.Result, grader, target string) ([]eval.GradeResult, error) {
+	byName := make(map[string]eval.Result, len(results))
+	for _, result := range results {
+		byName[result.Name] = result
+	}
+	type gradeCase struct {
+		Name   string          `json:"name"`
+		Rubric string          `json:"rubric"`
+		Output json.RawMessage `json:"output"`
+	}
+	cases := make([]gradeCase, 0)
+	for _, test := range suite.Cases {
+		if test.Grade == "" {
+			continue
+		}
+		result, ok := byName[test.Name]
+		if !ok {
+			return nil, fmt.Errorf("missing replay result for graded case %q", test.Name)
+		}
+		cases = append(cases, gradeCase{Name: test.Name, Rubric: test.Grade, Output: result.Output})
+	}
+	body, err := json.Marshal(struct {
+		Target string      `json:"target_agent"`
+		Cases  []gradeCase `json:"cases"`
+	}{Target: target, Cases: cases})
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		Grades []struct {
+			Name    string   `json:"name"`
+			Passed  bool     `json:"passed"`
+			Reason  string   `json:"reason"`
+			CostUSD *float64 `json:"cost_usd"`
+		} `json:"grades"`
+	}
+	var raw bytes.Buffer
+	if err := c.Request(ctx, http.MethodPost, "agents/"+grader+"/grade", bytes.NewReader(body), &raw); err != nil {
+		return nil, err
+	}
+	if err := eval.Decode(&raw, &response); err != nil {
+		return nil, fmt.Errorf("grade response: %w", err)
+	}
+	if len(response.Grades) != len(cases) {
+		return nil, errors.New("grade response is incomplete")
+	}
+	grades := make([]eval.GradeResult, 0, len(response.Grades))
+	for i, g := range response.Grades {
+		if g.Name != cases[i].Name {
+			return nil, fmt.Errorf("grade result %d names %q, want %q", i+1, g.Name, cases[i].Name)
+		}
+		var cost *json.Number
+		if g.CostUSD != nil {
+			n := json.Number(strconv.FormatFloat(*g.CostUSD, 'f', -1, 64))
+			cost = &n
+		}
+		grades = append(grades, eval.GradeResult{Name: g.Name, Passed: g.Passed, Reason: g.Reason, CostUSD: cost})
+	}
+	return grades, nil
 }
 
 func replayCases(ctx context.Context, c client.Client, suite eval.Suite, agent string) ([]eval.Result, error) {
