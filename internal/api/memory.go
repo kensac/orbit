@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
@@ -64,20 +63,13 @@ func (e entryIn) toNew() (store.NewEntry, error) {
 	return n, nil
 }
 
-func decode(w http.ResponseWriter, r *http.Request, limit int64, into any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(into); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return false
-	}
-	return true
-}
-
 func (s *Server) listEntries(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	f := store.EntryFilter{Scope: q.Get("scope"), Type: q.Get("type"), Status: q.Get("status"), Query: q.Get("q"), RunID: q.Get("run_id"), Limit: intParam(r, "limit")}
-	if f.RunID != "" && !isUUID(f.RunID) {
+	f := store.EntryFilter{Scope: q.Get("scope"), Type: q.Get("type"), Status: q.Get("status"), Query: q.Get("q"), RunID: q.Get("run_id")}
+	if !queryInt(w, r, "limit", &f.Limit) {
+		return
+	}
+	if f.RunID != "" && !store.IsUUID(f.RunID) {
 		writeErr(w, http.StatusBadRequest, "run_id is not a UUID")
 		return
 	}
@@ -104,7 +96,7 @@ func (s *Server) createEntry(w http.ResponseWriter, r *http.Request) {
 		Note   string `json:"note"`
 		Author string `json:"author"`
 	}
-	if !decode(w, r, entryBodyLimit, &body) {
+	if !decode(w, r, entryBodyLimit, &body, bodyRequired) {
 		return
 	}
 	n, err := body.toNew()
@@ -133,7 +125,7 @@ func (s *Server) updateEntry(w http.ResponseWriter, r *http.Request) {
 		Note    string `json:"note"`
 		Author  string `json:"author"`
 	}
-	if !decode(w, r, entryBodyLimit, &body) {
+	if !decode(w, r, entryBodyLimit, &body, bodyRequired) {
 		return
 	}
 	e, err := s.Store.UpdateEntry(r.Context(), r.PathValue("id"), body.Version, body.EntryEdit,
@@ -148,7 +140,7 @@ func (s *Server) retireEntry(w http.ResponseWriter, r *http.Request) {
 		Note         string  `json:"note"`
 		Author       string  `json:"author"`
 	}
-	if r.ContentLength != 0 && !decode(w, r, 16<<10, &body) {
+	if !decode(w, r, 16<<10, &body, bodyOptional) {
 		return
 	}
 	e, err := s.Store.RetireEntry(r.Context(), r.PathValue("id"), body.Version, body.SupersededBy,
@@ -163,7 +155,7 @@ func (s *Server) importEntries(w http.ResponseWriter, r *http.Request) {
 		Note    string    `json:"note"`
 		Author  string    `json:"author"`
 	}
-	if !decode(w, r, importBodyLimit, &body) {
+	if !decode(w, r, importBodyLimit, &body, bodyRequired) {
 		return
 	}
 	news := make([]store.NewEntry, 0, len(body.Entries))
@@ -191,8 +183,17 @@ func (s *Server) listTopics(w http.ResponseWriter, r *http.Request) {
 	for _, t := range stored {
 		byName[t.Name] = t
 	}
-	for _, a := range s.Engine.Current().Config.Agents {
-		for _, name := range a.Topics {
+	cfg := s.Engine.Current().Config
+	for _, a := range cfg.Agents {
+		names := a.Topics
+		if a.ReadsAllTopics() {
+			var err error
+			if names, err = engine.AgentTopics(r.Context(), s.Store, cfg, a); err != nil {
+				respond(w, nil, err)
+				return
+			}
+		}
+		for _, name := range names {
 			t, ok := byName[name]
 			if !ok {
 				t = store.Topic{Name: name, Agents: []string{}}
@@ -240,11 +241,18 @@ func (s *Server) agentContext(w http.ResponseWriter, r *http.Request) {
 		topics = append(topics, topic{Name: name, From: []string{from}})
 		names = append(names, name)
 	}
-	for _, t := range a.Topics {
-		add(t, "spec")
+	reads, err := engine.AgentTopics(r.Context(), s.Store, s.Engine.Current().Config, a)
+	if err != nil {
+		respond(w, nil, err)
+		return
 	}
-	for _, t := range attached {
-		add(t, "api")
+	for _, t := range reads {
+		if a.ReadsAllTopics() || slices.Contains(a.Topics, t) {
+			add(t, "spec")
+		}
+		if slices.Contains(attached, t) {
+			add(t, "api")
+		}
 	}
 	slices.SortFunc(topics, func(x, y topic) int { return strings.Compare(x.Name, y.Name) })
 	entries, err := s.Store.EntriesFor(r.Context(), a.Name, names)
@@ -254,7 +262,7 @@ func (s *Server) agentContext(w http.ResponseWriter, r *http.Request) {
 	}
 	index := ""
 	if len(entries) > 0 {
-		index = engine.KnownIndex(entries)
+		index = engine.KnownIndex(entries, s.Engine.Searchable(a))
 	}
 	attachedSkills, err := s.Store.AttachedNames(r.Context(), a.Name, store.AttachSkill)
 	if err != nil {
@@ -349,7 +357,7 @@ func (s *Server) restoreEntry(w http.ResponseWriter, r *http.Request) {
 		Note    string `json:"note"`
 		Author  string `json:"author"`
 	}
-	if !decode(w, r, 16<<10, &body) {
+	if !decode(w, r, 16<<10, &body, bodyRequired) {
 		return
 	}
 	e, err := s.Store.RestoreEntry(r.Context(), r.PathValue("id"), body.Restore, body.Version,
@@ -370,7 +378,7 @@ func (s *Server) writeMemory(w http.ResponseWriter, r *http.Request) {
 		Restore int64   `json:"restore"`
 		Author  string  `json:"author"`
 	}
-	if !decode(w, r, int64(snap.Config.Deployment.Defaults.MemoryMaxBytes)*2+4<<10, &body) {
+	if !decode(w, r, int64(snap.Config.Deployment.Defaults.MemoryMaxBytes)*2+4<<10, &body, bodyRequired) {
 		return
 	}
 	switch {

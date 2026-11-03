@@ -14,6 +14,7 @@ import (
 	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/status"
 )
 
 // claudeCode runs `claude -p` headless. Auth is CLAUDE_CODE_OAUTH_TOKEN (a
@@ -50,15 +51,20 @@ func (c *claudeCode) Model() string { return c.rs.Model }
 // hooks are orbit's own; with --setting-sources "" no other settings file
 // is read, so they are the only hooks the CLI runs, and with none
 // disableAllHooks stays on.
-func claudeSettings(keepDays int, hooks map[string]any) string {
-	s := map[string]any{
-		"permissions": map[string]any{
-			"deny": []string{
-				"Read(//proc/**)", "Read(//sys/**)", "Read(//run/**)", "Read(//etc/**)",
-				"Read(//config/**)", "Read(~/**)",
-			},
-			"defaultMode": "dontAsk",
+// ask are tools whose calls go to orbit's permission prompt (connector tools that wait for approval); with any, the mode is default, since dontAsk denies an ask rule unasked, and orbit's prompt denies anything else asked about.
+func claudeSettings(keepDays int, hooks map[string]any, ask []string) string {
+	perms := map[string]any{
+		"deny": []string{
+			"Read(//proc/**)", "Read(//sys/**)", "Read(//run/**)", "Read(//etc/**)",
+			"Read(//config/**)", "Read(~/**)",
 		},
+		"defaultMode": "dontAsk",
+	}
+	if len(ask) > 0 {
+		perms["defaultMode"], perms["ask"] = "default", ask
+	}
+	s := map[string]any{
+		"permissions":         perms,
 		"disableAllHooks":     len(hooks) == 0,
 		"includeCoAuthoredBy": false,
 		"cleanupPeriodDays":   keepDays,
@@ -80,31 +86,87 @@ func claudeSettings(keepDays int, hooks map[string]any) string {
 // for a loaded host.
 const hookTimeout = 10
 
-// harnessHooks are the hooks orbit configures: a path guard on the file
-// tools, and, with Figures, the figure check on the structured output.
-// Matchers are tool names joined by |.
+// harnessHooks are the hooks orbit configures, all one command: a path
+// guard on the file tools, with Figures the figure check on the structured
+// output, the run's pinned entries on every prompt (UserPromptSubmit), and
+// with Status every hook event posted to the run's status listener. One PreToolUse entry for every tool keeps it one process per
+// event; the hook decides by tool name. Matchers are tool names joined by
+// |, or * for all. An agent's own hooks (spec hooks) follow orbit's on
+// their event.
 func harnessHooks(h *Harness, workdir, home string) map[string]any {
-	cmd := func(extra string) []any {
-		return []any{map[string]any{"type": "command", "timeout": hookTimeout,
-			"command": shellQuote(h.Bin) + " hook --root " + shellQuote(workdir) +
-				" --state " + shellQuote(harness.StateDir(home)) + extra}}
-	}
-	pre := []any{map[string]any{"matcher": "Read|Glob|Grep", "hooks": cmd("")}}
+	command := shellQuote(h.Bin) + " hook --root " + shellQuote(workdir) +
+		" --state " + shellQuote(harness.StateDir(home))
 	if h.Figures {
-		pre = append(pre, map[string]any{"matcher": "StructuredOutput", "hooks": cmd(" --figures")})
+		command += " --figures"
 	}
-	return map[string]any{"PreToolUse": pre}
+	if h.Status != "" {
+		command += " --status " + shellQuote(h.Status)
+	}
+	entry := func(matcher string) []any {
+		e := map[string]any{"hooks": []any{map[string]any{"type": "command", "timeout": hookTimeout, "command": command}}}
+		if matcher != "" {
+			e["matcher"] = matcher
+		}
+		return []any{e}
+	}
+	out := map[string]any{}
+	if h.Status == "" {
+		matcher := "Read|Glob|Grep"
+		if h.Figures {
+			matcher += "|StructuredOutput"
+		}
+		out["PreToolUse"] = entry(matcher)
+	} else {
+		for _, ev := range status.HookEvents {
+			m := ""
+			if status.ToolEvents[ev] {
+				m = "*"
+			}
+			out[ev] = entry(m)
+		}
+	}
+	// Every prompt gets the run's pinned entries (harness.PinnedPath) added as context, so they hold however far the session has compacted; status mode has the event already.
+	if _, ok := out["UserPromptSubmit"]; !ok {
+		out["UserPromptSubmit"] = entry("")
+	}
+	for _, ah := range h.AgentHooks {
+		timeout := hookTimeout
+		if ah.Def.Timeout > 0 {
+			// The CLI's bound sits a little past the command's own, so the command's timeout is the one that reports.
+			timeout = int(ah.Def.Timeout.Seconds()) + 5
+		}
+		entry := map[string]any{"hooks": []any{map[string]any{"type": "command", "timeout": timeout,
+			"command": shellQuote(h.Bin) + " agent-hook --root " + shellQuote(workdir) + " --def " + harness.EncodeAgentHook(ah.Def)}}}
+		if ah.Matcher != "" {
+			entry["matcher"] = ah.Matcher
+		}
+		list, _ := out[ah.Event].([]any)
+		out[ah.Event] = append(list, entry)
+	}
+	return out
 }
 
-// harnessMCP is the --mcp-config that starts `orbit mcp` for the run.
-func harnessMCP(h *Harness, workdir, home string) string {
-	args := []string{"mcp", "--root", workdir, "--state", harness.StateDir(home)}
-	if h.Search != "" {
-		args = append(args, "--search", h.Search)
+// runMCP is the run's --mcp-config: `orbit mcp` for orbit's tools, and the run's connectors as SDK servers; empty when there is neither.
+func runMCP(h *Harness, conns *Connectors, workdir, home string) string {
+	servers := map[string]any{}
+	if h != nil {
+		args := []string{"mcp", "--root", workdir, "--state", harness.StateDir(home)}
+		if h.Search != "" {
+			args = append(args, "--search", h.Search)
+		}
+		if h.Repos != "" {
+			args = append(args, "--repos", h.Repos)
+		}
+		if h.Prometheus != "" {
+			args = append(args, "--prometheus", h.Prometheus)
+		}
+		servers[harness.MCPServer] = map[string]any{"type": "stdio", "command": h.Bin, "args": args}
 	}
-	b, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{
-		harness.MCPServer: map[string]any{"type": "stdio", "command": h.Bin, "args": args},
-	}})
+	conns.addServers(servers)
+	if len(servers) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(map[string]any{"mcpServers": servers})
 	return string(b)
 }
 
@@ -123,8 +185,15 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 		if req.Harness.Search != "" {
 			allowed = append(allowed, harness.ToolSearch)
 		}
+		if req.Harness.Repos != "" {
+			allowed = append(allowed, harness.RepoToolNames()...)
+		}
+		if req.Harness.Prometheus != "" {
+			allowed = append(allowed, harness.ToolPrometheus)
+		}
 		hooks = harnessHooks(req.Harness, req.Workdir, home)
 	}
+	allowed = append(allowed, req.Connectors.Allowed()...)
 	if req.SkillsPlugin != "" {
 		// Skills load from the plugin (setting sources are off, so no other skill is found) and run through the Skill tool, which in dontAsk mode runs only when allowed by name; orbit's skill tool serves their text.
 		tools = append(tools, "Skill")
@@ -139,16 +208,20 @@ func (c *claudeCode) baseArgs(req Request, home string, keepDays int) []string {
 		"--tools", strings.Join(tools, ","),
 		"--strict-mcp-config",
 		"--setting-sources", "",
-		"--settings", claudeSettings(keepDays, hooks),
+		"--settings", claudeSettings(keepDays, hooks, req.Connectors.Ask()),
 	}
-	if req.Harness != nil {
-		args = append(args, "--mcp-config", harnessMCP(req.Harness, req.Workdir, home))
+	if mcp := runMCP(req.Harness, req.Connectors, req.Workdir, home); mcp != "" {
+		args = append(args, "--mcp-config", mcp)
 	}
 	if req.SkillsPlugin != "" {
 		args = append(args, "--plugin-dir", req.SkillsPlugin)
 	}
+	allowed, webDeny := webRules(allowed, req.WebAllow)
 	if len(allowed) > 0 {
 		args = append(args, "--allowedTools", strings.Join(allowed, ","))
+	}
+	if len(webDeny) > 0 {
+		args = append(args, "--disallowedTools", strings.Join(webDeny, ","))
 	}
 	if c.rs.Model != "" {
 		args = append(args, "--model", c.rs.Model)
@@ -177,6 +250,9 @@ func (c *claudeCode) env(home string) []string {
 }
 
 func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*Result, error) {
+	if req.Chat != nil {
+		return c.runChat(ctx, req, emit)
+	}
 	sess := req.Session
 	home := filepath.Join(req.Workdir, ".home")
 	keepDays := 1
@@ -190,11 +266,7 @@ func (c *claudeCode) Run(ctx context.Context, req Request, emit func(Event)) (*R
 	args := c.baseArgs(req, home, keepDays)
 	env := c.env(home)
 	if sess == nil {
-		full, err := claudeproto.Args(claudeproto.Transport{Ephemeral: true}, args)
-		if err != nil {
-			return nil, err
-		}
-		final, err := c.oneShot(ctx, full, env, req, emit)
+		final, err := c.once(ctx, claudeproto.Transport{Ephemeral: true}, args, env, req, emit)
 		if final == nil {
 			return nil, err
 		}
@@ -250,11 +322,36 @@ func (c *claudeCode) resumed(ctx context.Context, sess *Session, args, env []str
 	if err := sess.Started(mode, sess.Resume); err != nil {
 		return nil, err
 	}
-	full, err := claudeproto.Args(claudeproto.Transport{Resume: sess.Resume}, args)
+	return c.once(ctx, claudeproto.Transport{Resume: sess.Resume}, args, env, req, emit)
+}
+
+// once runs one process for one turn: the prompt as plain text on stdin, or, for a run with connectors, as a stream-json message, so the control channel carries the connectors' calls and permission prompts.
+func (c *claudeCode) once(ctx context.Context, t claudeproto.Transport, args, env []string, req Request, emit func(Event)) ([]byte, error) {
+	if req.Connectors == nil {
+		full, err := claudeproto.Args(t, args)
+		if err != nil {
+			return nil, err
+		}
+		return c.oneShot(ctx, full, env, req, emit)
+	}
+	t.Stream, t.PermissionPrompt = true, len(req.Connectors.Ask()) > 0
+	full, err := claudeproto.Args(t, args)
 	if err != nil {
 		return nil, err
 	}
-	return c.oneShot(ctx, full, env, req, emit)
+	tools := &chatTools{}
+	tools.connectors(req.Connectors)
+	proc, err := claudeproto.Start(claudeproto.Command{Bin: c.bin, Args: full, Env: env, Dir: req.Workdir}, tools.handler())
+	if err != nil {
+		return nil, err
+	}
+	res, err := proc.Turn(ctx, req.Prompt, func(l claudeproto.Line) { emit(Event{Kind: l.Kind, Payload: l.Raw}) })
+	if err != nil {
+		proc.Kill()
+		return nil, err
+	}
+	proc.Close(claudeproto.CloseGrace)
+	return res.Raw, nil
 }
 
 // oneShot runs the CLI with the prompt on stdin and returns its result line,
@@ -262,9 +359,9 @@ func (c *claudeCode) resumed(ctx context.Context, sess *Session, args, env []str
 func (c *claudeCode) oneShot(ctx context.Context, args, env []string, req Request, emit func(Event)) ([]byte, error) {
 	var final []byte
 	stderr, err := runCLI(ctx, c.bin, args, env, req.Workdir, req.Prompt, func(line []byte) {
-		kind := eventKind(line)
-		emit(Event{Kind: kind, Payload: line})
-		if isResult(kind) {
+		l := claudeproto.ParseLine(line)
+		emit(Event{Kind: l.Kind, Payload: line})
+		if l.IsResult() {
 			final = line
 		}
 	})
@@ -277,8 +374,6 @@ func (c *claudeCode) oneShot(ctx context.Context, args, env []string, req Reques
 	return final, nil
 }
 
-func isResult(kind string) bool { return kind == "result" || strings.HasPrefix(kind, "result.") }
-
 // parseClaudeResult reads the stream's final `result` line. is_error is the field to trust: a failed login reports subtype "success" with is_error (claudeproto.Result.Failure).
 func parseClaudeResult(line []byte) (*Result, error) {
 	r, err := claudeproto.ParseResult(line)
@@ -288,7 +383,7 @@ func parseClaudeResult(line []byte) (*Result, error) {
 	usage, _ := json.Marshal(map[string]any{
 		"usage": r.Usage, "model_usage": r.ModelUsage, "num_turns": r.NumTurns,
 	})
-	res := &Result{Usage: usage, CostUSD: r.TotalCostUSD, SessionID: r.SessionID}
+	res := &Result{Usage: usage, Tokens: r.Tokens(), CostUSD: r.TotalCostUSD, SessionID: r.SessionID}
 	if r.IsError {
 		return res, fmt.Errorf("%w: claude-code %s/%s: %s", ErrBackend, r.Subtype, r.TerminalReason, firstLine(r.Failure()))
 	}
@@ -306,12 +401,9 @@ func attachOnce(emit func(Event), attached func(string)) func(Event) {
 	seen := false
 	return func(ev Event) {
 		if !seen {
-			var h struct {
-				SessionID string `json:"session_id"`
-			}
-			if json.Unmarshal(ev.Payload, &h) == nil && h.SessionID != "" {
+			if id := claudeproto.ParseLine(ev.Payload).SessionID(); id != "" {
 				seen = true
-				attached(h.SessionID)
+				attached(id)
 			}
 		}
 		emit(ev)

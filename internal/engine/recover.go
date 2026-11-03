@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kensac/orbit/internal/runner"
@@ -29,7 +31,22 @@ type attemptState struct {
 	keeps       bool
 	sessionID   string
 	baseCostUSD float64
+	// instructor is the person the run answers (runInstructor).
+	instructor string
+	// cancel is closed when a person asks the run to stop.
+	cancel     chan struct{}
+	cancelOnce sync.Once
+	// task is the task whose conversation the run is in, nil for none.
+	task *store.Task
+	// steer is set while a chat turn runs: where the attempt's poll hands
+	// the conversation's steer messages (steer.go).
+	steer atomic.Pointer[steerFeed]
+	// remembered is what /remember saved for a run that also answers other messages: it follows the reply.
+	remembered string
 }
+
+// stop closes cancel once.
+func (st *attemptState) stop() { st.cancelOnce.Do(func() { close(st.cancel) }) }
 
 // spent reads what the attempt's session had cost when it stopped, from
 // its transcript: (this attempt's share, the session's running total), nil

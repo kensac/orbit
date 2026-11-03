@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -332,8 +333,14 @@ func openStream(t *testing.T, v *env, run string) (<-chan sse, context.CancelFun
 
 func resumeStream(t *testing.T, v *env, run, lastID string) (<-chan sse, context.CancelFunc) {
 	t.Helper()
+	return openSSE(t, v, "/api/v1/runs/"+run+"/stream", lastID)
+}
+
+// openSSE reads the Server-Sent Events at path as the person kanishk.
+func openSSE(t *testing.T, v *env, path, lastID string) (<-chan sse, context.CancelFunc) {
+	t.Helper()
 	c, cancel := context.WithCancel(ctx)
-	req, _ := http.NewRequestWithContext(c, "GET", v.srv.URL+"/api/v1/runs/"+run+"/stream", nil)
+	req, _ := http.NewRequestWithContext(c, "GET", v.srv.URL+path, nil)
 	if lastID != "" {
 		req.Header.Set("Last-Event-ID", lastID)
 	}
@@ -372,8 +379,14 @@ func resumeStream(t *testing.T, v *env, run, lastID string) (<-chan sse, context
 	return ch, cancel
 }
 
-// next returns the next non-ping event.
+// next returns the next event that is neither a ping nor an agent_status
+// (TestStreamAgentStatus reads those).
 func next(t *testing.T, ch <-chan sse) sse {
+	t.Helper()
+	return nextEvent(t, ch, true)
+}
+
+func nextEvent(t *testing.T, ch <-chan sse, skipAgentStatus bool) sse {
 	t.Helper()
 	for {
 		select {
@@ -382,8 +395,9 @@ func next(t *testing.T, ch <-chan sse) sse {
 				t.Fatal("stream ended early")
 			}
 			// item events are the journal rows; tests of them read them
-			// with nextItem.
-			if e.Event != "ping" && e.Event != "item" {
+			// with nextItem. agent_status events are read by expect only
+			// when asked for.
+			if e.Event != "ping" && e.Event != "item" && (!skipAgentStatus || e.Event != "agent_status") {
 				return e
 			}
 		case <-time.After(5 * time.Second):
@@ -394,17 +408,40 @@ func next(t *testing.T, ch <-chan sse) sse {
 
 func expect(t *testing.T, ch <-chan sse, event, data string) sse {
 	t.Helper()
-	e := next(t, ch)
+	e := nextEvent(t, ch, event != "agent_status")
 	if e.Event != event || (data != "" && e.Data != data) {
 		t.Fatalf("got %s %s, want %s %s", e.Event, e.Data, event, data)
 	}
 	return e
 }
 
+// testWriteTimeout is the test server's write timeout. Every ordinary request in a test is held to it too, and a handler that outlasts it has its connection closed (the client sees EOF), so it stays well above a slow handler under -race on a loaded CI database.
+const testWriteTimeout = 2 * time.Second
+
 func fastStreams(a *api.Server, hs *http.Server) {
 	a.StreamPoll, a.StreamPing = 20*time.Millisecond, 100*time.Millisecond
-	// Far shorter than the stream lives: the stream must clear it.
-	hs.WriteTimeout = 300 * time.Millisecond
+	hs.WriteTimeout = testWriteTimeout
+}
+
+// A stream outlives the server's write timeout: it clears its own deadline, or the first ping after the timeout fails and the stream ends.
+func TestStreamsOutliveTheWriteTimeout(t *testing.T) {
+	r := newEnv(t, fastStreams)
+	run := enqueue(t, r)
+	runs, _ := openStream(t, r, run)
+	expect(t, runs, "status", `{"attempt":0,"status":"queued"}`)
+	v := newEnv(t, fastStreams)
+	_, conv, made := delegated(t, v)
+	tasks, _ := openSSE(t, v, "/api/v1/conversations/"+conv+"/tasks/stream", "")
+	expect(t, tasks, "tasks", "")
+
+	time.Sleep(testWriteTimeout + 500*time.Millisecond)
+	claim(t, r, "claude-code")
+	expect(t, runs, "status", `{"attempt":1,"epoch":1,"status":"running"}`)
+	if code, body := call(t, "POST", v.srv.URL+"/api/v1/tasks/"+made[0].ID+"/cancel", v.person("kanishk"), ""); code != 200 {
+		t.Fatalf("cancel = %d %v", code, body)
+	}
+	for !strings.Contains(expect(t, tasks, "tasks", "").Data, `"status":"cancelled"`) {
+	}
 }
 
 func TestStreamFollowsARunThroughARequeue(t *testing.T) {
@@ -708,5 +745,51 @@ func TestRetriedSendsActOnce(t *testing.T) {
 	}
 	if code, _ := call(t, "POST", v.srv.URL+"/api/v1/actions/"+ids[0]+"/approve", kanishk, ""); code != 409 {
 		t.Fatalf("approve without an id after a decision = %d", code)
+	}
+}
+
+// A stream sends the agent's status with every status, and on its own when
+// the run's hooks change it; done carries it too.
+func TestStreamAgentStatus(t *testing.T) {
+	v := newEnv(t, fastStreams)
+	run := enqueue(t, v)
+	ch, _ := openStream(t, v, run)
+	agentStatus := func(want string) {
+		t.Helper()
+		e := expect(t, ch, "agent_status", "")
+		var st struct {
+			State, Kind, Detail, Source string
+			RunID                       string `json:"run_id"`
+		}
+		_ = json.Unmarshal([]byte(e.Data), &st)
+		if st.RunID != run {
+			t.Fatalf("agent_status run_id = %q", st.RunID)
+		}
+		if got := st.State + "/" + st.Kind + "/" + st.Detail + "/" + st.Source; got != want {
+			t.Fatalf("agent_status = %s, want %s (%s)", got, want, e.Data)
+		}
+	}
+	expect(t, ch, "status", `{"attempt":0,"status":"queued"}`)
+	agentStatus("queued///run")
+	_, a1 := claim(t, v, "claude-code")
+	expect(t, ch, "status", `{"attempt":1,"epoch":1,"status":"running"}`)
+	agentStatus("working///run")
+	snap := `{"state":"waiting","kind":"permission","detail":"Write","event":"PermissionRequest","at":"2026-11-01T12:00:00Z","attempt":1}`
+	if err := v.s.SetHookStatus(ctx, run, a1, json.RawMessage(snap)); err != nil {
+		t.Fatal(err)
+	}
+	agentStatus("waiting/permission/Write/hooks")
+	if _, err := v.s.RecordOutcome(ctx, run, "a", store.RunResult{Attempt: a1, Status: "succeeded", Report: "r"},
+		store.Outcome{Questions: []string{"q?"}}); err != nil {
+		t.Fatal(err)
+	}
+	expect(t, ch, "status", `{"attempt":1,"epoch":1,"status":"succeeded"}`)
+	agentStatus("waiting/question//run")
+	done := expect(t, ch, "done", "")
+	if !strings.Contains(done.Data, `"agent_status":{"state":"waiting","kind":"question"`) {
+		t.Fatalf("done = %s", done.Data)
+	}
+	if err := v.s.SetHookStatus(ctx, run, a1, json.RawMessage(snap)); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("a finished run's hook status: %v", err)
 	}
 }

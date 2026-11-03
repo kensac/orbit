@@ -1,16 +1,20 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
+	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/spec"
@@ -193,89 +197,210 @@ func (e *Engine) prepareSkills(ctx context.Context, c *store.ClaimedRun, a *spec
 	return skills, "", append(inputs, runner.Input{Name: "skills", Path: rel, MediaType: "text/markdown", Content: b}), nil
 }
 
-// OutputSkill is one skill write in a run's output.
-type OutputSkill struct {
-	// Op is write (a new skill, or a new SKILL.md for one the run has) or retire.
-	Op   string `json:"op"`
-	Name string `json:"name"`
-	// Content is the whole SKILL.md, frontmatter (name, description) included; empty for retire.
-	Content string `json:"content"`
-	Note    string `json:"note"`
-}
-
-// skillsSchema is the output's skills property; every field required, as for entries.
-func skillsSchema() map[string]any {
-	return map[string]any{
-		"type": "array", "maxItems": maxSkillWrites,
-		"items": map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"op":      map[string]any{"type": "string", "enum": []string{"write", "retire"}},
-				"name":    map[string]any{"type": "string", "pattern": store.SkillNameRE.String()},
-				"content": map[string]any{"type": "string", "maxLength": 256 << 10},
-				"note":    map[string]any{"type": "string", "maxLength": 2 << 10},
-			},
-			"required":             []string{"op", "name", "content", "note"},
-			"additionalProperties": false,
-		},
-	}
-}
-
-// withSkills adds the skills property to a schema, required for the backend, optional in the engine's envelope.
-func withSkills(schema json.RawMessage, required bool) json.RawMessage {
-	var s map[string]any
-	if json.Unmarshal(schema, &s) != nil {
-		return schema
-	}
-	props, _ := s["properties"].(map[string]any)
-	if props == nil {
-		return schema
-	}
-	props["skills"] = skillsSchema()
-	if req, _ := s["required"].([]any); required && !slices.Contains(req, any("skills")) {
-		s["required"] = append(req, "skills")
-	}
-	b, _ := json.Marshal(s)
-	return b
-}
-
-// resolveSkillWrites turns a run's skill ops into store writes: a write to a skill the run has is its next version (at the version the run had), a write to a new name creates it, and a retire must name a skill the run has. A skill a run writes is attached to its agent.
-func resolveSkillWrites(had []store.Skill, ops []OutputSkill) ([]*store.AgentSkillWrite, []refusedWrite) {
-	byName := map[string]store.Skill{}
-	for _, k := range had {
-		byName[k.Name] = k
-	}
-	var writes []*store.AgentSkillWrite
-	var refused []refusedWrite
-	for i, op := range ops {
-		if i >= maxSkillWrites {
-			refused = append(refused, refusedWrite{Index: i, Op: op.Op, Ref: op.Name, Error: fmt.Sprintf("at most %d skill writes per run", maxSkillWrites)})
-			continue
+// agentHooks are the agent's spec hooks as the runner installs them.
+func agentHooks(a *spec.Agent) []runner.AgentHook {
+	var out []runner.AgentHook
+	for _, h := range a.Hooks {
+		timeout := time.Duration(h.Timeout)
+		if len(h.Run) > 0 && timeout == 0 {
+			timeout = spec.DefaultHookTimeout
 		}
-		k, has := byName[op.Name]
-		w := &store.AgentSkillWrite{Name: op.Name, Content: op.Content, Note: op.Note}
-		switch op.Op {
-		case "write":
-			if has {
-				w.Expect = k.Version
+		out = append(out, runner.AgentHook{Event: h.Event, Matcher: h.Matcher,
+			Def: harness.AgentHookDef{Event: h.Event, Say: h.Say, Deny: h.Deny, Run: h.Run, Timeout: timeout}})
+	}
+	return out
+}
+
+// skillProposal resolves a run's skill:write against the skills the run had: a write to one it has applies against that version, a write to a new name creates it, a retire must name one it has. It sets the params' version and the change code worked out (skillChanges), or returns why it is denied. A run proposes at most maxSkillWrites.
+func skillProposal(had []store.Skill, params json.RawMessage, count int) (json.RawMessage, error) {
+	if count > maxSkillWrites {
+		return nil, fmt.Errorf("at most %d skill writes per run", maxSkillWrites)
+	}
+	w, err := actions.DecodeSkillWrite(params)
+	if err != nil {
+		return nil, err
+	}
+	var cur *store.Skill
+	for i := range had {
+		if had[i].Name == w.Name {
+			cur = &had[i]
+		}
+	}
+	w.Version, w.Changes = 0, nil
+	switch {
+	case w.Op == "retire" && cur == nil:
+		return nil, errors.New("only a skill this run has can be retired")
+	case cur != nil:
+		w.Version = cur.Version
+	}
+	if w.Op == "write" {
+		if _, err := store.SkillDescription(w.Name, w.Content); err != nil {
+			return nil, err
+		}
+	}
+	w.Changes = skillChanges(cur, w)
+	return json.Marshal(w)
+}
+
+// skillChangesDiffMax bounds the diff an approval shows: a page, with the counts saying how much more there is.
+const skillChangesDiffMax = 16 << 10
+
+// skillChanges is what a write changes: SKILL.md's lines (a retire removes none; it ends the skill), the files the skill keeps, and which of them are scripts or executables.
+func skillChanges(cur *store.Skill, w actions.SkillWrite) *actions.SkillChanges {
+	ch := &actions.SkillChanges{Files: []string{}, Scripts: []string{}}
+	before := ""
+	if cur != nil {
+		ch.From, before = cur.Version, cur.Content
+		for _, f := range cur.Files {
+			ch.Files = append(ch.Files, f.Path)
+			if isScript(f) {
+				ch.Scripts = append(ch.Scripts, f.Path)
 			}
-		case "retire":
-			if !has {
-				refused = append(refused, refusedWrite{Index: i, Op: op.Op, Ref: op.Name, Error: "only a skill this run has can be retired"})
-				continue
+		}
+	}
+	if w.Op == "write" {
+		ch.Diff, ch.Added, ch.Removed = changedLines(before, w.Content, skillChangesDiffMax)
+	}
+	return ch
+}
+
+// scriptExts are file extensions of code a shell or interpreter runs.
+var scriptExts = []string{".sh", ".bash", ".zsh", ".fish", ".py", ".rb", ".pl", ".php", ".js", ".mjs", ".cjs", ".ts", ".lua", ".ps1", ".bat", ".cmd", ".exe", ".bin", ".so", ".dylib"}
+
+// isScript reports whether a skill's file is code that can run: under scripts/ or bin/, a script's extension, a #! line, or an ELF, Mach-O or PE header.
+func isScript(f store.SkillFile) bool {
+	p := strings.ToLower(f.Path)
+	if strings.HasPrefix(p, "scripts/") || strings.HasPrefix(p, "bin/") || strings.Contains(p, "/scripts/") || strings.Contains(p, "/bin/") {
+		return true
+	}
+	for _, ext := range scriptExts {
+		if strings.HasSuffix(p, ext) {
+			return true
+		}
+	}
+	for _, magic := range [][]byte{[]byte("#!"), {0x7f, 'E', 'L', 'F'}, {0xcf, 0xfa, 0xed, 0xfe}, {0xfe, 0xed, 0xfa, 0xcf}, {0xca, 0xfe, 0xba, 0xbe}, []byte("MZ")} {
+		if bytes.HasPrefix(f.Content, magic) {
+			return true
+		}
+	}
+	return false
+}
+
+// lineDiffMax bounds the lines a diff compares exactly; a longer SKILL.md is shown as a whole replacement.
+const lineDiffMax = 4000
+
+// changedLines is a diff of b against a by lines (a longest common subsequence): each changed line prefixed + or -, and the counts. It is cut at limit bytes, saying how many changed lines it leaves out.
+func changedLines(a, b string, limit int) (string, int, int) {
+	al, bl := splitLines(a), splitLines(b)
+	var ops []string
+	if len(al) > lineDiffMax || len(bl) > lineDiffMax {
+		for _, l := range al {
+			ops = append(ops, "-"+l)
+		}
+		for _, l := range bl {
+			ops = append(ops, "+"+l)
+		}
+	} else {
+		n, m := len(al), len(bl)
+		lcs := make([][]int, n+1)
+		for i := range lcs {
+			lcs[i] = make([]int, m+1)
+		}
+		for i := n - 1; i >= 0; i-- {
+			for j := m - 1; j >= 0; j-- {
+				if al[i] == bl[j] {
+					lcs[i][j] = lcs[i+1][j+1] + 1
+				} else {
+					lcs[i][j] = max(lcs[i+1][j], lcs[i][j+1])
+				}
 			}
-			w.Retire, w.Expect = true, k.Version
+		}
+		i, j := 0, 0
+		for i < n || j < m {
+			switch {
+			case i < n && j < m && al[i] == bl[j]:
+				ops = append(ops, " "+al[i])
+				i, j = i+1, j+1
+			case j < m && (i == n || lcs[i][j+1] >= lcs[i+1][j]):
+				ops = append(ops, "+"+bl[j])
+				j++
+			default:
+				ops = append(ops, "-"+al[i])
+				i++
+			}
+		}
+	}
+	added, removed, left := 0, 0, 0
+	var out strings.Builder
+	for _, op := range ops {
+		switch op[0] {
+		case '+':
+			added++
+		case '-':
+			removed++
 		default:
-			refused = append(refused, refusedWrite{Index: i, Op: op.Op, Ref: op.Name, Error: "op must be write or retire"})
 			continue
 		}
-		writes = append(writes, w)
+		if left > 0 || out.Len()+len(op)+1 > limit {
+			left++
+			continue
+		}
+		out.WriteString(op + "\n")
 	}
-	return writes, refused
+	if left > 0 {
+		fmt.Fprintf(&out, "(%d more changed lines not shown)\n", left)
+	}
+	return out.String(), added, removed
 }
 
-// skillsContract is the system prompt's part about skills.
-func skillsContract(skills []store.Skill, cliSkills bool) string {
+func splitLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+}
+
+// skillApprovalText is what a person approving a skill:write is told, before the params: what it writes, how SKILL.md changes, and every script or executable the skill holds.
+func skillApprovalText(params json.RawMessage) string {
+	w, err := actions.DecodeSkillWrite(params)
+	if err != nil || w.Changes == nil {
+		return ""
+	}
+	var b strings.Builder
+	switch {
+	case w.Op == "retire":
+		fmt.Fprintf(&b, "Retires skill %s (version %d).\n", w.Name, w.Changes.From)
+	case w.Changes.From == 0:
+		fmt.Fprintf(&b, "Creates skill %s: SKILL.md, %d lines.\n", w.Name, w.Changes.Added)
+	default:
+		fmt.Fprintf(&b, "Writes skill %s (version %d to %d): SKILL.md +%d -%d lines; its %d other files stay.\n", w.Name, w.Changes.From, w.Changes.From+1, w.Changes.Added, w.Changes.Removed, len(w.Changes.Files))
+	}
+	if len(w.Changes.Scripts) > 0 {
+		fmt.Fprintf(&b, "Scripts and executables in this skill (they run only if the agent's tools let them, when SKILL.md says to): %s\n", strings.Join(w.Changes.Scripts, ", "))
+	}
+	if w.Changes.Diff != "" {
+		b.WriteString("\n```diff\n" + w.Changes.Diff + "```\n")
+	}
+	return b.String()
+}
+
+// skillWriteAction executes a skill:write: the write applies against the version the run had, as the next version with the run as its source, and a written skill is attached to the agent. Its result says what it did and what changed.
+func (e *Engine) skillWriteAction(ctx context.Context, c actions.Call, w actions.SkillWrite) (json.RawMessage, error) {
+	sw := &store.AgentSkillWrite{Name: w.Name, Content: w.Content, Expect: w.Version, Retire: w.Op == "retire", Note: w.Note}
+	if err := e.Store.ApplySkillWrite(ctx, c.RunID, c.Agent, sw); err != nil {
+		return nil, err
+	}
+	if sw.Result.Outcome == "refused" {
+		return nil, fmt.Errorf("skill:write %s: %s", w.Name, sw.Result.Error)
+	}
+	return json.Marshal(map[string]any{"skill": w.Name, "op": w.Op, "outcome": sw.Result.Outcome, "version": sw.Result.Version, "changes": w.Changes})
+}
+
+// skillsContract is the system prompt's part about skills: which the run has, and, when skill:write is offered, that skills are written with it.
+func skillsContract(skills []store.Skill, cliSkills, canWrite bool) string {
+	if len(skills) == 0 && !canWrite {
+		return ""
+	}
 	var b strings.Builder
 	b.WriteString("\n- skills: your Claude Code skills, procedures kept for you between runs.")
 	if len(skills) > 0 {
@@ -289,37 +414,9 @@ func skillsContract(skills []store.Skill, cliSkills bool) string {
 			fmt.Fprintf(&b, " You have: %s, in full in the skills input.", strings.Join(names, ", "))
 		}
 	}
-	b.WriteString(" Write one when you have worked out a procedure your person will want done the same way again, or improve one you have; it is applied directly (every version is kept, and your person can restore any). op write gives the whole SKILL.md: frontmatter with name and a description saying when to use it, then the steps; a skill you have keeps its other files. op retire ends one you have. Return an empty list when there is nothing to change.\n")
+	if canWrite {
+		fmt.Fprintf(&b, " Write or retire one with the %s action.", actions.SkillWriteType)
+	}
+	b.WriteString("\n")
 	return b.String()
-}
-
-// recordSkillWrites stores what became of a run's skill writes as its skill-writes.json artifact, in output order.
-func (e *Engine) recordSkillWrites(ctx context.Context, c *store.ClaimedRun, ops []OutputSkill, writes []*store.AgentSkillWrite, refused []refusedWrite) {
-	if len(ops) == 0 {
-		return
-	}
-	type row struct {
-		Op     string                 `json:"op"`
-		Name   string                 `json:"name"`
-		Result store.EntryWriteResult `json:"result"`
-	}
-	bad := map[int]string{}
-	for _, r := range refused {
-		bad[r.Index] = r.Error
-	}
-	rows := make([]row, len(ops))
-	next := 0
-	for i, op := range ops {
-		rows[i] = row{Op: op.Op, Name: op.Name}
-		if msg, ok := bad[i]; ok {
-			rows[i].Result = store.EntryWriteResult{Outcome: "refused", Error: msg}
-		} else if next < len(writes) {
-			rows[i].Result = writes[next].Result
-			next++
-		}
-	}
-	b, _ := json.MarshalIndent(rows, "", "  ")
-	if err := e.Store.PutArtifact(context.WithoutCancel(ctx), c.ID, c.Attempt, "out", "skill-writes.json", "application/json", b); err != nil {
-		e.Log.Warn("record skill writes", "run", c.ID, "err", err)
-	}
 }

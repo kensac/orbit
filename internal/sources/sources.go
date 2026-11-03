@@ -6,15 +6,19 @@ package sources
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/spec"
 )
 
@@ -50,21 +54,52 @@ func Vars(now time.Time) map[string]string {
 	return v
 }
 
-func render(s string, vars map[string]string, env Env) (string, error) {
+// render fills a setting's templates, then its ${VAR}s, adding every credential (spec.Credentials) it expands to used. A restricted fetcher refuses any other variable.
+func (f *Fetcher) render(s string, vars map[string]string, used map[string]bool) (string, error) {
 	for k, v := range vars {
 		s = strings.ReplaceAll(s, "{{"+k+"}}", v)
 	}
 	if i := strings.Index(s, "{{"); i >= 0 {
 		return "", fmt.Errorf("unknown template variable in %q", s[i:])
 	}
-	return spec.ExpandEnv(s, env)
+	for _, r := range spec.EnvRefs(s) {
+		if _, ok := f.Credentials[r]; ok {
+			used[r] = true
+		} else if f.Restricted {
+			return "", fmt.Errorf("${%s} is not in orbit.yaml's credentials", r)
+		}
+	}
+	return spec.ExpandEnv(s, f.Env)
+}
+
+// allow refuses a request to u unless every credential in used may be sent there.
+func (f *Fetcher) allow(used map[string]bool, u string) error {
+	for _, n := range slices.Sorted(maps.Keys(used)) {
+		if err := f.Credentials.Check(n, u); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Fetcher fetches sources.
 type Fetcher struct {
 	Client *http.Client
 	Env    Env
+	// Credentials are orbit.yaml's: a ${VAR} naming one is sent only to URLs under its prefix, redirects included.
+	Credentials spec.Credentials
+	// Restricted is set for an agent written outside the configuration files (spec.Agent.Restricted): it may read no file and render no variable but a credential.
+	Restricted bool
+	// GitHub mints a token of perms for repo, one of github.read_repositories (refusing any other), for one github source's fetch; nil fails a github source.
+	GitHub func(ctx context.Context, repo string, perms github.Permissions) (*github.Token, error)
+	// Now is time.Now, replaceable in tests: a loki query ends at it.
+	Now func() time.Time
+	// Delivery is the webhook delivery that started the run, the content of its webhook sources; nil for a run no delivery started.
+	Delivery *Fetched
 }
+
+// ErrAbsent is a webhook source's answer on a run no delivery started: there is nothing to read, which is not a failure.
+var ErrAbsent = errors.New("no webhook delivery started this run")
 
 // Fetch fetches one source.
 func (f *Fetcher) Fetch(ctx context.Context, s spec.Source, vars map[string]string) (*Fetched, error) {
@@ -73,13 +108,30 @@ func (f *Fetcher) Fetch(ctx context.Context, s spec.Source, vars map[string]stri
 		return f.http(ctx, s, vars)
 	case "prometheus":
 		return f.prometheus(ctx, s, vars)
+	case "loki":
+		return f.loki(ctx, s, vars)
+	case "github":
+		return f.github(ctx, s)
 	case "file":
 		return f.file(s)
+	case "webhook":
+		if f.Delivery == nil {
+			return nil, ErrAbsent
+		}
+		if int64(len(f.Delivery.Content)) > s.MaxBytes {
+			return nil, fmt.Errorf("the delivery's body is %d bytes, more than max_bytes %d", len(f.Delivery.Content), s.MaxBytes)
+		}
+		out := *f.Delivery
+		out.Name = s.Name
+		return &out, nil
 	}
 	return nil, fmt.Errorf("unknown source kind %q", s.Kind)
 }
 
 func (f *Fetcher) file(s spec.Source) (*Fetched, error) {
+	if f.Restricted {
+		return nil, fmt.Errorf("a file source is only for an agent in the configuration files")
+	}
 	fh, err := os.Open(s.Path)
 	if err != nil {
 		return nil, err
@@ -93,7 +145,8 @@ func (f *Fetcher) file(s spec.Source) (*Fetched, error) {
 }
 
 func (f *Fetcher) http(ctx context.Context, s spec.Source, vars map[string]string) (*Fetched, error) {
-	base, err := render(s.URL, vars, f.Env)
+	used := map[string]bool{}
+	base, err := f.render(s.URL, vars, used)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +156,7 @@ func (f *Fetcher) http(ctx context.Context, s spec.Source, vars map[string]strin
 	}
 	q := u.Query()
 	for k, v := range s.Query {
-		rv, err := render(v, vars, f.Env)
+		rv, err := f.render(v, vars, used)
 		if err != nil {
 			return nil, fmt.Errorf("query %s: %w", k, err)
 		}
@@ -111,7 +164,7 @@ func (f *Fetcher) http(ctx context.Context, s spec.Source, vars map[string]strin
 	}
 	headers := http.Header{}
 	for k, v := range s.Headers {
-		rv, err := render(v, vars, f.Env)
+		rv, err := f.render(v, vars, used)
 		if err != nil {
 			return nil, fmt.Errorf("header %s: %w", k, err)
 		}
@@ -119,7 +172,7 @@ func (f *Fetcher) http(ctx context.Context, s spec.Source, vars map[string]strin
 	}
 	if s.Paginate == nil {
 		u.RawQuery = q.Encode()
-		b, ct, err := f.get(ctx, u.String(), headers, s.MaxBytes)
+		b, ct, err := f.get(ctx, u.String(), headers, s.MaxBytes, used)
 		if err != nil {
 			return nil, err
 		}
@@ -142,7 +195,7 @@ func (f *Fetcher) http(ctx context.Context, s spec.Source, vars map[string]strin
 		}
 		q.Set(p.PageParam, strconv.Itoa(page))
 		u.RawQuery = q.Encode()
-		b, _, err := f.get(ctx, u.String(), headers, s.MaxBytes-total)
+		b, _, err := f.get(ctx, u.String(), headers, s.MaxBytes-total, used)
 		if err != nil {
 			return nil, fmt.Errorf("page %d: %w", page, err)
 		}
@@ -195,11 +248,12 @@ func (f *Fetcher) http(ctx context.Context, s spec.Source, vars map[string]strin
 }
 
 func (f *Fetcher) prometheus(ctx context.Context, s spec.Source, vars map[string]string) (*Fetched, error) {
-	base, err := render(s.URL, vars, f.Env)
+	used := map[string]bool{}
+	base, err := f.render(s.URL, vars, used)
 	if err != nil {
 		return nil, err
 	}
-	expr, err := render(s.Expr, vars, f.Env)
+	expr, err := f.render(s.Expr, vars, used)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +262,7 @@ func (f *Fetcher) prometheus(ctx context.Context, s spec.Source, vars map[string
 		return nil, err
 	}
 	u.RawQuery = url.Values{"query": {expr}}.Encode()
-	b, _, err := f.get(ctx, u.String(), http.Header{}, s.MaxBytes)
+	b, _, err := f.get(ctx, u.String(), http.Header{}, s.MaxBytes, used)
 	if err != nil {
 		return nil, err
 	}
@@ -226,9 +280,32 @@ func (f *Fetcher) prometheus(ctx context.Context, s spec.Source, vars map[string
 	return &Fetched{Name: s.Name, MediaType: "application/json", Content: r.Data, Meta: map[string]any{"expr": expr}}, nil
 }
 
-func (f *Fetcher) get(ctx context.Context, u string, h http.Header, max int64) ([]byte, string, error) {
+// get fetches u with h, where used are the credentials rendered into either: u and every redirect must be under their prefixes.
+func (f *Fetcher) get(ctx context.Context, u string, h http.Header, max int64, used map[string]bool) ([]byte, string, error) {
 	if max <= 0 {
 		return nil, "", fmt.Errorf("source exceeds max_bytes")
+	}
+	if err := f.allow(used, u); err != nil {
+		return nil, "", err
+	}
+	client := f.Client
+	if len(used) > 0 {
+		// Go resends custom headers on a redirect to any host, so a redirect is held to the prefixes too.
+		c := *f.Client
+		next := c.CheckRedirect
+		c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if err := f.allow(used, req.URL.String()); err != nil {
+				return fmt.Errorf("redirect refused: %w", err)
+			}
+			if next != nil {
+				return next(req, via)
+			}
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		}
+		client = &c
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -240,7 +317,7 @@ func (f *Fetcher) get(ctx context.Context, u string, h http.Header, max int64) (
 		// agents with a 403 that reads like an auth failure.
 		req.Header.Set("User-Agent", "orbit/1 (+https://github.com/kensac/orbit)")
 	}
-	resp, err := f.Client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", err
 	}

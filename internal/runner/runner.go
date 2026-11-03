@@ -15,7 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 // Input is one fetched source, already written to Workdir/Path.
@@ -48,8 +50,15 @@ type Request struct {
 	// Harness, when set, gives a claude-code run orbit's tools (`orbit
 	// mcp`) and hooks (`orbit hook`). Other backends ignore it.
 	Harness *Harness
+	// Chat, when set, makes a claude-code run a chat run (chat.go): no
+	// OutputSchema, the reply its final message.
+	Chat *Chat
+	// WebAllow, when set, limits WebFetch to these domains (spec web.allow): each is an allow rule in place of the bare tool, and the private names are denied (web.go). Only for a run on orbit's host.
+	WebAllow []string
 	// SkillsPlugin is a plugin directory holding the run's skills (engine/skills.go), loaded with --plugin-dir; claude-code only.
 	SkillsPlugin string
+	// Connectors are the MCP servers the run reaches through orbit (connectors.go); claude-code only. A run with any talks to the CLI over stream-json, whose control channel carries their calls.
+	Connectors *Connectors
 }
 
 // Harness is orbit's own code inside the CLI's process tree.
@@ -59,9 +68,27 @@ type Harness struct {
 	// Figures sends an output back when its money amounts cannot be traced
 	// to the inputs or orbit's tool results (spec verify: [figures]).
 	Figures bool
+	// Status is the socket the engine's status listener serves for the
+	// run (status.SocketPath of the run's state directory); with it, every
+	// Claude Code hook event is configured and posted there.
+	Status string
 	// Search is the engine's search socket for the run's agent; empty
 	// offers no search tool.
 	Search string
+	// Repos is the engine's repository tools socket for the run's agent
+	// (engine/repos.go); empty offers none.
+	Repos string
+	// Prometheus is the engine's prometheus tool socket for the run's agent (engine/prometheus.go); empty offers no prometheus_query.
+	Prometheus string
+	// AgentHooks are the agent's own hooks (spec hooks), run by `orbit agent-hook` beside orbit's.
+	AgentHooks []AgentHook
+}
+
+// AgentHook is one agent hook: when it fires, and what orbit's binary does.
+type AgentHook struct {
+	Event   string
+	Matcher string
+	Def     harness.AgentHookDef
 }
 
 // Session is how one run uses a persistent Claude Code session. The engine
@@ -110,14 +137,20 @@ type Event struct {
 type Result struct {
 	// Output is the JSON the schema describes, unvalidated: the engine
 	// validates it, so every runner is held to the same check.
-	Output    json.RawMessage
-	Usage     json.RawMessage
+	Output json.RawMessage
+	Usage  json.RawMessage
+	// Tokens is Usage in orbit's shape, nil when the backend reported none.
+	Tokens    *tokens.Usage
 	CostUSD   *float64
 	SessionID string
 	Model     string
 	// SessionCostUSD is the backend's cumulative cost for the session, when
 	// the run had one; CostUSD is then this run's share of it.
 	SessionCostUSD *float64
+	// Reply is a chat run's answer: the turn's final message.
+	Reply string
+	// Interrupted is a chat turn a person stopped (Chat.Interrupt).
+	Interrupted bool
 }
 
 // Runner is a model backend.

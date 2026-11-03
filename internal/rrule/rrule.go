@@ -409,7 +409,12 @@ func (r *Rule) expand(ps time.Time) []time.Time {
 			for _, h := range orDefault(r.ByHour, r.Start.Hour()) {
 				for _, m := range orDefault(r.ByMinute, r.Start.Minute()) {
 					for _, sec := range orDefault(r.BySecond, r.Start.Second()) {
-						out = append(out, time.Date(d.Year(), d.Month(), d.Day(), h, m, sec, 0, loc))
+						occurrence := time.Date(d.Year(), d.Month(), d.Day(), h, m, sec, 0, loc)
+						// A DST gap has no occurrence; time.Date normalizes it to a different wall-clock time.
+						if occurrence.Year() != d.Year() || occurrence.Month() != d.Month() || occurrence.Day() != d.Day() || occurrence.Hour() != h || occurrence.Minute() != m || occurrence.Second() != sec {
+							continue
+						}
+						out = append(out, occurrence)
 					}
 				}
 			}

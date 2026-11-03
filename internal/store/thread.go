@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/kensac/orbit/internal/status"
 )
 
 // ThreadItem is one entry of an agent's conversation: exactly one of
@@ -52,13 +54,27 @@ type ThreadMessage struct {
 	Body    string    `json:"body"`
 	Author  *string   `json:"author,omitempty"`
 	ReplyTo *string   `json:"reply_to,omitempty"`
-	// RunID is the run that read it (person) or asked it (agent).
+	// RunID is the run that holds it (person; nil while it waits for a
+	// run) or asked it (agent).
 	RunID *string `json:"run_id"`
+	// SteeredInto is the run whose turn in progress took it (delivery steer).
+	SteeredInto *string `json:"steered_into,omitempty"`
+	// Reads are the attempts that read a person's message, oldest first;
+	// a handed-back one has ReleasedAt set (message_reads).
+	Reads []MessageRead `json:"reads,omitempty"`
 	// Open is set on a question: true until answered (openQuestion).
 	Open *bool `json:"open,omitempty"`
 	// Attachments are the files a person's message carries; always an
 	// array.
 	Attachments []Upload `json:"attachments"`
+}
+
+// MessageRead is one attempt's read of a person's message.
+type MessageRead struct {
+	RunID      string     `json:"run_id"`
+	Attempt    int        `json:"attempt"`
+	ReadAt     time.Time  `json:"read_at"`
+	ReleasedAt *time.Time `json:"released_at"`
 }
 
 // ThreadRun is a run with what it said: its report, its questions and the
@@ -81,12 +97,67 @@ type ThreadRun struct {
 	Questions []ThreadQuestion `json:"questions"`
 	Error     *string          `json:"error"`
 	CostUSD   *float64         `json:"cost_usd"`
-	Actions   []ThreadAction   `json:"actions"`
+	// Tokens is every attempt's token counts together, null when none were reported.
+	Tokens  *Tokens        `json:"tokens"`
+	Actions []ThreadAction `json:"actions"`
 	// Gate names what ended a skipped run; null otherwise.
 	Gate *string `json:"gate"`
+	// Tasks are the tasks the run delegated, in the order it listed them.
+	Tasks []ThreadTask `json:"tasks"`
 	// NeedsInput is true when the run is waiting on its person: one of its
 	// questions is open or one of its actions awaits approval.
 	NeedsInput bool `json:"needs_input"`
+	// AgentStatus is the agent's status in this run (status.Derive).
+	AgentStatus status.Status `json:"agent_status"`
+	// Folded is set on a run that stands for a streak of identical skips (FoldSkips).
+	Folded *FoldedSkips `json:"folded,omitempty"`
+	// TriggerIndex is which of the agent's triggers fired, for FoldSkips.
+	TriggerIndex *int `json:"-"`
+}
+
+// FoldedSkips is a streak of consecutive skipped runs of one trigger with one gate, shown as its newest run.
+type FoldedSkips struct {
+	// Count is how many runs the streak holds, the shown one included.
+	Count   int       `json:"count"`
+	FirstAt time.Time `json:"first_at"`
+	LastAt  time.Time `json:"last_at"`
+	// RunIDs are every run of the streak, oldest first; each is still a run of its own (GET /runs/{id}).
+	RunIDs []string `json:"run_ids"`
+}
+
+// FoldSkips folds each streak of consecutive items (oldest first, as a page holds them) that are skipped runs of the same trigger, trigger index and gate into the streak's newest run, carrying the streak in Folded. A quiet agent's thread is then one line per streak rather than one per fire; nothing stored changes. A streak broken by any other item, or by a page boundary, is two streaks.
+func FoldSkips(items []ThreadItem) []ThreadItem {
+	same := func(a, b *ThreadRun) bool {
+		return a.Status == StatusSkipped && b.Status == StatusSkipped && a.Trigger == b.Trigger &&
+			eqPtr(a.TriggerIndex, b.TriggerIndex) && eqPtr(a.Gate, b.Gate)
+	}
+	out := make([]ThreadItem, 0, len(items))
+	for i := 0; i < len(items); {
+		j := i + 1
+		if r := items[i].Run; r != nil {
+			for j < len(items) && items[j].Run != nil && same(r, items[j].Run) {
+				j++
+			}
+		}
+		if j-i < 2 {
+			out = append(out, items[i])
+			i++
+			continue
+		}
+		last := *items[j-1].Run
+		f := &FoldedSkips{Count: j - i, FirstAt: items[i].Run.At, LastAt: last.At}
+		for _, it := range items[i:j] {
+			f.RunIDs = append(f.RunIDs, it.Run.ID)
+		}
+		last.Folded = f
+		out = append(out, ThreadItem{Run: &last})
+		i = j
+	}
+	return out
+}
+
+func eqPtr[T comparable](a, b *T) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
 }
 
 // ThreadQuestion is a question a run asked; ID is its from_agent message,
@@ -104,6 +175,22 @@ type ThreadAction struct {
 	Status string          `json:"status"`
 	Reason string          `json:"reason"`
 	Params json.RawMessage `json:"params"`
+}
+
+// ThreadTask is a delegated task as its parent's thread shows it; the whole
+// task, with its report, is GET /tasks/{id}.
+type ThreadTask struct {
+	ID             string   `json:"id"`
+	Key            string   `json:"key"`
+	Agent          string   `json:"agent"`
+	Status         string   `json:"status"`
+	ConversationID string   `json:"conversation_id"`
+	DependsOn      []string `json:"depends_on"`
+	Summary        *string  `json:"summary"`
+	Error          *string  `json:"error"`
+	// DecisionActionID is the task:decision a person resolves before it
+	// starts, when it has one.
+	DecisionActionID *string `json:"decision_action_id"`
 }
 
 // DefaultThreadLimit and MaxThreadLimit are a thread page's size.
@@ -135,22 +222,32 @@ const latestTurn = `(
 // in one round trip; the correlated aggregates use messages_run,
 // actions_run and journal_items' key, so a page costs the same queries
 // however many runs it holds.
-const threadRunSelect = `
-	SELECT r.id::text, r.created_at, r.trigger, r.status, r.attempt, r.started_at, r.finished_at,
+var threadRunSelect = `
+	SELECT r.id::text, r.created_at, r.trigger, r.trigger_index, r.status, r.attempt, r.started_at, r.finished_at,
 	       ` + stepsCount + `, ` + latestTurn + `, r.summary, r.report, r.error, r.cost_usd::float8, r.gate,
 	       COALESCE((SELECT json_agg(json_build_object('id', m.id, 'body', m.body, 'open', (` + openQuestion + `)) ORDER BY m.created_at, m.id)
 	                 FROM messages m WHERE m.run_id = r.id AND m.direction = 'from_agent'), '[]'),
 	       COALESCE((SELECT json_agg(json_build_object('id', a.id, 'type', a.type, 'status', a.status,
 	                                                   'reason', a.reason, 'params', a.params)
 	                                 ORDER BY a.created_at, a.id)
-	                 FROM actions a WHERE a.run_id = r.id), '[]')
+	                 FROM actions a WHERE a.run_id = r.id), '[]'),
+	       COALESCE((SELECT json_agg(json_build_object('id', k.id, 'key', k.key, 'agent', k.agent, 'status', k.status,
+	                                                   'conversation_id', k.conversation_id, 'summary', k.report->>'summary',
+	                                                   'error', k.error, 'decision_action_id', k.decision_action_id,
+	                                                   'depends_on', COALESCE((SELECT json_agg(d.key ORDER BY d.key)
+	                                                       FROM task_deps x JOIN tasks d ON d.id = x.depends_on
+	                                                       WHERE x.task_id = k.id), '[]'))
+	                                 ORDER BY k.created_at, k.id)
+	                 FROM tasks k WHERE k.parent_run_id = r.id), '[]'),
+	       r.hook_status,
+	       ` + runTokens + `
 	FROM runs r`
 
 func scanThreadRun(row pgx.Row) (*ThreadRun, error) {
 	r := ThreadRun{Kind: "run"}
-	var questions, actions []byte
-	if err := row.Scan(&r.ID, &r.At, &r.Trigger, &r.Status, &r.Attempt, &r.StartedAt, &r.FinishedAt, &r.Steps,
-		&r.Turn, &r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions); err != nil {
+	var questions, actions, tasks, hook []byte
+	if err := row.Scan(&r.ID, &r.At, &r.Trigger, &r.TriggerIndex, &r.Status, &r.Attempt, &r.StartedAt, &r.FinishedAt, &r.Steps,
+		&r.Turn, &r.Summary, &r.Report, &r.Error, &r.CostUSD, &r.Gate, &questions, &actions, &tasks, &hook, &r.Tokens); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -162,12 +259,20 @@ func scanThreadRun(row pgx.Row) (*ThreadRun, error) {
 	if err := json.Unmarshal(actions, &r.Actions); err != nil {
 		return nil, err
 	}
+	if err := json.Unmarshal(tasks, &r.Tasks); err != nil {
+		return nil, err
+	}
+	openQ, pending := false, false
 	for _, q := range r.Questions {
-		r.NeedsInput = r.NeedsInput || q.Open
+		openQ = openQ || q.Open
 	}
 	for _, a := range r.Actions {
-		r.NeedsInput = r.NeedsInput || a.Status == "pending"
+		pending = pending || a.Status == "pending"
 	}
+	r.NeedsInput = openQ || pending
+	r.AgentStatus = status.Derive(status.Run{ID: r.ID, Status: r.Status, Attempt: r.Attempt, CreatedAt: r.At,
+		StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, Error: r.Error, OpenQuestion: openQ, PendingAction: pending,
+		Hook: hookSnapshot(hook)})
 	return &r, nil
 }
 
@@ -215,15 +320,13 @@ type ThreadPage struct {
 	Items      []ThreadItem
 	HasMore    bool
 	NextBefore string
+	// Meter is the conversation's context and cost now, whatever the page.
+	Meter *Meter
 }
 
 // Thread returns an agent's default conversation (see ConversationThread).
 func (s *Store) Thread(ctx context.Context, agent string, before *ThreadCursor, limit int) (*ThreadPage, error) {
-	var id string
-	err := s.Pool.QueryRow(ctx, `SELECT id::text FROM conversations WHERE agent = $1 AND is_default`, agent).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
-	}
+	id, err := s.DefaultConversationID(ctx, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -234,10 +337,7 @@ func (s *Store) Thread(ctx context.Context, agent string, before *ThreadCursor, 
 // and runs (every trigger): the newest limit items before the cursor (nil:
 // the newest), oldest first.
 func (s *Store) ConversationThread(ctx context.Context, conversationID string, before *ThreadCursor, limit int) (*ThreadPage, error) {
-	if limit <= 0 {
-		limit = DefaultThreadLimit
-	}
-	limit = min(limit, MaxThreadLimit)
+	limit = clampLimit(limit, DefaultThreadLimit, MaxThreadLimit)
 	at, rank, id := any(nil), rankMessage+1, "ffffffff-ffff-ffff-ffff-ffffffffffff"
 	if before != nil {
 		at, rank, id = before.At, before.Rank, before.ID
@@ -297,8 +397,13 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 		}
 		if len(msgIDs) > 0 {
 			rows, err := tx.Query(ctx, `
-				SELECT id::text, created_at, direction, body, author, reply_to::text, run_id::text,
-				       CASE WHEN direction = 'from_agent' THEN (`+openQuestion+`) END
+				SELECT id::text, created_at, direction, body, author, reply_to::text,
+				       CASE WHEN `+waitingMessage+` THEN NULL ELSE run_id::text END,
+				       CASE WHEN direction = 'from_agent' THEN (`+openQuestion+`) END, steered_into::text,
+				       (SELECT json_agg(json_build_object('run_id', x.run_id, 'attempt', x.attempt,
+				                                          'read_at', x.read_at, 'released_at', x.released_at)
+				                        ORDER BY x.read_at, x.attempt)
+				        FROM message_reads x WHERE x.message_id = m.id)
 				FROM messages m WHERE id = ANY($1::uuid[])`, msgIDs)
 			if err != nil {
 				return err
@@ -306,9 +411,16 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 			for rows.Next() {
 				m := ThreadMessage{Kind: "message"}
 				var dir string
-				if err := rows.Scan(&m.ID, &m.At, &dir, &m.Body, &m.Author, &m.ReplyTo, &m.RunID, &m.Open); err != nil {
+				var reads []byte
+				if err := rows.Scan(&m.ID, &m.At, &dir, &m.Body, &m.Author, &m.ReplyTo, &m.RunID, &m.Open, &m.SteeredInto, &reads); err != nil {
 					rows.Close()
 					return err
+				}
+				if reads != nil {
+					if err := json.Unmarshal(reads, &m.Reads); err != nil {
+						rows.Close()
+						return err
+					}
 				}
 				m.From = map[string]string{"to_agent": "person", "from_agent": "agent"}[dir]
 				page.Items = append(page.Items, ThreadItem{Message: &m})
@@ -343,9 +455,12 @@ func (s *Store) ConversationThread(ctx context.Context, conversationID string, b
 				}
 				page.Items = append(page.Items, ThreadItem{Run: r})
 			}
-			return rows.Err()
+			if err := rows.Err(); err != nil {
+				return err
+			}
 		}
-		return nil
+		page.Meter, err = conversationMeter(ctx, tx, conversationID)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -366,20 +481,27 @@ func (c ThreadCursor) less(o ThreadCursor) bool {
 	return c.ID < o.ID
 }
 
-// RunProgress is what a stream polls: where the run is.
+// RunProgress is what a stream polls: where the run is, and the agent's
+// status in it.
 type RunProgress struct {
-	Status     string
-	Attempt    int
-	RunnerKind string
+	Status      string
+	Attempt     int
+	RunnerKind  string
+	AgentStatus status.Status
 }
 
-// GetRunProgress returns a run's status, attempt and backend.
+// GetRunProgress returns a run's status, attempt, backend and agent status.
 func (s *Store) GetRunProgress(ctx context.Context, id string) (*RunProgress, error) {
 	var p RunProgress
-	err := s.Pool.QueryRow(ctx, `SELECT status, attempt, COALESCE(runner_kind, '') FROM runs WHERE id = $1`, id).
-		Scan(&p.Status, &p.Attempt, &p.RunnerKind)
+	var f RunFacts
+	err := s.Pool.QueryRow(ctx, `SELECT r.status, r.attempt, COALESCE(r.runner_kind, ''), `+runFacts("r")+`
+		FROM runs r WHERE r.id = $1`, id).
+		Scan(&p.Status, &p.Attempt, &p.RunnerKind, &f)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
+	}
+	if err == nil {
+		p.AgentStatus = status.Derive(*f.run())
 	}
 	return &p, err
 }

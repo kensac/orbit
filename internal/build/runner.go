@@ -9,12 +9,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 // Sandbox is sandboxd's four operations (*sandbox.Client).
@@ -38,27 +41,76 @@ func ParseIdentity(s string) (Identity, error) {
 type Job struct {
 	RunID   string
 	Attempt int
-	// TicketID names the branch (Branch).
-	TicketID    string
+	// TicketID names the branch (Branch), with Lane for a race lane's
+	// (LaneBranch).
+	TicketID string
+	// Lane is the race lane this build is ("a", "b", "c"), or empty.
+	Lane        string
 	Title       string
 	Repo        string
 	Plan        string
 	PlanVersion int
 	// Ticket is the ticket as data for the prompt (ticket.json).
 	Ticket json.RawMessage
-	// Purpose is "build" (from the default branch) or "fix" (on top of the
-	// PR's head, with Failure).
+	// Purpose is "build" (from the default branch), "fix" (on top of the
+	// PR's head, with Failure) or "revise" (on top of the PR's head, with
+	// Review).
 	Purpose string
 	Failure json.RawMessage
+	// Review is the review comments the run is given (review.json), as
+	// the person wrote them; empty when none waits.
+	Review json.RawMessage
+	// StackBranch, for a ticket stacked on another whose PR is open, is
+	// that ticket's branch: a build starts from its head and opens its PR
+	// against it. Empty builds from the default branch.
+	StackBranch string
+	// StackPR is that ticket's PR, named in this one's body.
+	StackPR int
 	Policy  spec.BuildRepo
-	// Model and MaxTurns are the build agent's runner's; Timeout its.
+	// Model and MaxTurns are the build agent's runner's, Model unless the
+	// lane's variant names one; Timeout the agent's. Effort is the lane
+	// variant's --effort, empty for the CLI's own.
+	Effort   string
 	Model    string
 	MaxTurns int
 	Timeout  time.Duration
-	// Credential is the backend credential the CLI needs
-	// (CLAUDE_CODE_OAUTH_TOKEN), the only secret the sandbox receives.
-	Credential string
-	Author     Identity
+	// Env is the CLI's one backend credential (SandboxEnv), the only secret the sandbox receives.
+	Env    map[string]string
+	Author Identity
+}
+
+// SandboxEnv is the environment orbit sends a build's CLI, chosen as an ordinary run's is: the variables sandbox.AllowedEnv permits, then claudeproto.Env keeping only claudeproto.Credential's pick (the subscription token when set, else the API key), so a stray key never turns a subscription build into API spend and the sandbox never holds both. It is empty when getenv has neither.
+func SandboxEnv(getenv func(string) (string, bool)) map[string]string {
+	cred := claudeproto.Credential(getenv)
+	if cred == "" {
+		return nil
+	}
+	names := make([]string, 0, len(sandbox.AllowedEnv))
+	for n := range sandbox.AllowedEnv {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var env []string
+	for _, n := range names {
+		if v, ok := getenv(n); ok && v != "" {
+			env = append(env, n+"="+v)
+		}
+	}
+	out := map[string]string{}
+	for _, kv := range claudeproto.Env(env, cred) {
+		k, v, _ := strings.Cut(kv, "=")
+		out[k] = v
+	}
+	return out
+}
+
+// secrets are env's values, which a diff must never contain.
+func secrets(env map[string]string) []string {
+	out := make([]string, 0, len(env))
+	for _, v := range env {
+		out = append(out, v)
+	}
+	return out
 }
 
 // Deps is what a build reaches: GitHub as the App, sandboxd, and orbit's
@@ -107,6 +159,7 @@ type Result struct {
 	TrustBoundary []string
 	CostUSD       *float64
 	Usage         json.RawMessage
+	Tokens        *tokens.Usage
 	// Gate, when set, says why the model was not called; GateName is its
 	// short name, recorded on the skipped run.
 	Gate     string
@@ -124,6 +177,9 @@ type Runner struct {
 	// CloneURL is where a repository is fetched from and pushed to;
 	// https://github.com/<repo>.git by default (tests point it elsewhere).
 	CloneURL func(repo string) string
+	// Pool, when set, keeps one clone per ticket and spare ones; nil makes
+	// a fresh clone per attempt.
+	Pool *Pool
 }
 
 // trustGlobs are the paths of orbit's own repository whose change alters
@@ -153,6 +209,10 @@ func TrustBoundary(repo string, paths []string) []string {
 	return out
 }
 
+// fromPRHead reports whether a build of purpose starts from the PR's head,
+// as store.FromPRHead does: a fix and a revise commit on top of it.
+func fromPRHead(purpose string) bool { return purpose == "fix" || purpose == "revise" }
+
 func (r *Runner) cloneURL(repo string) string {
 	if r.CloneURL != nil {
 		return r.CloneURL(repo)
@@ -172,13 +232,13 @@ func (d Deps) emit(kind string, v any) {
 // permission handler, readback, the diff policy, commit, push and the PR.
 // It returns the delivered result or why nothing was delivered.
 func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
-	if j.Credential == "" {
-		return nil, errors.New("the build needs CLAUDE_CODE_OAUTH_TOKEN for the CLI in the sandbox")
+	if len(j.Env) == 0 {
+		return nil, fmt.Errorf("the build needs %s or %s for the CLI in the sandbox", claudeproto.OAuthToken, claudeproto.APIKey)
 	}
 	if d.App == nil || d.Sandbox == nil {
 		return nil, errors.New("the build needs the GitHub App and sandboxd")
 	}
-	branch, err := Branch(j.TicketID)
+	branch, err := LaneBranch(j.TicketID, j.Lane)
 	if err != nil {
 		return nil, err
 	}
@@ -194,13 +254,18 @@ func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
 	if bin == "" {
 		bin = "git"
 	}
-	top := git{bin: bin, dir: work, home: filepath.Join(work, "home")}
-	if _, err := top.run(ctx, nil, "init", "--quiet", "repo"); err != nil {
-		return nil, err
-	}
-	g := git{bin: bin, dir: filepath.Join(work, "repo"), home: top.home}
-	if _, err := g.run(ctx, nil, "remote", "add", "origin", r.cloneURL(j.Repo)); err != nil {
-		return nil, err
+	home := filepath.Join(work, "home")
+	var g git
+	if r.Pool != nil {
+		// The ticket's clone, kept between its builds, or a spare one.
+		if g, err = r.Pool.Acquire(ctx, LaneKey(j.TicketID, j.Lane), j.Repo, home); err != nil {
+			return nil, err
+		}
+	} else {
+		g = git{bin: bin, dir: filepath.Join(work, "repo"), home: home}
+		if err := initClone(ctx, bin, g.dir, home, r.cloneURL(j.Repo)); err != nil {
+			return nil, err
+		}
 	}
 
 	read, err := d.App.Token(ctx, j.Repo, github.ReadContents)
@@ -232,34 +297,50 @@ func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
 	}
 
 	start := defSHA
-	if j.Purpose == "fix" {
+	if fromPRHead(j.Purpose) {
 		if branchSHA == "" {
 			return nil, fmt.Errorf("the PR's branch %s is gone; retry the ticket to build it again", branch)
 		}
 		start = branchSHA
+	} else if j.StackBranch != "" {
+		if err := g.fetch(ctx, read.GitAuthEnv(), "refs/heads/"+j.StackBranch, "refs/orbit/base"); err != nil {
+			return nil, fmt.Errorf("the branch %s this ticket stacks on: %w", j.StackBranch, err)
+		}
+		sha, err := g.run(ctx, nil, "rev-parse", "refs/orbit/base")
+		if err != nil {
+			return nil, err
+		}
+		start, res.BaseSHA = strings.TrimSpace(sha), strings.TrimSpace(sha)
 	} else {
 		if err := g.fetch(ctx, read.GitAuthEnv(), "refs/heads/"+defBranch, "refs/orbit/base"); err != nil {
 			return nil, err
 		}
 		res.BaseSHA = defSHA
 	}
-	if _, err := g.run(ctx, nil, "checkout", "--quiet", "--detach", start); err != nil {
+	if err := g.prepare(ctx, start); err != nil {
 		return nil, err
 	}
 	revokeRead()
+	scripts, err := readScripts(g.dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := scripts.trusted(j.Repo, j.Policy.TrustedScripts); err != nil {
+		return nil, err
+	}
 	d.emit("orbit.build", map[string]any{"step": "checkout", "repo": j.Repo, "start": start, "purpose": j.Purpose, "branch": branch})
 
-	out, cost, err := r.sandboxed(ctx, j, d, g)
+	out, cost, err := r.sandboxed(ctx, j, d, g, scripts)
 	if out == nil {
 		return nil, err
 	}
-	res.CostUSD, res.Usage = cost.cost, cost.usage
+	res.CostUSD, res.Usage, res.Tokens = cost.cost, cost.usage, cost.tokens
 	if err != nil {
 		return res, err
 	}
 	res.Output = *out
 
-	policy := DiffPolicy{Protected: j.Policy.Protected, MaxDiffLines: j.Policy.MaxDiffLines, Secrets: []string{j.Credential}}
+	policy := DiffPolicy{Protected: j.Policy.Protected, MaxDiffLines: j.Policy.MaxDiffLines, Secrets: secrets(j.Env)}
 	diff, err := policy.check(ctx, g)
 	if err != nil {
 		return res, err
@@ -287,14 +368,15 @@ func (r *Runner) Run(ctx context.Context, j Job, d Deps) (*Result, error) {
 
 // costs is what the CLI reported spending.
 type costs struct {
-	cost  *float64
-	usage json.RawMessage
+	cost   *float64
+	usage  json.RawMessage
+	tokens *tokens.Usage
 }
 
 // sandboxed runs the CLI in a fresh sandbox over the clone's tree and
 // writes the sandbox's tree back into the clone. The sandbox is destroyed
 // whatever happens. out is nil when the model never produced a result.
-func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git) (*Output, costs, error) {
+func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git, scripts Scripts) (*Output, costs, error) {
 	tree, err := packTree(g.dir)
 	if err != nil {
 		return nil, costs{}, err
@@ -346,6 +428,11 @@ func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git) (*Output, 
 	}
 	defer destroy()
 	d.emit("orbit.build", map[string]any{"step": "sandbox", "id": cr.ID, "expires_at": cr.ExpiresAt})
+	if scripts.Setup != "" {
+		if err := runScript(ctx, sb, cr.ID, "setup", scripts.Setup, d); err != nil {
+			return nil, costs{}, err
+		}
+	}
 
 	policy := Policy{Root: sandbox.WorkDir, Protected: j.Policy.Protected, Commands: j.Policy.Argv()}
 	binary := r.Binary
@@ -353,8 +440,8 @@ func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git) (*Output, 
 		binary = "claude"
 	}
 	ar := sandbox.AttachRequest{
-		Argv: cliArgs(binary, j.Model, j.MaxTurns, systemPrompt(policy, j.Purpose)),
-		Env:  map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": j.Credential},
+		Argv: cliArgs(binary, j.Model, j.Effort, j.MaxTurns, systemPrompt(policy, j.Purpose)),
+		Env:  j.Env,
 	}
 	proc := func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 		return sb.Attach(ctx, cr.ID, ar, stdin, stdout, stderr)
@@ -377,7 +464,7 @@ func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git) (*Output, 
 	if err != nil {
 		return nil, costs{}, err
 	}
-	c := costs{cost: cli.TotalCostUSD, usage: cli.Usage}
+	c := costs{cost: cli.TotalCostUSD, usage: cli.Usage, tokens: cli.Tokens()}
 	if n := len(cli.PermissionDenials); n > 0 && string(cli.PermissionDenials) != "null" && string(cli.PermissionDenials) != "[]" {
 		emit("orbit.permission_denials", cli.PermissionDenials)
 	}
@@ -392,6 +479,11 @@ func (r *Runner) sandboxed(ctx context.Context, j Job, d Deps, g git) (*Output, 
 	}
 	if d.Artifact != nil {
 		if err := d.Artifact("out", "output.json", "application/json", cli.StructuredOutput); err != nil {
+			return &out, c, err
+		}
+	}
+	if scripts.Cleanup != "" {
+		if err := runScript(ctx, sb, cr.ID, "cleanup", scripts.Cleanup, d); err != nil {
 			return &out, c, err
 		}
 	}
@@ -416,7 +508,7 @@ func (r *Runner) redeliver(ctx context.Context, j Job, d Deps, g git, res *Resul
 		return nil, err
 	}
 	res.HeadSHA, res.BaseSHA = head, strings.Fields(parent + " ")[0]
-	if j.Purpose == "fix" {
+	if fromPRHead(j.Purpose) {
 		res.BaseSHA = ""
 	}
 	if names, err := g.run(ctx, nil, "diff", "--name-only", "-z", res.HeadSHA+"^", res.HeadSHA); err == nil {
@@ -436,7 +528,7 @@ func (r *Runner) deliver(ctx context.Context, j Job, d Deps, g git, res *Result,
 	}
 	defer func() { _ = tok.Revoke(context.WithoutCancel(ctx)) }()
 	if push {
-		rs, err := refspec(j.TicketID, res.HeadSHA)
+		rs, err := refspec(res.Branch, res.HeadSHA)
 		if err != nil {
 			return err
 		}
@@ -452,7 +544,11 @@ func (r *Runner) deliver(ctx context.Context, j Job, d Deps, g git, res *Result,
 		return fmt.Errorf("find the PR: %w", err)
 	}
 	if pr == nil {
-		pr, err = c.CreatePR(ctx, j.Repo, github.NewPR{Title: title, Head: res.Branch, Base: defBranch, Body: full})
+		base := defBranch
+		if j.StackBranch != "" {
+			base = j.StackBranch
+		}
+		pr, err = c.CreatePR(ctx, j.Repo, github.NewPR{Title: title, Head: res.Branch, Base: base, Body: full})
 		if err != nil {
 			return fmt.Errorf("open the PR: %w", err)
 		}
@@ -499,6 +595,23 @@ func PRBody(model string, j Job, trust []string) string {
 	var b strings.Builder
 	b.WriteString(strings.TrimSpace(github.ScrubAttribution(model)))
 	fmt.Fprintf(&b, "\n\n---\n\nBuilt by orbit from ticket `%s` (%q), plan version %d.", j.TicketID, j.Title, j.PlanVersion)
+	if j.Lane != "" {
+		var with []string
+		if j.Model != "" {
+			with = append(with, "model `"+j.Model+"`")
+		}
+		if j.Effort != "" {
+			with = append(with, "effort `"+j.Effort+"`")
+		}
+		fmt.Fprintf(&b, "\n\nRace lane `%s`", j.Lane)
+		if len(with) > 0 {
+			fmt.Fprintf(&b, " (%s)", strings.Join(with, ", "))
+		}
+		b.WriteString(": the same plan is built on other lanes; a person picks one, and orbit closes the others' PRs and keeps their branches.")
+	}
+	if j.StackPR > 0 {
+		fmt.Fprintf(&b, "\n\nStacked on #%d: this PR's base is that one's branch until it merges; then orbit moves this branch onto the default branch, and only then merges it.", j.StackPR)
+	}
 	if len(trust) > 0 {
 		fmt.Fprintf(&b, "\n\n**Trust boundary:** this change touches what orbit itself may do: %s. Review those files before approving the merge.",
 			"`"+strings.Join(trust, "`, `")+"`")

@@ -16,8 +16,9 @@ type ConversationItem struct {
 	// report), failure (a run's error) or question (from the agent).
 	Kind  string `json:"kind"`
 	RunID string `json:"run_id,omitempty"`
-	// Summary is a report's one line; Body is the message, the report, the
-	// error or the question.
+	// Summary is a report's one line, or for a message an agent wrote
+	// (delegation) its author, agent:<name>; Body is the message, the
+	// report, the error or the question.
 	Summary string `json:"summary,omitempty"`
 	Body    string `json:"body"`
 }
@@ -32,9 +33,10 @@ func (s *Store) Conversation(ctx context.Context, agent, excludeRun string, limi
 	rows, err := s.Pool.Query(ctx, `
 		WITH me AS (SELECT conversation_id FROM runs WHERE id = $2)
 		SELECT at, kind, run_id, summary, body FROM (
-		    SELECT m.created_at AS at, 'message' AS kind, COALESCE(m.run_id::text, '') AS run_id, '' AS summary, m.body
+		    SELECT m.created_at AS at, 'message' AS kind, COALESCE(m.run_id::text, '') AS run_id, 
+		           CASE WHEN m.author LIKE 'agent:%' THEN m.author ELSE '' END AS summary, m.body
 		    FROM messages m
-		    WHERE m.agent = $1 AND m.direction = 'to_agent' AND m.run_id IS NOT NULL AND m.run_id <> $2
+		    WHERE m.agent = $1 AND m.direction = 'to_agent' AND m.run_id <> $2 AND NOT (`+waitingMessage+`)
 		      AND m.conversation_id = (SELECT conversation_id FROM me)
 		  UNION ALL
 		    SELECT q.created_at, 'question', q.run_id::text, '', q.body

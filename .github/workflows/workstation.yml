@@ -1,0 +1,176 @@
+# The workstation image (deploy/workstation.Dockerfile): an agent's box on
+# hetzner (amd64) and oci (arm64). A pull request builds it natively on each
+# architecture and runs every tool in it (deploy/workstation-smoke.sh).
+# Publishing is gated like build-push-ghcr.yml's: once a main commit's CI
+# run succeeds, and only when the image's inputs changed since the commit
+# latest was built from, it is pushed by digest, untagged, smoked natively
+# on each architecture, and only then tagged
+# ghcr.io/kensac/orbit-workstation:{sha-<commit>,latest}.
+name: Workstation image
+
+on:
+  pull_request:
+    paths:
+      - deploy/workstation.Dockerfile
+      - deploy/workstation/**
+      - deploy/workstation-smoke.sh
+      - deploy/cli/**
+      - .github/workflows/workstation.yml
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}-workstation
+  # What the image is built from; a main commit that touches none of it
+  # since latest's commit publishes nothing.
+  INPUTS: deploy/workstation.Dockerfile deploy/workstation deploy/workstation-smoke.sh deploy/cli .github/workflows/workstation.yml
+
+jobs:
+  test:
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: deploy/workstation.Dockerfile
+          push: false
+          load: true
+          tags: orbit-workstation:ci
+          platforms: linux/${{ matrix.arch }}
+          cache-from: type=gha,scope=workstation-${{ matrix.arch }}
+          cache-to: type=gha,scope=workstation-${{ matrix.arch }},mode=max
+      - name: Smoke
+        run: deploy/workstation-smoke.sh orbit-workstation:ci
+      - name: Size
+        run: docker image inspect orbit-workstation:ci --format '{{.Size}}' | awk '{printf "linux/${{ matrix.arch }} %.0f MiB uncompressed\n", $1/1048576}' | tee -a "$GITHUB_STEP_SUMMARY"
+
+  changed:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      build: ${{ steps.diff.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: diff
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          cur=$(.github/scripts/latest-revision.sh "$IMAGE")
+          # shellcheck disable=SC2086 # INPUTS is a list of paths
+          if [ -n "$cur" ] && git cat-file -e "$cur^{commit}" 2>/dev/null && git diff --quiet "$cur" "$SHA" -- $INPUTS; then
+            echo "latest ($cur) has the same inputs as $SHA: nothing to publish"
+            echo build=false >> "$GITHUB_OUTPUT"
+          else
+            echo "inputs changed since ${cur:-no latest}: publishing $SHA"
+            echo build=true >> "$GITHUB_OUTPUT"
+          fi
+
+  push:
+    needs: changed
+    if: needs.changed.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        id: push
+        with:
+          context: .
+          file: deploy/workstation.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha }}
+          cache-from: |
+            type=gha,scope=workstation-amd64
+            type=gha,scope=workstation-arm64
+          cache-to: type=gha,scope=workstation,mode=max
+
+  smoke:
+    needs: push
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: deploy/workstation-smoke.sh "$IMAGE@${{ needs.push.outputs.digest }}"
+
+  tag:
+    needs: [push, smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: publish-workstation-latest
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: .github/scripts/publish-tags.sh sha "$IMAGE" "${{ needs.push.outputs.digest }}" "${{ github.event.workflow_run.head_sha }}"
+      - run: .github/scripts/publish-tags.sh latest "$IMAGE" "${{ needs.push.outputs.digest }}" "${{ github.event.workflow_run.head_sha }}"

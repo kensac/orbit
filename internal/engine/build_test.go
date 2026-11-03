@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -32,6 +33,12 @@ type buildEnv struct {
 // the fake GitHub, a bare repository for its git side, a fake sandboxd
 // running the fake CLI.
 func newBuildEnv(t *testing.T) *buildEnv {
+	t.Helper()
+	return newBuildEnvWith(t, map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-engine-test-credential-000000"})
+}
+
+// newBuildEnvWith is newBuildEnv with creds as orbit's backend credentials.
+func newBuildEnvWith(t *testing.T, creds map[string]string) *buildEnv {
 	t.Helper()
 	b := &buildEnv{s: testdb.New(t), gh: githubtest.New(t), sb: buildtest.NewSandboxd(t), bare: buildtest.Repo(t)}
 	b.gh.Mu.Lock()
@@ -64,8 +71,10 @@ build:
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := map[string]string{"KEY": githubtest.KeyPEM(), "ORBIT_SANDBOX_TOKEN": buildtest.SandboxToken,
-		"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-engine-test-credential-000000"}
+	env := map[string]string{"KEY": githubtest.KeyPEM(), "ORBIT_SANDBOX_TOKEN": buildtest.SandboxToken}
+	for k, v := range creds {
+		env[k] = v
+	}
 	b.e = &engine.Engine{
 		Store: b.s, DataDir: t.TempDir(), Client: b.gh.Srv.Client(), Secret: []byte("secret"),
 		Env: func(k string) (string, bool) { v, ok := env[k]; return v, ok },
@@ -155,6 +164,50 @@ func TestABuildRunOpensItsPRAndMovesItsTicket(t *testing.T) {
 	}
 }
 
+// A build's sandbox gets the credential an ordinary run would: the subscription token when set, else the API key, never both and never another auth variable.
+func TestABuildGetsTheOrdinaryRunsCredential(t *testing.T) {
+	const tok, key = "sk-ant-oat01-engine-test-token", "sk-ant-api03-engine-test-key"
+	for name, tc := range map[string]struct {
+		creds map[string]string
+		want  map[string]string
+	}{
+		"token":         {map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": tok}, map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": tok}},
+		"api key":       {map[string]string{"ANTHROPIC_API_KEY": key}, map[string]string{"ANTHROPIC_API_KEY": key}},
+		"token and key": {map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": tok, "ANTHROPIC_API_KEY": key, "ANTHROPIC_AUTH_TOKEN": "x"}, map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": tok}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := newBuildEnvWith(t, tc.creds)
+			_, run := b.queueBuild(t, writeStep("/work/hello.txt", "hi\n"))
+			c, _ := b.s.ClaimRun(ctx, "w")
+			if err := b.e.Execute(ctx, c); err != nil {
+				t.Fatal(err)
+			}
+			if r, _ := b.s.GetRun(ctx, run); r.Status != "succeeded" {
+				t.Fatalf("run %s: %v", r.Status, r.Error)
+			}
+			if at := b.sb.Attaches(); len(at) != 1 || !reflect.DeepEqual(at[0].Env, tc.want) {
+				t.Fatalf("attaches = %+v, want env %v", at, tc.want)
+			}
+		})
+	}
+}
+
+func TestABuildWithoutACredentialFailsNamingBoth(t *testing.T) {
+	b := newBuildEnvWith(t, map[string]string{"ANTHROPIC_AUTH_TOKEN": "x"})
+	tid, _ := b.queueBuild(t, writeStep("/work/hello.txt", "hi\n"))
+	c, _ := b.s.ClaimRun(ctx, "w")
+	if err := b.e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	tk, _ := b.s.GetTicket(ctx, tid)
+	if tk.Error == nil || !strings.Contains(*tk.Error, "CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY") {
+		t.Fatalf("ticket = %+v", tk)
+	}
+	if n, _, _ := b.sb.Counts(); n != 0 {
+		t.Fatalf("%d sandboxes created without a credential", n)
+	}
+}
+
 func TestAFailedBuildFailsItsTicket(t *testing.T) {
 	b := newBuildEnv(t)
 	tid, _ := b.queueBuild(t, map[string]any{"sneak": "/work/.github/workflows/x.yml", "content": "x"})
@@ -221,5 +274,99 @@ func TestAnInterruptedBuildsSandboxIsDestroyedBeforeTheNext(t *testing.T) {
 	}
 	if tk, _ := b.s.GetTicket(ctx, tid); tk.Status != store.TicketReview {
 		t.Fatalf("ticket %s", tk.Status)
+	}
+}
+
+func TestAStackedBuildStartsFromTheTicketBelow(t *testing.T) {
+	b := newBuildEnv(t)
+	below, run := b.queueBuild(t, writeStep("/work/hello.txt", "hi\n"))
+	c, _ := b.s.ClaimRun(ctx, "w")
+	if err := b.e.Execute(ctx, c); err != nil || c.ID != run {
+		t.Fatal(err)
+	}
+	parent, _ := b.s.GetTicket(ctx, below)
+	sha := b.e.Current().Config.Agents["orbit"].SHA
+	r, _, err := b.s.CreateTicket(ctx, store.NewTicket{Kind: "request", Title: "On top", Body: "next", Agent: "orbit",
+		SpecSHA: sha, Repo: "kensac/orbit", StackOn: below})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, _ := json.Marshal(map[string]any{"steps": []map[string]any{writeStep("/work/next.txt", "next\n")}})
+	_, _ = b.s.ProposePlan(ctx, r.TicketID, "", "Add next.txt.\n\nFAKE-SCRIPT: "+string(script))
+	_, _ = b.s.ApprovePlan(ctx, r.TicketID, 1, "kanishk", "")
+	childRun, err := b.s.StartBuild(ctx, store.StartBuild{TicketID: r.TicketID, Agent: "orbit", SpecSHA: sha, Purpose: "build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ = b.s.ClaimRun(ctx, "w")
+	if c == nil || c.ID != childRun {
+		t.Fatalf("claimed %+v, want the stacked build %s", c, childRun)
+	}
+	if err := b.e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	child, _ := b.s.GetTicket(ctx, r.TicketID)
+	if child.Status != store.TicketReview || child.BaseSHA == nil || *child.BaseSHA != *parent.HeadSHA {
+		run, _ := b.s.GetRun(ctx, c.ID)
+		t.Fatalf("child = %+v (error %v), run error %v, want it based on %s", child, child.Error, run.Error, *parent.HeadSHA)
+	}
+	b.gh.Mu.Lock()
+	defer b.gh.Mu.Unlock()
+	if last := b.gh.Created[len(b.gh.Created)-1]; last["base"] != *parent.Branch || !strings.Contains(last["body"].(string), "Stacked on #7") {
+		t.Fatalf("the stacked PR = %v", last)
+	}
+}
+
+// Each lane of a race builds on its own branch with its variant, and the
+// ticket goes to review once both delivered, with each lane's diff kept for
+// the comparison.
+func TestARaceBuildsEachLaneWithItsVariant(t *testing.T) {
+	b := newBuildEnv(t)
+	sha := b.e.Current().Config.Agents["orbit"].SHA
+	r, _, err := b.s.CreateTicket(ctx, store.NewTicket{Kind: "request", Title: "Add hello", Body: "please", Agent: "orbit",
+		SpecSHA: sha, Repo: "kensac/orbit", Author: "kanishk", Race: 2, Variants: []store.Variant{{Model: "opus", Effort: "high"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, _ := json.Marshal(map[string]any{"steps": []any{writeStep("/work/hello.txt", "hi\n"), writeStep("/work/hello_test.go", "package x\n")}})
+	_, _ = b.s.ProposePlan(ctx, r.TicketID, "", "Add hello.txt.\n\nFAKE-SCRIPT: "+string(script))
+	_, _ = b.s.ApprovePlan(ctx, r.TicketID, 1, "kanishk", "")
+	if _, err := b.s.StartRace(ctx, store.StartBuild{TicketID: r.TicketID, Agent: "orbit", SpecSHA: sha, Purpose: "build"}); err != nil {
+		t.Fatal(err)
+	}
+	argv := map[string]string{}
+	for range 2 {
+		c, _ := b.s.ClaimRun(ctx, "w")
+		bd, _ := b.s.BuildOfRun(ctx, c.ID)
+		if err := b.e.Execute(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		at := b.sb.Attaches()
+		argv[*bd.Lane] = strings.Join(at[len(at)-1].Argv, " ")
+		run, _ := b.s.GetRun(ctx, c.ID)
+		if want := map[string]string{"a": "opus", "b": "m"}[*bd.Lane]; run.Status != "succeeded" || run.Model == nil || *run.Model != want {
+			t.Fatalf("lane %s run = %s model %v, want %s", *bd.Lane, run.Status, run.Model, want)
+		}
+	}
+	if !strings.Contains(argv["a"], "--model opus") || !strings.Contains(argv["a"], "--effort high") ||
+		!strings.Contains(argv["b"], "--model m") || strings.Contains(argv["b"], "--effort") {
+		t.Fatalf("argv a = %s\nargv b = %s", argv["a"], argv["b"])
+	}
+	short := strings.ReplaceAll(r.TicketID, "-", "")[:8]
+	for _, lane := range []string{"a", "b"} {
+		if buildtest.RevParse(b.bare, "refs/heads/orbit/"+short+"-"+lane) == "" {
+			t.Errorf("lane %s's branch was not pushed", lane)
+		}
+	}
+	tk, _ := b.s.GetTicket(ctx, r.TicketID)
+	if tk.Status != store.TicketReview || tk.PRNumber != nil {
+		t.Fatalf("ticket = %+v", tk)
+	}
+	lanes, _ := b.s.RaceLanes(ctx, r.TicketID)
+	for _, l := range lanes {
+		if !l.Delivered || l.LinesChanged != 2 || l.TestsTouched != 1 || len(l.Files) != 2 || *l.DiffPolicy != "passed" ||
+			*l.Branch != "orbit/"+short+"-"+l.Lane || l.CostUSD == nil {
+			t.Errorf("lane = %+v", l)
+		}
 	}
 }

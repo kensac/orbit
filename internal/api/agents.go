@@ -30,8 +30,7 @@ type agentChange struct {
 
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	var body agentChange
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSpecBytes)).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if !decode(w, r, maxSpecBytes, &body, bodyRequired) {
 		return
 	}
 	res, err := s.defineAgent(r.Context(), engine.DefineRequest{Spec: body.Spec, DryRun: body.DryRun, Author: actor(r, "")})
@@ -40,8 +39,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 	var body agentChange
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSpecBytes)).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if !decode(w, r, maxSpecBytes, &body, bodyRequired) {
 		return
 	}
 	res, err := s.defineAgent(r.Context(), engine.DefineRequest{Name: r.PathValue("name"), Spec: body.Spec, DryRun: body.DryRun,
@@ -82,13 +80,16 @@ type DefineResult struct {
 	Definition *store.AgentDefinition `json:"definition,omitempty"`
 	NextFires  []scheduler.NextFire   `json:"next_fires,omitempty"`
 	Row        *store.AgentRow        `json:"agent,omitempty"`
+	// PendingReload is set when the change is stored but not yet in force
+	// on this instance (engine.Defined).
+	PendingReload string `json:"pending_reload,omitempty"`
 }
 
 func (s *Server) defineResult(ctx context.Context, d *engine.Defined, err error) (*DefineResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	res := &DefineResult{Valid: true, Agent: d.Agent, Definition: d.Definition, NextFires: scheduler.NextFires(d.Agent, time.Now())}
+	res := &DefineResult{Valid: true, Agent: d.Agent, Definition: d.Definition, NextFires: scheduler.NextFires(d.Agent, time.Now()), PendingReload: d.PendingReload}
 	if d.Definition != nil {
 		res.Row = s.agentRow(ctx, d.Definition.Name)
 	}

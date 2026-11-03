@@ -5,17 +5,20 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/store"
+	"github.com/kensac/orbit/internal/workspace"
 )
 
 // UploadURLTTL is how long a signed upload URL works: long enough for a
@@ -27,18 +30,10 @@ const UploadURLTTL = 15 * time.Minute
 // beyond the file itself.
 const multipartOverhead = 1 << 20
 
-// uploadSigner keys signed upload URLs from the operator token, so either
-// instance of a rollout verifies the other's, and rotating the token voids
-// every outstanding URL.
-func (s *Server) uploadKey() []byte {
-	m := hmac.New(sha256.New, []byte(s.Token))
-	m.Write([]byte("orbit upload url"))
-	return m.Sum(nil)
-}
-
 // uploadSig signs the values a signed upload URL carries, in a fixed order.
 func (s *Server) uploadSig(v url.Values) string {
-	m := hmac.New(sha256.New, s.uploadKey())
+	// Keyed from the operator token, so either instance of a rollout verifies the other's, and rotating the token voids every outstanding URL.
+	m := hmac.New(sha256.New, secret.Key(s.Token).Derive(secret.UploadURL))
 	for _, k := range []string{"c", "n", "t", "b", "e", "a", "k"} {
 		m.Write([]byte(k + "=" + v.Get(k) + "\x00"))
 	}
@@ -110,8 +105,7 @@ func (s *Server) uploadURL(w http.ResponseWriter, r *http.Request) {
 		MediaType string `json:"media_type"`
 		Bytes     int64  `json:"bytes"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	if !decode(w, r, 16<<10, &body, bodyRequired) {
 		return
 	}
 	if body.Bytes < 0 || body.Bytes > store.MaxUploadBytes {
@@ -189,19 +183,16 @@ func (s *Server) signedUpload(w http.ResponseWriter, r *http.Request) {
 // getUpload is GET /conversations/{id}/uploads/{upload}: the file itself,
 // inline for an image, a download otherwise, never rendered as a page.
 func (s *Server) getUpload(w http.ResponseWriter, r *http.Request) {
-	u, b, err := s.Store.GetUpload(r.Context(), r.PathValue("id"), r.PathValue("upload"))
+	u, b, err := s.Store.OpenUpload(r.Context(), r.PathValue("id"), r.PathValue("upload"))
 	if err != nil {
 		respond(w, nil, err)
 		return
 	}
-	serveFile(w, u.Name, u.MediaType, b)
+	serveFile(w, r, u.Name, u.MediaType, u.CreatedAt, b)
 }
 
-// serveFile sends a stored file: images inline (the chat shows them),
-// everything else as an attachment, with nosniff and a CSP that runs
-// nothing, so a file a person or an agent wrote is never a page on orbit's
-// origin.
-func serveFile(w http.ResponseWriter, name, mediaType string, b []byte) {
+// serveFile sends a stored file: images inline (the chat shows them), everything else as an attachment, with nosniff and a CSP that runs nothing, so a file a person or an agent wrote is never a page on orbit's origin. http.ServeContent streams it from the store and answers Range requests (a video seeking) with only the bytes asked for.
+func serveFile(w http.ResponseWriter, r *http.Request, name, mediaType string, created time.Time, b *store.Blob) {
 	disp := "attachment"
 	mt, _, _ := mime.ParseMediaType(mediaType)
 	if strings.HasPrefix(mt, "image/") && mt != "image/svg+xml" {
@@ -211,6 +202,72 @@ func serveFile(w http.ResponseWriter, name, mediaType string, b []byte) {
 	w.Header().Set("Content-Disposition", mime.FormatMediaType(disp, map[string]string{"filename": name}))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	http.ServeContent(w, r, "", created, b)
+}
+
+// workspaceFiles is GET /conversations/{id}/files: the regular files of the
+// conversation's workspace as of its newest snapshot (a chat agent's,
+// stored after each run), without orbit's own state.
+func (s *Server) workspaceFiles(w http.ResponseWriter, r *http.Request) {
+	c, err := s.Store.GetConversation(r.Context(), r.PathValue("id"))
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	ws, err := s.Store.LatestWorkspace(r.Context(), c.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		respond(w, map[string]any{"files": []workspace.File{}, "snapshot": nil}, nil)
+		return
+	}
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	files, err := workspace.List(ws.Archive, hiddenFile)
+	if files == nil {
+		files = []workspace.File{}
+	}
+	respond(w, map[string]any{"files": files, "snapshot": ws}, err)
+}
+
+// workspaceFile is GET /conversations/{id}/files/{path...}: one file,
+// always as a download.
+func (s *Server) workspaceFile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("path")
+	if hiddenFile(name) {
+		respond(w, nil, store.ErrNotFound)
+		return
+	}
+	ws, err := s.Store.LatestWorkspace(r.Context(), r.PathValue("id"))
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	b, err := workspace.Read(ws.Archive, name)
+	if errors.Is(err, fs.ErrNotExist) {
+		respond(w, nil, store.ErrNotFound)
+		return
+	}
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(name)}))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 	_, _ = w.Write(b)
+}
+
+// hiddenFile is orbit's own state in a workspace: the CLI's config and the
+// run's inputs (stored as artifacts).
+func hiddenFile(name string) bool {
+	name = strings.TrimPrefix(path.Clean("/"+name), "/")
+	for _, p := range []string{".orbit", "inputs"} {
+		if name == p || strings.HasPrefix(name, p+"/") {
+			return true
+		}
+	}
+	return false
 }

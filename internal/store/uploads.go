@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -87,9 +88,16 @@ func numbered(name string, n int) string {
 	return fmt.Sprintf("%s (%d)%s", strings.TrimSuffix(name, ext), n, ext)
 }
 
-// CreateUpload stores a file in a conversation. A name already taken there
-// gets " (2)", " (3)", ... so uploads/<name> names one file; the stored name
-// is in the result.
+// SHA256 is b's digest in hex, as every stored digest is written.
+func SHA256(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// maxNumbered bounds the " (n)" suffixes CreateUpload tries for one name.
+const maxNumbered = 1000
+
+// CreateUpload stores a file in a conversation. A name already taken there gets " (2)", " (3)", ... so uploads/<name> names one file; the stored name is in the result. The free name is found before the INSERT, under a lock on the conversation's names, so the content crosses the wire once.
 func (s *Store) CreateUpload(ctx context.Context, n NewUpload) (Upload, error) {
 	if len(n.Content) > MaxUploadBytes {
 		return Upload{}, fmt.Errorf("%w: a file is at most %d bytes", ErrInvalid, MaxUploadBytes)
@@ -101,42 +109,78 @@ func (s *Store) CreateUpload(ctx context.Context, n NewUpload) (Upload, error) {
 	sum := sha256.Sum256(n.Content)
 	base := UploadName(n.Name)
 	u := Upload{MediaType: mt, Bytes: int64(len(n.Content)), SHA256: hex.EncodeToString(sum[:])}
-	for i := 1; i <= 1000; i++ {
-		name := base
-		if i > 1 {
-			name = numbered(base, i)
+	candidates := make([]string, maxNumbered)
+	candidates[0] = base
+	for i := 2; i <= maxNumbered; i++ {
+		candidates[i-1] = numbered(base, i)
+	}
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM conversations WHERE id = $1)`, n.ConversationID).Scan(&exists); err != nil {
+			return err
 		}
-		err := s.Pool.QueryRow(ctx, `INSERT INTO uploads (conversation_id, name, media_type, bytes, sha256, content, author, nonce)
+		if !exists {
+			return ErrNotFound
+		}
+		// One upload per conversation picks a name at a time, so the name found free below is still free at the INSERT; UNIQUE (conversation_id, name) holds it too. A signed URL names its conversation, so this lock also orders two uses of one nonce.
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('uploads:' || $1))`, n.ConversationID); err != nil {
+			return err
+		}
+		if n.Nonce != "" {
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM uploads WHERE nonce = $1)`, n.Nonce).Scan(&exists); err != nil {
+				return err
+			}
+			if exists {
+				return fmt.Errorf("%w: this upload link was already used", ErrConflict)
+			}
+		}
+		rows, err := tx.Query(ctx, `SELECT name FROM uploads WHERE conversation_id = $1 AND name = ANY($2)`, n.ConversationID, candidates)
+		if err != nil {
+			return err
+		}
+		taken, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		name := ""
+		for _, c := range candidates {
+			if !slices.Contains(taken, c) {
+				name = c
+				break
+			}
+		}
+		if name == "" {
+			return fmt.Errorf("%w: too many files named %q in this conversation", ErrInvalid, base)
+		}
+		err = tx.QueryRow(ctx, `INSERT INTO uploads (conversation_id, name, media_type, bytes, sha256, content, author, nonce)
 			VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''))
-			ON CONFLICT (conversation_id, name) DO NOTHING
 			RETURNING id::text, name, created_at`,
 			n.ConversationID, name, mt, u.Bytes, u.SHA256, n.Content, n.Author, n.Nonce).Scan(&u.ID, &u.Name, &u.CreatedAt)
-		if errors.Is(err, pgx.ErrNoRows) {
-			continue
-		}
 		var pe *pgconn.PgError
 		if errors.As(err, &pe) && pe.Code == "23505" {
-			return Upload{}, fmt.Errorf("%w: this upload link was already used", ErrConflict)
+			return fmt.Errorf("%w: this upload link was already used", ErrConflict)
 		}
-		if isForeignKeyViolation(err) {
-			return Upload{}, ErrNotFound
-		}
-		return u, err
+		return err
+	})
+	if err != nil {
+		return Upload{}, err
 	}
-	return Upload{}, fmt.Errorf("%w: too many files named %q in this conversation", ErrInvalid, base)
+	return u, nil
 }
 
-// GetUpload returns one of a conversation's uploads and its content.
-func (s *Store) GetUpload(ctx context.Context, conversationID, id string) (Upload, []byte, error) {
+// OpenUpload returns one of a conversation's uploads and a reader of its content.
+func (s *Store) OpenUpload(ctx context.Context, conversationID, id string) (Upload, *Blob, error) {
 	var u Upload
-	var content []byte
-	err := s.Pool.QueryRow(ctx, `SELECT id::text, name, media_type, bytes, sha256, created_at, content
+	err := s.Pool.QueryRow(ctx, `SELECT id::text, name, media_type, bytes, sha256, created_at
 		FROM uploads WHERE id = $1 AND conversation_id = $2`, id, conversationID).
-		Scan(&u.ID, &u.Name, &u.MediaType, &u.Bytes, &u.SHA256, &u.CreatedAt, &content)
+		Scan(&u.ID, &u.Name, &u.MediaType, &u.Bytes, &u.SHA256, &u.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return u, nil, ErrNotFound
 	}
-	return u, content, err
+	if err != nil {
+		return u, nil, err
+	}
+	return u, s.blob(ctx, blobUpload, u.ID, u.Bytes), nil
 }
 
 // Attachments returns the uploads each message carries, in their order,

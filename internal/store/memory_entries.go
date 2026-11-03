@@ -59,6 +59,8 @@ type EntryFields struct {
 	Body        string `json:"body"`
 	Why         string `json:"why"`
 	HowToApply  string `json:"how_to_apply"`
+	// Pinned repeats a feedback entry to every turn of its readers' runs (engine/known.go, renderPinned): a rule that must hold however long a session runs. Only feedback is pinned.
+	Pinned bool `json:"pinned"`
 }
 
 // Provenance is who wrote a version and why.
@@ -105,14 +107,14 @@ type NewEntry struct {
 }
 
 const entryCols = `e.id::text, e.scope, e.owner, e.key, v.version, v.status, v.type, v.title, v.description,
-	v.body, v.why, v.how_to_apply, v.superseded_by::text, v.source, v.source_run::text,
+	v.body, v.why, v.how_to_apply, v.pinned, v.superseded_by::text, v.source, v.source_run::text,
 	v.source_conversation::text, v.author, v.note, e.created_at, v.created_at`
 
 func scanEntry(row pgx.Row) (*Entry, error) {
 	var e Entry
 	var owner string
 	err := row.Scan(&e.ID, &e.Scope, &owner, &e.Key, &e.Version, &e.Status, &e.Type, &e.Title, &e.Description,
-		&e.Body, &e.Why, &e.HowToApply, &e.SupersededBy, &e.Source, &e.SourceRunID,
+		&e.Body, &e.Why, &e.HowToApply, &e.Pinned, &e.SupersededBy, &e.Source, &e.SourceRunID,
 		&e.SourceConversationID, &e.Author, &e.Note, &e.CreatedAt, &e.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -174,6 +176,8 @@ func validFields(f *EntryFields) error {
 		return fmt.Errorf("%w: body is required, at most %d bytes", ErrInvalid, entryBodyMax)
 	case len(f.Why) > entryReasonMax || len(f.HowToApply) > entryReasonMax:
 		return fmt.Errorf("%w: why and how_to_apply are at most %d bytes each", ErrInvalid, entryReasonMax)
+	case f.Pinned && f.Type != "feedback":
+		return fmt.Errorf("%w: only a feedback entry is pinned", ErrInvalid)
 	}
 	for _, s := range []string{f.Title, f.Description, f.Body, f.Why, f.HowToApply} {
 		if !utf8.ValidString(s) {
@@ -274,10 +278,10 @@ func createEntry(ctx context.Context, tx pgx.Tx, n NewEntry, p Provenance) (*Ent
 func insertVersion(ctx context.Context, tx pgx.Tx, id string, version int, status string, f EntryFields, supersededBy *string, p Provenance) error {
 	_, err := tx.Exec(ctx, `INSERT INTO memory_entry_versions
 		    (entry_id, version, status, type, title, description, body, why, how_to_apply, superseded_by,
-		     source, source_run, source_conversation, author, note)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, '')::uuid, NULLIF($13, '')::uuid, NULLIF($14, ''), $15)`,
+		     source, source_run, source_conversation, author, note, pinned)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, '')::uuid, NULLIF($13, '')::uuid, NULLIF($14, ''), $15, $16)`,
 		id, version, status, f.Type, f.Title, f.Description, f.Body, f.Why, f.HowToApply, supersededBy,
-		p.Source, p.RunID, p.ConversationID, p.Author, p.Note)
+		p.Source, p.RunID, p.ConversationID, p.Author, p.Note, f.Pinned)
 	if isForeignKeyViolation(err) {
 		return fmt.Errorf("%w: superseded_by, the run or the conversation does not exist", ErrInvalid)
 	}
@@ -291,7 +295,7 @@ type queryer interface {
 
 // entryAt reads an entry at a version, 0 meaning its current one.
 func entryAt(ctx context.Context, q queryer, id string, version int) (*Entry, error) {
-	if !isUUIDText(id) {
+	if !IsUUID(id) {
 		return nil, ErrNotFound
 	}
 	e, err := scanEntry(q.QueryRow(ctx, `SELECT `+entryCols+`
@@ -342,10 +346,7 @@ const (
 
 // ListEntries returns the entries that match f, by scope (profile, topics, agents), owner, then most recently changed.
 func (s *Store) ListEntries(ctx context.Context, f EntryFilter) ([]Entry, error) {
-	if f.Limit <= 0 {
-		f.Limit = DefaultEntryLimit
-	}
-	f.Limit = min(f.Limit, MaxEntryLimit)
+	f.Limit = clampLimit(f.Limit, DefaultEntryLimit, MaxEntryLimit)
 	status := f.Status
 	switch status {
 	case "":
@@ -394,7 +395,9 @@ type EntryEdit struct {
 	Body        *string `json:"body"`
 	Why         *string `json:"why"`
 	HowToApply  *string `json:"how_to_apply"`
-	Status      *string `json:"status"`
+	// Pinned pins or unpins; nil keeps it, except that an edit making the entry other than feedback unpins it.
+	Pinned *bool   `json:"pinned"`
+	Status *string `json:"status"`
 }
 
 // UpdateEntry writes the next version of an entry. expect, when above 0, is the version the caller read; another current version is ErrConflict, so two edits never silently overwrite each other. An edit that changes nothing writes nothing and returns the current version.
@@ -425,6 +428,11 @@ func updateEntry(ctx context.Context, tx pgx.Tx, id string, expect int, edit Ent
 	set(&f.Body, edit.Body)
 	set(&f.Why, edit.Why)
 	set(&f.HowToApply, edit.HowToApply)
+	if edit.Pinned != nil {
+		f.Pinned = *edit.Pinned
+	} else if f.Type != "feedback" {
+		f.Pinned = false
+	}
 	if err := validFields(&f); err != nil {
 		return nil, err
 	}
@@ -492,7 +500,7 @@ func equalPtr(a, b *string) bool { return (a == nil) == (b == nil) && (a == nil 
 
 // lockEntry reads an entry's current version for update and checks the version the caller expects.
 func lockEntry(ctx context.Context, tx pgx.Tx, id string, expect int) (*Entry, error) {
-	if !isUUIDText(id) {
+	if !IsUUID(id) {
 		return nil, ErrNotFound
 	}
 	var current int
@@ -605,8 +613,8 @@ func (s *Store) ImportEntries(ctx context.Context, entries []NewEntry, p Provena
 	return results, err
 }
 
-// isUUIDText reports whether s is a UUID in canonical form, so a malformed id is not found rather than a database error.
-func isUUIDText(s string) bool {
+// IsUUID reports whether s is a UUID in its canonical text form, so an id that cannot name a row is caught before Postgres's uuid cast fails on it.
+func IsUUID(s string) bool {
 	if len(s) != 36 {
 		return false
 	}

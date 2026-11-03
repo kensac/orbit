@@ -1,13 +1,14 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/kensac/orbit/internal/store"
+	"github.com/kensac/orbit/internal/usage"
 )
 
 // Tickets (docs/tickets.md): a ticket is a conversation with a lifecycle.
@@ -16,17 +17,6 @@ import (
 // means the ticket was no longer where the request assumed. The person is
 // the verified token's; body author and by count only with the operator
 // token.
-
-func decodeBody(w http.ResponseWriter, r *http.Request, into any) bool {
-	if r.ContentLength == 0 {
-		return true
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(into); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return false
-	}
-	return true
-}
 
 // decider is who decides a transition: the token's person, or with the
 // operator token whoever the body names, else "operator".
@@ -48,8 +38,15 @@ func (s *Server) createTicket(w http.ResponseWriter, r *http.Request) {
 		// Wake overrides the agent's wake_on_message for the first message.
 		Wake            *bool  `json:"wake"`
 		ClientRequestID string `json:"client_request_id"`
+		// StackOn files the request on top of another of the same
+		// repository (docs/tickets.md, Stacked tickets).
+		StackOn string `json:"stack_on"`
+		// Race builds the approved plan 2 or 3 times, each lane with its
+		// variant (docs/tickets.md, Races).
+		Race     int             `json:"race"`
+		Variants []store.Variant `json:"variants"`
 	}
-	if !decodeBody(w, r, &body) {
+	if !decode(w, r, 64<<10, &body, bodyOptional) {
 		return
 	}
 	body.Title, body.Body = strings.TrimSpace(body.Title), strings.TrimSpace(body.Body)
@@ -74,12 +71,24 @@ func (s *Server) createTicket(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "repo "+strconv.Quote(body.Repo)+" is not in github.repositories")
 		return
 	}
+	if body.Race > 0 {
+		w8, err := usage.Crossed(r.Context(), s.Store, time.Now())
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		if w8 != nil {
+			writeErr(w, http.StatusConflict, "a race is refused while "+w8.Above()+"; file it without race, or once the window drops")
+			return
+		}
+	}
 	wake := a.MessagesTrigger
 	if body.Wake != nil {
 		wake = *body.Wake
 	}
 	res, replayed, err := s.Store.CreateTicket(r.Context(), store.NewTicket{Kind: body.Kind, Title: body.Title, Body: body.Body,
-		Agent: a.Name, SpecSHA: a.SHA, Repo: body.Repo, Author: actor(r, body.Author), Wake: wake, ClientID: body.ClientRequestID})
+		Agent: a.Name, SpecSHA: a.SHA, Repo: body.Repo, Author: actor(r, body.Author), Wake: wake, ClientID: body.ClientRequestID,
+		StackOn: body.StackOn, Race: body.Race, Variants: body.Variants})
 	if err == nil && res.RunID != "" && !replayed {
 		s.Wake()
 	}
@@ -88,7 +97,10 @@ func (s *Server) createTicket(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listTickets(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	f := store.TicketFilter{Status: q.Get("status"), Agent: q.Get("agent"), Limit: intParam(r, "limit")}
+	f := store.TicketFilter{Status: q.Get("status"), Agent: q.Get("agent")}
+	if !queryInt(w, r, "limit", &f.Limit) {
+		return
+	}
 	if b := q.Get("before"); b != "" {
 		t, err := time.Parse(time.RFC3339Nano, b)
 		if err != nil {
@@ -119,7 +131,51 @@ func (s *Server) getTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reruns, err := s.Store.TicketReruns(r.Context(), id)
-	respond(w, map[string]any{"ticket": t, "plans": orEmpty(plans), "events": orEmpty(events), "reruns": orEmpty(reruns)}, err)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	out := map[string]any{"ticket": t, "plans": orEmpty(plans), "events": orEmpty(events), "reruns": orEmpty(reruns)}
+	if t.Race != nil {
+		lanes, err := s.Store.RaceLanes(r.Context(), id)
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		out["race"] = raceView(t, lanes)
+	}
+	respond(w, out, nil)
+}
+
+// raceView is a race's comparison: every lane as code scored it, best
+// first, and the lane code recommends (the best that delivered a PR).
+func raceView(t *store.Ticket, lanes []store.Lane) map[string]any {
+	ranked := slices.Clone(lanes)
+	slices.SortFunc(ranked, func(a, b store.Lane) int { return a.Rank - b.Rank })
+	v := map[string]any{"lanes": ranked}
+	if len(ranked) > 0 && ranked[0].Delivered {
+		v["recommended"] = ranked[0].Lane
+	}
+	if t.PickedLane != nil {
+		v["picked"] = *t.PickedLane
+	}
+	return v
+}
+
+// pickLane is a person picking one lane of a race (store.PickLane): the
+// ticket:pick action is approved and executed by them, never by a rule.
+func (s *Server) pickLane(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Lane            string `json:"lane"`
+		By              string `json:"by"`
+		ClientRequestID string `json:"client_request_id"`
+	}
+	if !decode(w, r, 4<<10, &body, bodyRequired) {
+		return
+	}
+	id, _, err := s.Store.PickLane(r.Context(), store.Pick{TicketID: r.PathValue("id"), Lane: body.Lane, By: decider(r, body.By),
+		ClientID: body.ClientRequestID})
+	respond(w, map[string]any{"ok": err == nil, "action_id": id}, err)
 }
 
 // rerunChecks records a person's request to rerun a PR's failed checks;
@@ -129,7 +185,7 @@ func (s *Server) rerunChecks(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		By string `json:"by"`
 	}
-	if !decodeBody(w, r, &body) {
+	if !decode(w, r, 64<<10, &body, bodyOptional) {
 		return
 	}
 	rr, err := s.Store.RequestRerun(r.Context(), r.PathValue("id"), decider(r, body.By))
@@ -141,7 +197,7 @@ func (s *Server) approvePlan(w http.ResponseWriter, r *http.Request) {
 		By              string `json:"by"`
 		ClientRequestID string `json:"client_request_id"`
 	}
-	if !decodeBody(w, r, &body) {
+	if !decode(w, r, 64<<10, &body, bodyOptional) {
 		return
 	}
 	version, err := strconv.Atoi(r.PathValue("version"))
@@ -160,7 +216,7 @@ func (s *Server) ticketMove(to string) http.HandlerFunc {
 			By     string `json:"by"`
 			Reason string `json:"reason"`
 		}
-		if !decodeBody(w, r, &body) {
+		if !decode(w, r, 64<<10, &body, bodyOptional) {
 			return
 		}
 		err := s.Store.TransitionTicket(r.Context(), r.PathValue("id"), to, decider(r, body.By), store.TicketUpdate{Reason: body.Reason})

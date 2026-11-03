@@ -2,7 +2,8 @@
 // service that alone holds a docker socket and runs build containers. It
 // holds the wire protocol both sides share and the client orbit uses.
 //
-// sandboxd exposes exactly four operations, and none takes a docker option:
+// sandboxd exposes four operations on build sandboxes, and none takes a
+// docker option (agents' boxes are box.go's):
 //
 //	POST   /v1/sandboxes?run_id=<id>   body: the workdir as a tar; creates and starts a container
 //	POST   /v1/sandboxes/{id}/attach   body: AttachRequest; upgrades to a framed stdio stream
@@ -20,11 +21,16 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/kensac/orbit/internal/claudeproto"
 )
 
 // Paths and the upgrade token of the attach stream.
 const (
 	PathSandboxes = "/v1/sandboxes"
+	// PathHealthz and PathReadyz are sandboxd's probes, the only routes without the token: they reveal no sandbox and change nothing.
+	PathHealthz   = "/healthz"
+	PathReadyz    = "/readyz"
 	AttachUpgrade = "orbit-sandbox-attach"
 )
 
@@ -50,10 +56,8 @@ const (
 	frameChunk = 32 << 10
 )
 
-// AllowedEnv is every variable a caller may set for an attached process: the
-// backend credential the CLI needs to reach its own backend (AGENTS.md rule
-// 2), and nothing else. sandboxd sets the rest of the environment itself.
-var AllowedEnv = map[string]bool{"CLAUDE_CODE_OAUTH_TOKEN": true}
+// AllowedEnv is every variable a caller may send for an attached process: the backend credentials the CLI can reach its own backend with (AGENTS.md rule 2), and nothing else. A caller sends at most one of them (build.SandboxEnv); sandboxd sets the rest of the environment itself. A sandbox's process never receives the value: sandboxd puts a credential proxy token in its place (internal/credproxy).
+var AllowedEnv = map[string]bool{claudeproto.OAuthToken: true, claudeproto.APIKey: true}
 
 // CreateResponse is the answer to a create.
 type CreateResponse struct {
@@ -96,6 +100,9 @@ func (r AttachRequest) Validate() error {
 			return fmt.Errorf("env %q has an invalid value", k)
 		}
 	}
+	if len(r.Env) > 1 {
+		return errors.New("env carries more than one backend credential")
+	}
 	return nil
 }
 
@@ -112,6 +119,18 @@ var (
 
 // ValidID reports whether s has the shape of a sandbox id (a container id).
 func ValidID(s string) bool { return idRE.MatchString(s) }
+
+// Profiles a create may name (POST /v1/sandboxes?profile=): "build" (the
+// default, the build egress allowlist) and "workstation" (a chat session's
+// own box: egress to any public host, through sandboxd's workstation
+// proxy). sandboxd decides what each means; a caller only names one.
+const (
+	ProfileBuild       = "build"
+	ProfileWorkstation = "workstation"
+)
+
+// ValidProfile reports whether p names a profile ("" is build).
+func ValidProfile(p string) bool { return p == "" || p == ProfileBuild || p == ProfileWorkstation }
 
 // ValidRunID reports whether s is an acceptable run id label.
 func ValidRunID(s string) bool { return runIDRE.MatchString(s) }
@@ -170,4 +189,24 @@ func ReadFrame(r io.Reader) (byte, []byte, error) {
 		return 0, nil, fmt.Errorf("truncated frame: %w", err)
 	}
 	return h[0], p, nil
+}
+
+// Readiness is sandboxd's /readyz body (200 when Ready, 503 when not). Checks maps "docker", "network" and "proxy:<host>" to "ok" or the failure.
+type Readiness struct {
+	Ready  bool              `json:"ready"`
+	Checks map[string]string `json:"checks"`
+}
+
+// ProxyCheck is the Checks key of the egress proxy at host.
+func ProxyCheck(host string) string { return "proxy:" + host }
+
+// Proxies returns each proxy check's host and whether it passed.
+func (r Readiness) Proxies() map[string]bool {
+	out := map[string]bool{}
+	for k, v := range r.Checks {
+		if host, ok := strings.CutPrefix(k, "proxy:"); ok {
+			out[host] = v == "ok"
+		}
+	}
+	return out
 }

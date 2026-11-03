@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -87,6 +89,16 @@ type Server struct {
 	// CommitChecks are the check runs of commits other than the checked
 	// one (a build's base), by sha.
 	CommitChecks map[string][]map[string]any
+	// Others are pull requests besides PR (7), by number: read and
+	// patched, nothing else.
+	Others map[int]map[string]any
+	// Issues and Releases are what GET issues and releases answer, one
+	// page of per_page from page.
+	Issues   []map[string]any
+	Releases []map[string]any
+	// Comments are the issue and pull request comments posted, each with
+	// "number" set to the issue's.
+	Comments []map[string]any
 }
 
 // New starts a fake, stopped when the test ends.
@@ -182,6 +194,9 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "DELETE" && r.URL.Path == "/installation/token":
 		f.Revoked = append(f.Revoked, auth)
 		w.WriteHeader(204)
+	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls" && r.URL.Query().Get("head") == "":
+		// A plain list: PR and Others in the state asked for, paged.
+		f.write(w, 200, f.list(r.URL.Query()))
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls":
 		list := []any{}
 		if f.PR != nil {
@@ -211,6 +226,15 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			"base": map[string]any{"ref": b["base"], "repo": map[string]any{"full_name": "kensac/orbit", "default_branch": "main"}},
 		}
 		f.write(w, 201, f.PR)
+	case (r.Method == "GET" || r.Method == "PATCH") && f.other(r.URL.Path) != nil:
+		pr := f.other(r.URL.Path)
+		if r.Method == "PATCH" {
+			var b map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			f.Patched = append(f.Patched, b)
+			patch(pr, b)
+		}
+		f.write(w, 200, pr)
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls/7" && f.PR == nil:
 		f.write(w, 404, map[string]string{"message": "Not Found"})
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls/7":
@@ -231,9 +255,7 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		var b map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		f.Patched = append(f.Patched, b)
-		for k, v := range b {
-			f.PR[k] = v
-		}
+		patch(f.PR, b)
 		f.write(w, 200, f.PR)
 	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/compare/"):
 		bh := strings.TrimPrefix(r.URL.Path, "/repos/kensac/orbit/compare/")
@@ -274,10 +296,38 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		f.write(w, 200, map[string]any{"name": "main", "protected": f.Protection != nil, "protection": f.Protection})
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/rules/branches/main":
 		f.write(w, 200, f.Rules)
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/branches/"):
+		f.write(w, 200, map[string]any{"name": strings.TrimPrefix(r.URL.Path, "/repos/kensac/orbit/branches/"), "protected": false})
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/rules/branches/"):
+		f.write(w, 200, []any{})
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/commits/"+f.checkedSHA()+"/check-runs":
 		f.write(w, 200, map[string]any{"total_count": len(f.CheckRuns), "check_runs": f.CheckRuns})
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/commits/"+f.checkedSHA()+"/status":
 		f.write(w, 200, map[string]any{"statuses": f.Statuses})
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/commits/") && strings.HasSuffix(r.URL.Path, "/status"):
+		f.write(w, 200, map[string]any{"statuses": []any{}})
+	case r.Method == "GET" && (r.URL.Path == "/repos/kensac/orbit/issues" || r.URL.Path == "/repos/kensac/orbit/releases"):
+		all := f.Issues
+		if strings.HasSuffix(r.URL.Path, "/releases") {
+			all = f.Releases
+		}
+		var per, page int
+		_, _ = fmt.Sscan(r.URL.Query().Get("per_page"), &per)
+		_, _ = fmt.Sscan(r.URL.Query().Get("page"), &page)
+		lo, hi := min((page-1)*per, len(all)), min(page*per, len(all))
+		out := all[lo:hi]
+		if out == nil {
+			out = []map[string]any{}
+		}
+		f.write(w, 200, out)
+	case r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/issues/") && strings.HasSuffix(r.URL.Path, "/comments"):
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		var n int
+		_, _ = fmt.Sscan(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/repos/kensac/orbit/issues/"), "/comments"), &n)
+		b["number"] = n
+		f.Comments = append(f.Comments, b)
+		f.write(w, 201, map[string]any{"id": 1000 + len(f.Comments), "html_url": fmt.Sprintf("https://github.com/kensac/orbit/issues/%d#issuecomment-%d", n, 1000+len(f.Comments))})
 	case r.Method == "PUT" && r.URL.Path == "/repos/kensac/orbit/pulls/7/merge":
 		_ = json.NewDecoder(r.Body).Decode(&f.Merged)
 		if f.Merged["sha"] != f.PR["head"].(map[string]any)["sha"] {
@@ -288,6 +338,65 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		f.write(w, 200, map[string]any{"sha": f.MergeSHA, "merged": true})
 	default:
 		f.write(w, 404, map[string]string{"message": "Not Found"})
+	}
+}
+
+// list is GET pulls without a head filter: PR and Others whose state
+// matches (open by default, or all), by number descending, one page.
+func (f *Server) list(q url.Values) []any {
+	state := q.Get("state")
+	if state == "" {
+		state = "open"
+	}
+	var all []map[string]any
+	if f.PR != nil {
+		all = append(all, f.PR)
+	}
+	for _, pr := range f.Others {
+		all = append(all, pr)
+	}
+	num := func(pr map[string]any) int {
+		var n int
+		_, _ = fmt.Sscan(fmt.Sprint(pr["number"]), &n)
+		return n
+	}
+	sort.Slice(all, func(i, j int) bool { return num(all[i]) > num(all[j]) })
+	var match []any
+	for _, pr := range all {
+		if state == "all" || pr["state"] == state {
+			match = append(match, pr)
+		}
+	}
+	per, page := 30, 1
+	_, _ = fmt.Sscan(q.Get("per_page"), &per)
+	_, _ = fmt.Sscan(q.Get("page"), &page)
+	lo, hi := min((page-1)*per, len(match)), min(page*per, len(match))
+	out := match[lo:hi]
+	if out == nil {
+		out = []any{}
+	}
+	return out
+}
+
+// other is the PR of Others a path names, or nil.
+func (f *Server) other(path string) map[string]any {
+	var n int
+	if _, err := fmt.Sscanf(path, "/repos/kensac/orbit/pulls/%d", &n); err != nil || n == 7 ||
+		path != fmt.Sprintf("/repos/kensac/orbit/pulls/%d", n) {
+		return nil
+	}
+	return f.Others[n]
+}
+
+// patch applies a PATCH body to a PR as GitHub does: base names the base
+// branch, every other field replaces its value.
+func patch(pr map[string]any, b map[string]string) {
+	for k, v := range b {
+		if k == "base" {
+			pr["base"].(map[string]any)["ref"] = v
+			continue
+		}
+		pr[k] = v
 	}
 }
 

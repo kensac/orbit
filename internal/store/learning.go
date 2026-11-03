@@ -122,7 +122,7 @@ func (s *Store) LearningItems(ctx context.Context, w LearningWindow, limit int) 
 
 // LearnNow queues a learning run of a conversation through its newest message from the person, whatever the quiet: the API's way to learn from a conversation at once. ErrConflict when there is nothing new since the last learning run, or one for that point exists.
 func (s *Store) LearnNow(ctx context.Context, conversationID, specSHA string) (string, error) {
-	if !isUUIDText(conversationID) {
+	if !IsUUID(conversationID) {
 		return "", ErrNotFound
 	}
 	var agent string

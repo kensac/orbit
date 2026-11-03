@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -62,6 +63,10 @@ func TestPublic(t *testing.T) {
 // testProxy allows example.org, which resolves to an echo server on
 // loopback; the public check is relaxed only for that server's address.
 func testProxy(t *testing.T, resolveTo string) (*httptest.Server, *lockedBuf) {
+	return testProxyAllowing(t, resolveTo, map[string]bool{"example.org": true})
+}
+
+func testProxyAllowing(t *testing.T, resolveTo string, allow map[string]bool) (*httptest.Server, *lockedBuf) {
 	echo, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +82,7 @@ func testProxy(t *testing.T, resolveTo string) (*httptest.Server, *lockedBuf) {
 		}
 	}()
 	logs := &lockedBuf{}
-	p := New(map[string]bool{"example.org": true}, slog.New(slog.NewTextHandler(logs, nil)))
+	p := New(allow, slog.New(slog.NewTextHandler(logs, nil)))
 	echoAddr := echo.Addr().(*net.TCPAddr).AddrPort()
 	p.lookup = func(context.Context, string) ([]netip.Addr, error) {
 		return []netip.Addr{netip.MustParseAddr(resolveTo)}, nil
@@ -119,12 +124,13 @@ func TestProxyTunnelsAllowedHost(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("CONNECT: %d", code)
 	}
-	if _, err := io.WriteString(c, "hello"); err != nil {
+	hello := clientHello(t, "example.org")
+	if _, err := c.Write(hello); err != nil {
 		t.Fatal(err)
 	}
-	buf := make([]byte, 5)
-	if _, err := io.ReadFull(br, buf); err != nil || string(buf) != "hello" {
-		t.Fatalf("tunnel: %q %v", buf, err)
+	buf := make([]byte, len(hello))
+	if _, err := io.ReadFull(br, buf); err != nil || !bytes.Equal(buf, hello) {
+		t.Fatalf("tunnel: %d bytes, %v", len(buf), err)
 	}
 	if !strings.Contains(logs.String(), "egress: allowed") {
 		t.Fatalf("decision not logged: %s", logs.String())
@@ -156,6 +162,36 @@ func TestProxyDenies(t *testing.T) {
 	}
 }
 
+// TestAnyPublicHost: "*" tunnels to any public hostname, GitHub included,
+// and still never dials into the host's networks.
+func TestAnyPublicHost(t *testing.T) {
+	allow, err := ParseAllowlist(" * ")
+	if err != nil || !allow[AnyPublic] {
+		t.Fatalf("%v %v", allow, err)
+	}
+	srv, _ := testProxyAllowing(t, "127.0.0.1", allow)
+	for _, target := range []string{"github.com:443", "pypi.org:443"} {
+		code, c, _ := connect(t, srv.URL, target)
+		c.Close()
+		if code != http.StatusOK {
+			t.Errorf("%s: %d", target, code)
+		}
+	}
+	for _, target := range []string{"pypi.org:22", "127.0.0.1:443"} {
+		code, c, _ := connect(t, srv.URL, target)
+		c.Close()
+		if code != http.StatusForbidden {
+			t.Errorf("%s: %d", target, code)
+		}
+	}
+	private, _ := testProxyAllowing(t, "100.79.4.41", allow)
+	if code, c, _ := connect(t, private.URL, "pypi.org:443"); code != http.StatusForbidden {
+		t.Errorf("a tailnet address: %d", code)
+	} else {
+		c.Close()
+	}
+}
+
 // TestProxyRefusesPrivateResolution: an allowed name that resolves into the
 // host's networks (a tailnet address here) is not dialed.
 func TestProxyRefusesPrivateResolution(t *testing.T) {
@@ -182,4 +218,28 @@ func (l *lockedBuf) String() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.b.String()
+}
+
+// The health probe answers only an origin-form GET for egress itself; a proxied GET naming the same path on another host is still refused.
+func TestHealthz(t *testing.T) {
+	srv, _ := testProxy(t, "127.0.0.1")
+	resp, err := http.Get(srv.URL + HealthPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(b) != "ok\n" {
+		t.Fatalf("healthz = %d %q", resp.StatusCode, b)
+	}
+	proxy, _ := url.Parse(srv.URL)
+	c := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}}
+	resp, err = c.Get("http://example.org" + HealthPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("proxied GET for /healthz = %d", resp.StatusCode)
+	}
 }

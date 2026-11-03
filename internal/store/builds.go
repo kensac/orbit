@@ -24,6 +24,12 @@ const (
 	BuildPurposeFix = "fix"
 )
 
+// FromPRHead reports whether a build of purpose starts from the PR's head
+// (a fix, a revise) rather than the default branch.
+func FromPRHead(purpose string) bool {
+	return purpose == BuildPurposeFix || purpose == BuildPurposeRevise
+}
+
 // ErrBusy is a ticket that cannot start its build or merge because another
 // ticket of the same repository is building or merging
 // (tickets_one_building, tickets_one_merging). It waits; nothing failed.
@@ -42,14 +48,16 @@ type StartBuild struct {
 }
 
 // StartBuild enqueues a build run and moves its ticket to building in one
-// transaction: from approved for a build, from review for a fix. The run is
+// transaction: from approved for a build, from review for a fix or a
+// revise. A build and a revise are given every review comment submitted
+// and not yet delivered (a revise needs one); a fix only fixes. The run is
 // in the ticket's conversation when the build agent is the ticket's agent,
 // and in the build agent's default conversation otherwise (a run is always
 // in a conversation of its own agent). ErrBusy means another ticket of the
 // repository is building; ErrConflict that the ticket is not where the
 // purpose starts.
 func (s *Store) StartBuild(ctx context.Context, b StartBuild) (string, error) {
-	from := map[string]string{BuildPurposeBuild: TicketApproved, BuildPurposeFix: TicketReview}[b.Purpose]
+	from := map[string]string{BuildPurposeBuild: TicketApproved, BuildPurposeFix: TicketReview, BuildPurposeRevise: TicketReview}[b.Purpose]
 	if from == "" {
 		return "", fmt.Errorf("%w: build purpose %q", ErrInvalid, b.Purpose)
 	}
@@ -59,9 +67,10 @@ func (s *Store) StartBuild(ctx context.Context, b StartBuild) (string, error) {
 	var runID string
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var kind, status, agent, conv string
-		var plan *int
-		err := tx.QueryRow(ctx, `SELECT kind, status, agent, conversation_id::text, approved_plan FROM tickets WHERE id = $1 FOR UPDATE`,
-			b.TicketID).Scan(&kind, &status, &agent, &conv, &plan)
+		var plan, race *int
+		var lane *string
+		err := tx.QueryRow(ctx, `SELECT kind, status, agent, conversation_id::text, approved_plan, race, picked_lane FROM tickets WHERE id = $1 FOR UPDATE`,
+			b.TicketID).Scan(&kind, &status, &agent, &conv, &plan, &race, &lane)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -70,6 +79,9 @@ func (s *Store) StartBuild(ctx context.Context, b StartBuild) (string, error) {
 		}
 		if kind != "request" || status != from || plan == nil {
 			return fmt.Errorf("ticket %s is %s: a %s starts from %s: %w", b.TicketID, status, b.Purpose, from, ErrConflict)
+		}
+		if race != nil && lane == nil {
+			return fmt.Errorf("ticket %s is a race no one picked from: it starts with StartRace: %w", b.TicketID, ErrConflict)
 		}
 		if agent != b.Agent {
 			conv = ""
@@ -82,9 +94,19 @@ func (s *Store) StartBuild(ctx context.Context, b StartBuild) (string, error) {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO ticket_builds (run_id, ticket_id, purpose, plan_version, failure)
-			VALUES ($1, $2, $3, $4, $5)`, runID, b.TicketID, b.Purpose, *plan, nullJSON(b.Failure)); err != nil {
+		// A picked race's builds are its picked lane's: its branch, its variant.
+		if _, err := tx.Exec(ctx, `INSERT INTO ticket_builds (run_id, ticket_id, purpose, plan_version, failure, lane)
+			VALUES ($1, $2, $3, $4, $5, $6)`, runID, b.TicketID, b.Purpose, *plan, nullJSON(b.Failure), lane); err != nil {
 			return err
+		}
+		if b.Purpose != BuildPurposeFix {
+			n, err := giveComments(ctx, tx, b.TicketID, runID)
+			if err != nil {
+				return err
+			}
+			if n == 0 && b.Purpose == BuildPurposeRevise {
+				return fmt.Errorf("ticket %s has no review comment waiting: %w", b.TicketID, ErrConflict)
+			}
 		}
 		err = setStatus(ctx, tx, b.TicketID, from, TicketBuilding, "orbit", TicketUpdate{},
 			map[string]any{"run": runID, "purpose": b.Purpose})
@@ -108,13 +130,18 @@ type Build struct {
 	CreatedAt time.Time
 	RunStatus string
 	RunError  *string
+	// Lane is the race lane it builds (its branch is orbit/<id>-<lane>)
+	// and Variant what that lane runs with; nil and empty outside a race.
+	Lane    *string
+	Variant Variant
 }
 
 const buildSelect = `SELECT b.run_id::text, b.ticket_id::text, b.purpose, b.plan_version, p.body, b.failure, b.created_at,
-	r.status, r.error
+	r.status, r.error, b.lane, COALESCE(l.variant, '{}')
 	FROM ticket_builds b
 	JOIN ticket_plans p ON p.ticket_id = b.ticket_id AND p.version = b.plan_version
-	JOIN runs r ON r.id = b.run_id `
+	JOIN runs r ON r.id = b.run_id
+	LEFT JOIN ticket_lanes l ON l.ticket_id = b.ticket_id AND l.lane = b.lane `
 
 func collectBuild(rows pgx.Rows) (*Build, error) {
 	b, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByPos[Build])
@@ -133,38 +160,57 @@ func (s *Store) BuildOfRun(ctx context.Context, runID string) (*Build, error) {
 	return collectBuild(rows)
 }
 
-// LatestBuild returns a ticket's newest build run, or nil when it has none.
+// LatestBuild returns a ticket's newest build run, or nil when it has none;
+// for a picked race, its picked lane's.
 func (s *Store) LatestBuild(ctx context.Context, ticketID string) (*Build, error) {
-	rows, err := s.Pool.Query(ctx, buildSelect+`WHERE b.ticket_id = $1 ORDER BY b.created_at DESC LIMIT 1`, ticketID)
+	rows, err := s.Pool.Query(ctx, buildSelect+`JOIN tickets t ON t.id = b.ticket_id
+		WHERE b.ticket_id = $1 AND (t.picked_lane IS NULL OR b.lane = t.picked_lane) ORDER BY b.created_at DESC LIMIT 1`, ticketID)
 	if err != nil {
 		return nil, err
 	}
 	return collectBuild(rows)
 }
 
-// FixesSinceBuild counts the fix runs since the ticket's newest build run:
-// the attempts spent on its current PR's checks.
+// FixesSinceBuild counts the fix runs since the ticket's newest build or
+// revise run: the attempts spent on the checks of what a person last asked
+// for.
 func (s *Store) FixesSinceBuild(ctx context.Context, ticketID string) (int, error) {
 	var n int
 	err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM ticket_builds
 		WHERE ticket_id = $1 AND purpose = 'fix'
-		  AND created_at > COALESCE((SELECT max(created_at) FROM ticket_builds WHERE ticket_id = $1 AND purpose = 'build'), '-infinity')`,
+		  AND created_at > COALESCE((SELECT max(created_at) FROM ticket_builds WHERE ticket_id = $1 AND purpose IN ('build', 'revise')), '-infinity')`,
 		ticketID).Scan(&n)
 	return n, err
 }
 
-// latestBuildIs locks the ticket a build run builds and reports its status
-// and whether this run is its newest build: only that one may move it.
-func latestBuildIs(ctx context.Context, tx pgx.Tx, runID string) (ticketID, status string, newest bool, err error) {
-	err = tx.QueryRow(ctx, `
+// builtTicket is the ticket a build run builds, locked: its status,
+// whether this run is its newest build (only that one may move it; for a
+// picked race, the newest of the picked lane), and whether it is a race
+// lane no one has picked from yet (settleRace moves that one).
+type builtTicket struct {
+	id, status     string
+	newest, racing bool
+}
+
+func lockBuiltTicket(ctx context.Context, tx pgx.Tx, runID string) (builtTicket, error) {
+	var t builtTicket
+	err := tx.QueryRow(ctx, `
 		SELECT t.id::text, t.status,
-		       b.run_id = (SELECT n.run_id FROM ticket_builds n WHERE n.ticket_id = t.id ORDER BY n.created_at DESC LIMIT 1)
+		       b.run_id = (SELECT n.run_id FROM ticket_builds n WHERE n.ticket_id = t.id
+		                     AND (t.picked_lane IS NULL OR n.lane = t.picked_lane) ORDER BY n.created_at DESC LIMIT 1),
+		       b.lane IS NOT NULL AND t.picked_lane IS NULL
 		FROM ticket_builds b JOIN tickets t ON t.id = b.ticket_id
-		WHERE b.run_id = $1 FOR UPDATE OF t`, runID).Scan(&ticketID, &status, &newest)
+		WHERE b.run_id = $1 FOR UPDATE OF t`, runID).Scan(&t.id, &t.status, &t.newest, &t.racing)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = ErrNotFound
 	}
-	return ticketID, status, newest, err
+	return t, err
+}
+
+// BuildDiff is a delivered build's diff, as the diff policy measured it.
+type BuildDiff struct {
+	Added, Deleted int
+	Files          []string
 }
 
 // FinishBuild records a build run that delivered its PR, and moves its
@@ -172,34 +218,59 @@ func latestBuildIs(ctx context.Context, tx pgx.Tx, runID string) (ticketID, stat
 // transaction. A ticket that moved on meanwhile (abandoned) keeps its state;
 // the run is still recorded as what it did. A run with r.Gate set delivered
 // without calling the model (an earlier attempt's pushed commit) and is
-// skipped, not succeeded.
+// skipped, not succeeded. The delivery (branch, base, head, PR, diff) is
+// kept on the build's row either way; a race lane's moves the ticket only
+// once every lane ended (settleRace).
 func (s *Store) FinishBuild(ctx context.Context, runID string, r RunResult, u TicketUpdate) error {
 	r.Status = StatusSucceeded
 	if r.Gate != "" {
 		r.Status = StatusSkipped
 	}
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		id, status, newest, err := latestBuildIs(ctx, tx, runID)
+		t, err := lockBuiltTicket(ctx, tx, runID)
 		if err != nil {
 			return err
 		}
 		if err := finishRun(ctx, tx, runID, r); err != nil {
 			return err
 		}
-		if status != TicketBuilding || !newest {
+		var added, deleted *int
+		var files []byte
+		if d := u.Diff; d != nil {
+			added, deleted = &d.Added, &d.Deleted
+			files, _ = json.Marshal(orEmptyStrings(d.Files))
+		}
+		if _, err := tx.Exec(ctx, `UPDATE ticket_builds SET branch = NULLIF($2, ''), base_sha = NULLIF($3, ''), head_sha = NULLIF($4, ''),
+			pr_number = $5, added = $6, deleted = $7, files = $8, diff_policy = 'passed' WHERE run_id = $1`,
+			runID, u.Branch, u.BaseSHA, u.HeadSHA, u.PRNumber, added, deleted, files); err != nil {
+			return err
+		}
+		if t.racing {
+			return settleRace(ctx, tx, t.id, t.status)
+		}
+		if t.status != TicketBuilding || !t.newest {
 			return nil
 		}
 		u.Error = ""
-		return setStatus(ctx, tx, id, TicketBuilding, TicketReview, "orbit", u, map[string]any{"run": runID})
+		return setStatus(ctx, tx, t.id, TicketBuilding, TicketReview, "orbit", u, map[string]any{"run": runID})
 	})
 }
 
+func orEmptyStrings(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
 // FailBuild records a failed build run and fails its ticket with the run's
-// error, in one transaction.
+// error, in one transaction; a race lane's fails it only once every lane
+// ended with none delivered (settleRace). r.DiffPolicyFailed is kept on the
+// build's row, for the race's comparison.
 func (s *Store) FailBuild(ctx context.Context, runID string, r RunResult) error {
 	r.Status = "failed"
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		id, status, newest, err := latestBuildIs(ctx, tx, runID)
+		t, err := lockBuiltTicket(ctx, tx, runID)
 		if err != nil {
 			return err
 		}
@@ -209,10 +280,18 @@ func (s *Store) FailBuild(ctx context.Context, runID string, r RunResult) error 
 		if err := releaseMessages(ctx, tx, runID); err != nil {
 			return err
 		}
-		if status != TicketBuilding || !newest {
+		if r.DiffPolicyFailed {
+			if _, err := tx.Exec(ctx, `UPDATE ticket_builds SET diff_policy = 'failed' WHERE run_id = $1`, runID); err != nil {
+				return err
+			}
+		}
+		if t.racing {
+			return settleRace(ctx, tx, t.id, t.status)
+		}
+		if t.status != TicketBuilding || !t.newest {
 			return nil
 		}
-		return setStatus(ctx, tx, id, TicketBuilding, TicketFailed, "orbit", TicketUpdate{Error: "build: " + r.Error},
+		return setStatus(ctx, tx, t.id, TicketBuilding, TicketFailed, "orbit", TicketUpdate{Error: "build: " + r.Error},
 			map[string]any{"run": runID})
 	})
 }
@@ -354,14 +433,14 @@ const (
 // TicketsInFlight returns the requests the ticket loop reconciles, oldest
 // first: every state between approved and done, failed tickets that reached
 // merging recently or wait on a person's rerun, and recently abandoned
-// tickets with a PR.
+// tickets with a PR or a race (their lane PRs are closed).
 func (s *Store) TicketsInFlight(ctx context.Context) ([]Ticket, error) {
 	rows, err := s.Pool.Query(ctx, `SELECT `+ticketCols+` FROM tickets
 		WHERE kind = 'request' AND (
 		    status IN ('approved', 'building', 'review', 'merging', 'merged')
 		    OR (status = 'failed' AND merge_action_id IS NOT NULL AND updated_at > now() - $1::interval)
 		    OR (status = 'failed' AND EXISTS (SELECT 1 FROM ticket_check_reruns r WHERE r.ticket_id = tickets.id AND r.done_at IS NULL))
-		    OR (status = 'abandoned' AND pr_number IS NOT NULL AND updated_at > now() - $2::interval))
+		    OR (status = 'abandoned' AND (pr_number IS NOT NULL OR race IS NOT NULL) AND updated_at > now() - $2::interval))
 		ORDER BY created_at`, failedWatch.String(), abandonedWatch.String())
 	if err != nil {
 		return nil, err

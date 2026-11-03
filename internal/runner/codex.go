@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/spec"
+	"github.com/kensac/orbit/internal/tokens"
 )
 
 // codex runs `codex exec` headless with a read-only sandbox. Auth is
@@ -72,7 +74,7 @@ func (c *codex) Run(ctx context.Context, req Request, emit func(Event)) (*Result
 	var usage json.RawMessage
 	var threadID, failure string
 	stderr, runErr := runCLI(ctx, c.bin, args, childEnv(home, c.getenv, codexAuthEnv...), req.Workdir, prompt, func(line []byte) {
-		kind := eventKind(line)
+		kind := claudeproto.ParseLine(line).Kind
 		emit(Event{Kind: kind, Payload: line})
 		var e struct {
 			ThreadID string          `json:"thread_id"`
@@ -96,7 +98,7 @@ func (c *codex) Run(ctx context.Context, req Request, emit func(Event)) (*Result
 			}
 		}
 	})
-	res := &Result{Usage: usage, SessionID: threadID}
+	res := &Result{Usage: usage, Tokens: tokens.FromCodex(usage, c.rs.Model), SessionID: threadID}
 	if failure != "" {
 		return res, fmt.Errorf("%w: codex: %s", ErrBackend, firstLine(failure))
 	}
