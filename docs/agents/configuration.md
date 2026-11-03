@@ -43,6 +43,10 @@ It is proposed as an `agent:define` with `rule: "approve"`, whatever the agent's
 
 A person approving any action can also make its type `auto` for that agent ("approve and always allow", docs/api.md, Actions): a new revertible version, like an API change.
 
+## Agents from templates
+
+A template is an agent spec with `{{ name }}` slots and typed parameters, kept in a versioned library (docs/api.md, Templates). `POST /templates/{name}/agents` renders one with a person's values, dry-runs it and defines the agent. An agent with `actions: {template:create: approve}` (the built-in `orbit` has it) proposes the same in a conversation: code renders it, asks the person with a form for any `user_prompt` parameter, and records the result as an `agent:define` a person approves whatever the rule (`auto` and `approve` both only offer the type). The agent it creates is a database agent, held to the same limits as any (above).
+
 ## Secrets
 
 Never in YAML. Channels name variables with `*_env`; source urls, headers, query
@@ -274,9 +278,31 @@ sources:
 
 ## Templates in sources
 
-URLs and query values may use `{{today}}`, `{{now}}`, `{{month_start}}`,
-`{{prev_month_start}}`, `{{prev_month_end}}`, `{{days_ago_N}}`, in the agent's
-timezone. An unknown `{{name}}` fails the fetch.
+URLs, query values, headers and Prometheus expressions may use these, as `YYYY-MM-DD` in the agent's timezone (`sources.Vars.Expand`):
+
+| Template | Is |
+|---|---|
+| `{{now}}` | the run's start, RFC 3339 |
+| `{{today}}` | the run's day |
+| `{{month_start}}`, `{{prev_month_start}}`, `{{prev_month_end}}` | the first day of this month, and the first and last day of the previous one |
+| `{{days_ago N}}` | N days before today, N from 0 to 3660 (`{{days_ago_N}}`, N from 1 to 366, is the same) |
+| `{{months_ago_start N}}`, `{{months_ago_end N}}` | the first and last day of the month N months before this one, N from 0 to 120: `{{months_ago_start 1}}` is `{{prev_month_start}}`, `{{months_ago_end 0}}` this month's last day |
+
+Anything else in `{{...}}`, or a count out of range, fails the fetch naming it.
+
+**Per-trigger windows.** An http source's `by_trigger.<trigger>.query` replaces query values for runs of that trigger, so a person's message can read a wider window than the schedule's review:
+
+```yaml
+query:
+  start_date: "{{prev_month_start}}"
+  end_date: "{{today}}"
+by_trigger:
+  message:
+    query:
+      start_date: "{{months_ago_start 3}}"
+```
+
+A run's trigger is the run's own (`schedule`, `manual`, `message`, `continue`, `task`, `delegation`, `webhook`); a trigger without an override fetches the source's query. An attempt that recovers an interrupted one reads the inputs that attempt read.
 
 ## Adding a kind
 

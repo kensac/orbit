@@ -172,7 +172,7 @@ readable. Changing an archived agent is `404`; a file or built-in agent is
 
 A database or built-in agent's spec may not have a `file` source, a `${VAR}` that is not in orbit.yaml's `credentials`, without a `sandbox`, a tool outside `Read`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task` and `TodoWrite`, a precheck or a `run` hook: each is a `400` naming it (docs/agents/configuration.md, Agents in the database).
 
-**Agents change agents.** An agent whose rules enable `agent:define` (the built-in `orbit` does, `auto`) proposes `{"spec": {...}}`: a whole agent, as `POST /agents` takes it, for a new agent or one already defined in the database or built in, itself included. Executed, it goes through the same validation and is stored as the next version with the run as `run_id`. A file agent cannot be changed this way (the action fails, naming why). A change that widens the agent compared with its current version (a tool, source, credential, delegate target or need it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily; for a new agent, any of these) is recorded with `rule: "approve"` and waits as `pending` for a person, whatever the agent's rule; one executing by rule that widens the agent as it is by then fails, naming what it widens.
+**Agents change agents.** An agent whose rules enable `agent:define` (the built-in `orbit` does, `auto`) proposes `{"spec": {...}}`: a whole agent, as `POST /agents` takes it, for a new agent or one already defined in the database or built in, itself included. Executed, it goes through the same validation and is stored as the next version with the run as `run_id`. A file agent cannot be changed this way (the action fails, naming why). A change that widens the agent compared with its current version (a tool, source, credential, delegate target or need it adds, a source it changes, a move to a sandbox profile, an action type allowed more readily; for a new agent, any of these) is recorded with `rule: "approve"` and waits as `pending` for a person, whatever the agent's rule; one executing by rule that widens the agent as it is by then fails, naming what it widens. Its params may also carry `template` (`{"name", "version"}`), which a `template:create` proposal sets (Templates, below): where the spec came from, a record only.
 
 **Schedules by talking.** `schedule:add`, `schedule:pause`, `schedule:resume` and `schedule:remove` change one database or built-in agent's triggers as the next version (`change: "update"`, the run as `run_id`), and `run:now` starts a manual run (docs/agents/configuration.md, Changing schedules by talking). Times are the person's words, parsed by orbit in the agent's timezone. An executed one's `result`, and a pending one's `preview` (Actions, below), is:
 
@@ -215,7 +215,7 @@ conversation is never deleted, only archived.
   "ticket_id": null, "workspace_id": null, "task_id": null, "purpose": null,
   "last_run": {"id": "uuid", "status": "running", "trigger": "message",
                "created_at": "...", "finished_at": null, "summary": null},
-  "read_through": "...", "model": null, "effort": null, "forked_from": null}],
+  "read_through": "...", "from_session": null, "model": null, "effort": null, "forked_from": null}],
  "has_more": false, "next_before": null}
 ```
 
@@ -243,6 +243,8 @@ a model). `client_request_id` makes a retry return the first result, as for
 messages below.
 
 `POST /conversations` takes the same body plus `agent`, and creates the conversation with that agent, or with the built-in general agent `orbit` when `agent` is absent: what "New chat" calls. 404 when the agent is not configured.
+
+Either route also takes `from_session`: an imported session (Imported sessions, below), by orbit's `id` or by its `session_id`, to continue on the server. The conversation's runs resume that session (`--resume <id> --fork-session`) until one of them succeeds, and from then on the conversation's own session, as any session agent's do: the session's current lines are written as a transcript under a session id of orbit's (derived from the session and its `content_sha256`, never the laptop's own id) into the session store, and a run writes it back on whichever host claims it. Its `from_session` is the session's `id`. Without a `title` or `body`, the session's title (or first prompt) names it. The agent must run Claude Code with `session.resume` (the built-in `orbit` does): 400 otherwise, or for a session whose transcript is over 64 MiB compressed; 404 for an unknown session.
 
 `GET /conversations/{id}` returns `{"conversation": {...}}`, the same shape.
 
@@ -1160,6 +1162,42 @@ Routes:
 
 **Skills agents write.** A skill steers every later run it is given to, so an agent writes one with the `skill:write` action, under its rule like any action (`auto`, `approve` or `deny`; unnamed, denied and not offered; the built-in `orbit` has it under `approve`). Its params are `{"op": "write"|"retire", "name", "content", "note"}`: `write` gives the whole `SKILL.md` of a new skill, or of one the run has, whose files stay; `retire` ends one the run has. At most 3 per run. Code resolves each when proposed and adds to its params `version` (the version the run had, which the write applies against; 0 for a new skill) and `changes`: `{"from_version", "lines_added", "lines_removed", "diff", "files", "scripts"}`, where `diff` is `SKILL.md`'s change, one `+` or `-` line each (at most 16 KB, then how many lines it left out), `files` the skill's other files, and `scripts` those of them that run (under `scripts/` or `bin/`, a script's extension, a `#!` line, or an executable's header). A retire of a skill the run lacks, a `SKILL.md` without a description, or a fourth write is `denied` with the reason. The approval notification leads with the change in words, `Writes skill deploy (version 1 to 2): SKILL.md +1 -1 lines; its 3 other files stay.`, then `Scripts and executables in this skill (...): scripts/go.sh, tools/check`, then the diff. Executed, the write is a `source: "agent"` version against `version` (a newer one fails the action, naming it), a written skill is attached to the agent, and the action's `result` is `{"skill", "op", "outcome": "written"|"unchanged", "version", "changes"}`. The versions the run was given are its `skills.json` artifact. A person reverts with `restore` or `retire`.
 
+## Templates
+
+orbit keeps a library of **agent templates**: an agent spec with `{{ name }}` slots and the typed parameters that fill them, every version kept (`internal/templates`, `internal/store/templates.go`). Creating an agent from one is code: the template's version is read, the values checked against its parameters, the slots filled, and the agent it gives dry-run through the same validation as `POST /agents` before anything is stored.
+
+A template:
+
+```json
+{"name": "news", "version": 2, "status": "active",
+ "description": "Morning headlines on topics you pick.",
+ "sha256": "<hex>", "source": "person", "author": "kanishk", "note": "...",
+ "restored_from": null, "created_at": "...", "updated_at": "...",
+ "parameters": [
+   {"name": "agent", "label": "Agent name", "type": "string", "mode": "required"},
+   {"name": "topics", "label": "Topics", "type": "string", "mode": "user_prompt", "description": "What to follow"},
+   {"name": "hour", "type": "number", "mode": "optional", "default": 8}],
+ "spec": {"name": "{{agent}}", "charter": "Summarize the news about {{topics}}.",
+          "triggers": [{"schedule": "0 {{hour}} * * *"}]}}
+```
+
+- `name` matches `^[a-z][a-z0-9-]{0,62}$`; `description` is required, one line of at most 400 bytes. The document (name, description, parameters, spec) is at most 64 KB. `version`, `status`, `sha256` (over the canonical document), `source` (`person`, or `import`), `author`, `note` and `restored_from` are as for skills.
+- `parameters` are form fields (as a question's, A conversation's thread: `name`, `label`, `type`, `options`, `default`) with `mode` in place of `required` and an optional `description` (at most 400 bytes): `required` (the creator gives a value), `optional` (its `default`, or empty, when none is given) or `user_prompt` (the person gives it at creation: through this API it is required like `required`, and a client shows the parameters as the form; in a conversation, orbit asks the person for it with a form, below). At most 12.
+- `spec` is the agent, exactly an agent file's fields as JSON (docs/agents/configuration.md), any string of which may hold slots, `{{name}}` or `{{ name }}`, each naming a parameter (another is a `400`). A string that is exactly one slot becomes the value itself, so a number or boolean parameter fills a number or boolean field; a slot inside a longer string becomes the value's text (a boolean as `true` or `false`). A `file` parameter's value is an upload id, and its slot becomes the file's text (UTF-8, at most 64 KB). An optional parameter without a value or default fills its slot with nothing. Values are never scanned for slots. A template is checked when written: its parameters, every slot, and the spec decoding as an agent with sample values; whether the rendered agent loads (its schedule, its sources, a restricted agent's limits) depends on the values, and is checked when it is rendered.
+- `spec` is in the responses of `GET /templates/{name}` and `GET /templates/{name}/versions/{v}` only; lists carry `parameters`.
+
+Routes:
+
+- `GET /templates?status=`: `{"templates": [...]}` by name, current versions; `status` as for skills.
+- `POST /templates` `{"template": {"name", "description", "parameters", "spec"}, "note"?}`: `201 {"template"}`; 409 when the name exists, 400 for an invalid template (unknown fields included).
+- `GET /templates/{name}`: `{"template": <current, in full>, "versions": [<every version without spec>, newest first]}`.
+- `GET /templates/{name}/versions/{version}`: `{"template": <that version, in full>}`.
+- `PUT /templates/{name}` `{"template", "version"?, "note"?}`: the next version (`template.name` may be omitted; if present it must be `{name}`). `version` is the version the client read; another is 409. A document identical to the current active version writes nothing: `{"template", "changed": false}`.
+- `POST /templates/{name}/restore` `{"restore": <version>, "version"?, "note"?}` and `POST /templates/{name}/retire` `{"version"?, "note"?}`: the next version, an active copy of an earlier one or retired. Nothing is created from a retired template.
+- `POST /templates/{name}/agents` `{"parameters": {"<name>": <value>}, "version"?, "name"?, "conversation_id"?, "dry_run"?}` creates an agent from the template's current version (or `version`): each value is the JSON type its parameter takes, checked as a form's answers are; `name` replaces the name the spec renders; `conversation_id` is whose uploads a `file` value may name (without it, a file value is refused). It always dry-runs first. A `required` or `user_prompt` parameter without a value or default is `400 {"error", "needs": [<field>]}`, the fields to ask for; an invalid value, a rendered agent that does not load, or a retired template is a `400` naming it; a name already defined is `409`. `dry_run: true` stores nothing: `200 {"valid": true, "spec": <the agent as loaded>, "next_fires", "widens", "template": {"name", "version"}}`, where `widens` is what the agent holds beyond nothing (as an `agent:define` preview names it). Otherwise the agent is defined as `POST /agents` defines one (its `author` the token's person): `201` with the same fields plus `definition` and `agent`, as `POST /agents` returns them.
+
+**In a conversation.** An agent whose rules enable `template:create` (the built-in `orbit` has it under `approve`) proposes `{"template", "version"?, "name"?, "parameters"}`. It is never executed as itself. When proposed, code renders it (the chat `act` tool answers at once with what will happen): a `user_prompt` value is the person's, taken from their `answers` to orbit's question for that template in this conversation and never from the proposal; when there are none, orbit asks it, a question with those parameters as its form (text `To create an agent from the template <name>, I need these from you.`), and the proposal is `denied` saying so. The person's answer reaches the agent's next run, which proposes again. A `required` value the proposal lacks, a parameter the template does not have, or a rendered agent that does not load denies it with the reason. A proposal that renders is recorded as an `agent:define` of the new agent, `pending` whatever the rules, its params the rendered `spec` and `template` (`{"name", "version"}`, the version it was rendered from); a person approves it like any action.
+
 ## Search
 
 `GET /search?q=&agent=&conversation_id=&run_id=&kind=&from=&to=&limit=&offset=`
@@ -1173,18 +1211,22 @@ Full-text search across everything orbit stores, ranked best first.
    {"kind": "report", "agent": "finance", "conversation_id": "uuid", "run_id": "uuid",
     "attempt": 1, "seq": null, "message_id": null, "memory_version_id": null,
     "entry_id": null, "entry_version": null, "scope": null, "owner": null, "title": null,
-    "author": null, "tool": null, "external_session_id": null, "at": "...", "rank": 0.083,
+    "author": null, "tool": null, "external_session_id": null, "repo": null, "path": null,
+    "skill": null, "skill_version": null, "at": "...", "rank": 0.083,
     "snippet": "The electricity bill rose because of a rate change ...",
     "snippet_parts": [{"text": "The ", "match": false}, {"text": "electricity", "match": true},
                       {"text": " ", "match": false}, {"text": "bill", "match": true},
                       {"text": " rose because of a rate change ...", "match": false}],
     "links": {"run": "/api/v1/runs/uuid", "run_page": "https://orbit.kanishksachdev.com/ui/runs/uuid",
-              "conversation": "/api/v1/conversations/uuid/thread"}}]}
+              "conversation": "/api/v1/conversations/uuid/thread"}}], "repaired": null}
 ```
 
-- **`kind`** is what matched: `message` (a person's message to an agent; `author`, `message_id`), `question` (an agent's question; `message_id`, `run_id`), `report` (a run's summary and report), `error` (a failed run's error), `narration` (the prose a backend wrote while working, one transcript line; `attempt`, `seq` locate it in `GET /runs/{id}/events`), `tool_call` (one tool call's input as JSON, `tool` its name; tool results are not searched), `memory` (an agent's memory document; `memory_version_id`), `memory_entry` (a memory entry: `entry_id`, `entry_version`, `scope`, `owner`, `title`, and `agent` for an agent's own, `null` for a profile or topic entry), `session` (one line of an imported session that carries prose: the person's prompt, the assistant's text, a summary; `external_session_id`, and `seq` its line number, as in `GET /sessions/{id}/lines`; `agent` is `null`, so an agent's own search never returns one). A line a resumed session repeats from its parent is one result, under the session it was imported with first. Of an agent's memory versions only the newest matching one is returned; a memory entry only as its current version, and never once retired. The `kind` parameter is a comma list of these.
-- **`q`** is web-search syntax: words (all must match, stemmed: `bills` finds `bill`), `"a quoted phrase"`, `or` between alternatives, `-word` to exclude. Required (`400` without one). A query of only stop words matches nothing.
-- **Ranking** is Postgres `ts_rank_cd` normalised by document length (`rank`, comparable only within one response), ties newest first. A memory entry's title weighs more than its body, and a tool's name more than its input.
+- **`kind`** is what matched: `message`, `question`, `report`, `error`, `narration`, `tool_call`, `memory`, `memory_entry`, `skill`, or `session`. A tool call includes its `repo` and `path` when present in its input. A skill has `skill`, `skill_version` and its name as `title`; only its current active version is returned. A session is one prose line from an imported session, with `external_session_id` and line number in `seq`. A line repeated by a resumed session is returned once, under the session it was first imported with. Of an agent's memory versions only the newest matching one is returned; a memory entry only as its current version, and never once retired. The `kind` parameter is a comma list of these.
+- **`q`** is web-search syntax: words (all must match, stemmed: `bills` finds `bill`), `"a quoted phrase"`, `or` between alternatives, `-word` to exclude, plus the operators below. Required, with at least one search word beyond operators (`400` without). A query of only stop words matches nothing.
+- **Identifiers** match by their pieces: punctuation and camelCase boundaries split a word (`getHTTPResponse` becomes get, HTTP, Response), so `parseConfig`, `parse_config`, `parse-config` and `"parse config"` match each other, `search.go` finds `internal/store/search.go`, and `config` finds `loadConfig`. Pieces remain unstemmed. A match found only through code pieces may have no highlighted snippet match.
+- **Operators** are whole unquoted `key:value` tokens; values may be quoted. `agent:<name>` applies the agent filter (a different `agent` parameter is `400`); `kind:<kinds>` intersects with the `kind` parameter (no overlap is `400`); `repo:<owner/name or name>` keeps matching tool-call repositories, case-insensitive; `path:<text>` keeps tool-call paths containing the text, case-insensitive. Operators can be combined with the corresponding parameters. Unknown `key:value` tokens are treated as text.
+- **Typo repair:** if the first page has no results, each wanted word piece of 3 to 32 ASCII letters absent from all documents is compared with `search_terms` using Postgres `pg_trgm`. If the corrected query finds results, those are returned and `repaired` contains the query searched and each changed word; otherwise it is `null`. Excluded words are never corrected.
+- **Ranking** is the better of the English and code `ts_rank_cd` scores normalised by document length (`rank`, comparable only within one response), ties newest first. A memory entry's title weighs more than its body, and a tool's name more than its input.
 - **`snippet`** is up to two fragments of the matching text joined by ` ... `; `snippet_parts` is the same text split into runs, `match` true on matched words, so a client highlights without parsing markup (the text is never escaped or marked up).
 - **Filters:** `agent` (that agent's documents; a profile or topic entry belongs to none), `conversation_id`, `run_id` (a UUID, else `400`); `from` and `to` are a calendar day in the deployment's timezone (`to` includes its day) or an RFC 3339 time (`to` excluded), by the document's `at` (a message's or memory version's creation, a run's finish, a transcript line's time). `limit` defaults to 20, at most 100; `offset` pages, at most 1000. `total` counts every match within the filters, whatever the page.
 - **`links`** are where the result is read in full: the run (`run`, and `run_page` when `public_url` is set) and its conversation's thread, or for a session line the session (`session`). A memory version names its run's conversation when it has one.
