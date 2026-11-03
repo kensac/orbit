@@ -75,7 +75,7 @@ func (s *Store) StoredConfig(ctx context.Context) (deployment []byte, agents []S
 			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT a.name, a.spec_sha, sp.spec FROM agents a
-			JOIN agent_specs sp ON sp.sha = a.spec_sha WHERE a.present ORDER BY a.name`)
+			JOIN agent_specs sp ON sp.sha = a.spec_sha WHERE a.present AND NOT a.task_worker ORDER BY a.name`)
 		if err != nil {
 			return err
 		}
