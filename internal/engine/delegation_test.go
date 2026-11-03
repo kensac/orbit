@@ -1012,3 +1012,58 @@ func TestADelegateInstantiatesATypedTemplateWithANarrowConnectorSet(t *testing.T
 		t.Fatal("task conversation has no worker agent")
 	}
 }
+
+func TestTemplateTaskRetryReusesItsPinnedWorkerSpec(t *testing.T) {
+	var d *delegationHarness
+	var delegatedRun string
+	var retryTaskID string
+	workerCalls := 0
+	fr := &scriptRunner{scripts: map[string]func(runner.Request) string{
+		"planner": func(req runner.Request) string {
+			if strings.Contains(req.Prompt, "Trigger: delegation") {
+				if retryTaskID == "" {
+					tasks := d.tasks(t, delegatedRun)
+					if len(tasks) != 1 {
+						t.Fatalf("tasks before retry = %+v", tasks)
+					}
+					retryTaskID = tasks[0].ID
+					action := fmt.Sprintf(`{"type":"task:retry","params":{"task_id":%q,"reason":"try once more"},"reason":"retry after first failure"}`, retryTaskID)
+					return output("Retrying", "retry", nil, action)
+				}
+				return output("Integrated", "complete", nil)
+			}
+			return output("Delegated", "on it", nil, delegateAction(`[{"key":"report","template":"weekly","parameters":{"days":7},"brief":"Prepare a report"}]`))
+		},
+		"specialist": func(runner.Request) string {
+			workerCalls++
+			if workerCalls == 1 {
+				return outcome("Could not", "incomplete", store.OutcomeFailed, "source was unavailable")
+			}
+			return output("Report ready", "REPORT", nil)
+		},
+	}}
+	planner := strings.Replace(plannerSpec, "delegates: [researcher, writer]", "delegates: [researcher, writer]\ndelegate_templates: [weekly]\nconnectors: [drive, calendar]", 1)
+	planner = strings.Replace(planner, "actions: {delegate: approve, continue: auto}", "actions: {delegate: approve, continue: auto, task:retry: auto}", 1)
+	d = newDelegationWith(t, fr, planner)
+	doc, err := templates.Decode([]byte(`{"name":"weekly","description":"Weekly report","parameters":[{"name":"days","type":"number","mode":"required"}],"spec":{"name":"worker","charter":"I am specialist.","connectors":["drive","calendar"]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.s.PutTemplate(ctx, store.TemplateWrite{Doc: doc, Create: true}, store.TemplateProvenance{Source: store.TemplateByPerson}); err != nil {
+		t.Fatal(err)
+	}
+	delegatedRun = d.message(t, "Prepare a weekly report")
+	d.step(t)
+	tasks := d.tasks(t, delegatedRun)
+	if len(tasks) != 1 || tasks[0].Status != store.TaskDone || tasks[0].Attempt != 2 || tasks[0].Failures != 1 || tasks[0].Template == nil || tasks[0].Template.Version != 1 {
+		t.Fatalf("retried template task = %+v", tasks)
+	}
+	var distinctSpecs, attempts, agentNames int
+	if err := d.s.Pool.QueryRow(ctx, `SELECT count(DISTINCT r.spec_sha), count(*), count(DISTINCT r.agent)
+		FROM runs r WHERE r.conversation_id = $1 AND r.trigger = 'task'`, tasks[0].ConversationID).Scan(&distinctSpecs, &attempts, &agentNames); err != nil {
+		t.Fatal(err)
+	}
+	if distinctSpecs != 1 || attempts != 2 || agentNames != 1 {
+		t.Fatalf("retry changed pinned worker identity: distinct specs=%d attempts=%d agents=%d", distinctSpecs, attempts, agentNames)
+	}
+}
