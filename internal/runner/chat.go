@@ -523,7 +523,6 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		if err != nil {
 			return nil, err
 		}
-<<<<<<< HEAD
 		p = &liveProc{proc: proc, tools: tools, busy: true, model: req.Model, effort: req.Effort}
 		if sess != nil {
 			p.key = sess.Key
