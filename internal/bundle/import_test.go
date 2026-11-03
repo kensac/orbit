@@ -73,6 +73,7 @@ func portableConversationTestBundle(t *testing.T) string {
 	const id = "10000000-0000-4000-8000-000000000001"
 	fetch := bundleFetcher{
 		"agents/source":                                         `{"agent":{"name":"source","spec":{}}}`,
+		"agents/source/definitions":                             `{"name":"source","origin":"database","versions":[]}`,
 		"agents/source/memory?limit=1":                          `{"versions":[]}`,
 		"agents/source/context":                                 `{"topics":[],"skills":[]}`,
 		"memory/entries?limit=1000&scope=profile&status=active": `{"entries":[]}`,
@@ -92,6 +93,7 @@ func portableTestBundle(t *testing.T) string {
 	t.Helper()
 	fetch := bundleFetcher{
 		"agents/source":                                         `{"agent":{"name":"source","spec":{}}}`,
+		"agents/source/definitions":                             `{"name":"source","origin":"database","versions":[]}`,
 		"agents/source/memory?limit=1":                          `{"versions":[{"content":"memory text"}]}`,
 		"agents/source/context":                                 `{"topics":[{"name":"finance","from":["api"]}],"skills":[]}`,
 		"memory/entries?limit=1000&scope=profile&status=active": `{"entries":[{"scope":"profile","key":"pref","type":"user","title":"Preference","body":"tea"}]}`,
