@@ -41,7 +41,7 @@ inputs go in a per-attempt directory removed after the run.
 
 An agent is a file (`agents/<name>.yaml`), a database definition written
 through the API (`agent_definitions`, every version kept), or built in
-(`spec.Builtins`: `orbit`, the general agent). A database agent may be rendered from a template (`templates`, `template_versions`: a spec with `{{ }}` slots and typed parameters, `internal/templates`) by code, then defined through the same path (`engine/templates.go`; docs/api.md, Templates). `engine.LoadConfig` merges
+(`spec.Builtins`: `orbit`, the general agent). A database agent may be rendered from a template (`templates`, `template_versions`: a spec with `{{ }}` slots and typed parameters, `internal/templates`) by code, then defined through the same path (`engine/templates.go`; docs/api.md, Templates). Templates travel between orbits as bundles (JSON, or a signed link); an import is scanned for hidden characters and lowered so it grants nothing (`internal/share`). `engine.LoadConfig` merges
 the three and validates them as one configuration; a reload follows any
 change to the files or the definitions.
 
