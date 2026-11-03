@@ -36,17 +36,17 @@ const Version = 1
 
 // Item kinds.
 const (
-	KindMessage  = "message"
-	KindThinking = "thinking"
-	KindToolCall = "tool_call"
-	KindDiff     = "diff"
-	KindPlan     = "plan"
-	KindApproval = "approval"
-	KindQuestion = "question"
-	KindStatus   = "status"
-	KindTurn     = "turn"
-	// KindPermissions is a chat run's permission level being applied: at its start, or changed during the turn.
+	KindMessage     = "message"
+	KindThinking    = "thinking"
+	KindToolCall    = "tool_call"
+	KindDiff        = "diff"
+	KindPlan        = "plan"
+	KindApproval    = "approval"
+	KindQuestion    = "question"
+	KindSteer       = "steer"
 	KindPermissions = "permissions"
+	KindStatus      = "status"
+	KindTurn        = "turn"
 )
 
 // Item is one stored revision of a journal item.
@@ -213,7 +213,14 @@ type Approval struct {
 	Grant string `json:"grant,omitempty"`
 }
 
-// Permissions is a permission level applied to a chat run's process (orbit.permissions): the level asked for, the one the process is at (auto that the CLI refused is ask), its Claude Code mode, when (start, turn or live) and what set it.
+// Steer is a person's message the turn in progress took (delivery steer): from here on the turn answers it too.
+type Steer struct {
+	MessageID string `json:"message_id"`
+	Text      string `json:"text"`
+	Author    string `json:"author,omitempty"`
+}
+
+// Permissions is a permission level applied to a chat run's process.
 type Permissions struct {
 	Level     string     `json:"level"`
 	Applied   string     `json:"applied"`

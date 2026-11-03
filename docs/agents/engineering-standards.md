@@ -7,7 +7,7 @@
   succeeds together with its memory, questions and actions (`RecordOutcome`);
   a failed or requeued run hands its messages back in the same transaction.
 - **Invariants the schema can hold, it holds**: one running run per agent
-  (`runs_one_running`), one run per schedule fire (`runs_one_per_fire`). Code
+  (`runs_one_running_lane`: per agent, per conversation for a chat agent), one run per schedule fire (`runs_one_per_fire`). Code
   that relies on one says which index enforces it.
 - Errors carry their cause to the person: a failed run's `error` is what the
   notification shows, so it names the source, the backend message, or the

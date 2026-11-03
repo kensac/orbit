@@ -1,9 +1,12 @@
 package api_test
 
 import (
+	"maps"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/kensac/orbit/internal/spec"
 )
 
 func TestMemoryEntriesAPI(t *testing.T) {
@@ -32,11 +35,18 @@ func TestMemoryEntriesAPI(t *testing.T) {
 		out["entry"].(map[string]any)["version"].(float64) != 2 {
 		t.Fatalf("patch = %d %v", code, out)
 	}
+	if code, out := call(t, "PATCH", pub+"/memory/entries/"+id, tok, `{"pinned":true}`); code != 200 ||
+		out["entry"].(map[string]any)["pinned"] != true || out["entry"].(map[string]any)["version"].(float64) != 3 {
+		t.Fatalf("pin = %d %v", code, out)
+	}
+	if code, out := call(t, "POST", pub+"/memory/entries", tok, `{"scope":"profile","type":"user","title":"t","body":"b","pinned":true}`); code != 400 {
+		t.Fatalf("a pinned user entry = %d %v", code, out)
+	}
 	if code, _ := call(t, "PATCH", pub+"/memory/entries/"+id, tok, `{"version":1,"body":"stale"}`); code != 409 {
 		t.Fatalf("stale patch = %d, want 409", code)
 	}
 	code, out = call(t, "GET", pub+"/memory/entries/"+id, tok, "")
-	if code != 200 || len(out["versions"].([]any)) != 2 {
+	if code != 200 || len(out["versions"].([]any)) != 3 {
 		t.Fatalf("get = %d %v", code, out)
 	}
 
@@ -60,6 +70,24 @@ func TestMemoryEntriesAPI(t *testing.T) {
 	}
 	if code, out := call(t, "GET", pub+"/memory/topics", tok, ""); code != 200 || out["topics"].([]any)[0].(map[string]any)["entries"].(float64) != 1 {
 		t.Fatalf("topics = %d %v", code, out)
+	}
+	// The built-in orbit agent reads every topic, from its spec.
+	old := v.e.Current().Config
+	cfg := *old
+	cfg.Agents = maps.Clone(old.Agents)
+	for _, b := range spec.Builtins(cfg.Deployment) {
+		cfg.Agents[b.Name] = b
+	}
+	if err := v.e.SetConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	code, out = call(t, "GET", pub+"/agents/orbit/context", tok, "")
+	if code != 200 || out["entries"].(float64) != 1 || len(out["topics"].([]any)) != 1 ||
+		out["topics"].([]any)[0].(map[string]any)["name"] != "finance" || out["topics"].([]any)[0].(map[string]any)["from"].([]any)[0] != "spec" {
+		t.Fatalf("orbit's context = %d %v", code, out)
+	}
+	if _, out := call(t, "GET", pub+"/memory/topics", tok, ""); strings.Join(strs(out["topics"].([]any)[0].(map[string]any)["agents"]), ",") != "a,orbit" {
+		t.Fatalf("finance's agents = %v", out)
 	}
 	if code, _ := call(t, "DELETE", pub+"/agents/a/topics/finance", tok, ""); code != 200 {
 		t.Fatalf("detach = %d", code)
@@ -159,4 +187,12 @@ func TestLearnNowAPI(t *testing.T) {
 	if cs := out["conversations"].([]any); len(cs) != 1 || cs[0].(map[string]any)["purpose"] != "learning" {
 		t.Fatalf("archived = %v", out)
 	}
+}
+
+func strs(v any) []string {
+	var out []string
+	for _, x := range v.([]any) {
+		out = append(out, x.(string))
+	}
+	return out
 }
