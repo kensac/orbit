@@ -423,3 +423,58 @@ func TestThePersonsMessageIsTheInstruction(t *testing.T) {
 		t.Fatal("the defined agent is not in force")
 	}
 }
+
+func TestPagePublishReturnsTheConversationPageReferenceOnlyForPersonMessage(t *testing.T) {
+	s := testdb.New(t)
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "agents"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "orbit.yaml"), []byte("defaults: {runner: cc, channels: [log]}\nrunners: {cc: {kind: claude-code}}\nchannels: {log: {kind: log}}\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "agents", "chat.yaml"), []byte("name: chat\ncharter: Help.\nchat: true\nwake_on_message: true\nactions: {page:publish: approve}\n"), 0o644)
+	args := `{"type":"page:publish","reason":"requested","params":{"title":"Example","html":"<main>hello</main>"}}`
+	e := &engine.Engine{Store: s, DataDir: t.TempDir(), ConfigDir: dir, Outbox: true, Env: func(string) (string, bool) { return "", false },
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		NewRunner: func(string, spec.RunnerSpec, func(string) (string, bool)) (runner.Runner, error) {
+			return actRunner{args}, nil
+		}}
+	if err := e.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	a := e.Current().Config.Agents["chat"]
+	wake := func(trigger string) *store.ThreadRun {
+		t.Helper()
+		var id string
+		if trigger == "message" {
+			r, _, err := s.PostMessageOnce(ctx, store.PostMessage{Agent: "chat", SpecSHA: a.SHA, Body: "make a page", Author: "kanishk", Wake: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id = r.RunID
+		} else {
+			var err error
+			id, err = s.EnqueueRun(ctx, store.NewRun{Agent: "chat", SpecSHA: a.SHA, Trigger: trigger})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		c, err := s.ClaimRun(ctx, "test")
+		if err != nil || c == nil {
+			t.Fatalf("claim: %v %v", c, err)
+		}
+		if err := e.Execute(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		r, err := s.ThreadRunByID(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	asked := wake("message")
+	if asked.Report == nil || len(asked.Actions) != 1 || *asked.Report != `{"page_id":"`+asked.Actions[0].ID+`","title":"Example"}` || asked.Actions[0].Status != "executed" {
+		t.Fatalf("person message result = %q actions=%+v", deref(asked.Report), asked.Actions)
+	}
+	manual := wake("manual")
+	if manual.Report == nil || !strings.Contains(*manual.Report, "only available while answering") || len(manual.Actions) != 0 {
+		t.Fatalf("manual page publish = %q actions=%+v", deref(manual.Report), manual.Actions)
+	}
+}

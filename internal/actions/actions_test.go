@@ -150,3 +150,45 @@ func TestMergeExecutorMergesAndRevokesItsToken(t *testing.T) {
 		t.Fatal("revoked after a refusal too")
 	}
 }
+
+func TestPagePublishIsChatOnlyAndRuleGated(t *testing.T) {
+	has := func(a *spec.Agent) bool {
+		for _, typ := range actions.Catalog(a, spec.Deployment{}) {
+			if typ.Name == actions.PagePublishType {
+				return true
+			}
+		}
+		return false
+	}
+	if has(&spec.Agent{Chat: true}) || has(&spec.Agent{Chat: false, Actions: spec.ActionSet{actions.PagePublishType: spec.RuleApprove}}) || !has(&spec.Agent{Chat: true, Actions: spec.ActionSet{actions.PagePublishType: spec.RuleApprove}}) {
+		t.Fatal("page:publish must be offered only to named chat agents")
+	}
+	typ := actions.Catalog(&spec.Agent{Chat: true, Actions: spec.ActionSet{actions.PagePublishType: spec.RuleApprove}}, spec.Deployment{})[0]
+	for _, raw := range []string{
+		`{"title":" spaced ","html":"<p>x</p>"}`,
+		`{"title":"ok","html":""}`,
+		`{"title":"ok","html":"<p>x</p>","url":"https://example.test"}`,
+		`{"title":"ok","html":"<p>x</p>"} {}`,
+	} {
+		if err := typ.Validate(json.RawMessage(raw)); err == nil {
+			t.Errorf("accepted invalid params %s", raw)
+		}
+	}
+	if err := typ.Validate(json.RawMessage(`{"title":"ok","html":"<main>safe payload</main>"}`)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPagePublishExecutorReturnsCallbackResult(t *testing.T) {
+	want := json.RawMessage(`{"page_id":"id","title":"x"}`)
+	ex := &actions.Executor{PagePublish: func(_ context.Context, c actions.Call, p actions.PagePublish) (json.RawMessage, error) {
+		if c.ID != "id" || p.Title != "x" || p.HTML != "<p>x</p>" {
+			t.Fatalf("call = %+v params=%+v", c, p)
+		}
+		return want, nil
+	}}
+	got, err := ex.Execute(context.Background(), actions.Call{ID: "id", Type: actions.PagePublishType, Params: json.RawMessage(`{"title":"x","html":"<p>x</p>"}`)})
+	if err != nil || string(got) != string(want) {
+		t.Fatalf("execute = %s, %v", got, err)
+	}
+}
