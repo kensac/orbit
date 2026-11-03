@@ -270,6 +270,15 @@ func TestBoxLifecycle(t *testing.T) {
 	if err != nil || st.State != sandbox.BoxRunning || st.Image != testBoxImage || !sandbox.ValidID(st.ID) {
 		t.Fatalf("ensure: %+v %v", st, err)
 	}
+	if _, err := h.client.SessionScrollback(ctx, "orbit", "shell-1", 100); err != nil {
+		t.Fatalf("scrollback: %v", err)
+	}
+	if err := h.client.ResizeSession(ctx, "orbit", "shell-1", sandbox.Resize{Cols: 120, Rows: 40}); err != nil {
+		t.Fatalf("standalone resize: %v", err)
+	}
+	if _, err := h.client.SessionScrollback(ctx, "orbit", "shell-1", 10001); err == nil {
+		t.Fatal("oversized scrollback request was accepted")
+	}
 	h.fd.mu.Lock()
 	created, query := h.fd.created[0], h.fd.createQueries[0]
 	h.fd.mu.Unlock()

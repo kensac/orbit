@@ -16,6 +16,7 @@ import (
 
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/harness"
+	"github.com/kensac/orbit/internal/orbitskills"
 	"github.com/kensac/orbit/internal/runner"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
@@ -53,7 +54,7 @@ func skillsDigest(skills []store.Skill) string {
 // skillStub is the SKILL.md Claude Code loads: the name and description it decides by, and where the text is. The text itself is served by orbit's skill tool from the run's own copy, so what the model follows is exactly the version this run was given.
 func skillStub(k store.Skill) string {
 	desc, _ := json.Marshal(k.Description)
-	return fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\nThis skill's full text is kept by orbit. Call the %s tool with {\"name\": %q} and follow what it returns. Read the skill's other files with the same tool, passing a file's path as file.\n",
+	return fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\nThis skill's full text is kept by orbit. Call the %s tool with {\"name\": %q} and follow what it returns. Read the skill's other files with the same tool, passing a file's path as file, or one of the references it lists by name, passing reference.\n",
 		k.Name, desc, harness.ToolSkill, k.Name)
 }
 
@@ -149,8 +150,38 @@ func skillsInput(skills []store.Skill) []byte {
 	return []byte(b.String())
 }
 
-// prepareSkills reads an agent's skills and gives them to the run: a plugin directory for Claude Code, an input file for other backends. It records which versions the run had (skills.json).
-func (e *Engine) prepareSkills(ctx context.Context, c *store.ClaimedRun, a *spec.Agent, kind, home, workdir, inputsDir string, withTool bool, inputs []runner.Input) ([]store.Skill, string, []runner.Input, error) {
+// builtinSkills are the skills built into orbit (internal/orbitskills) a run is given: query, calc and entries always, actions when it has any, continuations when it may continue. Only a Claude Code report run with orbit's skill tool gets them, since that is what lets its system contract leave the how-to to them (contractVia).
+func builtinSkills(types []actions.Type) []store.Skill {
+	names := []string{orbitskills.Query, orbitskills.Calc, orbitskills.Entries}
+	for _, t := range types {
+		if t.Name == "continue" {
+			names = append(names, orbitskills.Continuations)
+		}
+	}
+	if len(types) > 0 {
+		names = append(names, orbitskills.Actions)
+	}
+	var out []store.Skill
+	for _, n := range names {
+		b, _ := orbitskills.Get(n)
+		desc, _ := store.SkillDescription(n, b.Content)
+		k := store.Skill{Name: n, Status: "active", Description: desc, Source: store.SkillBuiltIn, Content: b.Content, FilePaths: []string{}}
+		h := sha256.New()
+		_, _ = fmt.Fprintf(h, "SKILL.md\x00%d\x00%s", len(b.Content), b.Content)
+		for _, f := range b.Files {
+			k.Files = append(k.Files, store.SkillFile{Path: f.Path, Content: f.Content})
+			k.FilePaths = append(k.FilePaths, f.Path)
+			_, _ = fmt.Fprintf(h, "\x00%s\x00%d\x00", f.Path, len(f.Content))
+			h.Write(f.Content)
+		}
+		k.SHA256 = hex.EncodeToString(h.Sum(nil))
+		out = append(out, k)
+	}
+	return out
+}
+
+// prepareSkills reads an agent's skills and gives them to the run: a plugin directory for Claude Code, an input file for other backends. builtin are skills built into orbit the run also gets (builtinSkills), in the plugin only. It records which versions the run had (skills.json, a built-in one at version 0), and returns the library's, which are the ones the run may write.
+func (e *Engine) prepareSkills(ctx context.Context, c *store.ClaimedRun, a *spec.Agent, kind, home, workdir, inputsDir string, withTool bool, builtin []store.Skill, inputs []runner.Input) ([]store.Skill, string, []runner.Input, error) {
 	names, err := e.agentSkills(ctx, a)
 	if err != nil {
 		return nil, "", nil, err
@@ -159,14 +190,16 @@ func (e *Engine) prepareSkills(ctx context.Context, c *store.ClaimedRun, a *spec
 	if err != nil {
 		return nil, "", nil, err
 	}
-	if len(skills) > 0 {
+	given := append(slices.Clone(skills), builtin...)
+	slices.SortFunc(given, func(x, y store.Skill) int { return strings.Compare(x.Name, y.Name) })
+	if len(given) > 0 {
 		type had struct {
 			Name    string `json:"name"`
 			Version int    `json:"version"`
 			SHA256  string `json:"sha256"`
 		}
 		var list []had
-		for _, k := range skills {
+		for _, k := range given {
 			list = append(list, had{k.Name, k.Version, k.SHA256})
 		}
 		b, _ := json.Marshal(list)
@@ -175,7 +208,7 @@ func (e *Engine) prepareSkills(ctx context.Context, c *store.ClaimedRun, a *spec
 		}
 	}
 	if kind == "claude-code" {
-		dir, err := writeSkills(home, skills, withTool)
+		dir, err := writeSkills(home, given, withTool)
 		return skills, dir, inputs, err
 	}
 	if len(skills) == 0 {
@@ -227,6 +260,9 @@ func skillProposal(had []store.Skill, params json.RawMessage, count int) (json.R
 		}
 	}
 	w.Version, w.Changes = 0, nil
+	if orbitskills.Has(w.Name) {
+		return nil, fmt.Errorf("%s is built into orbit and cannot be written", w.Name)
+	}
 	switch {
 	case w.Op == "retire" && cur == nil:
 		return nil, errors.New("only a skill this run has can be retired")
