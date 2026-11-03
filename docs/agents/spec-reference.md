@@ -15,6 +15,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `github` | map | absent | The GitHub App orbit acts as. Without it, tickets naming a repository and `github:merge` fail validation. |
 | `build` | map | absent | How approved tickets become PRs. Without it no ticket is built. |
 | `sandbox` | map | `build`'s sandboxd | The sandboxd sandboxed chat agents use (below). |
+| `box` | map | absent | Operator pins for account-scoped workstation box plugin imports (below). |
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `credentials` | map of variable to credential | none | The variables sources and endpoint headers may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
 | `connectors` | map of name to connector | none | MCP servers agents may be given; orbit calls them on the agents' behalf and holds their credentials (below). |
@@ -23,6 +24,13 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `usage_poll` | map: `every` (default 5m, at least 1m), `token_env` (default `CLAUDE_CODE_OAUTH_TOKEN`) | absent | Poll the subscription's usage windows (configuration.md, Subscription usage and low-priority agents). |
 | `defer_low_priority` | bool | `false` | Hold `priority: low` agents' scheduled runs while a usage window is above `usage.DeferLowAbove`. |
 | `board` | map | absent | Tunes `GET /board` (below). |
+
+
+### `box`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `plugin_digests` | map of plugin ID to lowercase SHA-256 | none | Allows the exact canonical local plugin payload a person reviewed for account-scoped import. The payload runs with that Claude account's privileges. A digest identifies bytes; it does not establish that plugin code is safe. |
 
 ### `defaults`
 

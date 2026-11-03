@@ -70,6 +70,8 @@ type Deployment struct {
 	// Sandbox is sandboxd for sandboxed chat agents, when it is not the
 	// build section's (SandboxService).
 	Sandbox *SandboxService `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
+	// Box holds operator pins for executable plugins imported into a named account.
+	Box *BoxConfig `yaml:"box,omitempty" json:"box,omitempty"`
 	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
 	// UsagePoll polls the subscription's usage windows (usage.go). Without
@@ -88,6 +90,12 @@ type Deployment struct {
 	WebhookSecrets map[string]WebhookSecret `yaml:"webhook_secrets,omitempty" json:"webhook_secrets,omitempty"`
 	// Board tunes GET /board (docs/api.md, The board).
 	Board *Board `yaml:"board,omitempty" json:"board,omitempty"`
+}
+
+// BoxConfig controls account-scoped workstation box imports.
+type BoxConfig struct {
+	// PluginDigests pins the complete canonical payload accepted for each Claude plugin ID.
+	PluginDigests map[string]string `yaml:"plugin_digests,omitempty" json:"plugin_digests,omitempty"`
 }
 
 // Board tunes the board of every open conversation.
@@ -800,7 +808,9 @@ var ReservedAgentNames = map[string]bool{
 const AgentNamePattern = `^[a-z][a-z0-9-]{0,62}$`
 
 var (
-	nameRE = regexp.MustCompile(AgentNamePattern)
+	nameRE           = regexp.MustCompile(AgentNamePattern)
+	claudePluginIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}@[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	lowerSHA256RE    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	// CapabilityRE is a capability's shape: a name, optionally qualified
 	// (docker-network:hetzner).
 	CapabilityRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}(:[a-z0-9][a-z0-9._-]{0,62})?$`)
@@ -1079,6 +1089,16 @@ func (c *Config) Validate() error {
 	errs = append(errs, c.validateBuild()...)
 	if sb := c.Deployment.Sandbox; sb != nil && !strings.HasPrefix(sb.Sandboxd, "unix:/") && !strings.Contains(sb.Sandboxd, ":") {
 		errs = append(errs, fmt.Errorf("sandbox: sandboxd %q is neither host:port nor unix:/path", sb.Sandboxd))
+	}
+	if box := c.Deployment.Box; box != nil {
+		for id, digest := range box.PluginDigests {
+			if !claudePluginIDRE.MatchString(id) || strings.Contains(id, "..") {
+				errs = append(errs, fmt.Errorf("box.plugin_digests: invalid plugin ID %q (want name@marketplace)", id))
+			}
+			if !lowerSHA256RE.MatchString(digest) {
+				errs = append(errs, fmt.Errorf("box.plugin_digests[%q]: must be a lowercase sha256 digest", id))
+			}
+		}
 	}
 	errs = append(errs, c.validateMail()...)
 	errs = append(errs, c.validateUsage()...)

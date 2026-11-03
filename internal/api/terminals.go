@@ -209,6 +209,8 @@ func (s *Server) createTerminal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		acct = &a
+		s.accountConfigMu.Lock()
+		defer s.accountConfigMu.Unlock()
 	}
 	c, ok := s.boxClient(w)
 	if !ok {
