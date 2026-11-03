@@ -186,6 +186,10 @@ With `mail` configured (configuration.md), a person talks to orbit by mail as we
 - **Once.** `IngestMail` writes the message, its run and the `mail_in` row in one transaction keyed by Message-ID, and the mail is marked seen only after; a database error leaves it unseen for the next poll.
 - **Attachments** are not uploads yet: the message names each (file, type, size) and the raw mail is kept in `mail_in`.
 
+## Telegram
+
+`telegram:` in orbit.yaml enables the Bot API reader (`internal/telegram`). It long-polls `getUpdates` over HTTPS from the fixed Telegram API host; no public webhook route is exposed. `token_env` belongs to a configured Telegram notification channel and is read by the service only. The reader accepts private text messages from numeric ids in `allow_users`, records ignored and accepted updates in `telegram_in`, and posts accepted messages through the store. `update_id` makes ingestion idempotent. A reply to an Orbit-sent bot message resolves through `telegram_out` to its conversation; each successful outbound message records its provider id. Reports and failures for a run that read Telegram are sent back to that chat regardless of `notify.when`, as mail replies are, and never expose the bot token to a runner.
+
 ## Continuations
 
 An agent with the `continue` action may ask to be woken again
@@ -248,11 +252,14 @@ approvals and failure are in the conversation they are reading
 the agent's `notify.when`, and always their failures and the approvals
 they wait on.
 
+A run that read an email is answered through its SMTP reply path; a run that read a Telegram update is answered through the configured Telegram channel. Both exceptions apply even to attended message runs and ignore `notify.when`; other attended runs keep their answer, questions, approvals and failure in the conversation.
+
 Separately from channels, everything waiting on a person is an `attention`
 row (store/attention.go), written in the transaction that created it, for
 attended runs too. It feeds the app's inbox (`GET /attention`) and, for
 unattended runs and for a chat run's permission request (its turn waits on the person), Web Push to the person's devices (`internal/push`), which
-carries a title and a link only; bursts fold into one summary push, and a person whose app is showing the conversation (a 30 s heartbeat, `POST /presence`, fresh for 60 s) is not pushed for it.
+
+carries a title and a link only; bursts fold into one summary push, and a person whose app is showing the conversation (a 30 s heartbeat, `POST /presence`, fresh for 60 s) is not pushed for it. A push of one pending action or permission request carries Approve and Reject or Deny buttons, signed single-use links the service worker POSTs to (`POST /api/v1/push/act`) without the app's session; when a pushed row closes, a close push with its tag takes the notification off the devices it reached (not Apple's, which revoke subscriptions that receive pushes showing nothing).
 
 ## Memory, questions, messages
 

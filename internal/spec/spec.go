@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,6 +78,8 @@ type Deployment struct {
 	Extensions *ExtensionsConfig `yaml:"extensions,omitempty" json:"extensions,omitempty"`
 	// Mail is orbit's mailbox (mail.go). Without it orbit reads no mail and its mails carry no reply address.
 	Mail *Mail `yaml:"mail,omitempty" json:"mail,omitempty"`
+	// Telegram is a two-way bot channel (telegram.go). Without it orbit does not poll Telegram updates.
+	Telegram *Telegram `yaml:"telegram,omitempty" json:"telegram,omitempty"`
 	// UsagePoll polls the subscription's usage windows (usage.go). Without
 	// it /usage shows only what runs' streams reported.
 	UsagePoll *UsagePoll `yaml:"usage_poll,omitempty" json:"usage_poll,omitempty"`
@@ -226,6 +229,8 @@ type Channel struct {
 	To          []string `yaml:"to,omitempty" json:"to,omitempty"`
 	// webhook
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	// telegram
+	ChatID string `yaml:"chat_id,omitempty" json:"chat_id,omitempty"`
 }
 
 // Endpoint is a named HTTP target a `webhook` action may call. The agent
@@ -876,7 +881,7 @@ var (
 
 	// Kinds every adapter registry must cover. Kept here so validation does
 	// not import the adapters (which import spec).
-	channelKinds = []string{"ntfy", "smtp", "webhook", "log"}
+	channelKinds = []string{"ntfy", "smtp", "webhook", "telegram", "log"}
 	sourceKinds  = []string{"http", "prometheus", "loki", "github", "lake", "file", "webhook", "extension"}
 	runnerKinds  = []string{"claude-code", "codex", "anthropic"}
 	notifyWhen   = []string{"", "always", "agent", "never"}
@@ -889,7 +894,7 @@ func ParseSchedule(expr string) (cron.Schedule, error) { return cronParse.Parse(
 // Load reads orbit.yaml and every agents/*.yaml under dir, then validates the
 // whole configuration. An invalid file fails the load: a deployment never
 // runs with part of its configuration silently skipped.
-func Load(dir string) (*Config, error) { return load(dir, nil, false) }
+func Load(dir string) (*Config, error) { return load(dir, nil, nil, false) }
 
 // Definition is an agent defined in the database (agent_definitions): its
 // newest version, which LoadAll merges with the files.
@@ -906,7 +911,13 @@ type Definition struct {
 // database agent named like a file agent is a configuration error; a
 // built-in agent yields to a file or database agent of its name, so a
 // deployment can replace it.
-func LoadAll(dir string, defs []Definition) (*Config, error) { return load(dir, defs, true) }
+func LoadAll(dir string, defs []Definition) (*Config, error) { return load(dir, defs, nil, true) }
+
+// LoadAllWithConnectors loads the configuration orbit runs, adding the
+// user's stored OAuth connectors before cross-references are validated.
+func LoadAllWithConnectors(dir string, defs []Definition, stored map[string]Connector) (*Config, error) {
+	return load(dir, defs, stored, true)
+}
 
 // DecodeAgent reads one agent's JSON as strictly as a file is read: an
 // unknown field is an error.
@@ -923,10 +934,23 @@ func DecodeAgent(b []byte) (*Agent, error) {
 	return a, nil
 }
 
-func load(dir string, defs []Definition, all bool) (*Config, error) {
+func load(dir string, defs []Definition, stored map[string]Connector, all bool) (*Config, error) {
 	cfg := &Config{Agents: map[string]*Agent{}}
 	if err := decodeFile(filepath.Join(dir, "orbit.yaml"), &cfg.Deployment); err != nil {
 		return nil, err
+	}
+	if len(stored) > 0 {
+		if cfg.Deployment.Connectors == nil {
+			cfg.Deployment.Connectors = map[string]Connector{}
+		}
+		for name, c := range stored {
+			if _, exists := cfg.Deployment.Connectors[name]; exists {
+				return nil, fmt.Errorf("connector %q is defined in orbit.yaml and the catalog", name)
+			}
+			c.CatalogManaged = true
+			c.DefaultToolRule = RuleApprove
+			cfg.Deployment.Connectors[name] = c
+		}
 	}
 	files, err := filepath.Glob(filepath.Join(dir, "agents", "*.yaml"))
 	if err != nil {
@@ -1113,6 +1137,12 @@ func (c *Config) Validate() error {
 			if ch.URL == "" {
 				errs = append(errs, fmt.Errorf("channel %q: webhook needs url", name))
 			}
+		case "telegram":
+			if ch.TokenEnv == "" || ch.ChatID == "" {
+				errs = append(errs, fmt.Errorf("channel %q: telegram needs token_env and chat_id", name))
+			} else if id, err := strconv.ParseInt(ch.ChatID, 10, 64); err != nil || id == 0 {
+				errs = append(errs, fmt.Errorf("channel %q: telegram chat_id must be a non-zero integer", name))
+			}
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(d.Endpoints)) {
@@ -1181,6 +1211,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("sandbox: sandboxd %q is neither host:port nor unix:/path", sb.Sandboxd))
 	}
 	errs = append(errs, c.validateMail()...)
+	errs = append(errs, c.validateTelegram()...)
 	errs = append(errs, c.validateUsage()...)
 	return errors.Join(errs...)
 }

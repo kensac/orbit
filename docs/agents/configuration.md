@@ -174,6 +174,24 @@ mail:
 
 `port` defaults to 993 (implicit TLS); any other port must offer STARTTLS. `mailbox` defaults to `INBOX` and must be orbit's own: every unseen mail in it is read and marked seen. The server must deliver `local+anything@domain` to the mailbox (Postfix's `recipient_delimiter`). Without `agent`, a mail that is not a reply is recorded and ignored. `poll` is at least 10s. With the section, every mail orbit sends carries a reply address and Message-ID naming its run's conversation.
 
+## Telegram
+
+Telegram uses the Bot API long poll, so no inbound public route is needed. The bot token is read only by Orbit's service from the selected channel's environment variable. Incoming updates are accepted only from the configured private-chat user ids; usernames are not used for authorization.
+
+```yaml
+channels:
+  telegram:
+    kind: telegram
+    token_env: ORBIT_TELEGRAM_BOT_TOKEN
+    chat_id: "123456789"
+telegram:
+  channel: telegram
+  agent: assistant
+  allow_users: [123456789]
+```
+
+An allowed text message starts a new conversation. A reply to an Orbit bot message continues the conversation that produced it. Unsupported updates, group messages, and messages from other users are kept as ignored inbox records. The poller stores each provider update before advancing its in-memory offset, so retries do not post it twice.
+
 ## Subscription usage and low-priority agents
 
 ```yaml
@@ -364,6 +382,8 @@ fails at runtime, not at load.
 
 `connectors:` in `orbit.yaml` names MCP servers; an agent's `connectors: [<name>, ...]` gives its runs their tools, as `mcp__<name>__<tool>` (claude-code runners only; docs/ARCHITECTURE.md, Connectors). orbit is the gateway: it lists the tools before each run and makes every call itself with the connector's credential, so neither the CLI nor a sandbox ever holds one.
 
+A signed-in person can also add a public OAuth connector by URL at `POST /api/v1/connectors/catalog` (docs/api.md). Its URL, description, scopes, and creator are stored as configuration; OAuth grants remain separately sealed in `connector_tokens`. These records join the deployment's connector map and are offered to `agent:define`. Every tool of a catalog connector defaults to `approve`; an agent must explicitly set a tool rule to change that behavior.
+
 ```yaml
 credentials:
   HOUSING_MCP_TOKEN: {url_prefix: https://housing.example.com/}
@@ -439,6 +459,7 @@ unattended runs: schedule, manual, continue, build. A run answering a
 person's message never notifies, whatever it says: the person is reading
 the chat. Failures and pending approvals of unattended runs always notify, except a failure that holds its runner (the backend refused orbit's login, or the subscription window is spent): that sends one notification for the runner (or, for a run a person started, the run's own failure report), and the runner's unattended runs wait until it answers again (docs/ARCHITECTURE.md, Reliability).
 Another exception is a run that read a mail (`mail:`): its report, or a short note when it fails, is mailed to the sender as a reply, through the agent's first `smtp` channel (else the deployment's first by name) and no other channel, whatever `notify.when` is.
+Likewise, a run that read a Telegram message replies to that chat through the configured Telegram channel, regardless of `notify.when`.
 
 ## Memory topics
 

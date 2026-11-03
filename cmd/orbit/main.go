@@ -62,6 +62,7 @@ import (
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
+	"github.com/kensac/orbit/internal/telegram"
 	"github.com/kensac/orbit/internal/tickets"
 	subusage "github.com/kensac/orbit/internal/usage"
 )
@@ -509,6 +510,9 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		}
 		if pusher == nil {
 			log.Info("ORBIT_VAPID_* not set: Web Push is off (the inbox still lists what needs attention)")
+		} else {
+			pusher.Secret = eng.Secret
+			pusher.PublicURL = func() string { return eng.Current().Config.Deployment.PublicURL }
 		}
 		// reloadNow puts the files and the database's definitions in force,
 		// for the poll below and for the API after it writes a definition.
@@ -591,6 +595,18 @@ func serve(ctx context.Context, log *slog.Logger) error {
 			(&mail.Poller{
 				Store: s, Config: func() *spec.Config { return eng.Current().Config }, Secret: []byte(token),
 				Env: os.LookupEnv, Log: log.With("component", "mail"), Wake: nudge,
+			}).Run(claimCtx)
+		}()
+
+		// Telegram is polled only when configured. Incoming updates are keyed
+		// by provider update id, so a retry or a second control instance cannot
+		// post a message twice.
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			(&telegram.Poller{
+				Store: s, Config: func() *spec.Config { return eng.Current().Config },
+				Env: os.LookupEnv, HTTP: &http.Client{}, Log: log.With("component", "telegram"), Wake: nudge,
 			}).Run(claimCtx)
 		}()
 
@@ -913,7 +929,11 @@ func definitionGeneration(ctx context.Context, s *store.Store) string {
 	if err != nil {
 		return "db?"
 	}
-	return "db" + strconv.FormatInt(n, 10)
+	catalog, err := s.ConnectorCatalogGeneration(ctx)
+	if err != nil {
+		return "db?"
+	}
+	return "db" + strconv.FormatInt(n, 10) + ":connectors" + strconv.FormatInt(catalog, 10)
 }
 
 // configHash fingerprints every file under dir. A deploy's git pull swaps
