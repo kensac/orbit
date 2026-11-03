@@ -162,3 +162,29 @@ func (s *Store) AttemptChain(ctx context.Context, runID string, attempt int) (ch
 	}
 	return chain, settled, nil
 }
+
+// ToolCallRunning reports whether a tool call of the attempt is still
+// running by its journal: a tool_call item whose newest revision's state is
+// running. The live journal write is in AppendEvent's transaction, so this
+// is as current as the transcript. The stall watchdog reads it, since a
+// tool may run silently for as long as it takes.
+func (s *Store) ToolCallRunning(ctx context.Context, runID string, attempt int) (bool, error) {
+	var running bool
+	err := s.Pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM (
+		    SELECT DISTINCT ON (item_id) body->>'state' AS state FROM journal_items
+		    WHERE run_id = $1 AND attempt = $2 AND kind = 'tool_call'
+		    ORDER BY item_id, revision DESC) t
+		WHERE t.state = 'running')`, runID, attempt).Scan(&running)
+	return running, err
+}
+
+// AttemptStalled reports whether the attempt's turn was ended by the stall
+// watchdog (an orbit.stalled event), so the attempt that continues it says
+// why it was interrupted.
+func (s *Store) AttemptStalled(ctx context.Context, runID string, attempt int) (bool, error) {
+	var stalled bool
+	err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM run_events WHERE run_id = $1 AND attempt = $2 AND kind = 'orbit.stalled')`,
+		runID, attempt).Scan(&stalled)
+	return stalled, err
+}
