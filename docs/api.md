@@ -268,6 +268,28 @@ characters (400 otherwise).
 `POST /conversations/{id}/messages` takes and returns exactly what
 `POST /agents/{name}/messages` does (below), in that conversation.
 
+### Imported conversation archives
+
+`POST /agents/{name}/conversation-archives/import` stores exported thread snapshots separately from live conversations:
+
+```json
+{"dry_run": false, "archives": [{
+  "source_agent": "finance",
+  "source_conversation_id": "uuid",
+  "source_bundle_sha256": "64 lowercase hex characters",
+  "snapshot": {"conversation": {"id": "uuid", "title": "..."},
+               "pages": [{"items": [], "has_more": false, "next_before": null}]}
+}]}
+```
+
+The snapshot contains the source conversation metadata and the exact exported thread page envelopes. The server computes `content_sha256` over canonical JSON. The identity is the target agent, source agent and source conversation id. Reimporting the same snapshot returns `unchanged`; changed content appends a version and leaves prior versions intact. `dry_run` reports outcomes without writing ids or rows. At most 100 archives are accepted per request and each snapshot is at most 8 MiB. The endpoint never creates or changes conversations, messages, runs, questions or actions.
+
+`200 {"dry_run": false, "results": [{"source_agent": "finance", "source_conversation_id": "uuid", "outcome": "created|versioned|unchanged", "version": 1, "id": 123}]}`. `id` is absent in a dry run that would create a row. The author is the authenticated person. One invalid archive rejects the request.
+
+`GET /agents/{name}/conversation-archives?limit=<n>&before_id=<id>` lists every immutable version, newest archive id first; `limit` defaults to 50 and is at most 200. The response has `archives`, `has_more` and `next_before_id`. `GET /agents/{name}/conversation-archives/{id}` reads one archived version. Each archive is marked `kind: "exported_thread_snapshot"`, `read_only: true`, `coverage: "partial"`, and `coverage_details: "source conversation metadata and exported thread pages only"`.
+
+These snapshots are not live conversations or a full history restore. Portable exports exclude upload bytes, run artifacts, journals, transcripts, source inputs, workspace state and server configuration. Imported thread content is read-only data and has no execution semantics.
+
 ### Conversation permissions
 
 A conversation has a permission level for the runs its person's messages start (`trigger` `message`): one of `locked`, `ask`, `edits`, `auto`, `full`, narrowest first (docs/agents/configuration.md, Permissions), never wider than its agent's `ceiling`. Without one of its own it is at its agent's `level`. Every other run (schedule, manual, continue, task, delegation) is at the agent's level, or the conversation's when that is narrower: an unattended run never takes a raised level.

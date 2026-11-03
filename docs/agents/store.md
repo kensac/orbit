@@ -25,6 +25,11 @@ Nothing ages out. Rows that look disposable are the record: `run_events` is
 the transcript, `artifacts` is what the model saw, `memory_versions` is how
 an agent's beliefs changed.
 
+`conversation_archives` holds portable bundle thread snapshots separately
+from operational conversations. Its trigger rejects updates and deletes;
+re-importing an identical snapshot is a no-op, and changed content adds a
+version. The JSON is read-only evidence, never inbox messages or runs.
+
 ## The journal
 
 `journal_items` is derived from `run_events` by `journal.Project`, a pure function of an attempt's events in order. Keep it pure: the live write (in `AppendEvent`'s transaction) and the backfill (`syncAttempt`, run at start and every 30 s for recent runs, and by a reader before it reads) must write the same rows, and `TestBackfillWritesWhatTheLiveWriterWould` holds them together. Whether a run needs a sync is decided by `unsyncedSQL`: each attempt's newest event is one descent of `run_events`' primary key, compared with `journal_sources.through`, so an up-to-date journal costs a reader one read and no write (`TestAReaderOfAnUpToDateJournalWritesNothing`); never make that check read a run's whole transcript, because the stream runs it every 500 ms per open stream. The backfill skips and reports a run whose sync fails, so one bad run never holds back the others. Rows are append-only: a change is a new revision, never an UPDATE. A body's shape changes only with a new `journal.Version` and an upcaster in `journal.Upcast`; stored rows keep their version. Every journal write of a run holds its advisory lock (`lockJournal`), which is what keeps `seq` gapless. A transition that ends an attempt (`finishRun`, `endAttempt`, `HandBack`) syncs that attempt in its own transaction, so the turn it left open closes with it.
