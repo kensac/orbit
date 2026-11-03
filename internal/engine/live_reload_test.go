@@ -22,10 +22,10 @@ func TestLiveChatProcessSurvivesConfigReloadWhenInvocationIsUnchanged(t *testing
 	if err := os.MkdirAll(filepath.Join(dir, "agents"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeConfig := func(timezone string) {
+	writeConfig := func(publicURL string) {
 		t.Helper()
 		if err := os.WriteFile(filepath.Join(dir, "orbit.yaml"), []byte(`
-timezone: `+timezone+`
+public_url: `+publicURL+`
 defaults: {runner: cc, channels: [log]}
 runners: {cc: {kind: claude-code, binary: /unused}}
 channels: {log: {kind: log}}
@@ -34,7 +34,7 @@ sandbox: {sandboxd: "unix:/tmp/unused.sock"}
 			t.Fatal(err)
 		}
 	}
-	writeConfig("UTC")
+	writeConfig("https://one.example")
 	if err := os.WriteFile(filepath.Join(dir, "agents/helper.yaml"), []byte(`
 name: helper
 charter: Help.
@@ -94,7 +94,7 @@ session: {resume: true, idle: 24h, live: 24h}
 		t.Fatalf("first = %s %q, live=%d", first.Status, deref(first.Report), e.Live.Len())
 	}
 
-	writeConfig("America/Los_Angeles")
+	writeConfig("https://two.example")
 	if err := e.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
