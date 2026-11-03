@@ -16,6 +16,8 @@ const (
 	MCPOAuth = "orbit mcp oauth"
 	// ConnectorTokens keys connector tokens at rest and a connector sign-in's state (internal/connectors). Its root is ORBIT_CONNECTOR_KEY, not the operator token, so rotating the operator token signs no connector out.
 	ConnectorTokens = "orbit connector tokens"
+	// TemplateLink keys a signed templates link (docs/api.md, Sharing templates).
+	TemplateLink = "orbit template link"
 )
 
 // Approval is the purpose that signs the approval link of one action: the link's signature is Derive(Approval(id)) itself, in hex.

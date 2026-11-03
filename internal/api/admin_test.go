@@ -44,6 +44,7 @@ channels: {c: {kind: log}}
 func TestUsage(t *testing.T) {
 	v := newEnv(t, nil)
 	withTrigger(t, v, "America/New_York")
+	v.e.Current().Config.Agents["a"].Budget = &spec.AgentBudget{Period: "month", MaxCostUSD: 0.02, MaxRuns: 2}
 	sha := v.e.Current().Config.Agents["a"].SHA
 	id, err := v.s.EnqueueRun(ctx, store.NewRun{Agent: "a", SpecSHA: sha, Trigger: "manual"})
 	if err != nil {
@@ -119,6 +120,15 @@ func TestUsage(t *testing.T) {
 	}
 	if a := c["by_agent"].([]any); len(a) != 1 || a[0].(map[string]any)["agent"] != "a" {
 		t.Fatalf("by_agent = %v", a)
+	}
+	budgets := u["budgets"].([]any)
+	if len(budgets) != 1 {
+		t.Fatalf("budgets = %v", budgets)
+	}
+	b := budgets[0].(map[string]any)
+	if b["agent"] != "a" || b["period"] != "month" || b["runs"] != 1.0 || b["runs_with_cost"] != 1.0 ||
+		b["alert"] != true || b["exceeded"] != false || b["cost_utilization"].(float64) < 0.8 {
+		t.Fatalf("budget status = %v", b)
 	}
 
 	code, u = call(t, "GET", v.internal.URL+"/api/v1/usage?from=2020-01-01&to=2020-01-03", token, "")

@@ -1,11 +1,13 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
 	"time"
 
+	"github.com/kensac/orbit/internal/budget"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/scheduler"
 	"github.com/kensac/orbit/internal/spec"
@@ -45,6 +47,11 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
+	budgets, err := s.agentBudgets(r, cfg, now)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
 	toks, err := s.Store.TokenUsage(r.Context(), from, to, tz)
 	if err != nil {
 		respond(w, nil, err)
@@ -69,10 +76,67 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 			"threshold": usage.DeferLowAbove,
 			"held":      orEmpty(held),
 		},
-		"cost":   costs,
-		"tokens": toks,
-		"skills": skills,
+		"cost":    costs,
+		"budgets": budgets,
+		"tokens":  toks,
+		"skills":  skills,
 	}, nil)
+}
+
+type agentBudgetStatus struct {
+	Agent            string      `json:"agent"`
+	Period           string      `json:"period"`
+	PeriodStart      time.Time   `json:"period_start"`
+	ResetsAt         time.Time   `json:"resets_at"`
+	APIEquivalentUSD json.Number `json:"api_equivalent_usd"`
+	Runs             int         `json:"runs"`
+	RunsWithCost     int         `json:"runs_with_cost"`
+	MaxCostUSD       *float64    `json:"max_cost_usd,omitempty"`
+	MaxRuns          *int        `json:"max_runs,omitempty"`
+	CostUtilization  float64     `json:"cost_utilization"`
+	RunUtilization   float64     `json:"run_utilization"`
+	Alert            bool        `json:"alert"`
+	Exceeded         bool        `json:"exceeded"`
+}
+
+func (s *Server) agentBudgets(r *http.Request, cfg *spec.Config, now time.Time) ([]agentBudgetStatus, error) {
+	names := make([]string, 0, len(cfg.Agents))
+	for name := range cfg.Agents {
+		if cfg.Agents[name].Budget != nil {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	out := make([]agentBudgetStatus, 0, len(names))
+	for _, name := range names {
+		a := cfg.Agents[name]
+		start, end, err := budget.Window(a.Budget.Period, now, a.Location())
+		if err != nil {
+			return nil, err
+		}
+		used, err := s.Store.BudgetUsage(r.Context(), name, start, end, "")
+		if err != nil {
+			return nil, err
+		}
+		cost, err := used.APIEquivalentUSD.Float64()
+		if err != nil {
+			return nil, err
+		}
+		item := agentBudgetStatus{Agent: name, Period: a.Budget.Period, PeriodStart: start,
+			ResetsAt: end, APIEquivalentUSD: used.APIEquivalentUSD, Runs: used.Runs,
+			RunsWithCost: used.RunsWithCost, CostUtilization: budget.Utilization(cost, a.Budget.MaxCostUSD),
+			Alert:    budget.Alert(cost, used.Runs, a.Budget.MaxCostUSD, a.Budget.MaxRuns),
+			Exceeded: budget.Reached(cost, used.Runs, a.Budget.MaxCostUSD, a.Budget.MaxRuns)}
+		if a.Budget.MaxCostUSD > 0 {
+			item.MaxCostUSD = &a.Budget.MaxCostUSD
+		}
+		if a.Budget.MaxRuns > 0 {
+			item.MaxRuns = &a.Budget.MaxRuns
+			item.RunUtilization = float64(used.Runs) / float64(a.Budget.MaxRuns)
+		}
+		out = append(out, item)
+	}
+	return out, nil
 }
 
 // pollStatus is the usage poller's state as /usage reports it.
