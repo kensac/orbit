@@ -247,7 +247,8 @@ const (
 	TurnRunning   = "running"
 	TurnCompleted = "completed"
 	// TurnInterrupted is a turn whose process orbit saw end without a
-	// result: a timeout, a crash, a drain's hand-back.
+	// result: a timeout, a crash, a drain's hand-back, or orbit ending a
+	// stalled turn (Reason).
 	TurnInterrupted = "interrupted"
 	// TurnUnverifiable is a turn whose attempt was lost (reaped without a
 	// heartbeat): nothing observed how it ended.
@@ -267,7 +268,14 @@ type Turn struct {
 	CostUSD     *float64        `json:"cost_usd,omitempty"`
 	Usage       json.RawMessage `json:"usage,omitempty"`
 	Error       string          `json:"error,omitempty"`
+	// Reason is why orbit ended an interrupted turn, when it did so itself:
+	// ReasonStalled. Absent otherwise (and on rows older than the field).
+	Reason string `json:"reason,omitempty"`
 }
+
+// ReasonStalled is a turn orbit's stall watchdog ended (an orbit.stalled
+// event): the CLI wrote nothing for session.stall with no tool call running.
+const ReasonStalled = "stalled"
 
 // ---------------------------------------------------------------- cursors
 
