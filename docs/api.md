@@ -764,7 +764,7 @@ MCP servers orbit calls for agents (orbit.yaml `connectors`, docs/agents/configu
 
 ## Attention and push
 
-Something waiting on a person is an **attention** row, written in the same transaction as the thing itself, one per thing (`key`): a pending approval (`approval`, key `action:<id>`), a run's question (`question`, `question:<message id>`), a failed run (`failure`, `failure:<run id>`) and a decision: a ticket plan to approve (`decision`, `plan:<ticket id>:<version>`) or a delegated task blocked on a person (`decision`, `action:<task:decision action id>`). Whether it is still open is read from the thing at query time: the action still `pending`, the question unanswered, the plan the ticket's newest while it is `planned`, a task's decision action still `pending`, a failure until a later run of its conversation succeeds or the person writes there. Dismissing closes any of them for the inbox only (a dismissed approval stays pending).
+Something waiting on a person is an **attention** row, written in the same transaction as the thing itself, one per thing (`key`): a pending approval (`approval`, key `action:<id>`), a run's question (`question`, `question:<message id>`), a failed run (`failure`, `failure:<run id>`), a budget limit reached (`budget`, key `budget:<agent>:<period start>`), and a decision: a ticket plan to approve (`decision`, `plan:<ticket id>:<version>`) or a delegated task blocked on a person (`decision`, `action:<task:decision action id>`). Whether it is still open is read from the thing at query time: the action still `pending`, the question unanswered, the plan the ticket's newest while it is `planned`, a task's decision action still `pending`, a failure until a later run of its conversation succeeds or the person writes there, and a budget alert until dismissed. Dismissing closes any of them for the inbox only (a dismissed approval stays pending).
 
 `GET /attention?limit=<n>` is everything open, newest first (`limit` defaults to and is at most 500):
 
@@ -869,7 +869,7 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
 
 ## Workspace
 
-**Partly built.** The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). Built: finding a workspace, snapshot reads (W1), snapshot writes (W3), history, the change stream and per-reply changes (W6), the audit, and terminals in a box. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
+**Partly built.** The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). Built: finding a workspace, snapshot reads (W1), snapshot writes (W3), history, the change stream and per-reply changes (W6), review comments (W7), the audit, and terminals in a box. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
 
 A workspace is a file tree a person and an agent share. Routes take the authentik token as above; writes, trash, uploads, terminals and git writes also require membership of `ORBIT_WORKSPACE_GROUP` (default `ORBIT_OIDC_GROUP`; `403`, `check: "group"`). Errors carry a `check` beside `error`, as authentication errors do:
 
@@ -1056,16 +1056,16 @@ Close codes: `4001` when the instance drains or shuts down: reconnect with a new
 
 ### Review comments
 
-*(planned)* Comments on lines, sent to the conversation's agent as one message, as a ticket's review comments are (tickets.md).
+Comments on lines, sent to the conversation's agent as one message, as a ticket's review comments are (tickets.md, Review comments). The routes need a conversation with a workspace (`404`, `check: "no_workspace"`, otherwise); a comment, like a message, needs no workspace group. Errors carry a `check` as the routes above do, and `state` (`409`) when a comment's state does not allow the change.
 
-- `POST /conversations/{id}/comments` `{"path", "start_line", "end_line", "side": "new", "anchor": {"kind": "run", "run_id": "uuid"}, "body"}`: `201 {"comment"}`, a draft. `anchor.kind` is `run` (a reply's changes), `git` (`repo`, `base`, `head` as for a git diff) or `worktree` (the file as it is). `side` is `new` or `old`. Lines `0` and `0` mean the whole file; a body is at most 8 KB.
-- `GET /conversations/{id}/comments?status=`: `{"comments": [...]}`. `status` is `draft`, `sent`, `superseded` or `withdrawn`.
-- `POST /conversations/{id}/comments/{c}/edit` `{"body", "start_line"?, "end_line"?}` writes a new version that supersedes it; `POST .../withdraw` withdraws a draft.
-- `POST /conversations/{id}/review` `{"note"?, "comments"?: ["ids"], "wake"?: true, "client_request_id"?}`: sends the drafts (all of the conversation's, or the ones named) as one message, formatted by code: each comment's file, lines and anchor, the code it is on quoted, then its body quoted line by line. `201 {"message_id", "run_id"}` as `POST /conversations/{id}/messages`.
+- `POST /conversations/{id}/comments` `{"path", "start_line", "end_line", "side": "new", "anchor": {"kind": "run", "run_id": "uuid"}, "body"}`: `201 {"comment"}`, a draft. `anchor.kind` is `run` (a reply's changes: `side` `new` is the run's after, `old` its before), `git` (`repo`, `base`, `head` as for a git diff; `no_git` on the snapshot backend) or `worktree` (the file as it is now; `new` only). `side` defaults to `new`. Lines are 1-based and inclusive; `0` and `0` mean the whole file. The file must be in that snapshot, lines within it and text (binary files take only `0` and `0`); a run must be of this conversation. `quote` is the quoted lines as they were when the comment was written (at most 40 lines or 4 KB).
+- `GET /conversations/{id}/comments?status=`: `{"comments": [...]}`, every version, oldest first. `status` narrows to `draft`, `sent`, `delivered`, `superseded` or `withdrawn`; statuses are derived from rows.
+- `POST /conversations/{id}/comments/{c}/edit` `{"body", "start_line"?, "end_line"?}` writes a new version that supersedes it, re-quoting the same path and snapshot; `POST .../withdraw` withdraws a draft. Editing a sent or delivered comment creates a new draft version; the old version keeps its sent or delivered state. A withdrawn or superseded comment cannot be edited. Only a draft can be withdrawn.
+- `POST /conversations/{id}/review` `{"note"?, "comments"?: ["ids"], "wake"?: true, "client_request_id"?}`: sends selected drafts (or all drafts when `comments` is absent or empty) as one message, formatted by code with file, lines, anchor, quoted code and quoted body. Every named comment must be a draft in this conversation. `201 {"message_id", "run_id"}`; `wake` defaults true and `run_id` is absent when false. At least one draft is required; an empty review is `400`. The message, comment links and review audit rows are one transaction; `client_request_id` makes retry return the first result. A sent comment becomes delivered once a run that read its message succeeds.
 
 ### Audit
 
-`GET /workspaces/{id}/events?before=&limit=`: `{"events": [{"id", "at", "person", "op", "path", "from", "version_before", "version_after", "bytes", "terminal_id", "run_id", "request_id"}], "next_before"}`, newest first. `id` is a number; `limit` defaults to 100, at most 500; `next_before` is opaque, `null` on the last page. Fields an operation has no value for are `null` (`person` for the operator token, `version_before` for a create, `version_after` for a trash, `bytes` for a mkdir). Built today: `write`, `mkdir`, `rename`, `trash` (also before an upload's overwrite), `restore` and `upload`, one row per file. Reads are not recorded. `op` is each write route's name (`write`, `mkdir`, `rename`, `trash`, `restore`, `upload`, `commit`, `push`, `terminal.create`, `terminal.attach`, `terminal.detach`, `terminal.kill`, `review`). Terminal input is never recorded.
+`GET /workspaces/{id}/events?before=&limit=`: `{"events": [{"id", "at", "person", "op", "path", "from", "version_before", "version_after", "bytes", "terminal_id", "run_id", "request_id"}], "next_before"}`, newest first. `id` is a number; `limit` defaults to 100, at most 500; `next_before` is opaque, `null` on the last page. Fields an operation has no value for are `null` (`person` for the operator token, `version_before` for a create, `version_after` for a trash, `bytes` for a mkdir). Built today: `write`, `mkdir`, `rename`, `trash` (also before an upload's overwrite), `restore` and `upload`, one row per file, and `review`, one row per comment sent. Reads are not recorded. `op` is each write route's name (`write`, `mkdir`, `rename`, `trash`, `restore`, `upload`, `commit`, `push`, `terminal.create`, `terminal.attach`, `terminal.detach`, `terminal.kill`, `review`). Terminal input is never recorded.
 
 ## Memory
 
@@ -1259,6 +1259,20 @@ Routes:
 
 **In a conversation.** An agent whose rules enable `template:create` (the built-in `orbit` has it under `approve`) proposes `{"template", "version"?, "name"?, "parameters"}`. It is never executed as itself. When proposed, code renders it (the chat `act` tool answers at once with what will happen): a `user_prompt` value is the person's, taken from their `answers` to orbit's question for that template in this conversation and never from the proposal; when there are none, orbit asks it, a question with those parameters as its form (text `To create an agent from the template <name>, I need these from you.`), and the proposal is `denied` saying so. The person's answer reaches the agent's next run, which proposes again. A `required` value the proposal lacks, a parameter the template does not have, or a rendered agent that does not load denies it with the reason. A proposal that renders is recorded as an `agent:define` of the new agent, `pending` whatever the rules, its params the rendered `spec` and `template` (`{"name", "version"}`, the version it was rendered from); a person approves it like any action.
 
+### Sharing templates
+
+A template travels as a **bundle**: `{"format": "orbit.templates/1", "templates": [<document>]}`, each document `{"name", "description", "parameters", "spec"}` as a template is written. At most 100 templates and 1 MiB.
+
+- `POST /templates/share` `{"templates": [{"name", "version"?}], "link"?, "expires_in_hours"?}`: `200 {"bundle"}`, the named versions (the current one when `version` is absent, which must be active). With `link: true`, also `"link"` and `"expires_at"`: a URL under `public_url`, `<public_url>/api/v1/templates/shared/<token>`, that serves the bundle to anyone holding it, until it expires (`expires_in_hours`, 1 to 168; default 24). The token names those exact versions and the expiry, signed with a key derived from `ORBIT_API_TOKEN`, so the link always serves the same bundle and rotating the token voids every link. `503` without `public_url`.
+- `GET /templates/shared/{token}` takes no `Authorization`: the signature is the credential, as for signed uploads. `200` is the bundle; an altered or expired link is `403`.
+- `POST /templates/import` `{"bundle": {...}}` or `{"link": "<another orbit's link>"}`, with `dry_run`, `note`: `200 {"dry_run", "results": [{"name", "outcome": "created"|"updated"|"unchanged", "version", "lowered": [...]}]}`, in bundle order, as `source: "import"` versions with the token's person as `author`. All of it is one transaction; one bad template refuses the import (`400`, naming its index). A link is fetched with one GET: `https` only, a path under `/api/v1/templates/shared/`, no credential sent, no redirect followed, a public address only (checked on the connection, so a name resolving to a private, loopback or tailnet address is refused), within 10 s and 1 MiB.
+
+**What an import is held to**, all by code (`internal/share`) before anything is written:
+
+- **The scan.** Every key and string of the bundle, after JSON escapes are decoded, is checked for characters that hide or reorder text: Unicode tag characters (U+E0000 to U+E007F) and bidirectional controls (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069). One anywhere refuses the import, naming where (`/templates/0/spec/charter: a hidden character U+202E ...`).
+- **It grants nothing.** Every action rule in a template's spec that is not `deny` arrives as `approve`: an `auto`, and a slot that could render one, so nothing an import brings runs without a person. `connectors` are removed. `lowered` lists each change (`actions.notify: auto arrives as approve`). An agent created from an imported template is then held to everything any database agent is (Defining agents).
+
+
 ## Search
 
 `GET /search?q=&agent=&conversation_id=&run_id=&kind=&from=&to=&limit=&offset=`
@@ -1399,6 +1413,12 @@ The answer is Prometheus's `data`, `{"resultType", "result"}`, with `warnings` w
    "by_agent": [{"agent": "finance", "api_equivalent_usd": 0.811000, "runs": 30,
                  "runs_with_cost": 29, "by_status": {"...": 0}}],
    "by_day": [{"date": "2026-10-03", "api_equivalent_usd": 0.000000, "runs": 0}]},
+ "budgets": [{"agent": "finance", "period": "month",
+              "period_start": "2026-11-01T04:00:00Z", "resets_at": "2026-12-01T05:00:00Z",
+              "api_equivalent_usd": 0.811000, "runs": 30, "runs_with_cost": 29,
+              "max_cost_usd": 5, "max_runs": 40,
+              "cost_utilization": 0.1622, "run_utilization": 0.75,
+              "alert": false, "exceeded": false}],
  "tokens": {
    "total": {"input": 1200, "output": 52000, "cache_read": 4100000, "cache_creation": 310000,
              "cache_hit_ratio": 0.929515, "attempts": 40, "runs": 39},
@@ -1411,6 +1431,7 @@ The answer is Prometheus's `data`, `{"resultType", "result"}`, with `warnings` w
 
 - **Each window is the freshest of two readings, and says which.** `source: "stream"`: the CLI writes a `rate_limit_event` into a run's stream when its rate-limit information changes; orbit stores it in the run's events (`GET /runs/{id}/events`), and this reads the newest one per window from runs created in the last 8 days (`store.RateLimitLookback`: the longest window, `seven_day`, and a day); `run_id` is that run. `source: "poll"`: with `usage_poll` configured, control asks the endpoint Claude Code's own `/usage` reads every few minutes and keeps each answer; this reads the newest successful one from the same 8 days (`run_id` and `status` are `null`: the endpoint reports neither). **The poll is best effort**: the endpoint is undocumented, its shape is the one Claude Code caches from it, and a poll that fails is recorded (`poll.last_error`) while the windows keep the last good reading. Of the two, the one observed later wins (`observed_at`); a tie goes to the stream. A window absent from the list was reported by neither in that time.
 - `poll` is the poller's state: `enabled` (and `every`) as configured, `last_at` the newest poll of any outcome, `last_ok_at` the newest successful one, `last_error` the newest poll's error when it failed, else `null`.
+- `budgets` lists configured agent budgets for the current local calendar period, with API-equivalent cost, runner-started runs, limit utilization, reset time and whether an alert threshold or limit has been reached. Reaching a limit skips the next scheduled run before source fetching or a backend call and raises one pushable attention alert per agent and period; manual runs and messages remain available.
 - `deferral` is low-priority holding (`defer_low_priority`; docs/agents/configuration.md): `enabled`, `threshold` (`usage.DeferLowAbove`, a fraction like `utilization`) and `held`, the scheduled runs held now, oldest hold first: when first and last held, how many times, and the window, reading and source behind the latest hold, and `held_until`, when it is judged again.
 - `window` is the CLI's name for it (`five_hour`, `seven_day`,
   `seven_day_opus`, `seven_day_sonnet`, ...). `status` is `allowed`,
