@@ -302,7 +302,8 @@ func (s *Store) LastSuccessTimes(ctx context.Context) (map[string]time.Time, err
 		    WHERE r.agent = a.name AND r.status IN ('succeeded', 'skipped')
 		      AND r.gate IS DISTINCT FROM 'missed' AND r.gate IS DISTINCT FROM 'budget'
 		    ORDER BY r.finished_at DESC LIMIT 1
-		) ls ON true`)
+		) ls ON true
+		WHERE NOT a.task_worker`)
 	if err != nil {
 		return nil, err
 	}

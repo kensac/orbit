@@ -541,6 +541,7 @@ files. This is not a full run replay: behavior that depends on sources,
 memory, messages, tools, sessions or hooks is absent. Requests have at most
 32 cases, 8 MiB per input, 32 MiB total input and 512 KiB per output. Each
 case runs under the agent's configured timeout.
+`POST /agents/{grader}/grade` accepts `{"target_agent":"finance","cases":[{"name":"case","rubric":"...","output":{...}}]}` for model-based semantic checks. The grader must be an enabled, separately configured agent using a different runner configuration from the replay target. The backend receives only the rubric and candidate output, without either agent's charter, skills, sources, connectors, hooks, sessions, custom tools or actions. Claude Code can read the private temporary files holding this input through its built-in read-only file tools. The response is `{"grades":[{"name":"case","passed":true,"reason":"...","cost_usd":0.01}]}`. Grading creates no stored runs or artifacts. There are at most 32 cases, a 4 KiB rubric and a 512 KiB output per case. Reasons are limited to 512 characters.
 `GET /agents/{name}/messages` lists the default conversation's messages.
 
 ## Streaming a run
@@ -865,7 +866,7 @@ orbit reads the PR and its files from GitHub on each request, with a token for t
 
 ## Delegation
 
-An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each task has its own conversation of its agent, which is an ordinary conversation (thread, messages, runs) whose first message is the brief, written by the delegating agent: a message's `author` of `agent:<name>` is an agent, not a person. The delegating conversation's thread shows each run's `tasks`; these routes show the rest.
+An agent hands tasks to other agents or instantiates a fresh worker from an active template (docs/ARCHITECTURE.md, Delegation). An agent names allowed targets with `delegates` and `delegate_templates` in its spec. A template task supplies typed `parameters`; `user_prompt` templates are not offered. Its connector set is the intersection of the parent agent and rendered template, optionally narrowed by the task's `connectors` list. The worker spec and template version are pinned to the task. Each task has its own conversation whose first message is the brief, written by the delegating agent: a message's `author` of `agent:<name>` is an agent, not a person. A template-backed task reports `agent` as `template:<name>` and includes `template: {name, version}`. The delegating conversation's thread shows each run's `tasks`; these routes show the rest.
 
 `GET /conversations/{id}/tasks` is `{"tasks": [<task>]}`: the tasks delegated from that conversation, oldest first. `GET /tasks/{id}` is `{"task": <task>}`:
 
@@ -902,7 +903,7 @@ An agent hands tasks to other agents (docs/ARCHITECTURE.md, Delegation). Each ta
 
 ## Workspace
 
-**Partly built.** The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). Built: finding a workspace, snapshot reads (W1), snapshot writes (W3), history, the change stream and per-reply changes (W6), review comments (W7), the audit, and terminals in a box. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
+**Partly built.** The contract the portfolio's workspace builds against (design: [workspace.md](workspace.md)). Built: finding a workspace, snapshot reads (W1), workspace search (#147), snapshot writes (W3), history, the change stream and per-reply changes (W6), review comments (W7), the audit, and terminals in a box. Every part marked *(planned)* is not built yet and answers `404`; it loses the mark in the PR that implements it.
 
 A workspace is a file tree a person and an agent share. Routes take the authentik token as above; writes, trash, uploads, terminals and git writes also require membership of `ORBIT_WORKSPACE_GROUP` (default `ORBIT_OIDC_GROUP`; `403`, `check: "group"`). Errors carry a `check` beside `error`, as authentication errors do:
 
@@ -978,6 +979,17 @@ Reads are limited to 100 requests a second per person per workspace (per orbit i
 On the snapshot backend a write, mkdir, rename, trash, restore or upload stores a new snapshot (`source: person`, `run_id` null), made from the newest and applied again from the newest when another write got in first; it is refused with `busy` while a run of the conversation is running, since the run's own snapshot would follow it. `as_of` moves to it. The whole snapshot holds at most 256 MiB (`too_large`), so a signed upload larger than that is refused when it is asked for. Writes are limited to 20 a second per person per workspace (per instance), as reads are. A request's `X-Request-Id` (up to 128 printable characters; one is made when it has none) is echoed in the response and recorded with its events.
 
 The next turn of the conversation's agent is told, by code, which files the person changed since the agent last saw the workspace (added, modified, removed, renamed; at most 100 lines), and its working directory has the person's version: a live session process, whose sandbox holds the old copy, is not reused, and the session resumes in a new one started from the workspace as it is.
+
+### Search
+
+`GET /workspaces/{id}/search?q=&path=&regex=&case=&limit=&ref=` finds text in the workspace's files, line by line: `{"matches": [{"path": "src/a.go", "line": 3, "column": 6, "end_column": 12, "preview": "func Needle() {}", "preview_column": 1}], "truncated": false, "files_searched": 4}`.
+
+- `q` is the text (1 to 256 bytes), literal unless `regex=1`, which takes Go's RE2 syntax (linear in the text, so no pattern can run away; an invalid one is `request`). Matching ignores case unless `case=1`. A match never spans lines; an empty match is skipped.
+- `path` narrows to a directory or one file (default the root); `ref` searches a past version, as for `GET /files`. Files are searched in tree order (directories first, then by name); a binary file, one over the editor's 2 MiB, and what `.gitignore` ignores (unless `path` names it) are skipped, and orbit's own state is never in the tree. `files_searched` counts the files read.
+- `line` is 1-based; `column` and `end_column` are 1-based in UTF-16 code units (as a JavaScript string counts, where an editor puts a cursor), `end_column` just past the match. `preview` is the line (without its line ending), cut to at most 200 bytes around the match on character boundaries; `preview_column` is where it starts in the line.
+- `limit` defaults to 200 matches, at most 1000. A search stops at `limit` or after 5 seconds and returns what it found with `truncated` true.
+
+A search is a read: it spends one of the reads the rate allows, and, like every read, is not in the audit.
 
 ### History
 
@@ -1097,13 +1109,17 @@ A box holds Claude accounts besides its own profile: each is a directory, `/home
  "email": "k@example.com", "account_uuid": "uuid", "org_id": "uuid", "org_name": "...",
  "subscription_type": "max", "rate_limit_tier": "default_claude_max_20x",
  "access_expires_at": "...", "refresh_expires_at": "...", "checked_at": "...",
- "last_used_at": "...", "created_by": "kanishk", "created_at": "..."}
+ "last_used_at": "...",
+ "usage": {"source": "statusline", "observed_at": "...",
+           "windows": [{"window": "five_hour", "used_percentage": 12.5, "resets_at": "..."}]},
+ "created_by": "kanishk", "created_at": "..."}
 ```
 
 - `slot` names the account's volume (`orbit-box-<agent>-acct-<slot>`) and directory: 12 hex digits of its `id`.
 - `logged_in`, `email`, `account_uuid`, `org_id`, `org_name`, `subscription_type`, `rate_limit_tier` and the expiries are what the account's files said when `checked_at` was: `logged_in` is whether its credentials hold a refresh token; `access_expires_at` is the access token's expiry (the CLI refreshes it itself), `refresh_expires_at` the refresh token's, past which the account needs a new login. A read that finds no login sets `logged_in` false and clears the expiries but keeps the identity fields, so a logged-out account still says whose it was. Each is `null` until read, or when the CLI did not write it.
 - `last_used_at` is the newest attach of a terminal under the account, `null` before one.
-- An account is read from the box on every list and get while the box is running (a stopped box is not started for it), and when a terminal under it ends; otherwise the fields are as last read.
+- `usage` is the newest observation of the account's subscription windows, `null` before one. `source` is `statusline`: the box image's status line (`orbit-statusline`, which managed settings give every Claude Code in the box) records the `rate_limits` the CLI hands it into the account's `.orbit/usage.json` whenever an interactive Claude Code runs under the account, and orbit reads that file; or `poll`: orbit asked the undocumented `/api/oauth/usage` from inside the box with the account's access token, only when `ORBIT_ACCOUNT_USAGE_POLL` is set (off by default; docs/agents/deployment.md). `observed_at` is when the status line ran or the poll answered. `windows` are sorted by name: `window` is the CLI's or the endpoint's name (`five_hour`, `seven_day`, `seven_day_opus`, ...), `used_percentage` 0 to 100 (`null` when not reported), `resets_at` `null` when not reported. An older observation never replaces a newer one, whichever its source, and it is not refreshed by a stopped box: after a window's `resets_at` has passed, its `used_percentage` is out of date.
+- An account (its login and its status line's usage record) is read from the box on every list and get while the box is running (a stopped box is not started for it), and when a terminal under it ends; otherwise the fields are as last read.
 
 Routes require the workspace to be a box (`409`, `no_shell`, otherwise). Mutations and account login require membership of `ORBIT_WORKSPACE_GROUP` (`403`, `group`); account reads use the authenticated workspace access.
 

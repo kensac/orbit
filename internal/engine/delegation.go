@@ -2,6 +2,9 @@ package engine
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -12,7 +15,32 @@ import (
 	"github.com/kensac/orbit/internal/forms"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
+	"github.com/kensac/orbit/internal/templates"
 )
+
+func (e *Engine) actionCatalog(ctx context.Context, a *spec.Agent, d spec.Deployment) ([]actions.Type, error) {
+	if len(a.DelegateTemplateTargets()) == 0 || a.RuleFor(actions.DelegateType) == spec.RuleDeny {
+		return actions.Catalog(a, d), nil
+	}
+	templates, err := e.Store.ListTemplates(ctx, "active")
+	if err != nil {
+		return nil, err
+	}
+	full := make([]store.Template, 0, len(templates))
+	for _, tpl := range templates {
+		if !slices.Contains(a.DelegateTemplateTargets(), "*") && !slices.Contains(a.DelegateTemplateTargets(), tpl.Name) {
+			continue
+		}
+		loaded, err := e.Store.GetTemplate(ctx, tpl.Name, tpl.Version, true)
+		if err != nil {
+			return nil, err
+		}
+		if loaded.Status == "active" {
+			full = append(full, *loaded)
+		}
+	}
+	return actions.Catalog(a, d, full), nil
+}
 
 // Delegation (docs/ARCHITECTURE.md, Delegation): the engine's side is the
 // prompts (a task's run is told whom it reports to; a parent's run is told
@@ -50,10 +78,29 @@ func (o *taskOps) Delegate(ctx context.Context, c actions.Call, p actions.Delega
 	}
 	// Checked again against the configuration in force: a target may have
 	// gone since the run proposed it.
-	if _, err := actions.DecodeDelegate(c.Params, a.DelegateTargets()); err != nil {
+	available, err := o.e.Store.ListTemplates(ctx, "active")
+	if err != nil {
 		return nil, err
 	}
-	made, err := o.e.Store.Delegate(ctx, store.Delegation{ActionID: c.ID, RunID: c.RunID, Tasks: p.NewTasks()})
+	targetTemplates := make([]string, 0, len(available))
+	for _, tpl := range available {
+		if slices.Contains(a.DelegateTemplateTargets(), "*") || slices.Contains(a.DelegateTemplateTargets(), tpl.Name) {
+			targetTemplates = append(targetTemplates, tpl.Name)
+		}
+	}
+	if _, err := actions.DecodeDelegate(c.Params, a.DelegateTargets(), targetTemplates); err != nil {
+		return nil, err
+	}
+	tasks := p.NewTasks()
+	for i := range tasks {
+		if tasks[i].TemplateName == "" {
+			continue
+		}
+		if err := o.prepareTemplateWorker(ctx, c, a, &tasks[i]); err != nil {
+			return nil, fmt.Errorf("delegate task %q: %w", tasks[i].Key, err)
+		}
+	}
+	made, err := o.e.Store.Delegate(ctx, store.Delegation{ActionID: c.ID, RunID: c.RunID, Tasks: tasks})
 	if err != nil {
 		return nil, err
 	}
@@ -73,6 +120,128 @@ func (o *taskOps) Delegate(ctx context.Context, c actions.Call, p actions.Delega
 		o.e.Log.Warn("delegation: reconcile after delegate", "err", err)
 	}
 	return json.Marshal(map[string]any{"tasks": made})
+}
+
+func (o *taskOps) prepareTemplateWorker(ctx context.Context, c actions.Call, parent *spec.Agent, task *store.NewTask) error {
+	tpl, err := o.e.Store.GetTemplate(ctx, task.TemplateName, 0, true)
+	if err != nil {
+		return fmt.Errorf("template %s: %w", task.TemplateName, err)
+	}
+	if tpl.Status != "active" {
+		return fmt.Errorf("template %s version %d is retired", tpl.Name, tpl.Version)
+	}
+	for _, prm := range tpl.Parameters {
+		if prm.Mode == templates.UserPrompt {
+			return fmt.Errorf("template %s has person-only parameter %q and cannot be delegated", tpl.Name, prm.Name)
+		}
+	}
+	workerName, err := newTaskWorkerName()
+	if err != nil {
+		return err
+	}
+	_, rendered, err := o.e.renderTemplate(ctx, TemplateRequest{Template: tpl.Name, Version: tpl.Version, Name: workerName,
+		Values: task.Parameters, ConversationID: c.ConversationID})
+	if err != nil {
+		return err
+	}
+	worker, err := spec.DecodeAgent(rendered)
+	if err != nil {
+		return err
+	}
+	allowed := make([]string, 0, len(worker.Connectors))
+	for _, name := range worker.Connectors {
+		if slices.Contains(parent.Connectors, name) {
+			allowed = append(allowed, name)
+		}
+	}
+	selected := allowed
+	if task.Connectors != nil {
+		selected = slices.Clone(task.Connectors)
+		for _, name := range selected {
+			if !slices.Contains(parent.Connectors, name) {
+				return fmt.Errorf("connector %q is not enabled for the parent agent", name)
+			}
+			if !slices.Contains(worker.Connectors, name) {
+				return fmt.Errorf("connector %q is not enabled by template %s", name, tpl.Name)
+			}
+		}
+	}
+	worker.Connectors = selected
+	workerJSON, err := json.Marshal(worker)
+	if err != nil {
+		return err
+	}
+	defined, err := o.e.DefineAgent(ctx, DefineRequest{Spec: workerJSON, DryRun: true})
+	if err != nil {
+		return err
+	}
+	task.Agent = defined.Agent.Name
+	task.TemplateVersion = tpl.Version
+	task.WorkerSpec, err = json.Marshal(defined.Agent)
+	if err != nil {
+		return err
+	}
+	task.WorkerSHA = defined.Agent.SHA
+	return nil
+}
+
+func newTaskWorkerName() (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", err
+	}
+	return "worker-" + hex.EncodeToString(id[:]), nil
+}
+
+func (e *Engine) taskWorkerAgent(ctx context.Context, snap *Snapshot, c *store.ClaimedRun, task *store.Task) (*spec.Agent, error) {
+	doc, err := e.Store.TaskWorkerSpec(ctx, c.Agent, c.SpecSHA)
+	if err != nil {
+		return nil, err
+	}
+	worker, err := spec.DecodeAgent(doc)
+	if err != nil {
+		return nil, fmt.Errorf("template worker spec: %w", err)
+	}
+	if worker.Name != c.Agent {
+		return nil, fmt.Errorf("template worker spec names %q, run names %q", worker.Name, c.Agent)
+	}
+	canonical, err := json.Marshal(worker)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(canonical)
+	if got := hex.EncodeToString(sum[:]); got != c.SpecSHA {
+		return nil, fmt.Errorf("template worker spec for %q does not match run spec %s", c.Agent, c.SpecSHA)
+	}
+	parent := snap.Config.Agents[task.ParentAgent]
+	if parent == nil {
+		return nil, fmt.Errorf("template worker parent agent %q is no longer configured", task.ParentAgent)
+	}
+	for _, name := range worker.Connectors {
+		if !slices.Contains(parent.Connectors, name) {
+			return nil, fmt.Errorf("template worker connector %q is outside parent agent %q's connector set", name, parent.Name)
+		}
+	}
+	worker.Origin = spec.OriginDatabase
+	worker.SHA = c.SpecSHA
+	copyConfig := &spec.Config{Deployment: snap.Config.Deployment, Agents: make(map[string]*spec.Agent, len(snap.Config.Agents)+1)}
+	for name, existing := range snap.Config.Agents {
+		b, err := json.Marshal(existing)
+		if err != nil {
+			return nil, err
+		}
+		cloned, err := spec.DecodeAgent(b)
+		if err != nil {
+			return nil, err
+		}
+		cloned.Enabled, cloned.Origin, cloned.Version, cloned.SHA = existing.Enabled, existing.Origin, existing.Version, existing.SHA
+		copyConfig.Agents[name] = cloned
+	}
+	copyConfig.Agents[worker.Name] = worker
+	if err := copyConfig.Validate(); err != nil {
+		return nil, fmt.Errorf("template worker %q no longer loads: %w", task.Template.Name, err)
+	}
+	return worker, nil
 }
 
 // MessageTask writes to a task: into its running reply when a chat agent's run works on it (a correction reaches the worker mid-turn), otherwise for its next run, which it wakes. The result's delivered says which.
@@ -147,6 +316,9 @@ func taskContract(t *store.Task) string {
 	b.WriteString("- notify: nothing you send here reaches a person directly; leave notify.send false.\n")
 	if t.Fresh {
 		b.WriteString("- You are a fresh worker for this task: you start with no memory, and nothing you put in memory is kept.\n")
+	}
+	if t.Template != nil {
+		fmt.Fprintf(&b, "- Your worker spec was rendered from template %s version %d; your allowed connectors are limited to the task's pinned worker spec.\n", t.Template.Name, t.Template.Version)
 	}
 	return b.String()
 }
