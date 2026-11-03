@@ -117,6 +117,10 @@ it, a request ticket or a `github:merge` rule fails validation.
 
 `read_repositories` (optional) lists the repositories agents may read (`repos`, below). It is separate from `repositories`: reading a repository never permits a ticket or a merge there, and a repository in `repositories` is not readable unless it is listed here too.
 
+`comment_repositories` (optional) lists where `github:comment` may post: `{"repo", "number", "body"}` on an issue or a pull request, as the App, with an `issues: write` token minted for the comment and revoked after it. An agent with a `github:comment` rule fails validation without it. A comment is public to everyone who can see the repository, so give the action `approve` unless the agent's inputs are its own. The App needs the Issues write permission.
+
+`gmail:draft` and `calendar:create` are not action types: orbit holds no Google credential, and the connectors work (agents calling MCP servers through orbit, which holds the credentials) is where they belong. Until it lands, a draft or an event is a `notify` or a `webhook:<endpoint>` to something that holds the credential.
+
 ## Repositories
 
 `repos: [{repo: owner/name, ref: main}]` on an agent gives every run the tree of each repository at `ref` (a branch, a tag or a full commit sha; empty is the default branch), fetched by orbit just before the run (`internal/repos`, docs/ARCHITECTURE.md, Repositories):
@@ -274,9 +278,31 @@ sources:
 
 ## Templates in sources
 
-URLs and query values may use `{{today}}`, `{{now}}`, `{{month_start}}`,
-`{{prev_month_start}}`, `{{prev_month_end}}`, `{{days_ago_N}}`, in the agent's
-timezone. An unknown `{{name}}` fails the fetch.
+URLs, query values, headers and Prometheus expressions may use these, as `YYYY-MM-DD` in the agent's timezone (`sources.Vars.Expand`):
+
+| Template | Is |
+|---|---|
+| `{{now}}` | the run's start, RFC 3339 |
+| `{{today}}` | the run's day |
+| `{{month_start}}`, `{{prev_month_start}}`, `{{prev_month_end}}` | the first day of this month, and the first and last day of the previous one |
+| `{{days_ago N}}` | N days before today, N from 0 to 3660 (`{{days_ago_N}}`, N from 1 to 366, is the same) |
+| `{{months_ago_start N}}`, `{{months_ago_end N}}` | the first and last day of the month N months before this one, N from 0 to 120: `{{months_ago_start 1}}` is `{{prev_month_start}}`, `{{months_ago_end 0}}` this month's last day |
+
+Anything else in `{{...}}`, or a count out of range, fails the fetch naming it.
+
+**Per-trigger windows.** An http source's `by_trigger.<trigger>.query` replaces query values for runs of that trigger, so a person's message can read a wider window than the schedule's review:
+
+```yaml
+query:
+  start_date: "{{prev_month_start}}"
+  end_date: "{{today}}"
+by_trigger:
+  message:
+    query:
+      start_date: "{{months_ago_start 3}}"
+```
+
+A run's trigger is the run's own (`schedule`, `manual`, `message`, `continue`, `task`, `delegation`, `webhook`); a trigger without an override fetches the source's query. An attempt that recovers an interrupted one reads the inputs that attempt read.
 
 ## Adding a kind
 
@@ -289,6 +315,14 @@ fails at runtime, not at load.
 ## Chat agents
 
 `chat: true` (claude-code runners only) makes an agent a Claude Code session whose reply is its final message, with memory, questions and actions as orbit's tools (docs/ARCHITECTURE.md, Chat agents); each conversation gets its own workspace. `sandbox: workstation` (needs `chat`) runs it in a sandboxd container with Claude Code's full tool set, a kept home and egress to any public host; `sandbox: build` with the tools in its `tools` and the build allowlist; sandboxd is `sandbox: {sandboxd: <host:port | unix:/path>, token_env: ORBIT_SANDBOX_TOKEN}` in orbit.yaml, or the `build:` section's when there is no `sandbox:`. The CLI there needs `CLAUDE_CODE_OAUTH_TOKEN`. Give a sandboxed agent `needs: [sandbox]` so only hosts that reach sandboxd claim it (the built-in has it).
+
+## Permissions
+
+`permissions: {level, ceiling}` is how a chat agent's Claude Code session asks before a tool runs, named as Orca names them and mapped onto Claude Code's permission modes: `locked` is `dontAsk` (the spec's allowlist, everything else denied unasked), `ask` is `default` with the stdio permission prompt, `edits` is `acceptEdits`, `auto` is `auto` where the CLI and model offer it (else `ask`, recorded as an `orbit.permissions` event), `full` is `bypassPermissions`. A level decides which calls run without a person; it never adds a tool (`tools` and the sandbox profile do).
+
+- **Defaults.** A chat in a `sandbox` is `full` with ceiling `full`: the container is the boundary (security.md, Sandboxed chats). Every other agent is `locked`, and an agent that is not a chat runs unattended, so it can be nothing else.
+- **Limits.** `level` is at most `ceiling`. Without a `sandbox` the widest is `edits`: `auto` and `full` let a call run without a person on orbit's host, beside its secrets. A level that is not one of the five, or one the agent cannot run, resolves down at run time, never up (`Agent.ResolveLevel`); at load it is an error.
+- **A process can be raised.** Every chat process has the stdio permission prompt, and one whose ceiling is `full` is launched with `--allow-dangerously-skip-permissions` (without it the CLI refuses `set_permission_mode bypassPermissions`).
 
 ## Web allowlist
 
@@ -379,7 +413,7 @@ orbit's binary runs each (`orbit agent-hook`, its definition a flag orbit writes
 
 ## Skills
 
-`skills: [monthly-close]` names skills from orbit's library the agent runs with (docs/ARCHITECTURE.md, Skills). A name no skill has is skipped at run time and shown as `missing` in `GET /agents/{name}/context`; the API attaches more.
+`skills: [monthly-close]` names skills from orbit's library the agent runs with (docs/ARCHITECTURE.md, Skills). A name no skill has is skipped at run time and shown as `missing` in `GET /agents/{name}/context`; the API attaches more. An agent writes skills only with `actions: {skill:write: approve}` (or `auto`): unnamed, it writes none.
 
 ## Learning
 

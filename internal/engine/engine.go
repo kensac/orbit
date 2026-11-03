@@ -194,12 +194,21 @@ func (e *Engine) Execute(ctx context.Context, c *store.ClaimedRun) error {
 		e.saveSession(ctx, c, st.home, st.workdir, st.sessionID)
 		return e.Store.HandBack(context.WithoutCancel(ctx), c.ID, c.Attempt, cost, total)
 	}
+	if st.stalledBack(c.Attempt) {
+		cost, total := st.spent()
+		e.saveSession(ctx, c, st.home, st.workdir, st.sessionID)
+		log.Info("stalled; handed back", "attempt", c.Attempt, "session", st.sessionID)
+		return e.Store.HandBack(context.WithoutCancel(ctx), c.ID, c.Attempt, cost, total)
+	}
 	var sk *gateSkip
 	if errors.As(err, &sk) {
 		return e.skip(context.WithoutCancel(ctx), snap, a, c, start, sk)
 	}
 	if cr := (cancelledRun{}); errors.As(err, &cr) || errors.Is(context.Cause(actx), errCancelled) {
 		return e.cancelled(ctx, snap, a, c, start, cr.out, res)
+	}
+	if err != nil && st.stalled && c.Attempt >= store.MaxAttempts {
+		err = fmt.Errorf("%w (attempt %d of %d)", err, c.Attempt, store.MaxAttempts)
 	}
 	if err != nil {
 		if h := e.holdFor(context.WithoutCancel(ctx), a, c, err); h != nil {
@@ -340,7 +349,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	home := filepath.Join(workdir, ".home")
 	inputsDir := "inputs"
-	keepScratch := func() bool { return ctx.Err() != nil }
+	keepScratch := func() bool { return ctx.Err() != nil || st.stalledBack(c.Attempt) }
 	withSession := a.Session != nil && a.Session.Resume && claudeCode
 	chat := a.Chat && claudeCode
 	// What the person changed in a chat's workspace since the last turn.
@@ -471,7 +480,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 				Meta: map[string]any{"delivery_id": d.DeliveryID, "event": d.Event, "trigger": d.TriggerName}}
 		}
 	}
-	vars := sources.Vars(now)
+	vars := sources.Vars{Now: now, Trigger: c.Trigger}
 	var inputs []runner.Input
 	if rec != nil {
 		// The session read these; it continues on exactly them.
@@ -602,7 +611,6 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	schema := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, true)
 	envelope := OutputSchema(types, snap.Config.Deployment.Defaults.MemoryMaxBytes, false)
 	schema, envelope = withEntries(schema, true), withEntries(envelope, false)
-	schema, envelope = withSkills(schema, true), withSkills(envelope, false)
 	tk, err := e.Store.TicketForConversation(ctx, c.ConversationID)
 	if err != nil {
 		return nil, nil, err
@@ -649,26 +657,33 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	if err != nil {
 		return nil, nil, err
 	}
-	gw, conns, connSection := e.prepareConnectors(ctx, snap, a, c, workdir, inputsDir, emit, func(kind string, v any) error {
+	record := func(kind string, v any) error {
 		b, _ := json.Marshal(v)
 		return events.write(kind, b)
-	})
+	}
+	gw, conns, connSection := e.prepareConnectors(ctx, snap, a, c, workdir, inputsDir, emit, record)
 	defer gw.close()
 	var hooks *status.Listener
 	if hr != nil {
 		hooks, hr.Status = e.listenHooks(ctx, c, home, emit, log)
 		defer hooks.Close()
 	}
+	var stall *runner.Stall
+	if claudeCode {
+		stall = &runner.Stall{After: a.StallAfter(), ToolOpen: func(ctx context.Context) (bool, error) {
+			return e.Store.ToolCallRunning(ctx, c.ID, c.Attempt)
+		}}
+	}
 	if chat {
-		out, res, err := e.chatTurn(ctx, snap, a, c, r, chatTurn{workdir: workdir, home: home, inputsDir: inputsDir, now: now,
+		out, res, err := e.chatTurn(ctx, snap, a, c, r, chatTurn{stall: stall, workdir: workdir, home: home, inputsDir: inputsDir, now: now,
 			run: promptRun{Trigger: c.Trigger, Wake: c.Prompt, Chain: c.Chain, Continuing: continuing, Known: known, Attached: attached,
 				WorkspaceChanges: wsNote}, fresh: wsFresh,
 			rc: rc, convo: convo, inputs: inputs, types: types, sess: sess, harness: hr, emit: emit, cancel: st.cancel, steer: &st.steer, rec: rec, instructor: st.instructor,
-			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != ""), plugin: skillsPlugin, repos: repoRun, connectors: conns, pinned: pinned})
+			extra: entriesContract(topics) + skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny), plugin: skillsPlugin, repos: repoRun, connectors: conns, pinned: pinned, skills: skills, record: record})
 		if out != nil {
 			out.connectorCalls = gw.pendingCalls()
 		}
-		return out, res, err
+		return out, res, st.sawStall(err)
 	}
 	system := systemPrompt(a, types, inputs, r.Kind() != "anthropic", hr)
 	if tk != nil {
@@ -681,7 +696,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		system += knownContract
 	}
 	system += entriesContract(topics)
-	system += skillsContract(skills, skillsPlugin != "")
+	system += skillsContract(skills, skillsPlugin != "", a.RuleFor(actions.SkillWriteType) != spec.RuleDeny)
 	system += connSection
 	delegated, err := e.Store.ConversationTasks(ctx, c.ConversationID, c.ID)
 	if err != nil {
@@ -709,7 +724,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 
 	req := runner.Request{
 		RunID: c.ID, Workdir: workdir, System: system, Prompt: prompt, Inputs: inputs,
-		Tools: a.Tools, WebAllow: webAllow(a), OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin, Connectors: conns,
+		Tools: a.Tools, WebAllow: webAllow(a), OutputSchema: schema, Session: sess, Harness: hr, SkillsPlugin: skillsPlugin, Connectors: conns, Stall: stall,
 	}
 	if err := e.Store.RecordPrefix(ctx, c.ID, c.Attempt, runner.PrefixOf(r.Kind(), r.Model(), a.Charter, req)); err != nil {
 		return nil, nil, err
@@ -724,7 +739,7 @@ func (e *Engine) attempt(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))
 	}
 	if err != nil {
-		return nil, res, backendErr{err}
+		return nil, res, st.sawStall(backendErr{err})
 	}
 	if err := e.Store.PutArtifact(ctx, c.ID, c.Attempt, "out", "output.json", "application/json", res.Output); err != nil {
 		return nil, res, err
@@ -841,6 +856,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		m := out.Memory.Content
 		o.Memory = &m
 	}
+	skillWrites := 0
 	acts := make([]proposed, 0, len(out.Actions))
 	for _, act := range out.Actions {
 		acts = append(acts, proposed{act.Type, act.Params, act.Reason})
@@ -887,6 +903,14 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 				e.Log.Info("agent:define widens an agent; held for approval", "run", c.ID, "widens", strings.Join(w, "; "))
 			}
 		}
+		if act.Type == actions.SkillWriteType && pa.Error == "" {
+			skillWrites++
+			if p, err := skillProposal(out.skills, act.Params, skillWrites); err != nil {
+				pa.Rule, pa.Error = string(spec.RuleDeny), err.Error()
+			} else {
+				pa.Params = p
+			}
+		}
 		if act.Type == actions.TemplateCreateType && pa.Error == "" {
 			e.templateOutcome(ctx, c.ConversationID, &pa, &o.Questions)
 		}
@@ -897,8 +921,6 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	}
 	writes, refused := resolveEntryWrites(a.Name, out.topics, out.known, out.Entries)
 	o.Entries = writes
-	skillWrites, skillsRefused := resolveSkillWrites(out.skills, out.Skills)
-	o.Skills = skillWrites
 	rr := store.RunResult{Attempt: c.Attempt, Status: "succeeded", Summary: out.Summary, Report: out.Report}
 	fillResult(&rr, res)
 	ids, err := e.Store.RecordOutcome(ctx, c.ID, a.Name, rr, o)
@@ -906,7 +928,6 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return err
 	}
 	e.recordEntryWrites(ctx, c, out.Entries, writes, refused)
-	e.recordSkillWrites(ctx, c, out.Skills, skillWrites, skillsRefused)
 	metrics.RunFinished(a.Name, "succeeded", runnerKind(snap, a), time.Since(start), rr.CostUSD)
 
 	// Delivery: the report, then each pending approval.
@@ -952,9 +973,14 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			continue
 		}
 		id := ids[i]
+		body := pa.Reason + "\n\n```json\n" + string(pa.Params) + "\n```"
+		if pa.Type == actions.SkillWriteType {
+			// The change and the skill's scripts come first, in words, so a person sees what a skill would make later runs do.
+			body = skillApprovalText(pa.Params) + "\n" + body
+		}
 		e.deliver(ctx, snap, a, &c.ID, &id, "approval", notify.Message{
 			Title:    fmt.Sprintf("%s wants to %s", a.Name, pa.Type),
-			Body:     pa.Reason + "\n\n```json\n" + string(pa.Params) + "\n```",
+			Body:     body,
 			Priority: notify.High,
 			Tags:     []string{"orbit", "approval"},
 			Link:     e.ApprovalLink(snap, id),
@@ -1297,7 +1323,7 @@ func (e *Engine) executor(snap *Snapshot) *actions.Executor {
 			return e.Store.EnqueueContinuation(ctx, store.Continuation{
 				Agent: agent, FromRun: fromRun, After: after, Note: note, MaxChain: actions.MaxContinueChain})
 		},
-		Define: e.defineAction, Schedule: e.scheduleAction,
+		Define: e.defineAction, Schedule: e.scheduleAction, SkillWrite: e.skillWriteAction,
 		Connector: func(ctx context.Context, c actions.Call) (json.RawMessage, error) {
 			return e.executeConnector(ctx, snap, c)
 		}}

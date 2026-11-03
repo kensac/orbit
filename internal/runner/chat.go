@@ -17,6 +17,7 @@ import (
 
 	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/sandbox"
+	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/workspace"
 )
 
@@ -69,6 +70,12 @@ type Chat struct {
 	// Steered is told each steer message the turn took: from then on the
 	// turn answers it.
 	Steered func(id string)
+	// Level is the run's permission level (spec.Levels, resolved by the engine), and Ceiling the widest its conversation may set: a process whose ceiling is full is launched so that it can be raised to it.
+	Level, Ceiling string
+	// Prompt answers the CLI's permission requests during the turn; nil denies each one.
+	Prompt Prompt
+	// RecordPermission persists each decision before the CLI receives it.
+	RecordPermission func(claudeproto.PermissionRequest, claudeproto.Permission) error
 }
 
 // SandboxClient is sandboxd's four operations (*sandbox.Client).
@@ -195,8 +202,15 @@ func (c *claudeCode) chatArgs(req Request, home string, keepDays int) []string {
 	if len(webDeny) > 0 {
 		args = append(args, "--disallowedTools", strings.Join(webDeny, ","))
 	}
-	if sandboxed {
-		args = append(args, "--permission-mode", "bypassPermissions")
+	mode := startMode(req.Chat.Level)
+	if mode == PermissionMode(spec.LevelLocked) && len(req.Connectors.Ask()) > 0 {
+		// dontAsk drops explicit connector asks. In default mode orbit still denies other prompts.
+		mode = PermissionMode(spec.LevelAsk)
+	}
+	args = append(args, "--permission-mode", mode)
+	if req.Chat.Ceiling == spec.LevelFull && sandboxed {
+		// Without it the CLI refuses set_permission_mode bypassPermissions, so a conversation could not be raised to full live.
+		args = append(args, "--allow-dangerously-skip-permissions")
 	}
 	if req.SkillsPlugin != "" {
 		dir := req.SkillsPlugin
@@ -233,9 +247,11 @@ type chatProc interface {
 	SendUUID(text, uuid string) error
 	CancelQueued(ctx context.Context, uuid string) (bool, error)
 	Capable(name string) bool
+	SetPermissionMode(ctx context.Context, mode string) error
 	Close(grace time.Duration)
 	Kill()
 	Exited() <-chan struct{}
+	LastLine() time.Time
 }
 
 // chatTools routes a process's control requests to the turn in progress: a
@@ -330,12 +346,23 @@ func (t *chatTools) handler() claudeproto.Handler {
 			return conns.serve(ctx, req.ServerName, req.Message, push)
 		},
 		CanUseTool: func(ctx context.Context, req claudeproto.PermissionRequest) (claudeproto.Permission, error) {
-			_, _, conns, _ := t.current()
-			if conns == nil {
-				// orbit asks for no permission prompt without connectors.
-				return claudeproto.Permission{}, errors.New("orbit does not handle can_use_tool requests in this run")
+			c, _, conns, _ := t.current()
+			if c == nil {
+				if conns == nil {
+					return claudeproto.Permission{}, errors.New("orbit does not handle can_use_tool requests in this run")
+				}
+				return conns.permission(ctx, req)
 			}
-			return conns.permission(ctx, req)
+			if server, tool, ok := splitToolName(req.Tool); ok {
+				if _, found := conns.find(server, tool); found {
+					return conns.permission(ctx, req)
+				}
+			}
+			decide := noPrompt
+			if c.Prompt != nil && spec.LevelRank(c.Level) > spec.LevelRank(spec.LevelLocked) {
+				decide = c.Prompt
+			}
+			return claudeproto.Recorded(decide, c.RecordPermission)(ctx, req)
 		},
 	}
 }
@@ -417,9 +444,11 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	if sess != nil {
 		resume = sess.Resume
 	}
-	key := hashArgs(c.bin, req.Workdir, extra, env)
+	// Auto and ask share launch arguments but must have distinct live processes.
+	key := hashArgs(c.bin, req.Workdir, append(append([]string(nil), extra...), req.Chat.Level), env)
 
 	var p *liveProc
+	started := false
 	mode, parent := "fresh", resume
 	if sess != nil && sess.Live != nil {
 		if req.Chat.Fresh {
@@ -434,8 +463,8 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		}
 		tools := &chatTools{}
 		tools.connectors(req.Connectors)
-		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, Resume: resume, Ephemeral: sess == nil,
-			PermissionPrompt: len(req.Connectors.Ask()) > 0}, extra)
+		// Every chat process has the stdio permission prompt, so a level that asks can be set without a new process; at locked or full the CLI sends none but ExitPlanMode's.
+		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, PermissionPrompt: true, Resume: resume, Ephemeral: sess == nil}, extra)
 		if err != nil {
 			return nil, err
 		}
@@ -454,6 +483,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			return nil, err
 		}
 		p = &liveProc{proc: proc, tools: tools, busy: true}
+		started = true
 		if sess != nil {
 			p.key = sess.Key
 		}
@@ -477,6 +507,13 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	p.tools.set(req.Chat, ws)
 	p.tools.connectors(req.Connectors)
 	defer func() { p.tools.set(nil, nil); p.tools.connectors(nil) }()
+
+	if started && req.Chat.Level == spec.LevelAuto {
+		if _, err := applyLevel(ctx, p.proc, req.Chat.Level, emit); err != nil {
+			dropOrKill(sess, p)
+			return nil, fmt.Errorf("set the permission level: %w", err)
+		}
+	}
 
 	var (
 		imu     sync.Mutex
@@ -511,12 +548,17 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		steer = newSteering(p.proc, req.Chat, emit)
 		go steer.feed(turnCtx, req.Chat.Steer)
 	}
+	stopWatch := req.Stall.watch(turnCtx, p.proc, func(ctx context.Context) error {
+		_, err := p.proc.Interrupt(ctx, false)
+		return err
+	})
 	res, err := p.proc.Turn(turnCtx, req.Prompt, func(l claudeproto.Line) {
 		if steer != nil {
 			steer.observe(l)
 		}
 		emit(Event{Kind: l.Kind, Payload: l.Raw})
 	})
+	stopWatch()
 	endTurn()
 	imu.Lock()
 	interrupted, rec := stopped, receipt
@@ -535,6 +577,11 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		if serr := sb.sync(context.WithoutCancel(ctx)); serr != nil && err == nil {
 			err = fmt.Errorf("read the workspace back from the sandbox: %w", serr)
 		}
+	}
+	if req.Stall.Fired() {
+		emit(req.Stall.event())
+		dropOrKill(sess, p)
+		return nil, stallError(req.Stall)
 	}
 	if err != nil {
 		dropOrKill(sess, p)

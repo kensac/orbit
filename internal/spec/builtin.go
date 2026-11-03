@@ -90,10 +90,10 @@ func Builtins(d Deployment) []*Agent {
 		MessagesTrigger: true,
 		Session:         sess,
 		// It may define agents, itself included (docs/api.md, Defining
-		// agents): each change is a new, revertible version.
-		// GitHub writes wait for approval unless the person asked for them
-		// in the conversation, which approves them (docs/api.md, Chat
-		// agents); unattended runs always wait.
+		// agents): each change is a new, revertible version. It delegates
+		// under approve: directly in its person's chat, after approval
+		// when unattended. It creates agents from templates, each one an
+		// agent:define a person approves. GitHub writes follow the rules below.
 		Actions: builtinActions(d),
 		// Replies stay in orbit; failures and approvals still notify.
 		Notify: NotifySpec{When: "never"},
@@ -104,9 +104,10 @@ func Builtins(d Deployment) []*Agent {
 func builtinActions(d Deployment) ActionSet {
 	// It delegates, changes schedules and starts runs under approve:
 	// directly in its person's chat, after approval when unattended.
-	// agent:save and template:create are always proposed for approval
-	// (engine/save.go, engine/templates.go).
-	rules := ActionSet{"agent:define": RuleAuto, "agent:save": RuleApprove, "template:create": RuleApprove, "continue": RuleAuto, "delegate": RuleApprove,
+	// agent:save is always proposed for approval (engine/save.go). Its
+	// skill writes wait for a person: a skill steers every later run it
+	// is given to.
+	rules := ActionSet{"agent:define": RuleAuto, "skill:write": RuleApprove, "agent:save": RuleApprove, "template:create": RuleApprove, "continue": RuleAuto, "delegate": RuleApprove,
 		"schedule:add": RuleApprove, "schedule:pause": RuleApprove, "schedule:resume": RuleApprove,
 		"schedule:remove": RuleApprove, "run:now": RuleApprove}
 	if d.GitHub != nil {

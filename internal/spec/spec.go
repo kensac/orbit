@@ -122,6 +122,8 @@ type GitHub struct {
 	// for them. Reading a repository never permits a ticket or a merge
 	// there; that is Repositories alone.
 	ReadRepositories []string `yaml:"read_repositories,omitempty" json:"read_repositories,omitempty"`
+	// CommentRepositories ("owner/name") are where github:comment may post: a token of issues:write alone, minted per comment. Commenting never permits a push, a ticket or a merge.
+	CommentRepositories []string `yaml:"comment_repositories,omitempty" json:"comment_repositories,omitempty"`
 }
 
 // AllowsRepo reports whether repo is one orbit may act on.
@@ -143,6 +145,11 @@ func (d Deployment) RunURL(runID string) string {
 		return ""
 	}
 	return strings.TrimRight(d.PublicURL, "/") + "/ui/runs/" + url.PathEscape(runID)
+}
+
+// AllowsComment reports whether github:comment may post on repo.
+func (d Deployment) AllowsComment(repo string) bool {
+	return d.GitHub != nil && slices.Contains(d.GitHub.CommentRepositories, repo)
 }
 
 // AllowsRead reports whether repo is one an agent may read.
@@ -280,6 +287,8 @@ type Agent struct {
 	// a home kept in the workspace) or "build" (the tools it names, the
 	// build egress allowlist). Needs sandboxd in orbit.yaml.
 	Sandbox string `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
+	// Permissions is how a chat session asks before a tool runs, and how far a conversation may raise it (permissions.go). Absent is the defaults: full in a sandbox, locked otherwise.
+	Permissions *Permissions `yaml:"permissions,omitempty" json:"permissions,omitempty"`
 	// Delegates names the agents this one may hand tasks to with the
 	// delegate action ("*" is every configured agent, itself included).
 	// The delegate rule still decides whether it may (docs/ARCHITECTURE.md,
@@ -351,6 +360,8 @@ type SessionSpec struct {
 	// person's message started, and feeds the next runs into it instead of
 	// starting a process per run. Zero means no live process.
 	Live Duration `yaml:"live,omitempty" json:"live,omitempty"`
+	// Stall bounds time without CLI output while no tool call is running.
+	Stall Duration `yaml:"stall,omitempty" json:"stall,omitempty"`
 }
 
 // Hook is one Claude Code hook of an agent: at Event (and, for a tool event, a tool Matcher matches), orbit's hook binary does one thing: Say tells the model something (as context; at Stop it sends the model back once with it), Deny refuses the tool with a reason (PreToolUse), or Run runs a command with the event on stdin, in the run's workdir, with an empty environment but PATH, under Timeout.
@@ -417,6 +428,15 @@ const MaxSessionIdle = 24 * time.Hour
 // a resident CLI process; an hour covers a conversation with pauses, and
 // resume picks up after it closes.
 const MaxSessionLive = time.Hour
+
+// DefaultSessionStall is session.stall when a spec names none.
+const DefaultSessionStall = 10 * time.Minute
+
+// MinSessionStall and MaxSessionStall bound session.stall.
+const (
+	MinSessionStall = time.Minute
+	MaxSessionStall = 24 * time.Hour
+)
 
 // Trigger is one way an agent wakes: a cron Schedule, an RRule (RFC
 // 5545, internal/rrule) anchored at Start, or a Webhook (webhook.go).
@@ -561,6 +581,33 @@ type Source struct {
 	Since Duration `yaml:"since,omitempty" json:"since,omitempty"`
 	// MaxBytes bounds one source's fetched size.
 	MaxBytes int64 `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
+	// ByTrigger overrides query values for runs of one trigger: a person's
+	// message may want a wider window than the schedule's review.
+	ByTrigger map[string]SourceOverride `yaml:"by_trigger,omitempty" json:"by_trigger,omitempty"`
+}
+
+// SourceOverride is what a source changes for runs of one trigger.
+type SourceOverride struct {
+	// Query values replace the source's own by key, and add keys it lacks.
+	Query map[string]string `yaml:"query" json:"query"`
+}
+
+// SourceTriggers are the run triggers a source may override for: the
+// agent's own runs that fetch sources (a build fetches none, and a
+// learning pass reads conversations, not sources).
+var SourceTriggers = []string{"schedule", "manual", "message", "continue", "task", "delegation", "webhook"}
+
+// QueryFor is the source's query for a run of trigger: its own values with
+// that trigger's override over them.
+func (s Source) QueryFor(trigger string) map[string]string {
+	o, ok := s.ByTrigger[trigger]
+	if !ok {
+		return s.Query
+	}
+	q := make(map[string]string, len(s.Query)+len(o.Query))
+	maps.Copy(q, s.Query)
+	maps.Copy(q, o.Query)
+	return q
 }
 
 // Transform is code run over one source's bytes before the run: its output
@@ -678,6 +725,14 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 
 // Verifies reports whether the agent's spec names a check.
 func (a *Agent) Verifies(check string) bool { return slices.Contains(a.Verify, check) }
+
+// StallAfter is the agent's session.stall, or DefaultSessionStall.
+func (a *Agent) StallAfter() time.Duration {
+	if a.Session != nil && a.Session.Stall > 0 {
+		return time.Duration(a.Session.Stall)
+	}
+	return DefaultSessionStall
+}
 
 // IsEnabled reports whether the agent's triggers fire. Manual runs work
 // either way.
@@ -984,6 +1039,11 @@ func (c *Config) Validate() error {
 				errs = append(errs, fmt.Errorf("github: read_repositories: %q is not owner/name", r))
 			}
 		}
+		for _, r := range g.CommentRepositories {
+			if !RepoRE.MatchString(r) || strings.Contains(r, "..") {
+				errs = append(errs, fmt.Errorf("github: comment_repositories: %q is not owner/name", r))
+			}
+		}
 	}
 	if d.Board != nil && d.Board.Idle < 0 {
 		errs = append(errs, fmt.Errorf("board.idle must not be negative"))
@@ -1064,6 +1124,9 @@ func (c *Config) validateAgent(a *Agent) []error {
 		if !slices.Contains(sourceKinds, s.Kind) {
 			at("source %q: unknown kind %q (want one of %v)", s.Name, s.Kind, sourceKinds)
 		}
+		if s.Kind != "http" && len(s.ByTrigger) > 0 {
+			at("source %q: by_trigger is only for http sources", s.Name)
+		}
 		switch s.Kind {
 		case "http":
 			if s.URL == "" {
@@ -1072,6 +1135,18 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if p := s.Paginate; p != nil && (p.PageParam == "" || p.ItemsPath == "") {
 				at("source %q: paginate needs page_param and items_path", s.Name)
 			}
+			for _, tr := range slices.Sorted(maps.Keys(s.ByTrigger)) {
+				switch o := s.ByTrigger[tr]; {
+				case !slices.Contains(SourceTriggers, tr):
+					at("source %q: by_trigger: unknown trigger %q (want one of %v)", s.Name, tr, SourceTriggers)
+				case len(o.Query) == 0:
+					at("source %q: by_trigger.%s: query is required", s.Name, tr)
+				case s.Paginate != nil && hasKey(o.Query, s.Paginate.PageParam):
+					at("source %q: by_trigger.%s: query may not set the page parameter %q", s.Name, tr, s.Paginate.PageParam)
+				}
+			}
+		}
+		switch s.Kind {
 		case "prometheus":
 			if s.URL == "" || s.Expr == "" {
 				at("source %q: prometheus needs url and expr", s.Name)
@@ -1169,8 +1244,8 @@ func (c *Config) validateAgent(a *Agent) []error {
 			at("action %q: rule must be auto, approve or deny", typ)
 		}
 		switch {
-		case typ == "notify", typ == "continue", typ == "agent:define", typ == "agent:save", typ == "template:create",
-			typ == "schedule:add", typ == "schedule:pause", typ == "schedule:resume", typ == "schedule:remove", typ == "run:now":
+		case typ == "notify", typ == "continue", typ == "agent:define", typ == "agent:save", typ == "skill:write",
+			typ == "schedule:add", typ == "schedule:pause", typ == "schedule:resume", typ == "schedule:remove", typ == "run:now", typ == "template:create":
 		case typ == "delegate", typ == "task:message", typ == "task:cancel", typ == "task:retry":
 			if len(a.Delegates) == 0 {
 				at("action %q: needs delegates, the agents this one may hand tasks to", typ)
@@ -1183,12 +1258,16 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if c.Deployment.GitHub == nil {
 				at("action %q: needs a github block in orbit.yaml", typ)
 			}
+		case typ == "github:comment":
+			if c.Deployment.GitHub == nil || len(c.Deployment.GitHub.CommentRepositories) == 0 {
+				at("action %q: needs github.comment_repositories in orbit.yaml", typ)
+			}
 		case strings.HasPrefix(typ, ConnectorRulePrefix):
 			// validateAgentConnectors
 		case strings.HasPrefix(typ, ConnectorActionPrefix):
 			at("action %q: a connector tool's rule is named mcp:<connector>:<tool>", typ)
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, template:create, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr or mcp:<connector>:<tool>)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, skill:write, template:create, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr, github:comment or mcp:<connector>:<tool>)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
@@ -1347,6 +1426,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 	}
 	errs = append(errs, a.validateWeb()...)
+	errs = append(errs, a.validatePermissions()...)
 	errs = append(errs, c.validateTrust(a)...)
 	errs = append(errs, c.validateAgentConnectors(a)...)
 	if ss := a.Session; ss != nil {
@@ -1359,6 +1439,9 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		if ss.Idle < 0 || time.Duration(ss.Idle) > MaxSessionIdle {
 			at("session.idle must be between 0 and %s", MaxSessionIdle)
+		}
+		if ss.Stall != 0 && (time.Duration(ss.Stall) < MinSessionStall || time.Duration(ss.Stall) > MaxSessionStall) {
+			at("session.stall must be between %s and %s", MinSessionStall, MaxSessionStall)
 		}
 		if ss.Live < 0 || time.Duration(ss.Live) > MaxSessionLive {
 			at("session.live must be between 0 and %s", MaxSessionLive)
@@ -1402,4 +1485,9 @@ func EnvRefs(s string) []string {
 		out = append(out, m[1])
 	}
 	return out
+}
+
+func hasKey(m map[string]string, k string) bool {
+	_, ok := m[k]
+	return ok
 }
