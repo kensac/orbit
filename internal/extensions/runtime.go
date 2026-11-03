@@ -120,12 +120,12 @@ func Invoke(ctx context.Context, sb SandboxExecutor, in Invocation) (json.RawMes
 	}()
 	stdout := &boundedBuffer{max: extensionproto.MaxJSONBytes}
 	stderr := &boundedBuffer{max: 64 << 10}
-	exit, err := sb.Attach(callCtx, created.ID, sandbox.AttachRequest{Argv: []string{"/work/extension/" + pkg.Manifest.Entrypoint}},
+	exit, err := sb.Attach(callCtx, created.ID, sandbox.AttachRequest{Argv: []string{sandbox.ExtensionWorkDir + "/extension/" + pkg.Manifest.Entrypoint}},
 		bytes.NewReader(request), stdout, stderr)
+	if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+		return nil, fmt.Errorf("extension %s operation %s timed out", in.PackageID, in.Operation)
+	}
 	if err != nil {
-		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("extension %s operation %s timed out", in.PackageID, in.Operation)
-		}
 		return nil, fmt.Errorf("extension %s operation %s: %w", in.PackageID, in.Operation, err)
 	}
 	if exit != 0 {

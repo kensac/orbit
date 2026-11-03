@@ -177,13 +177,13 @@ func containerSpec(cfg Config, runID string, now time.Time) containerCreate {
 			Image: cfg.Image, User: user,
 			Entrypoint: []string{"sleep", strconv.Itoa(int(Lifetime / time.Second))},
 			Env:        []string{"HOME=/tmp", "TMPDIR=/tmp", "LANG=C.UTF-8"},
-			WorkingDir: sandbox.WorkDir, Hostname: "sandbox", Labels: labels,
+			WorkingDir: sandbox.ExtensionWorkDir, Hostname: "sandbox", Labels: labels,
 			NetworkDisabled: true,
 			HostConfig: hostConfig{
 				Privileged: false, ReadonlyRootfs: true, CapDrop: []string{"ALL"},
 				SecurityOpt: []string{"no-new-privileges:true"}, NetworkMode: "none",
 				IpcMode: "private", CgroupnsMode: "private",
-				Mounts: []mount{{Type: "volume", Target: sandbox.WorkDir, VolumeOptions: volumeOptions{Labels: map[string]string{LabelManaged: "1", LabelRunID: runID}}}},
+				Mounts: []mount{{Type: "volume", Target: sandbox.ExtensionWorkDir, VolumeOptions: volumeOptions{NoCopy: true, Labels: map[string]string{LabelManaged: "1", LabelRunID: runID}}}},
 				Tmpfs: map[string]string{
 					"/tmp":      "rw,nosuid,nodev,size=" + strconv.Itoa(ExtensionTmpBytes) + ",mode=1777",
 					"/work/out": "rw,nosuid,nodev,size=" + strconv.Itoa(ExtensionOutBytes) + ",mode=0700,uid=" + strconv.Itoa(UID) + ",gid=" + strconv.Itoa(UID),
@@ -424,16 +424,27 @@ func verifyCreated(cfg Config, c containerState) error {
 	// Docker includes bind and volume mounts here, but not tmpfs entries. Their
 	// effective extension destinations and options were checked in HostConfig
 	// above, where inspect retains the create-time Tmpfs map.
+	workVolume := false
+	workDir := sandbox.WorkDir
+	if cfg.ExtensionProfile {
+		workDir = sandbox.ExtensionWorkDir
+	}
 	for _, m := range c.Mounts {
 		if m.Type != "volume" && m.Type != "tmpfs" {
 			return fmt.Errorf("mount of type %s at %s", m.Type, m.Destination)
 		}
-		if m.Type == "volume" && m.Destination != sandbox.WorkDir {
+		if m.Type == "volume" && m.Destination != workDir {
 			return fmt.Errorf("volume at %s", m.Destination)
+		}
+		if m.Type == "volume" && m.Destination == workDir {
+			workVolume = true
 		}
 		if cfg.ExtensionProfile && m.Type == "tmpfs" && m.Destination != "/tmp" && m.Destination != "/work/out" {
 			return fmt.Errorf("unexpected extension tmpfs mount at %s", m.Destination)
 		}
+	}
+	if cfg.ExtensionProfile && !workVolume {
+		return fmt.Errorf("extension work volume at %s is missing", sandbox.ExtensionWorkDir)
 	}
 	return nil
 }
@@ -451,7 +462,7 @@ func validateProfileAttach(c containerState, ar sandbox.AttachRequest) error {
 	if c.Config.Labels[LabelProfile] != sandbox.ProfileExtension {
 		return nil
 	}
-	if len(ar.Argv) != 1 || !strings.HasPrefix(ar.Argv[0], sandbox.WorkDir+"/extension/") || path.Clean(ar.Argv[0]) != ar.Argv[0] || ar.Env != nil {
+	if len(ar.Argv) != 1 || !strings.HasPrefix(ar.Argv[0], sandbox.ExtensionWorkDir+"/extension/") || path.Clean(ar.Argv[0]) != ar.Argv[0] || ar.Env != nil {
 		return fmt.Errorf("an extension sandbox accepts only one package entrypoint and no environment")
 	}
 	return nil

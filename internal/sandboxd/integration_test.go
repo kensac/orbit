@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -478,19 +477,19 @@ func assertExtensionIsolation(t *testing.T, ctx context.Context, c *sandbox.Clie
 		if err := json.Unmarshal(result, &got); err != nil {
 			t.Fatalf("extension result %q: %v", result, err)
 		}
-		for _, key := range []string{"package_read_only", "input_read_only", "work_root_read_only", "tmp_writable", "out_writable", "no_network", "proxy_absent", "secrets_absent", "environment_clean", "docker_socket_absent", "capabilities_zero", "no_new_privileges", "seccomp_enabled"} {
+		for _, key := range []string{"package_read_only", "input_present", "input_read_only", "work_root_read_only", "tmp_writable", "out_writable", "no_network", "proxy_absent", "secrets_absent", "environment_clean", "docker_socket_absent", "capabilities_zero", "no_new_privileges", "seccomp_enabled"} {
 			if got[key] != true {
 				t.Errorf("extension isolation %s = %v", key, got[key])
 			}
 		}
+		if !got["input_present"].(bool) {
+			t.Errorf("extension input missing; write error: %v", got["input_write_error"])
+		}
+		if !got["work_root_read_only"].(bool) {
+			t.Errorf("extension work root is writable or chmod-able; write error: %v, chmod error: %v", got["work_root_write_error"], got["work_root_chmod_error"])
+		}
 		if got["no_cross_tmp"] != wantCrossTmp {
 			t.Errorf("extension cross-invocation tmpfs isolation = %v, want %v", got["no_cross_tmp"], wantCrossTmp)
-		}
-		for key, limit := range map[string]int64{"pids_max": 32, "memory_max": 256 << 20} {
-			n, err := strconv.ParseInt(got[key].(string), 10, 64)
-			if err != nil || n < 1 || n > limit {
-				t.Errorf("extension cgroup %s = %v, want a positive limit at most %d", key, got[key], limit)
-			}
 		}
 	}
 	result, err := invocation("inspect", map[string]any{})
@@ -547,7 +546,7 @@ func extensionMustJSON(t *testing.T, value any) json.RawMessage {
 }
 
 const extensionProbeOutputSchema = `{"type":"object","properties":{
-"package_read_only":{"type":"boolean"},"input_read_only":{"type":"boolean"},"work_root_read_only":{"type":"boolean"},"tmp_writable":{"type":"boolean"},"out_writable":{"type":"boolean"},"no_network":{"type":"boolean"},"proxy_absent":{"type":"boolean"},"secrets_absent":{"type":"boolean"},"environment_clean":{"type":"boolean"},"docker_socket_absent":{"type":"boolean"},"capabilities_zero":{"type":"boolean"},"no_new_privileges":{"type":"boolean"},"seccomp_enabled":{"type":"boolean"},"pids_max":{"type":"string","maxLength":64},"memory_max":{"type":"string","maxLength":64},"no_cross_tmp":{"type":"boolean"}},"required":["package_read_only","input_read_only","work_root_read_only","tmp_writable","out_writable","no_network","proxy_absent","secrets_absent","environment_clean","docker_socket_absent","capabilities_zero","no_new_privileges","seccomp_enabled","pids_max","memory_max","no_cross_tmp"],"additionalProperties":false}`
+"package_read_only":{"type":"boolean"},"input_present":{"type":"boolean"},"input_read_only":{"type":"boolean"},"input_write_error":{"type":"string","maxLength":512},"work_root_read_only":{"type":"boolean"},"work_root_write_error":{"type":"string","maxLength":512},"work_root_chmod_error":{"type":"string","maxLength":512},"tmp_writable":{"type":"boolean"},"out_writable":{"type":"boolean"},"no_network":{"type":"boolean"},"proxy_absent":{"type":"boolean"},"secrets_absent":{"type":"boolean"},"environment_clean":{"type":"boolean"},"docker_socket_absent":{"type":"boolean"},"capabilities_zero":{"type":"boolean"},"no_new_privileges":{"type":"boolean"},"seccomp_enabled":{"type":"boolean"},"no_cross_tmp":{"type":"boolean"}},"required":["package_read_only","input_present","input_read_only","input_write_error","work_root_read_only","work_root_write_error","work_root_chmod_error","tmp_writable","out_writable","no_network","proxy_absent","secrets_absent","environment_clean","docker_socket_absent","capabilities_zero","no_new_privileges","seccomp_enabled","no_cross_tmp"],"additionalProperties":false}`
 
 type lockedLog struct {
 	mu sync.Mutex

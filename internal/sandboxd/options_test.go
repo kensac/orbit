@@ -126,6 +126,9 @@ func TestExtensionProfileHasNoNetworkOrCredentialEnvironment(t *testing.T) {
 	if c.Labels[LabelProfile] != sandbox.ProfileExtension {
 		t.Fatalf("extension profile label = %v", c.Labels)
 	}
+	if c.WorkingDir != sandbox.ExtensionWorkDir || len(c.HostConfig.Mounts) != 1 || c.HostConfig.Mounts[0].Target != sandbox.ExtensionWorkDir || !c.HostConfig.Mounts[0].VolumeOptions.NoCopy {
+		t.Fatalf("extension work volume = working dir %q, mounts %+v", c.WorkingDir, c.HostConfig.Mounts)
+	}
 	got, err := json.Marshal(c)
 	if err != nil {
 		t.Fatal(err)
@@ -144,6 +147,7 @@ func TestExtensionProfileHasNoNetworkOrCredentialEnvironment(t *testing.T) {
 	state.HostConfig.UTSMode = ""
 	state.HostConfig.CgroupnsMode = "private"
 	state.HostConfig.Tmpfs = c.HostConfig.Tmpfs
+	state.Mounts = []mountState{{Type: "volume", Destination: sandbox.ExtensionWorkDir}}
 	state.HostConfig.IpcMode = "private"
 	state.HostConfig.Memory = ExtensionMemoryBytes
 	state.HostConfig.MemorySwap = ExtensionMemoryBytes
@@ -184,12 +188,12 @@ func TestExtensionProfileAttachIsFixedAndCredentialFree(t *testing.T) {
 		env  map[string]string
 		ok   bool
 	}{
-		{name: "package entrypoint", argv: []string{"/work/extension/bin/reducer"}, ok: true},
+		{name: "package entrypoint", argv: []string{sandbox.ExtensionWorkDir + "/extension/bin/reducer"}, ok: true},
 		{name: "outside package", argv: []string{"/usr/bin/cat"}},
-		{name: "traversal", argv: []string{"/work/extension/../bin/reducer"}},
-		{name: "extra argument", argv: []string{"/work/extension/bin/reducer", "--unsafe"}},
-		{name: "environment", argv: []string{"/work/extension/bin/reducer"}, env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "token"}},
-		{name: "empty env map", argv: []string{"/work/extension/bin/reducer"}, env: map[string]string{}},
+		{name: "traversal", argv: []string{sandbox.ExtensionWorkDir + "/extension/../bin/reducer"}},
+		{name: "extra argument", argv: []string{sandbox.ExtensionWorkDir + "/extension/bin/reducer", "--unsafe"}},
+		{name: "environment", argv: []string{sandbox.ExtensionWorkDir + "/extension/bin/reducer"}, env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "token"}},
+		{name: "empty env map", argv: []string{sandbox.ExtensionWorkDir + "/extension/bin/reducer"}, env: map[string]string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateProfileAttach(c, sandbox.AttachRequest{Argv: tc.argv, Env: tc.env})
