@@ -283,14 +283,15 @@ func parseCredentialURL(raw string) (bool, error) {
 
 func inspectPack(root string) (packManifest, error) {
 	var m packManifest
-	st, err := os.Lstat(root)
+	// The operator supplies the inspection root; this checks that exact selected path before any reads.
+	st, err := os.Lstat(root) //nolint:gosec // root is the directory the operator explicitly asked to inspect.
 	if err != nil {
 		return m, err
 	}
 	if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
 		return m, errors.New("pack inspect: root must be a real directory")
 	}
-	mb, err := os.ReadFile(filepath.Join(root, "orbit.json"))
+	mb, err := os.ReadFile(filepath.Join(root, "orbit.json")) //nolint:gosec // fixed file beneath the user-selected inspection root.
 	if err != nil {
 		return m, err
 	}
@@ -469,10 +470,13 @@ func safeRelative(p string) (string, error) {
 	return p, nil
 }
 func readPackFile(root, p string) ([]byte, error) {
+	if _, err := safeRelative(p); err != nil {
+		return nil, err
+	}
 	cur := root
 	for _, part := range strings.Split(filepath.FromSlash(p), string(filepath.Separator)) {
 		cur = filepath.Join(cur, part)
-		st, err := os.Lstat(cur)
+		st, err := os.Lstat(cur) //nolint:gosec // p was checked as a relative path and each symlink component is rejected.
 		if err != nil {
 			return nil, err
 		}
@@ -480,7 +484,7 @@ func readPackFile(root, p string) ([]byte, error) {
 			return nil, fmt.Errorf("pack inspect: symlink is forbidden: %s", p)
 		}
 	}
-	return os.ReadFile(cur)
+	return os.ReadFile(cur) //nolint:gosec // p was checked as a relative path and its components were inspected for symlinks.
 }
 func walkPack(root string) ([]string, error) {
 	var out []string
