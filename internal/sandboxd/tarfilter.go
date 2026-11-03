@@ -150,12 +150,17 @@ func SanitizeExtensionIn(dst io.Writer, src io.Reader) error {
 		if name == "." {
 			continue
 		}
-		readonly := strings.HasPrefix(name, "extension/") || strings.HasPrefix(name, "inputs/")
+		readonly := strings.HasPrefix(name, "extension/") || strings.HasPrefix(name, "inputs/") ||
+			h.Typeflag == tar.TypeDir && (name == "extension" || name == "inputs")
 		if !readonly {
 			return fmt.Errorf("extension archive entry %q is outside the package and input roots", name)
 		}
-		mode, uid, gid := h.Mode&0o777, 0, 0
-		mode &^= 0o222
+		mode, uid, gid := h.Mode&0o111, 0, 0
+		if h.Typeflag == tar.TypeDir {
+			mode |= 0o555
+		} else {
+			mode |= 0o444
+		}
 		out := &tar.Header{Typeflag: h.Typeflag, Name: name, Mode: mode, Uid: uid, Gid: gid, ModTime: h.ModTime}
 		if h.Typeflag == tar.TypeDir {
 			out.Name += "/"

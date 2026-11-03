@@ -320,7 +320,11 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		_ = pw.CloseWithError(err)
 		sanErr <- err
 	}()
-	putErr := s.d.putArchive(ctx, id, sandbox.WorkDir, pr)
+	workDir := sandbox.WorkDir
+	if cfg.ExtensionProfile {
+		workDir = sandbox.ExtensionWorkDir
+	}
+	putErr := s.d.putArchive(ctx, id, workDir, pr)
 	_ = pr.CloseWithError(errors.New("upload ended"))
 	if err := <-sanErr; err != nil {
 		fail(http.StatusBadRequest, "archive: "+err.Error())
