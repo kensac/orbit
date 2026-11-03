@@ -510,7 +510,11 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 		t.steer.Store(feed)
 		defer t.steer.Store(nil)
 	}
-	chat.Level, chat.Ceiling = a.PermissionLevel(), a.PermissionCeiling()
+	lc, err := e.runLevel(ctx, a, c)
+	if err != nil {
+		return nil, nil, err
+	}
+	chat.Level, chat.Ceiling, chat.Choice = lc.Level, a.PermissionCeiling(), lc.Choice
 	chat.RecordPermission = func(req claudeproto.PermissionRequest, p claudeproto.Permission) error {
 		return recordPermission(t.record, req, p)
 	}
@@ -541,6 +545,9 @@ func (e *Engine) chatTurn(ctx context.Context, snap *Snapshot, a *spec.Agent, c 
 	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout))
 	defer cancel()
+	changes := make(chan runner.LevelChange, 1)
+	chat.Changes = changes
+	go e.watchLevel(runCtx, a, c, lc, changes)
 	res, err := r.Run(runCtx, req, func(ev runner.Event) { t.emit(ev.Kind, ev.Payload) })
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return nil, res, fmt.Errorf("timed out after %s", time.Duration(a.Timeout))

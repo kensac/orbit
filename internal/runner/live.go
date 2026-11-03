@@ -66,6 +66,8 @@ type liveProc struct {
 	proc    liveProcess
 	// tools serves the turn in progress its orbit tools (a chat run's) and connectors.
 	tools *chatTools
+	// lv is a chat process's permission level.
+	lv    procLevel
 	busy  bool
 	used  time.Time
 	timer *time.Timer
