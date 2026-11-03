@@ -132,6 +132,46 @@ func TestInternalListenerAcceptsTheOperatorToken(t *testing.T) {
 	}
 }
 
+func TestAddCatalogConnectorDiscoversOAuthAndStartsSignIn(t *testing.T) {
+	var oauthURL string
+	oauthServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/.well-known/oauth-protected-resource/mcp"), r.URL.Path == "/.well-known/oauth-protected-resource":
+			_, _ = io.WriteString(w, `{"resource":"`+oauthURL+`/mcp","authorization_servers":["`+oauthURL+`"],"scopes_supported":["read"]}`)
+		case r.URL.Path == "/.well-known/oauth-authorization-server":
+			_, _ = io.WriteString(w, `{"issuer":"`+oauthURL+`","authorization_endpoint":"`+oauthURL+`/authorize","token_endpoint":"`+oauthURL+`/token","registration_endpoint":"`+oauthURL+`/register"}`)
+		case r.URL.Path == "/register":
+			_, _ = io.WriteString(w, `{"client_id":"orbit-test"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer oauthServer.Close()
+	oauthURL = oauthServer.URL
+	v := newEnv(t, func(a *api.Server, _ *http.Server) { a.LinkClient = oauthServer.Client() })
+	v.e.Client = oauthServer.Client()
+	v.e.Env = func(name string) (string, bool) {
+		if name == spec.ConnectorKeyEnv {
+			return token, true
+		}
+		return "", false
+	}
+	url := v.srv.URL + "/api/v1/connectors/catalog"
+	person := v.person("kanishk")
+	if code, b := call(t, "POST", url, person, `{"name":"acme","url":"`+oauthServer.URL+`/mcp","description":"Acme data","scopes":[]}`); code != http.StatusCreated {
+		t.Fatalf("add catalog connector = %d %v", code, b)
+	} else if b["authorize_url"] == nil || !strings.Contains(b["authorize_url"].(string), "client_id=orbit-test") {
+		t.Fatalf("authorize URL = %v", b)
+	}
+	if code, b := call(t, "GET", url, person, ""); code != http.StatusOK || len(b["connectors"].([]any)) != 1 {
+		t.Fatalf("catalog = %d %v", code, b)
+	}
+	if code, _ := call(t, "POST", url, person, `{"name":"unsafe","url":"http://127.0.0.1/mcp"}`); code != http.StatusBadRequest {
+		t.Fatalf("non-HTTPS connector URL = %d", code)
+	}
+}
+
 func TestManualRunAndMessageWake(t *testing.T) {
 	srv, s, _ := server(t)
 	code, v := call(t, "POST", srv.URL+"/api/v1/agents/a/runs", token, `{"prompt":"now"}`)
