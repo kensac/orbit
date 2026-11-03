@@ -93,7 +93,7 @@ func Catalog(a *spec.Agent, d spec.Deployment, available ...[]store.Template) []
 		out = append(out, commentType(d))
 	}
 	if a.RuleFor(DefineType) != spec.RuleDeny {
-		out = append(out, defineType(a))
+		out = append(out, defineType(a, d.Connectors))
 	}
 	if a.RuleFor(SaveType) != spec.RuleDeny {
 		out = append(out, saveType())
@@ -182,20 +182,37 @@ type TemplateRef struct {
 	Version int    `json:"version"`
 }
 
-func defineType(a *spec.Agent) Type {
+func defineType(a *spec.Agent, configured map[string]spec.Connector) Type {
+	connectors := slices.Sorted(maps.Keys(configured))
+	connectorNote := "No connectors are configured in orbit.yaml."
+	var connectorSchema map[string]any
+	if len(connectors) > 0 {
+		connectorNote = "Preconfigured connectors that can be enabled for a database agent: " + strings.Join(connectors, ", ") + "."
+		connectorSchema = map[string]any{
+			"type":        "array",
+			"items":       map[string]any{"type": "string", "enum": connectors},
+			"description": "Preconfigured connector names the target agent may use. Adding a connector always waits for the person's approval.",
+		}
+	}
+	properties := map[string]any{
+		"name": map[string]any{"type": "string", "pattern": spec.AgentNamePattern},
+	}
+	if connectorSchema != nil {
+		properties["connectors"] = connectorSchema
+	}
 	return Type{
 		Name: DefineType,
 		Description: "Create an agent or change one (yourself included, \"" + a.Name + "\"): spec is the whole agent, " +
-			"the same fields as an agents/<name>.yaml file (name, description, charter, triggers, sources, tools, actions, " +
+			"the same fields as an agents/<name>.yaml file (name, description, charter, triggers, sources, connectors, tools, actions, " +
 			"session, notify, ...; durations as strings like \"15m\"). It replaces the agent's spec as a new version; " +
 			"every version is kept and can be reverted. Agents defined in configuration files cannot be changed this way. " +
-			"A change that adds a tool, source, credential, delegate target or need, or allows an action more readily, waits for a person's approval. " +
+			connectorNote + " Adding a connector grants that database agent access to its tools, so the change always waits for a person's approval; it does not add a server or sign in. " +
+			"A change that adds a tool, source, credential, delegate target or need, or allows an action more readily, also waits for a person's approval. " +
 			"Such an agent may use, without a sandbox, only the tools " + strings.Join(spec.UnsandboxedTools, ", ") + "; never a file source or a ${VAR} but orbit.yaml's credentials.",
 		ParamsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"spec": map[string]any{"type": "object", "properties": map[string]any{
-					"name": map[string]any{"type": "string", "pattern": spec.AgentNamePattern}}, "required": []string{"name"}},
+				"spec": map[string]any{"type": "object", "properties": properties, "required": []string{"name"}},
 			},
 			"required":             []string{"spec"},
 			"additionalProperties": false,
