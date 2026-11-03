@@ -131,7 +131,7 @@ func (s *Server) sharedTemplates(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "the template link is not valid")
 		return
 	}
-	if time.Now().Unix() > c.Expires {
+	if time.Now().Unix() >= c.Expires {
 		writeErr(w, http.StatusForbidden, "the template link has expired")
 		return
 	}

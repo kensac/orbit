@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
-	"sort"
 	"strconv"
 	"unicode/utf8"
 
@@ -63,14 +63,20 @@ func Scan(doc []byte) error {
 	if !utf8.Valid(doc) {
 		return errors.New("not UTF-8")
 	}
-	var v any
-	if err := json.Unmarshal(doc, &v); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(doc))
+	if err := scanJSON(dec, ""); err != nil {
 		return err
 	}
-	return scan(v, "")
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
-func scan(v any, at string) error {
+func scanJSON(dec *json.Decoder, at string) error {
 	check := func(s, where string) error {
 		for i, r := range s {
 			if Hidden(r) {
@@ -79,28 +85,54 @@ func scan(v any, at string) error {
 		}
 		return nil
 	}
-	switch x := v.(type) {
+	token, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	switch x := token.(type) {
 	case string:
 		return check(x, orRoot(at))
-	case []any:
-		for i, e := range x {
-			if err := scan(e, at+"/"+strconv.Itoa(i)); err != nil {
-				return err
+	case json.Delim:
+		switch x {
+		case '{':
+			for dec.More() {
+				key, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				k, ok := key.(string)
+				if !ok {
+					return errors.New("object key is not a string")
+				}
+				if err := check(k, at+"/"+k+" (the key)"); err != nil {
+					return err
+				}
+				if err := scanJSON(dec, at+"/"+k); err != nil {
+					return err
+				}
 			}
-		}
-	case map[string]any:
-		keys := make([]string, 0, len(x))
-		for k := range x {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			if err := check(k, at+"/"+k+" (the key)"); err != nil {
-				return err
+			end, err := dec.Token()
+			if err != nil || end != json.Delim('}') {
+				if err != nil {
+					return err
+				}
+				return errors.New("malformed JSON object")
 			}
-			if err := scan(x[k], at+"/"+k); err != nil {
-				return err
+		case '[':
+			for i := 0; dec.More(); i++ {
+				if err := scanJSON(dec, at+"/"+strconv.Itoa(i)); err != nil {
+					return err
+				}
 			}
+			end, err := dec.Token()
+			if err != nil || end != json.Delim(']') {
+				if err != nil {
+					return err
+				}
+				return errors.New("malformed JSON array")
+			}
+		default:
+			return errors.New("unexpected JSON delimiter")
 		}
 	}
 	return nil
