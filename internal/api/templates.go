@@ -21,6 +21,8 @@ func (s *Server) templatesRoutes(api func(string, http.HandlerFunc)) {
 	api("POST /api/v1/templates/{name}/restore", s.restoreTemplate)
 	api("POST /api/v1/templates/{name}/retire", s.retireTemplate)
 	api("POST /api/v1/templates/{name}/agents", s.agentFromTemplate)
+	api("POST /api/v1/templates/share", s.shareTemplates)
+	api("POST /api/v1/templates/import", s.importTemplates)
 }
 
 // templateBodyLimit bounds a request carrying a template: its own bound with room for the request around it.
