@@ -399,11 +399,18 @@ the agent. The connector must authenticate and list the fixed tool in
 ## Sessions and continuations
 
 `session` (claude-code runners only) is `{resume: true, idle: <=24h, live:
-<=1h}`; `idle` defaults to 6h, `live` to 0 (no live process) and may not exceed
-`idle`. `live` is refused with a runner's `max_budget_usd`, because the CLI
-counts that budget over a process's whole life, every run fed into it. An
-agent with `session` needs `ORBIT_DATA_DIR` on a persistent volume; without
-one every run after a restart starts fresh (it does not fail).
+<=24h}`; `idle` defaults to 6h, `live` to 0 (no live process) and may not exceed
+`idle`. Linux closes idle live processes when memory is pressured. A process
+whose credential has a shorter expiry is forcibly stopped at that deadline.
+Reloading configuration keeps a live process when its invocation and session
+are still compatible. The persistent chat-box integration passes its proxy
+grant expiry as the process hard deadline and preserves the box and workspace
+when stopping the CLI; that integration is tracked separately by W11. `live`
+is refused with a runner's
+`max_budget_usd`, because the CLI counts that budget over a process's whole
+life, every run fed into it. An agent with `session` needs `ORBIT_DATA_DIR`
+on a persistent volume; without one every run after a restart starts fresh
+(it does not fail).
 
 `continue` is an action type like any other: absent means denied. Its bounds
 are constants in `internal/actions` (`ContinueMinDelay`, `ContinueMaxDelay`,

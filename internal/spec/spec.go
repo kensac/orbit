@@ -457,10 +457,9 @@ const DefaultSessionIdle = 6 * time.Hour
 // day a fresh session with the thread in its prompt is cheaper and as good.
 const MaxSessionIdle = 24 * time.Hour
 
-// MaxSessionLive bounds how long an idle live process is kept. Each one is
-// a resident CLI process; an hour covers a conversation with pauses, and
-// resume picks up after it closes.
-const MaxSessionLive = time.Hour
+// MaxSessionLive bounds how long an idle live process is kept. Memory
+// pressure can close it earlier; resume picks up from its saved transcript.
+const MaxSessionLive = MaxSessionIdle
 
 // DefaultSessionStall is session.stall when a spec names none.
 const DefaultSessionStall = 10 * time.Minute

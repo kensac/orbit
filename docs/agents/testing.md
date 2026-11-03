@@ -50,6 +50,12 @@ runs at its `run_after`, and a `kill -9` of the live process mid-turn (that
 run fails with "claude exited during the turn"; the next starts fresh), with a
 Read outside the workdir denied in the live turn.
 
+The live-process unit tests also pin idle eviction under simulated memory
+pressure, the maximum 24-hour window, and the hard expiry used by a sandbox
+credential grant. The engine reload test changes deployment configuration
+without changing a chat invocation and verifies that the same process and box
+serve the next message.
+
 After changing chat runs (`runner/chat.go`), run `ORBIT_REAL_CLAUDE=<wrapper> go test -run RealCLIChat ./internal/runner/`: orbit's SDK MCP tool is listed and called over the control channel, the reply is the final message, the second turn is `live` in the same process, and an interrupt ends the third turn with a result; `RealCLIChatPermissionLevels`: one live process at locked denies a Read outside the workspace unasked, then takes the next run at ask after a `set_permission_mode` and sends that Read to orbit's prompt (seen on 2.1.316); `RealCLIChatPlanApproval` (sonnet by default): the session's `ExitPlanMode` comes to orbit's prompt, and after the allow the CLI is back in the mode it planned from (plan, then acceptEdits on 2.1.316). The sandboxed path is covered by `TestASandboxedChatKeepsItsWorkspace` against a fake sandboxd that runs the argv locally; a real sandbox is seen only on hetzner.
 
 After changing connectors' wiring (`runner/connectors.go`, the permission prompt, the transport), run `ORBIT_REAL_CLAUDE=<wrapper> go test -run RealCLIConnectors ./internal/runner/`: a connector with a dash in its name is listed and called as an SDK server, an auto tool runs unasked, and an approve tool reaches orbit's prompt with the tool use id its call then carries, in a report run and in a chat run.

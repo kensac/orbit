@@ -118,6 +118,10 @@ type Session struct {
 	// it for LiveIdle after the turn.
 	Open     bool
 	LiveIdle time.Duration
+	// LiveUntil is a hard expiration for a live process whose environment
+	// carries a short-lived credential. It is set when the process starts
+	// and is never extended by later turns.
+	LiveUntil time.Time
 	// Started is called once the runner knows how it will use the session
 	// (mode fresh, resumed or live; parent the session continued), before
 	// the prompt is sent. An error aborts the run.
