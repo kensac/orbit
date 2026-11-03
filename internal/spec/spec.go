@@ -281,8 +281,10 @@ type Agent struct {
 	Budget *AgentBudget `yaml:"budget,omitempty" json:"budget,omitempty"`
 	// QuietHours suppresses scheduled runs in this agent's local timezone.
 	QuietHours *QuietHours `yaml:"quiet_hours,omitempty" json:"quiet_hours,omitempty"`
-	Triggers   []Trigger   `yaml:"triggers" json:"triggers"`
-	Sources    []Source    `yaml:"sources,omitempty" json:"sources,omitempty"`
+	// CalendarSkip checks a fixed read-only connector tool before scheduled runs.
+	CalendarSkip *CalendarSkip `yaml:"calendar_skip,omitempty" json:"calendar_skip,omitempty"`
+	Triggers     []Trigger     `yaml:"triggers" json:"triggers"`
+	Sources      []Source      `yaml:"sources,omitempty" json:"sources,omitempty"`
 	// Transforms run over sources before the model sees them; each output
 	// is an input of its own (internal/transforms).
 	Transforms []Transform `yaml:"transforms,omitempty" json:"transforms,omitempty"`
@@ -1250,6 +1252,11 @@ func (c *Config) validateAgent(a *Agent) []error {
 	if q := a.QuietHours; q != nil {
 		if err := q.Validate(); err != nil {
 			at("quiet_hours: %v", err)
+		}
+	}
+	if q := a.CalendarSkip; q != nil {
+		if err := q.Validate(); err != nil {
+			at("calendar_skip: %v", err)
 		}
 	}
 	if r, ok := c.Deployment.Runners[a.Runner]; !ok {

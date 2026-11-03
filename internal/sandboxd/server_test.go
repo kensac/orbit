@@ -190,9 +190,9 @@ func (f *fakeDocker) handler(t *testing.T) http.Handler {
 			}{c.health}
 		}
 		if c.running && h.NetworkMode != "none" {
-			st.NetworkSettings.Networks = map[string]struct {
-				IPAddress string `json:"IPAddress"`
-			}{h.NetworkMode: {IPAddress: "10.250.251.7"}}
+			st.NetworkSettings.Networks = map[string]networkAttachment{
+				h.NetworkMode: {IPAddress: "10.250.251.7"},
+			}
 		}
 		if f.tamper != nil {
 			f.tamper(&st)

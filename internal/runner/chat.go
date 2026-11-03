@@ -98,6 +98,14 @@ type SandboxClient interface {
 	Destroy(ctx context.Context, id string) error
 }
 
+// PersistentChatClient runs a chat process in its own persistent container,
+// separate from boxes that expose direct terminals or account volumes.
+type PersistentChatClient interface {
+	CreateChatBox(ctx context.Context, name, runID string, archive io.Reader) (sandbox.CreateResponse, error)
+	AttachChatBox(ctx context.Context, name string, ar sandbox.ChatBoxAttachRequest, stdin io.Reader, stdout, stderr io.Writer) (int, error)
+	ArchiveChatBox(ctx context.Context, name string) (io.ReadCloser, error)
+}
+
 // Sandbox is where a sandboxed chat run's CLI runs, and how its workspace
 // crosses the boundary. Only Env, the backend's one credential (build.SandboxEnv), enters it.
 type Sandbox struct {
@@ -108,6 +116,11 @@ type Sandbox struct {
 	// "workstation" session gets every tool and a home kept in the
 	// workspace.
 	Profile string
+	// Persistent uses a per-conversation container with retained volumes.
+	// It is never the shared box that accepts direct terminal or account mounts.
+	Persistent bool
+	// RunID scopes the chat's short-lived credential proxy grant.
+	RunID string
 	// Pack is the workspace a new sandbox starts from.
 	Pack func() ([]byte, error)
 	// PackFiles is a tar of some workdir files, for a live sandbox.
@@ -542,6 +555,11 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		p = &liveProc{proc: proc, tools: tools, busy: true, model: req.Model, effort: req.Effort}
 		if sess != nil {
 			p.key = sess.Key
+			if sess.Live != nil {
+				if sb, ok := proc.(*sandboxProc); ok && sb.sb.Persistent {
+					sess.Live.setHardExpiry(p, sess.LiveUntil)
+				}
+			}
 		}
 		p.hash = key
 		first := level
@@ -704,7 +722,8 @@ func hashArgs(bin, workdir string, args, env []string) string {
 }
 
 // sandboxProc is a CLI in a sandboxd container: its stdio is an attach
-// stream, and the container is destroyed when the process is closed.
+// stream. Ephemeral sandboxes are destroyed on close; a persistent chat box
+// keeps its container and volumes.
 type sandboxProc struct {
 	*claudeproto.Conn
 	sb     *Sandbox
@@ -721,9 +740,18 @@ func startSandbox(ctx context.Context, sb *Sandbox, args []string, h claudeproto
 	if err != nil {
 		return nil, fmt.Errorf("pack the workspace: %w", err)
 	}
-	cr, err := sb.Client.CreateProfile(ctx, sb.Label, sb.Profile, strings.NewReader(string(tree)))
+	var cr sandbox.CreateResponse
+	if sb.Persistent {
+		client, ok := sb.Client.(PersistentChatClient)
+		if !ok {
+			return nil, errors.New("sandboxd client does not support persistent chat boxes")
+		}
+		cr, err = client.CreateChatBox(ctx, sb.Label, sb.RunID, strings.NewReader(string(tree)))
+	} else {
+		cr, err = sb.Client.CreateProfile(ctx, sb.Label, sb.Profile, strings.NewReader(string(tree)))
+	}
 	var se *sandbox.Error
-	if errors.As(err, &se) && se.Status == 429 && sess != nil && sess.Live != nil {
+	if !sb.Persistent && errors.As(err, &se) && se.Status == 429 && sess != nil && sess.Live != nil {
 		// Every sandbox slot is taken; idle live sandboxes give theirs up.
 		sess.Live.closeIdle()
 		cr, err = sb.Client.CreateProfile(ctx, sb.Label, sb.Profile, strings.NewReader(string(tree)))
@@ -731,8 +759,15 @@ func startSandbox(ctx context.Context, sb *Sandbox, args []string, h claudeproto
 	if err != nil {
 		return nil, fmt.Errorf("create the sandbox: %w", err)
 	}
+	if sb.Persistent && sess != nil {
+		sess.LiveUntil = cr.ExpiresAt
+	}
 	if sb.Events != nil {
-		sb.Events("orbit.sandbox", map[string]any{"step": "create", "id": cr.ID, "expires_at": cr.ExpiresAt, "bytes": len(tree)})
+		if sb.Persistent {
+			sb.Events("orbit.chatbox", map[string]any{"step": "ensure", "id": cr.ID, "bytes": len(tree)})
+		} else {
+			sb.Events("orbit.sandbox", map[string]any{"step": "create", "id": cr.ID, "expires_at": cr.ExpiresAt, "bytes": len(tree)})
+		}
 	}
 	bin := sb.Binary
 	if bin == "" {
@@ -752,13 +787,24 @@ func startSandbox(ctx context.Context, sb *Sandbox, args []string, h claudeproto
 	actx, cancel := context.WithCancel(context.Background())
 	p := &sandboxProc{sb: sb, id: cr.ID, exited: make(chan struct{}), stderr: &claudeproto.Tail{}, cancel: cancel}
 	go func() {
-		_, aerr := sb.Client.Attach(actx, cr.ID, ar, inR, outW, p.stderr)
+		_, aerr := p.attach(actx, ar, inR, outW, p.stderr)
 		_ = outW.CloseWithError(aerr)
 		_ = inR.Close()
 		close(p.exited)
 	}()
 	p.Conn = claudeproto.NewConn(outR, inW, h)
 	return p, nil
+}
+
+func (p *sandboxProc) attach(ctx context.Context, ar sandbox.AttachRequest, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	if !p.sb.Persistent {
+		return p.sb.Client.Attach(ctx, p.id, ar, stdin, stdout, stderr)
+	}
+	client, ok := p.sb.Client.(PersistentChatClient)
+	if !ok {
+		return -1, errors.New("sandboxd client does not support persistent chat boxes")
+	}
+	return client.AttachChatBox(ctx, p.sb.Label, sandbox.ChatBoxAttachRequest{RunID: p.sb.RunID, Exec: ar}, stdin, stdout, stderr)
 }
 
 func (p *sandboxProc) Exited() <-chan struct{} { return p.exited }
@@ -778,7 +824,19 @@ func (p *sandboxProc) Turn(ctx context.Context, prompt string, emit func(claudep
 
 // sync reads the sandbox's workspace back.
 func (p *sandboxProc) sync(ctx context.Context) error {
-	rc, err := p.sb.Client.Archive(ctx, p.id)
+	var (
+		rc  io.ReadCloser
+		err error
+	)
+	if p.sb.Persistent {
+		client, ok := p.sb.Client.(PersistentChatClient)
+		if !ok {
+			return errors.New("sandboxd client does not support persistent chat boxes")
+		}
+		rc, err = client.ArchiveChatBox(ctx, p.sb.Label)
+	} else {
+		rc, err = p.sb.Client.Archive(ctx, p.id)
+	}
 	if err != nil {
 		return err
 	}
@@ -797,7 +855,7 @@ func (p *sandboxProc) push(ctx context.Context, paths []string) error {
 		return err
 	}
 	var stderr claudeproto.Tail
-	code, err := p.sb.Client.Attach(ctx, p.id, sandbox.AttachRequest{Argv: []string{"tar", "-xf", "-", "-C", sandbox.WorkDir}},
+	code, err := p.attach(ctx, sandbox.AttachRequest{Argv: []string{"tar", "-xf", "-", "-C", sandbox.WorkDir}},
 		strings.NewReader(string(tree)), io.Discard, &stderr)
 	if err == nil && code != 0 {
 		err = fmt.Errorf("tar exited %d: %s", code, claudeproto.LastLines(stderr.String(), 2))
@@ -808,7 +866,7 @@ func (p *sandboxProc) push(ctx context.Context, paths []string) error {
 // Put unpacks a tar under dir in the running sandbox, with tar inside it.
 func (p *sandboxProc) Put(ctx context.Context, dir string, tree []byte) error {
 	var stderr claudeproto.Tail
-	code, err := p.sb.Client.Attach(ctx, p.id, sandbox.AttachRequest{Argv: []string{"sh", "-c", `mkdir -p "$1" && tar -xf - -C "$1"`, "sh", sandbox.WorkDir + "/" + dir}},
+	code, err := p.attach(ctx, sandbox.AttachRequest{Argv: []string{"sh", "-c", `mkdir -p "$1" && tar -xf - -C "$1"`, "sh", sandbox.WorkDir + "/" + dir}},
 		strings.NewReader(string(tree)), io.Discard, &stderr)
 	if err == nil && code != 0 {
 		err = fmt.Errorf("tar exited %d: %s", code, claudeproto.LastLines(stderr.String(), 2))
@@ -820,7 +878,7 @@ func (p *sandboxProc) Put(ctx context.Context, dir string, tree []byte) error {
 func (p *sandboxProc) Get(ctx context.Context, dir string) ([]byte, error) {
 	var out strings.Builder
 	var stderr claudeproto.Tail
-	code, err := p.sb.Client.Attach(ctx, p.id, sandbox.AttachRequest{Argv: []string{"tar", "-cf", "-", "-C", sandbox.WorkDir + "/" + dir, "."}},
+	code, err := p.attach(ctx, sandbox.AttachRequest{Argv: []string{"tar", "-cf", "-", "-C", sandbox.WorkDir + "/" + dir, "."}},
 		nil, &out, &stderr)
 	if err == nil && code != 0 {
 		err = fmt.Errorf("tar exited %d: %s", code, claudeproto.LastLines(stderr.String(), 2))
@@ -845,8 +903,10 @@ func (p *sandboxProc) stop(grace time.Duration) {
 			}
 		}
 		p.cancel()
-		// A sandbox left behind ends at its lifetime and is reaped.
-		_ = p.sb.Client.Destroy(context.Background(), p.id)
+		if !p.sb.Persistent {
+			// An ephemeral sandbox left behind ends at its lifetime and is reaped.
+			_ = p.sb.Client.Destroy(context.Background(), p.id)
+		}
 	})
 	<-p.exited
 }
