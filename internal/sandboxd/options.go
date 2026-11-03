@@ -337,10 +337,18 @@ type containerState struct {
 		} `json:"Health"`
 	} `json:"State"`
 	NetworkSettings struct {
-		Networks map[string]struct {
-			IPAddress string `json:"IPAddress"`
-		} `json:"Networks"`
+		Networks map[string]networkAttachment `json:"Networks"`
 	} `json:"NetworkSettings"`
+}
+
+// Docker reports a network attachment named "none" for some daemon versions,
+// even though that attachment has no endpoint. It is distinct from a real
+// network attachment, which must remain forbidden for extensions.
+type networkAttachment struct {
+	NetworkID  string `json:"NetworkID"`
+	EndpointID string `json:"EndpointID"`
+	IPAddress  string `json:"IPAddress"`
+	Gateway    string `json:"Gateway"`
 }
 
 // mountState is one mount of an inspected container; Name is a volume's.
@@ -365,8 +373,10 @@ func verifyCreated(cfg Config, c containerState) error {
 		if c.Config.Labels[LabelProfile] != sandbox.ProfileExtension {
 			return fmt.Errorf("profile label is %q", c.Config.Labels[LabelProfile])
 		}
-		if len(c.NetworkSettings.Networks) != 0 {
-			return fmt.Errorf("extension sandbox has network attachments: %v", c.NetworkSettings.Networks)
+		for name, network := range c.NetworkSettings.Networks {
+			if name != "none" || network.NetworkID != "" || network.EndpointID != "" || network.IPAddress != "" || network.Gateway != "" {
+				return fmt.Errorf("extension sandbox has network attachments: %v", c.NetworkSettings.Networks)
+			}
 		}
 		if len(h.SecurityOpt) != 1 || h.SecurityOpt[0] != "no-new-privileges:true" || h.UTSMode != "" || h.CgroupnsMode != "private" || len(h.Devices) != 0 || h.PublishAllPorts || len(h.PortBindings) != 0 || len(h.ExtraHosts) != 0 {
 			return fmt.Errorf("extension host options exceed the fixed profile")

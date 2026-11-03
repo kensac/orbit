@@ -11,6 +11,14 @@
   stdin line, and can crash, hang, or send a control request mid-turn.
 - **The engine is tested end to end** with a fake runner and an httptest
   server standing in for sources, channels and endpoints.
+- **sandboxd's Docker integration tests** use a real daemon when available and
+  skip locally when it is not. Under CI, missing Docker fails the test instead
+  of skipping it. `TestIntegrationIsolation` exercises both the build profile
+  and the native extension profile; extension checks include filesystem
+  boundaries, absent network and credentials, process controls, per-invocation
+  scratch, timeout cleanup and container removal. This does not cover every
+  isolation acceptance case in [plugins.md](../plugins.md), so it is not by
+  itself evidence that extensions are ready to enable.
 - **The CLI protocol has its own real-CLI check**: `ORBIT_REAL_CLAUDE=claude go test -run RealCLI ./internal/claudeproto/` (initialize with a host hook, set_permission_mode, can_use_tool allowed and denied, a hook_callback per call, an interrupt that withdraws a pending permission request; and `TestRealCLISteer`: a message written during a tool call folded into that turn, one written after the last tool call starting its own turn after the result, `cancel_async_message` withdrawing a queued one, an interrupt with `cancel_queued` listing it in its receipt). Run it after a CLI bump; it uses the person's own login, so it never runs in CI. The same command runs `TestRealCLIPermissionModes` for mode changes, launch flags, edits, and prompts.
 
 ## The real-CLI smoke

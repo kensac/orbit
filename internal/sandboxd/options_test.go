@@ -156,7 +156,17 @@ func TestExtensionProfileHasNoNetworkOrCredentialEnvironment(t *testing.T) {
 	if err := verifyCreated(cfg, state); err != nil {
 		t.Fatalf("verify extension profile: %v", err)
 	}
+	state.NetworkSettings.Networks = map[string]networkAttachment{"none": {}}
+	if err := verifyCreated(cfg, state); err != nil {
+		t.Fatalf("verify Docker's empty none-network attachment: %v", err)
+	}
+	state.NetworkSettings.Networks = nil
 	bad := state
+	bad.NetworkSettings.Networks = map[string]networkAttachment{"bridge": {NetworkID: "network-id"}}
+	if err := verifyCreated(cfg, bad); err == nil {
+		t.Fatal("accepted a real network attachment in the extension profile")
+	}
+	bad = state
 	bad.HostConfig.Devices = []any{map[string]any{"PathOnHost": "/dev/kvm"}}
 	if err := verifyCreated(cfg, bad); err == nil {
 		t.Fatal("accepted a device in the extension profile")
