@@ -32,8 +32,9 @@ func run(ctx context.Context, args []string, out, notice io.Writer) error {
 	issuer := fs.String("issuer", os.Getenv("ORBIT_OIDC_ISSUER"), "authentik device provider issuer")
 	timeout := fs.Duration("timeout", 10*time.Minute, "overall sign-in and export timeout")
 	id := fs.String("client-id", os.Getenv("ORBIT_OIDC_CLIENT_ID"), "public device provider client ID")
+	dryRun := fs.Bool("dry-run", false, "validate portable bundle imports without writing")
 	fs.Usage = func() {
-		_, _ = fmt.Fprintln(notice, "Usage: orbitexport [flags] export AGENT NEW_OUTPUT.zip\n       orbitexport verify OUTPUT.zip\n       orbitexport inspect BUNDLE.zip")
+		_, _ = fmt.Fprintln(notice, "Usage: orbitexport [flags] export AGENT NEW_OUTPUT.zip\n       orbitexport [flags] import BUNDLE.zip TARGET_AGENT\n       orbitexport verify OUTPUT.zip\n       orbitexport inspect BUNDLE.zip")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -65,18 +66,44 @@ func run(ctx context.Context, args []string, out, notice io.Writer) error {
 		_, err := fmt.Fprintln(out, "Bundle checksums verified. This does not prove completeness or restorability.")
 		return err
 	}
+	if len(a) == 3 && a[0] == "import" {
+		if _, err := bundle.Inspect(a[1]); err != nil {
+			return err
+		}
+		if _, err := client.Segment(a[2]); err != nil {
+			return err
+		}
+		if err := validateConnection(*endpoint, *timeout); err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(ctx, *timeout)
+		defer cancel()
+		hc := client.HTTPClient()
+		token, err := client.Login(ctx, hc, *issuer, *id, notice)
+		if err != nil {
+			return err
+		}
+		api := client.Client{BaseURL: *endpoint, Token: token, HTTP: hc}
+		result, err := bundle.Import(ctx, &api, a[1], a[2], *dryRun)
+		if result.Agent != "" {
+			if writeErr := json.NewEncoder(out).Encode(result); writeErr != nil {
+				return writeErr
+			}
+		}
+		return err
+	}
 	if len(a) != 3 || a[0] != "export" {
 		fs.Usage()
-		return errors.New("expected export AGENT NEW_OUTPUT.zip or verify OUTPUT.zip or inspect BUNDLE.zip")
+		return errors.New("expected export AGENT NEW_OUTPUT.zip, import BUNDLE.zip TARGET_AGENT, verify OUTPUT.zip or inspect BUNDLE.zip")
 	}
-	if err := client.ValidateURL(*endpoint); err != nil {
-		return err
+	if *dryRun {
+		return errors.New("-dry-run is only valid with import")
 	}
 	if _, err := client.Segment(a[1]); err != nil {
 		return err
 	}
-	if *timeout <= 0 {
-		return errors.New("timeout must be positive")
+	if err := validateConnection(*endpoint, *timeout); err != nil {
+		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
@@ -94,4 +121,14 @@ func run(ctx context.Context, args []string, out, notice io.Writer) error {
 		return writeErr
 	}
 	return err
+}
+
+func validateConnection(endpoint string, timeout time.Duration) error {
+	if err := client.ValidateURL(endpoint); err != nil {
+		return err
+	}
+	if timeout <= 0 {
+		return errors.New("timeout must be positive")
+	}
+	return nil
 }
