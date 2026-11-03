@@ -82,12 +82,34 @@ type Deployment struct {
 	Credentials Credentials `yaml:"credentials,omitempty" json:"credentials,omitempty"`
 	// Connectors are MCP servers agents may be given (connectors.go); orbit calls them on the agents' behalf.
 	Connectors map[string]Connector `yaml:"connectors,omitempty" json:"connectors,omitempty"`
+	// GoogleActions binds typed Gmail and Calendar writes to fixed tools on
+	// configured connectors; action parameters cannot choose a server or tool.
+	GoogleActions *GoogleActions `yaml:"google_actions,omitempty" json:"google_actions,omitempty"`
 	// Expires records when a credential orbit cannot inspect stops working (the Claude Code subscription token lasts a year), keyed by its variable, as YYYY-MM-DD (expires.go). It only feeds orbit_credential_expiry_timestamp_seconds, so an alert fires before the date.
 	Expires map[string]string `yaml:"expires,omitempty" json:"expires,omitempty"`
 	// WebhookSecrets are the signing secrets inbound webhooks are verified with, keyed by variable, each bound to the agents that may use it (webhook.go).
 	WebhookSecrets map[string]WebhookSecret `yaml:"webhook_secrets,omitempty" json:"webhook_secrets,omitempty"`
 	// Board tunes GET /board (docs/api.md, The board).
 	Board *Board `yaml:"board,omitempty" json:"board,omitempty"`
+}
+
+// GoogleActions configures the MCP tools used by typed Google write actions.
+type GoogleActions struct {
+	GmailDraft     *GoogleActionBinding   `yaml:"gmail_draft,omitempty" json:"gmail_draft,omitempty"`
+	CalendarCreate *GoogleCalendarBinding `yaml:"calendar_create,omitempty" json:"calendar_create,omitempty"`
+}
+
+// GoogleActionBinding names one configured connector and its write tool.
+type GoogleActionBinding struct {
+	Connector string `yaml:"connector" json:"connector"`
+	Tool      string `yaml:"tool" json:"tool"`
+}
+
+// GoogleCalendarBinding also fixes the destination calendar.
+type GoogleCalendarBinding struct {
+	Connector  string `yaml:"connector" json:"connector"`
+	Tool       string `yaml:"tool" json:"tool"`
+	CalendarID string `yaml:"calendar_id,omitempty" json:"calendar_id,omitempty"`
 }
 
 // Board tunes the board of every open conversation.
@@ -1074,6 +1096,7 @@ func (c *Config) Validate() error {
 	}
 	errs = append(errs, c.validateCredentials()...)
 	errs = append(errs, c.validateConnectors()...)
+	errs = append(errs, c.validateGoogleActions()...)
 	errs = append(errs, c.validateExpires()...)
 	errs = append(errs, c.validateWebhookSecrets()...)
 	errs = append(errs, c.validateBuild()...)
@@ -1287,12 +1310,20 @@ func (c *Config) validateAgent(a *Agent) []error {
 			if c.Deployment.GitHub == nil || len(c.Deployment.GitHub.CommentRepositories) == 0 {
 				at("action %q: needs github.comment_repositories in orbit.yaml", typ)
 			}
+		case typ == "gmail:draft":
+			if c.Deployment.GoogleActions == nil || c.Deployment.GoogleActions.GmailDraft == nil {
+				at("action %q: needs google_actions.gmail_draft in orbit.yaml", typ)
+			}
+		case typ == "calendar:create":
+			if c.Deployment.GoogleActions == nil || c.Deployment.GoogleActions.CalendarCreate == nil {
+				at("action %q: needs google_actions.calendar_create in orbit.yaml", typ)
+			}
 		case strings.HasPrefix(typ, ConnectorRulePrefix):
 			// validateAgentConnectors
 		case strings.HasPrefix(typ, ConnectorActionPrefix):
 			at("action %q: a connector tool's rule is named mcp:<connector>:<tool>", typ)
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, skill:write, template:create, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr, github:comment or mcp:<connector>:<tool>)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, skill:write, template:create, gmail:draft, calendar:create, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr, github:comment or mcp:<connector>:<tool>)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {

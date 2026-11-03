@@ -87,6 +87,15 @@ bounded in delay and chain length and, like any type, denied unless named. A web
 `deny` is the default for every type an agent does not name, and denied
 types are not even offered.
 
+Typed Google writes (`gmail:draft`, `calendar:create`) are actions, not model
+tools. `orbit.yaml` fixes each action to an authenticated connector and a tool
+listed in its `write_tools`; the agent must also name that connector. Orbit
+builds the Gmail draft or Calendar event arguments from the typed fields and
+calls the configured tool with its credential. The model cannot choose an
+account, connector, tool, calendar or URL. The action type remains denied
+unless the agent names its rule; use `approve` when a person should review
+each draft or event.
+
 ## What a model can define
 
 A database agent is written through the API or by `agent:define`, and the built-in `orbit` is changed the same way, so a model steered by a poisoned input (a fetched page, an upload) can write either. Without a sandbox (`sandbox:`, Sandboxed chats below) their runs are in orbit's container, which holds every `ORBIT_*` secret, and their sources are fetched by orbit either way. So `spec.validateTrust` holds them (`spec.Agent.Restricted`) to what orbit.yaml offers, at load and so on every write:
