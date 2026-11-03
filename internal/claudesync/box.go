@@ -47,7 +47,7 @@ func NewBoxBundle(dir string) (BoxBundle, error) {
 		return BoxBundle{}, err
 	}
 	if !info.IsDir() || info.Mode()&fs.ModeSymlink != 0 {
-		return BoxBundle{}, fmt.Errorf("Claude config path %q is not a directory", dir)
+		return BoxBundle{}, fmt.Errorf("claude config path %q is not a directory", dir)
 	}
 	files := map[string][]byte{}
 	var warnings []string
@@ -56,7 +56,7 @@ func NewBoxBundle(dir string) (BoxBundle, error) {
 			return fmt.Errorf("invalid Claude bundle path %q", name)
 		}
 		if _, exists := files[name]; exists {
-			return fmt.Errorf("Claude bundle path %q appears twice", name)
+			return fmt.Errorf("claude bundle path %q appears twice", name)
 		}
 		files[name] = bytes.Clone(content)
 		return nil
@@ -104,7 +104,7 @@ func NewBoxBundle(dir string) (BoxBundle, error) {
 		return BoxBundle{}, err
 	}
 	if len(files) == 0 {
-		return BoxBundle{}, errors.New("Claude config directory has no CLAUDE.md or skills to bundle")
+		return BoxBundle{}, errors.New("claude config directory has no CLAUDE.md or skills to bundle")
 	}
 	names := make([]string, 0, len(files))
 	for name := range files {
@@ -112,13 +112,13 @@ func NewBoxBundle(dir string) (BoxBundle, error) {
 	}
 	slices.Sort(names)
 	if len(names) > maxBoxClaudeFiles {
-		return BoxBundle{}, fmt.Errorf("Claude config has more than %d files", maxBoxClaudeFiles)
+		return BoxBundle{}, fmt.Errorf("claude config has more than %d files", maxBoxClaudeFiles)
 	}
 	var total int
 	for _, name := range names {
 		total += len(files[name])
 		if total > sandbox.MaxClaudeConfigBytes {
-			return BoxBundle{}, fmt.Errorf("Claude config content exceeds %d bytes", sandbox.MaxClaudeConfigBytes)
+			return BoxBundle{}, fmt.Errorf("claude config content exceeds %d bytes", sandbox.MaxClaudeConfigBytes)
 		}
 	}
 	var archive bytes.Buffer
@@ -139,7 +139,7 @@ func NewBoxBundle(dir string) (BoxBundle, error) {
 	}
 	raw := archive.Bytes()
 	if len(raw) > sandbox.MaxClaudeConfigBytes {
-		return BoxBundle{}, fmt.Errorf("Claude config archive exceeds %d bytes", sandbox.MaxClaudeConfigBytes)
+		return BoxBundle{}, fmt.Errorf("claude config archive exceeds %d bytes", sandbox.MaxClaudeConfigBytes)
 	}
 	digest := sha256.Sum256(raw)
 	out := BoxBundle{Archive: bytes.Clone(raw), Digest: hex.EncodeToString(digest[:]), Warnings: warnings}
