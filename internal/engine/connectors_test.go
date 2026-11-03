@@ -29,9 +29,10 @@ import (
 
 // fakeMCP is an MCP server over streamable HTTP with a read tool, a write tool, a tool with a large result and one the agent denies; it refuses a request without the connector's credential.
 type fakeMCP struct {
-	mu     sync.Mutex
-	writes []string
-	auths  []string
+	mu           sync.Mutex
+	writes       []string
+	auths        []string
+	calendarArgs []string
 }
 
 const bigMarker = "the-end-of-a-large-result"
@@ -59,6 +60,32 @@ func (f *fakeMCP) handler(token func() string) http.Handler {
 		})
 	srv.AddTool(&mcp.Tool{Name: "drop_all", Description: "Delete everything.", InputSchema: obj},
 		func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) { return text("dropped"), nil })
+	srv.AddTool(&mcp.Tool{Name: "events", Description: "List calendar events.", InputSchema: obj, Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
+		func(_ context.Context, r *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			f.mu.Lock()
+			f.calendarArgs = append(f.calendarArgs, string(r.Params.Arguments))
+			f.mu.Unlock()
+			var args struct {
+				From string `json:"from"`
+				To   string `json:"to"`
+			}
+			if err := json.Unmarshal(r.Params.Arguments, &args); err != nil {
+				return nil, err
+			}
+			from, err := time.Parse(time.RFC3339, args.From)
+			if err != nil {
+				return nil, err
+			}
+			to, err := time.Parse(time.RFC3339, args.To)
+			if err != nil {
+				return nil, err
+			}
+			body, _ := json.Marshal(map[string]any{"items": []any{map[string]any{
+				"summary": "private meeting title", "start": map[string]string{"dateTime": from.Add(time.Minute).Format(time.RFC3339)},
+				"end": map[string]string{"dateTime": to.Add(-time.Minute).Format(time.RFC3339)},
+			}}})
+			return text(string(body)), nil
+		})
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -161,6 +188,7 @@ wake_on_message: true
 connectors: [hw]
 actions:
   "mcp:hw:drop_all": deny
+  "mcp:hw:events": deny
 %[1]s
 `, agentExtra))
 	cfg, err := spec.Load(dir)
@@ -312,6 +340,59 @@ func TestConnectorToolsAreListedAndAReadToolRuns(t *testing.T) {
 	}
 	if acts, _ := ch.s.ListActions(ctx, "finance", "", 10); len(acts) != 0 {
 		t.Fatalf("reads became actions: %+v", acts)
+	}
+}
+
+func TestCalendarBusySkipsScheduledRunBeforeSourcesAndRunner(t *testing.T) {
+	runnerCalled := false
+	sr := &connRunner{script: func(context.Context, runner.Request) error {
+		runnerCalled = true
+		return nil
+	}, output: connQuietOutput}
+	agent := `calendar_skip:
+  connector: hw
+  tool: events
+  window_before: 15m
+  window_after: 1h
+  arguments: {from: "{{window_start}}", to: "{{window_end}}"}
+  events_path: items
+`
+	ch := connectorSetupExtra(t, sr, "", agent)
+	a := ch.e.Current().Config.Agents["finance"]
+	idx := 0
+	fire := time.Now().UTC().Truncate(time.Second)
+	id, err := ch.s.EnqueueRun(ctx, store.NewRun{Agent: "finance", SpecSHA: a.SHA, Trigger: "schedule", TriggerIndex: &idx, ScheduledFor: &fire})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := ch.s.ClaimRun(ctx, "test")
+	if err != nil || c == nil {
+		t.Fatalf("claim = %+v, %v", c, err)
+	}
+	if c.ID != id {
+		t.Fatalf("claimed run %s, want %s", c.ID, id)
+	}
+	if err := ch.e.Execute(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	run, err := ch.s.GetRun(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != store.StatusSkipped || run.Gate == nil || *run.Gate != store.GateCalendarBusy {
+		t.Fatalf("run = status %s, gate %v, summary %v", run.Status, run.Gate, run.Summary)
+	}
+	if runnerCalled {
+		t.Fatal("runner called for calendar-busy schedule")
+	}
+	if len(ch.mcp.calendarArgs) != 1 {
+		t.Fatalf("calendar queries = %d, want 1", len(ch.mcp.calendarArgs))
+	}
+	if strings.Contains(*run.Summary, "private meeting title") {
+		t.Fatalf("calendar event detail leaked into summary: %s", *run.Summary)
+	}
+	if !strings.Contains(ch.mcp.calendarArgs[0], "2026") {
+		t.Fatalf("calendar query did not render the window: %s", ch.mcp.calendarArgs[0])
 	}
 }
 
