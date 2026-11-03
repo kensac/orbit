@@ -16,6 +16,8 @@ type principal struct {
 	// Person is the authentik user (preferred_username). Empty for the
 	// operator token, which acts for no one in particular.
 	Person string
+	// Groups are the person's groups, from their token.
+	Groups []string
 }
 
 type principalKey struct{}
@@ -60,7 +62,7 @@ func (s *Server) authenticate(internal bool, next http.HandlerFunc) http.Handler
 			writeErr(w, http.StatusServiceUnavailable, "cannot verify tokens right now: "+err.Error())
 			return
 		}
-		next(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, principal{Person: id.Person})))
+		next(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, principal{Person: id.Person, Groups: id.Groups})))
 	})
 }
 

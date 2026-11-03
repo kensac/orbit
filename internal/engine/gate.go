@@ -25,12 +25,12 @@ type gateSkip struct {
 
 func (g *gateSkip) Error() string { return "skipped by gate " + g.gate + ": " + g.summary }
 
-// gated reports whether a run's gates apply: a scheduled run with no
-// person's message waiting. A message, a manual run, a continuation, a
-// build and a recovered attempt always reach the backend, because someone
-// asked for judgment (or already paid for part of it).
+// gated reports whether a run's gates apply: a scheduled or webhook run
+// with no person's message waiting. A message, a manual run, a
+// continuation, a build and a recovered attempt always reach the backend,
+// because someone asked for judgment (or already paid for part of it).
 func gated(a *spec.Agent, c *store.ClaimedRun, rc *store.RunContext, recovering bool) bool {
-	return len(a.Gates) > 0 && c.Trigger == "schedule" && len(rc.Messages) == 0 && !recovering
+	return len(a.Gates) > 0 && (c.Trigger == "schedule" || c.Trigger == store.TriggerWebhook) && len(rc.Messages) == 0 && !recovering
 }
 
 // gate runs the agent's gates in order over what the model would be shown
@@ -63,7 +63,12 @@ func (e *Engine) gate(ctx context.Context, a *spec.Agent, c *store.ClaimedRun, w
 					"inputs unchanged since run %s, the last that succeeded", last.RunID)}, nil
 			}
 		case "items_above":
-			doc, err := harness.Decode(docs[g.Input])
+			raw, ok := docs[g.Input]
+			if !ok {
+				// A webhook source (or a transform of one) on a run no delivery started.
+				return &gateSkip{gate: g.Kind, summary: g.Input + " is absent: no webhook delivery started this run"}, nil
+			}
+			doc, err := harness.Decode(raw)
 			if err != nil {
 				return nil, fmt.Errorf("gate %d: %s is not JSON: %w", i, g.Input, err)
 			}
@@ -89,6 +94,31 @@ func (e *Engine) skip(ctx context.Context, snap *Snapshot, a *spec.Agent, c *sto
 		return err
 	}
 	metrics.RunSkipped(a.Name, g.gate)
+	if g.gate == store.GateMissed {
+		// The agent did no work, so it is not a success for staleness.
+		metrics.RunMissed(a.Name, time.Since(start))
+		return nil
+	}
 	metrics.RunFinished(a.Name, store.StatusSkipped, runnerKind(snap, a), time.Since(start), nil)
 	return nil
+}
+
+// missed is the verdict on a schedule fire claimed later than its grace (spec.MissedGraceFor): the run ends skipped, gate missed, before anything is read or fetched. Only a first attempt is judged: a later one continues work an attempt that started in time began.
+func missed(a *spec.Agent, c *store.ClaimedRun, now time.Time) *gateSkip {
+	if c.Trigger != "schedule" || c.ScheduledFor == nil || c.TriggerIndex == nil || c.Attempt != 1 {
+		return nil
+	}
+	i := *c.TriggerIndex
+	if i < 0 || i >= len(a.Triggers) || a.Triggers[i].IsWebhook() {
+		// The trigger changed since the fire; its grace is unknown, so the run goes ahead.
+		return nil
+	}
+	loc := a.Location()
+	grace := spec.MissedGraceFor(a.Triggers[i], loc, *c.ScheduledFor)
+	late := now.Sub(*c.ScheduledFor)
+	if late <= grace {
+		return nil
+	}
+	return &gateSkip{gate: store.GateMissed, summary: fmt.Sprintf("the fire at %s was claimed %s late, past its grace of %s",
+		c.ScheduledFor.In(loc).Format("2006-01-02 15:04 MST"), late.Round(time.Second), grace)}
 }

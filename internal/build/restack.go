@@ -137,7 +137,7 @@ func (r *Runner) Restack(ctx context.Context, app *github.App, s Restack) (*Rest
 		return nil, err
 	}
 	head = strings.TrimSpace(head)
-	rs, err := refspec(s.TicketID, head)
+	rs, err := refspec(branch, head)
 	if err != nil {
 		return nil, err
 	}

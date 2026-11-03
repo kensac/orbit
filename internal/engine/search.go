@@ -109,10 +109,16 @@ func (e *Engine) searchSocket(agent string) string {
 // Markdown reports (often already bold) do not use.
 func (e *Engine) searchFor(ctx context.Context, agent string, req harness.SearchRequest) (map[string]any, error) {
 	loc := time.UTC
+	q := store.SearchQuery{Q: req.Q, Agent: agent, ConversationID: req.ConversationID, Limit: req.Limit}
 	if a, ok := e.Current().Config.Agents[agent]; ok {
 		loc = a.Location()
+		// The entries the agent reads are its to search too: the profile's and its topics'.
+		topics, err := e.agentTopics(ctx, a)
+		if err != nil {
+			return nil, err
+		}
+		q.EntryProfile, q.EntryTopics = true, topics
 	}
-	q := store.SearchQuery{Q: req.Q, Agent: agent, ConversationID: req.ConversationID, Limit: req.Limit}
 	if q.Limit <= 0 {
 		q.Limit = searchDefault
 	}
@@ -156,7 +162,15 @@ func (e *Engine) searchFor(ctx context.Context, agent string, req harness.Search
 		if r.Tool != nil {
 			m["tool"] = *r.Tool
 		}
+		if r.Path != nil {
+			m["path"] = *r.Path
+		}
 		results[i] = m
 	}
-	return map[string]any{"total": page.Total, "results": results}, nil
+	out := map[string]any{"total": page.Total, "results": results}
+	if page.Repaired != nil {
+		// The model reads that these are not the results of what it asked.
+		out["repaired"] = page.Repaired
+	}
+	return out, nil
 }
