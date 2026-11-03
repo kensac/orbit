@@ -69,9 +69,9 @@ func portableConversationTestBundle(t *testing.T) string {
 	t.Helper()
 	const id = "10000000-0000-4000-8000-000000000001"
 	fetch := bundleFetcher{
-		"agents/source":                `{"agent":{"name":"source","spec":{}}}`,
-		"agents/source/memory?limit=1": `{"versions":[]}`,
-		"agents/source/context":        `{"topics":[],"skills":[]}`,
+		"agents/source":                                         `{"agent":{"name":"source","spec":{}}}`,
+		"agents/source/memory?limit=1":                          `{"versions":[]}`,
+		"agents/source/context":                                 `{"topics":[],"skills":[]}`,
 		"memory/entries?limit=1000&scope=profile&status=active": `{"entries":[]}`,
 		"memory/entries?agent=source&limit=1000&status=active":  `{"entries":[]}`,
 		"agents/source/conversations?archived=false&limit=200":  `{"conversations":[],"has_more":false,"next_before":null}`,
@@ -88,9 +88,9 @@ func portableConversationTestBundle(t *testing.T) string {
 func portableTestBundle(t *testing.T) string {
 	t.Helper()
 	fetch := bundleFetcher{
-		"agents/source":                `{"agent":{"name":"source","spec":{}}}`,
-		"agents/source/memory?limit=1": `{"versions":[{"content":"memory text"}]}`,
-		"agents/source/context":        `{"topics":[{"name":"finance","from":["api"]}],"skills":[]}`,
+		"agents/source":                                         `{"agent":{"name":"source","spec":{}}}`,
+		"agents/source/memory?limit=1":                          `{"versions":[{"content":"memory text"}]}`,
+		"agents/source/context":                                 `{"topics":[{"name":"finance","from":["api"]}],"skills":[]}`,
 		"memory/entries?limit=1000&scope=profile&status=active": `{"entries":[{"scope":"profile","key":"pref","type":"user","title":"Preference","body":"tea"}]}`,
 		"memory/entries?agent=source&limit=1000&status=active":  `{"entries":[{"scope":"agent","agent":"source","key":"local","type":"project","title":"Local","body":"source-only"}]}`,
 		"memory/entries?limit=1000&status=active&topic=finance": `{"entries":[{"scope":"topic","topic":"finance","key":"topic","type":"reference","title":"Topic","body":"fact"}]}`,
