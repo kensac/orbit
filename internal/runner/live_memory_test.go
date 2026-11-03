@@ -23,6 +23,8 @@ func newPressureProcess() *pressureProcess {
 func (p *pressureProcess) Turn(context.Context, string, func(claudeproto.Line)) (*claudeproto.Result, error) {
 	return nil, nil
 }
+func (p *pressureProcess) SetModel(context.Context, string) error  { return nil }
+func (p *pressureProcess) SetEffort(context.Context, string) error { return nil }
 func (p *pressureProcess) Close(time.Duration) {
 	p.once.Do(func() { close(p.closed); close(p.exited) })
 }
