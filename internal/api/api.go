@@ -194,6 +194,8 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("POST /api/v1/workspaces/{id}/terminals", s.createTerminal)
 	api("GET /api/v1/workspaces/{id}/terminals", s.listTerminals)
 	api("GET /api/v1/terminals/{tid}", s.getTerminal)
+	api("GET /api/v1/terminals/{tid}/scrollback", s.terminalScrollback)
+	api("POST /api/v1/terminals/{tid}/resize", s.terminalResize)
 	api("POST /api/v1/terminals/{tid}/kill", s.killTerminal)
 	api("POST /api/v1/terminals/{tid}/attach", s.attachTicket)
 	api("GET /api/v1/workspaces/{id}/accounts", s.listAccounts)

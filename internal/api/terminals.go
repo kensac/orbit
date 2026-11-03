@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -312,6 +313,76 @@ func (s *Server) getTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) terminalScrollback(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWorkspaceGroup(w, r) {
+		return
+	}
+	t, ok := s.terminal(w, r)
+	if !ok {
+		return
+	}
+	if t.EndedAt != nil {
+		writeCheck(w, http.StatusConflict, "exited", "the terminal has ended")
+		return
+	}
+	lines := 10000
+	if raw := r.URL.Query().Get("lines"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 10000 {
+			writeErr(w, http.StatusBadRequest, "lines: want 1 to 10000")
+			return
+		}
+		lines = n
+	}
+	c, ok := s.boxClient(w)
+	if !ok {
+		return
+	}
+	b, err := c.SessionScrollback(r.Context(), t.Agent, t.Session, lines)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(b)
+}
+
+func (s *Server) terminalResize(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWorkspaceGroup(w, r) {
+		return
+	}
+	t, ok := s.terminal(w, r)
+	if !ok {
+		return
+	}
+	if t.EndedAt != nil {
+		writeCheck(w, http.StatusConflict, "exited", "the terminal has ended")
+		return
+	}
+	var size sandbox.Resize
+	if !decode(w, r, 2<<10, &size, bodyRequired) {
+		return
+	}
+	if err := size.Validate(); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	c, ok := s.boxClient(w)
+	if !ok {
+		return
+	}
+	if err := c.ResizeSession(r.Context(), t.Agent, t.Session, size); err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if err := s.Store.TerminalResized(r.Context(), t.ID, size.Cols, size.Rows); err != nil {
+		respond(w, nil, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // killTerminal ends a terminal's tmux session and records it killed. Every
 // signal ends the session the same way (tmux kill-session); ending one
 // already ended returns it as it is.
@@ -583,11 +654,20 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 		b, _ := json.Marshal(v)
 		return write(websocket.MessageText, b)
 	}
-	t = s.withClients(t)
-	if err := writeJSON(map[string]any{"type": "ready", "terminal": t, "replay_bytes": 0}); err != nil {
+	replay, err := c.SessionScrollback(ctx, t.Agent, t.Session, 10000)
+	if err != nil {
+		fail("scrollback", err.Error())
 		return
 	}
-
+	t = s.withClients(t)
+	if err := writeJSON(map[string]any{"type": "ready", "terminal": t, "replay_bytes": len(replay)}); err != nil {
+		return
+	}
+	if len(replay) > 0 {
+		if err := write(websocket.MessageBinary, replay); err != nil {
+			return
+		}
+	}
 	// The client: input, resizes and pings, until it closes.
 	clientGone := make(chan struct{})
 	go func() {
