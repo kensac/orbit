@@ -323,7 +323,7 @@ func (c *claudeCode) resumed(ctx context.Context, sess *Session, args, env []str
 	if err := sess.Started(mode, sess.Resume); err != nil {
 		return nil, err
 	}
-	return c.once(ctx, claudeproto.Transport{Resume: sess.Resume}, withModel(args, req), env, req, emit)
+	return c.once(ctx, claudeproto.Transport{Resume: sess.Resume, ResumeAt: sess.ResumeAt}, withModel(args, req), env, req, emit)
 }
 
 // once runs one process for one turn: the prompt as plain text on stdin, or, for a run with connectors, as a stream-json message, so the control channel carries the connectors' calls and permission prompts.

@@ -123,6 +123,7 @@ func (s *Server) routes(internal bool) http.Handler {
 	api("GET /api/v1/conversations/{id}/approvals", s.listApprovals)
 	api("GET /api/v1/approvals/{id}", s.getApproval)
 	api("POST /api/v1/approvals/{id}", s.decideApproval)
+	api("POST /api/v1/conversations/{id}/fork", s.forkConversation)
 	api("GET /api/v1/conversations/{id}/thread", s.conversationThread)
 	api("POST /api/v1/conversations/{id}/read", s.markRead)
 	api("GET /api/v1/board", s.board)

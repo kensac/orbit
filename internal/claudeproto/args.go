@@ -13,6 +13,8 @@ type Transport struct {
 	PermissionPrompt bool
 	// Resume continues this session as a fork: a new session id, the parent's transcript copied, so a turn that fails or is interrupted never edits the session the next attempt continues.
 	Resume string
+	// ResumeAt, with Resume, continues the session only up to this message (an assistant message's uuid), dropping what came after (--resume-session-at; on 2.1.316, with --fork-session, the fork answered from the session as it stood at that message).
+	ResumeAt string
 	// Ephemeral keeps no transcript (--no-session-persistence).
 	Ephemeral bool
 }
@@ -53,6 +55,12 @@ func Args(t Transport, extra []string) ([]string, error) {
 		args = append(args, "--no-session-persistence")
 	}
 	args = append(args, ResumeArgs(t.Resume)...)
+	if t.ResumeAt != "" {
+		if t.Resume == "" {
+			return nil, fmt.Errorf("resuming at a message needs a session to resume")
+		}
+		args = append(args, "--resume-session-at", t.ResumeAt)
+	}
 	return append(args, extra...), nil
 }
 

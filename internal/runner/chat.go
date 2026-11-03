@@ -482,9 +482,9 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 	}
 	extra := c.chatArgs(req, home, keepDays)
 	env := c.env(home)
-	resume := ""
+	resume, resumeAt := "", ""
 	if sess != nil {
-		resume = sess.Resume
+		resume, resumeAt = sess.Resume, sess.ResumeAt
 	}
 	// A live process moves between permission levels with set_permission_mode.
 	key := hashArgs(c.bin, req.Workdir, withoutMode(extra), env)
@@ -517,7 +517,8 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		tools := &chatTools{}
 		tools.connectors(req.Connectors)
 		// Every chat process has the stdio permission prompt, so a level that asks can be set without a new process; at locked or full the CLI sends none but ExitPlanMode's.
-		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, PermissionPrompt: true, Resume: resume, Ephemeral: sess == nil}, withModel(extra, req))
+		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, PermissionPrompt: true, Resume: resume, ResumeAt: resumeAt,
+			Ephemeral: sess == nil}, withModel(extra, req))
 		if err != nil {
 			return nil, err
 		}
