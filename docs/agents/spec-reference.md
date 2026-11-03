@@ -465,7 +465,7 @@ claude-code runners only.
 |---|---|---|---|
 | `resume` | bool | `false` | Continue the previous run's session when it succeeded under the same spec within `idle`. |
 | `idle` | duration | `6h` | The resume window, at most `24h`. |
-| `live` | duration | `0` (none) | Keep one process open this long after a message-started run and feed later runs into it; at most `1h` and at most `idle`. |
+| `live` | duration | `0` (none) | Keep one process open this long after a message-started run and feed later runs into it; at most `24h` and at most `idle`. Linux memory pressure closes idle processes sooner. |
 | `stall` | duration | `10m` | A chat or live turn with no line from the CLI (keep_alive included) for this long, and no tool call running, is interrupted and the run handed back to continue the session (ARCHITECTURE.md, Stall watchdog); `1m` to `24h`. Needs no `resume`. |
 
 ### `learn`

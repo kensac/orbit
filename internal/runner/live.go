@@ -24,6 +24,8 @@ import (
 // recently used idle one is closed past this.
 const MaxLive = 4
 
+const memoryPressureCheckInterval = 15 * time.Second
+
 // Live holds the live processes, one per key (a conversation).
 type Live struct {
 	mu     sync.Mutex
@@ -31,10 +33,54 @@ type Live struct {
 	max    int
 	closed bool
 	wg     sync.WaitGroup
+
+	pressure      func() bool
+	pressureStop  chan struct{}
+	pressureDone  chan struct{}
+	pressureClose sync.Once
+	closeOnce     sync.Once
 }
 
-// NewLive returns an empty set of live processes bounded by max.
-func NewLive(max int) *Live { return &Live{procs: map[string]*liveProc{}, max: max} }
+// NewLive returns an empty set of live processes bounded by max. On Linux it
+// also sheds idle processes when the host or Orbit's memory cgroup is under
+// pressure; other platforms still shed them when a sandbox slot is needed.
+func NewLive(max int) *Live {
+	return NewLiveWithPressure(max, systemMemoryPressure, memoryPressureCheckInterval)
+}
+
+// NewLiveWithPressure returns a live-process set whose idle eviction checks
+// pressure at interval. A nil pressure function or non-positive interval
+// disables the watcher. This also lets callers with an external resource
+// manager provide their own pressure signal.
+func NewLiveWithPressure(max int, pressure func() bool, interval time.Duration) *Live {
+	return newLive(max, pressure, interval)
+}
+
+func newLive(max int, pressure func() bool, interval time.Duration) *Live {
+	l := &Live{procs: map[string]*liveProc{}, max: max, pressure: pressure}
+	if pressure != nil && interval > 0 {
+		l.pressureStop = make(chan struct{})
+		l.pressureDone = make(chan struct{})
+		go l.watchMemoryPressure(interval)
+	}
+	return l
+}
+
+func (l *Live) watchMemoryPressure(interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	defer close(l.pressureDone)
+	for {
+		select {
+		case <-l.pressureStop:
+			return
+		case <-t.C:
+			if l.pressure() {
+				l.CloseIdle()
+			}
+		}
+	}
+}
 
 // Len reports how many live processes are open.
 func (l *Live) Len() int {
@@ -49,15 +95,21 @@ func (l *Live) Len() int {
 // in progress (the end of a drain), so none is mid-turn. Later runs fall
 // back to one process per run.
 func (l *Live) Close() {
-	l.mu.Lock()
-	l.closed = true
-	procs := l.procs
-	l.procs = map[string]*liveProc{}
-	l.mu.Unlock()
-	for _, p := range procs {
-		l.async(func() { p.stop(false) })
-	}
-	l.wg.Wait()
+	l.closeOnce.Do(func() {
+		if l.pressureStop != nil {
+			l.pressureClose.Do(func() { close(l.pressureStop) })
+			<-l.pressureDone
+		}
+		l.mu.Lock()
+		l.closed = true
+		procs := l.procs
+		l.procs = map[string]*liveProc{}
+		l.mu.Unlock()
+		for _, p := range procs {
+			l.async(func() { p.stop(false) })
+		}
+		l.wg.Wait()
+	})
 }
 
 type liveProc struct {
@@ -74,16 +126,61 @@ type liveProc struct {
 	model, effort string
 	busy          bool
 	used          time.Time
+	timerMu       sync.Mutex
 	timer         *time.Timer
+	hardTimer     *time.Timer
+	hardUntil     time.Time
 }
 
 // stop ends the process: closed between turns (stdin closed, so it exits on its own, within claudeproto.CloseGrace), or killed after a failed turn.
 func (p *liveProc) stop(kill bool) {
+	p.cancelTimers()
 	if kill {
 		p.proc.Kill()
 		return
 	}
 	p.proc.Close(claudeproto.CloseGrace)
+}
+
+func (p *liveProc) scheduleIdle(d time.Duration, f func()) {
+	p.timerMu.Lock()
+	defer p.timerMu.Unlock()
+	if p.timer != nil {
+		p.timer.Stop()
+	}
+	p.timer = time.AfterFunc(d, f)
+}
+
+func (p *liveProc) stopIdleTimer() {
+	p.timerMu.Lock()
+	defer p.timerMu.Unlock()
+	if p.timer != nil {
+		p.timer.Stop()
+		p.timer = nil
+	}
+}
+
+func (p *liveProc) scheduleHardExpiry(at time.Time, f func()) {
+	if at.IsZero() {
+		return
+	}
+	p.timerMu.Lock()
+	defer p.timerMu.Unlock()
+	p.hardUntil = at
+	p.hardTimer = time.AfterFunc(max(0, time.Until(at)), f)
+}
+
+func (p *liveProc) cancelTimers() {
+	p.timerMu.Lock()
+	defer p.timerMu.Unlock()
+	if p.timer != nil {
+		p.timer.Stop()
+		p.timer = nil
+	}
+	if p.hardTimer != nil {
+		p.hardTimer.Stop()
+		p.hardTimer = nil
+	}
 }
 
 // take returns the idle process for key if it runs this exact invocation
@@ -102,14 +199,15 @@ func (l *Live) take(key, hash, want string) *liveProc {
 		alive = false
 	default:
 	}
-	if !alive || p.hash != hash || p.session != want || want == "" {
+	p.timerMu.Lock()
+	expired := !p.hardUntil.IsZero() && !time.Now().Before(p.hardUntil)
+	p.timerMu.Unlock()
+	if !alive || expired || p.hash != hash || p.session != want || want == "" {
 		delete(l.procs, key)
 		l.async(func() { p.stop(false) })
 		return nil
 	}
-	if p.timer != nil {
-		p.timer.Stop()
-	}
+	p.stopIdleTimer()
 	p.busy = true
 	return p
 }
@@ -128,7 +226,7 @@ func (l *Live) keep(p *liveProc, idle time.Duration) {
 	}
 	p.busy, p.used = false, time.Now()
 	l.procs[p.key] = p
-	p.timer = time.AfterFunc(idle, func() { l.expire(p) })
+	p.scheduleIdle(idle, func() { l.expire(p) })
 	for len(l.procs) > l.max {
 		var lru *liveProc
 		for _, q := range l.procs {
@@ -163,9 +261,7 @@ func (l *Live) discard(key string) {
 	if p == nil || p.busy {
 		return
 	}
-	if p.timer != nil {
-		p.timer.Stop()
-	}
+	p.stopIdleTimer()
 	delete(l.procs, key)
 	l.async(func() { p.stop(false) })
 }
@@ -178,6 +274,21 @@ func (l *Live) expire(p *liveProc) {
 	}
 	delete(l.procs, p.key)
 	l.async(func() { p.stop(false) })
+}
+
+// setHardExpiry caps a process started with a short-lived credential. Unlike
+// idle expiry, this deadline also interrupts a turn that is still running.
+func (l *Live) setHardExpiry(p *liveProc, at time.Time) {
+	p.scheduleHardExpiry(at, func() { l.expireHard(p) })
+}
+
+func (l *Live) expireHard(p *liveProc) {
+	l.mu.Lock()
+	if l.procs[p.key] == p {
+		delete(l.procs, p.key)
+	}
+	l.mu.Unlock()
+	p.stop(true)
 }
 
 // liveProcess is a live process: a local CLI (*claudeproto.Process) or one in
@@ -197,8 +308,9 @@ type liveProcess interface {
 	SetPermissionMode(ctx context.Context, mode string) error
 }
 
-// closeIdle closes every idle live process, for a sandbox slot or memory.
-func (l *Live) closeIdle() {
+// CloseIdle closes every idle live process and reports how many it closed.
+// Active turns remain untouched; their process is eligible on the next check.
+func (l *Live) CloseIdle() int {
 	l.mu.Lock()
 	var idle []*liveProc
 	for k, p := range l.procs {
@@ -211,7 +323,11 @@ func (l *Live) closeIdle() {
 	for _, p := range idle {
 		p.stop(false)
 	}
+	return len(idle)
 }
+
+// closeIdle is kept for the sandbox-capacity retry path.
+func (l *Live) closeIdle() { l.CloseIdle() }
 
 func (l *Live) async(f func()) {
 	l.wg.Add(1)
@@ -297,6 +413,7 @@ func (c *claudeCode) runLive(ctx context.Context, sess *Session, args, env []str
 			return nil, true, err
 		}
 		p.key, p.hash, p.busy = sess.Key, hash, true
+		sess.Live.setHardExpiry(p, sess.LiveUntil)
 		p.model, p.effort = req.Model, req.Effort
 	}
 	if err := sess.Started(mode, parent); err != nil {
