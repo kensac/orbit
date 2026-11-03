@@ -4,19 +4,23 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/kensac/orbit/internal/client"
+	"github.com/kensac/orbit/internal/store"
 )
 
-// Importer is the authenticated write side used to restore portable agent state.
+// Importer is the authenticated write side for portable state imports.
 type Importer interface {
 	Request(context.Context, string, string, io.Reader, io.Writer) error
 }
@@ -24,19 +28,21 @@ type Importer interface {
 // ImportResult reports each independently committed API operation. The API
 // import endpoints are idempotent, so a failed import can be retried safely.
 type ImportResult struct {
-	Agent                 string          `json:"agent"`
-	DryRun                bool            `json:"dry_run"`
-	MemoryDocument        string          `json:"memory_document"`
-	Entries               json.RawMessage `json:"entries,omitempty"`
-	Skills                json.RawMessage `json:"skills,omitempty"`
-	Attachments           []string        `json:"attachments,omitempty"`
-	ConversationResources int             `json:"conversation_resources_in_archive"`
-	ConversationsImported bool            `json:"conversations_imported"`
+	Agent                        string          `json:"agent"`
+	DryRun                       bool            `json:"dry_run"`
+	MemoryDocument               string          `json:"memory_document"`
+	Entries                      json.RawMessage `json:"entries,omitempty"`
+	Skills                       json.RawMessage `json:"skills,omitempty"`
+	Attachments                  []string        `json:"attachments,omitempty"`
+	ConversationArchivesCount    int             `json:"conversation_archives_in_bundle"`
+	ConversationArchivesImported bool            `json:"conversation_archives_imported"`
+	ConversationImportResults    json.RawMessage `json:"conversation_archive_results,omitempty"`
 }
 
 type bundleResources struct {
-	manifest Manifest
-	values   map[string]json.RawMessage
+	manifest  Manifest
+	values    map[string]json.RawMessage
+	bundleSHA string
 }
 
 type importedEntry struct {
@@ -91,6 +97,7 @@ func Import(ctx context.Context, api Importer, filename, target string, dryRun b
 	if !r.manifest.ResourceCoverageComplete {
 		return out, errors.New("bundle has incomplete resource coverage")
 	}
+	bundleHash := r.bundleSHA
 	sourceSegment, err := client.Segment(r.manifest.Agent)
 	if err != nil {
 		return out, errors.New("bundle has an invalid source agent")
@@ -98,9 +105,6 @@ func Import(ctx context.Context, api Importer, filename, target string, dryRun b
 	for _, resource := range r.manifest.Resources {
 		if resource.Coverage == "error" || resource.Coverage == "partial" {
 			return out, fmt.Errorf("bundle resource %q is incomplete", resource.Endpoint)
-		}
-		if strings.HasPrefix(resource.Endpoint, "conversations/") && strings.HasSuffix(resource.Endpoint, "/thread?limit=200") {
-			out.ConversationResources++
 		}
 	}
 	out.Agent, out.DryRun = target, dryRun
@@ -186,6 +190,17 @@ func Import(ctx context.Context, api Importer, filename, target string, dryRun b
 			out.Attachments = append(out.Attachments, "skill:"+a.Name)
 		}
 	}
+	archives, err := conversationArchives(r, source, bundleHash)
+	if err != nil {
+		return out, err
+	}
+	out.ConversationArchivesCount = len(archives)
+	if len(archives) > 0 {
+		out.ConversationImportResults, err = importConversationArchives(ctx, api, targetSegment, archives, true)
+		if err != nil {
+			return out, fmt.Errorf("validate imported conversation archives: %w", err)
+		}
+	}
 	if dryRun {
 		return out, nil
 	}
@@ -219,7 +234,120 @@ func Import(ctx context.Context, api Importer, filename, target string, dryRun b
 			return out, fmt.Errorf("attach imported %s %q: %w", kind, name, err)
 		}
 	}
+	if len(archives) > 0 {
+		out.ConversationImportResults, err = importConversationArchives(ctx, api, targetSegment, archives, false)
+		if err != nil {
+			return out, fmt.Errorf("import conversation archives: %w", err)
+		}
+		out.ConversationArchivesImported = true
+	}
 	return out, nil
+}
+
+type importedConversationArchive struct {
+	SourceAgent          string          `json:"source_agent"`
+	SourceConversationID string          `json:"source_conversation_id"`
+	SourceBundleSHA256   string          `json:"source_bundle_sha256"`
+	Snapshot             json.RawMessage `json:"snapshot"`
+}
+
+func conversationArchives(r bundleResources, source, bundleHash string) ([]importedConversationArchive, error) {
+	type sourceConversation struct {
+		ID string `json:"id"`
+	}
+	conversations := map[string]json.RawMessage{}
+	conversationPrefix := "agents/" + source + "/conversations?"
+	for _, resource := range r.manifest.Resources {
+		if !strings.HasPrefix(resource.Endpoint, conversationPrefix) {
+			continue
+		}
+		raw, ok := r.values[resource.Endpoint]
+		if !ok {
+			return nil, fmt.Errorf("bundle is missing conversations page %q", resource.Endpoint)
+		}
+		var page struct {
+			Conversations []json.RawMessage `json:"conversations"`
+		}
+		if err := json.Unmarshal(raw, &page); err != nil {
+			return nil, errors.New("bundle has an invalid conversations page")
+		}
+		for _, item := range page.Conversations {
+			var c sourceConversation
+			if err := json.Unmarshal(item, &c); err != nil || !store.IsUUID(c.ID) {
+				return nil, errors.New("bundle has an invalid source conversation")
+			}
+			if _, exists := conversations[c.ID]; !exists {
+				conversations[c.ID] = item
+			}
+		}
+	}
+	type threadArchive struct {
+		Conversation json.RawMessage   `json:"conversation"`
+		Pages        []json.RawMessage `json:"pages"`
+	}
+	threads := make(map[string]*threadArchive, len(conversations))
+	for id, conversation := range conversations {
+		threads[id] = &threadArchive{Conversation: conversation, Pages: []json.RawMessage{}}
+	}
+	for _, resource := range r.manifest.Resources {
+		path, _, _ := strings.Cut(resource.Endpoint, "?")
+		parts := strings.Split(path, "/")
+		if len(parts) != 3 || parts[0] != "conversations" || parts[2] != "thread" {
+			continue
+		}
+		id := parts[1]
+		if threads[id] == nil {
+			return nil, fmt.Errorf("bundle thread %q has no source conversation metadata", id)
+		}
+		page, ok := r.values[resource.Endpoint]
+		if !ok {
+			return nil, fmt.Errorf("bundle is missing thread page %q", resource.Endpoint)
+		}
+		threads[id].Pages = append(threads[id].Pages, page)
+	}
+	ids := make([]string, 0, len(threads))
+	for id, thread := range threads {
+		if len(thread.Pages) == 0 {
+			return nil, fmt.Errorf("bundle has no thread pages for conversation %q", id)
+		}
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	out := make([]importedConversationArchive, 0, len(ids))
+	for _, id := range ids {
+		snapshot, err := json.Marshal(threads[id])
+		if err != nil {
+			return nil, err
+		}
+		if len(snapshot) > 8<<20 {
+			return nil, fmt.Errorf("conversation %q transcript exceeds the 8 MiB archive limit", id)
+		}
+		out = append(out, importedConversationArchive{SourceAgent: source, SourceConversationID: id,
+			SourceBundleSHA256: bundleHash, Snapshot: snapshot})
+	}
+	return out, nil
+}
+
+func importConversationArchives(ctx context.Context, api Importer, target string, archives []importedConversationArchive, dryRun bool) (json.RawMessage, error) {
+	var results []json.RawMessage
+	for _, archive := range archives {
+		payload, err := json.Marshal(map[string]any{"dry_run": dryRun, "archives": []importedConversationArchive{archive}})
+		if err != nil {
+			return nil, err
+		}
+		response, err := requestJSON(ctx, api, "POST", "agents/"+target+"/conversation-archives/import", payload)
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			Results []json.RawMessage `json:"results"`
+		}
+		if err := json.Unmarshal(response, &result); err != nil || len(result.Results) != 1 {
+			return nil, errors.New("conversation archive import API returned an invalid result")
+		}
+		results = append(results, result.Results[0])
+	}
+	return json.Marshal(map[string]any{"results": results})
 }
 
 func importRecords(ctx context.Context, api Importer, endpoint, field string, records any, limit int, dryRun bool) (json.RawMessage, error) {
@@ -262,27 +390,42 @@ func importRecords(ctx context.Context, api Importer, endpoint, field string, re
 	return json.Marshal(map[string]any{"results": results})
 }
 
-func loadBundle(filename string) (out bundleResources, retErr error) {
-	manifest, err := Inspect(filename)
+func loadBundle(filename string) (out bundleResources, err error) {
+	file, err := os.Open(filename)
 	if err != nil {
 		return out, err
 	}
-	archive, err := zip.OpenReader(filename)
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
 		return out, err
 	}
-	defer func() {
-		if err := archive.Close(); err != nil && retErr == nil {
-			retErr = err
-		}
-	}()
-	out.manifest = manifest
-	out.values = make(map[string]json.RawMessage, len(manifest.Resources))
+	maxSize := int64(maxBundleBytes + maxResponseBytes + maxResponses*1024)
+	if info.Size() < 0 || info.Size() > maxSize {
+		return out, errors.New("archive size exceeds format bounds")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxSize+1))
+	if err != nil {
+		return out, err
+	}
+	if int64(len(data)) != info.Size() {
+		return out, errors.New("archive size changed while reading")
+	}
+	if err := verifyData(data, &out.manifest); err != nil {
+		return out, err
+	}
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return out, err
+	}
+	sum := sha256.Sum256(data)
+	out.bundleSHA = hex.EncodeToString(sum[:])
+	out.values = make(map[string]json.RawMessage, len(out.manifest.Resources))
 	files := make(map[string]*zip.File, len(archive.File))
 	for _, file := range archive.File {
 		files[file.Name] = file
 	}
-	for _, resource := range manifest.Resources {
+	for _, resource := range out.manifest.Resources {
 		if resource.File == "" {
 			continue
 		}

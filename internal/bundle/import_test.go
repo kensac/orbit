@@ -2,9 +2,12 @@ package bundle
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -47,11 +50,12 @@ func (a *importAPI) Request(_ context.Context, method, path string, body io.Read
 		_, _ = io.WriteString(out, `{"agent":{"name":"target"}}`)
 	case method == "POST" && strings.HasSuffix(path, "/import"):
 		var request struct {
-			Entries []json.RawMessage `json:"entries"`
-			Skills  []json.RawMessage `json:"skills"`
+			Entries  []json.RawMessage `json:"entries"`
+			Skills   []json.RawMessage `json:"skills"`
+			Archives []json.RawMessage `json:"archives"`
 		}
 		_ = json.Unmarshal([]byte(payload.String()), &request)
-		count := max(len(request.Entries), len(request.Skills))
+		count := max(len(request.Entries), len(request.Skills), len(request.Archives))
 		results := make([]map[string]string, count)
 		for i := range results {
 			results[i] = map[string]string{"outcome": "unchanged"}
@@ -62,6 +66,26 @@ func (a *importAPI) Request(_ context.Context, method, path string, body io.Read
 		_, _ = io.WriteString(out, `{}`)
 	}
 	return nil
+}
+
+func portableConversationTestBundle(t *testing.T) string {
+	t.Helper()
+	const id = "10000000-0000-4000-8000-000000000001"
+	fetch := bundleFetcher{
+		"agents/source":                                         `{"agent":{"name":"source","spec":{}}}`,
+		"agents/source/memory?limit=1":                          `{"versions":[]}`,
+		"agents/source/context":                                 `{"topics":[],"skills":[]}`,
+		"memory/entries?limit=1000&scope=profile&status=active": `{"entries":[]}`,
+		"memory/entries?agent=source&limit=1000&status=active":  `{"entries":[]}`,
+		"agents/source/conversations?archived=false&limit=200":  `{"conversations":[],"has_more":false,"next_before":null}`,
+		"agents/source/conversations?archived=true&limit=200":   `{"conversations":[{"id":"` + id + `","agent":"source","title":"Old","archived":true}],"has_more":false,"next_before":null}`,
+		"conversations/" + id + "/thread?limit=200":             `{"items":[{"kind":"message","id":"m1","body":"hello"}],"has_more":false,"next_before":null}`,
+	}
+	path := filepath.Join(t.TempDir(), "conversation-bundle.zip")
+	if manifest, err := Export(context.Background(), fetch, "source", path); err != nil {
+		t.Fatalf("%v: %+v", err, manifest.Resources)
+	}
+	return path
 }
 
 func portableTestBundle(t *testing.T) string {
@@ -89,7 +113,7 @@ func TestImportDryRunValidatesWithoutWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.DryRun || result.MemoryDocument != "would import" || result.ConversationsImported || len(result.Attachments) != 1 {
+	if !result.DryRun || result.MemoryDocument != "would import" || result.ConversationArchivesImported || len(result.Attachments) != 1 {
 		t.Fatalf("result: %+v", result)
 	}
 	var entryCalls int
@@ -109,13 +133,61 @@ func TestImportDryRunValidatesWithoutWrites(t *testing.T) {
 	}
 }
 
+func TestImportArchivesConversationAsReadOnlySnapshot(t *testing.T) {
+	api := &importAPI{}
+	filename := portableConversationTestBundle(t)
+	result, err := Import(context.Background(), api, filename, "target", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.ConversationArchivesImported || result.ConversationArchivesCount != 1 {
+		t.Fatalf("conversation import result: %+v", result)
+	}
+	var found bool
+	for _, call := range api.calls {
+		if call.path != "agents/target/conversation-archives/import" {
+			continue
+		}
+		found = true
+		var body struct {
+			Archives []struct {
+				SourceAgent          string `json:"source_agent"`
+				SourceConversationID string `json:"source_conversation_id"`
+				SourceBundleSHA256   string `json:"source_bundle_sha256"`
+				Snapshot             struct {
+					Conversation struct {
+						ID string `json:"id"`
+					} `json:"conversation"`
+					Pages []json.RawMessage `json:"pages"`
+				} `json:"snapshot"`
+			} `json:"archives"`
+		}
+		if err := json.Unmarshal([]byte(call.body), &body); err != nil || len(body.Archives) != 1 {
+			t.Fatalf("archive request body %q: %v", call.body, err)
+		}
+		archive := body.Archives[0]
+		bundleBytes, err := os.ReadFile(filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bundleDigest := sha256.Sum256(bundleBytes)
+		if archive.SourceAgent != "source" || archive.SourceConversationID != "10000000-0000-4000-8000-000000000001" ||
+			archive.SourceBundleSHA256 != hex.EncodeToString(bundleDigest[:]) || archive.Snapshot.Conversation.ID != archive.SourceConversationID || len(archive.Snapshot.Pages) != 1 {
+			t.Fatalf("archive payload: %+v", archive)
+		}
+	}
+	if !found {
+		t.Fatal("conversation archive endpoint was not called")
+	}
+}
+
 func TestImportAppliesAndReportsConversationLimitation(t *testing.T) {
 	api := &importAPI{}
 	result, err := Import(context.Background(), api, portableTestBundle(t), "target", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.MemoryDocument != "imported" || result.ConversationsImported {
+	if result.MemoryDocument != "imported" || result.ConversationArchivesImported {
 		t.Fatalf("result: %+v", result)
 	}
 	var wroteMemory, attachedTopic bool
