@@ -347,7 +347,11 @@ func (g *connectorGateway) permit(ctx context.Context, server, tool, toolUseID s
 
 // recordPermission stores a permission decision before the CLI is answered.
 func (g *connectorGateway) recordPermission(req claudeproto.PermissionRequest, p claudeproto.Permission) error {
-	return g.record("orbit.permission", map[string]any{"request_id": req.RequestID, "tool": req.Tool, "allowed": p.Allow, "message": p.Message})
+	return recordPermission(g.record, req, p)
+}
+
+func recordPermission(record func(string, any) error, req claudeproto.PermissionRequest, p claudeproto.Permission) error {
+	return record("orbit.permission", map[string]any{"request_id": req.RequestID, "tool": req.Tool, "allowed": p.Allow, "message": p.Message})
 }
 
 // propose records a call to an approve tool as a pending action of the run.

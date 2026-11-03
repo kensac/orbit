@@ -46,6 +46,7 @@ Deployed on hetzner: everything up to the image pinned in `hetzner-vps-config/co
 
 | Area | Branch / PR | Notes |
 |---|---|---|
+| Permission levels | #155 perm-levels | Configurable chat defaults and ceilings with recorded permission decisions. Conversation overrides and approval UI follow separately. |
 | Isolation: the credential proxy (the Claude token out of build sandboxes and sandboxed chats), egress profiles (`workstation`: the open web without private ranges, orbit or SMTP), the gVisor host plan for hetzner and oci | claude-isolation: iso-spike, then credproxy, egress-profiles | spike recorded in tickets.md (Credential proxy: what the CLI does); direct terminals keep their own login by choice |
 | Laptop sessions: `orbit import claude-sessions` and `POST /sessions/import` (imported sessions searchable as kind `session`), continuing one on the server, learning from them, `orbit sync claude` | #129 claude-sessions-import, #132 claude-sessions-continue, #140 claude-sessions-learn, #146 claude-sync | ARCHITECTURE.md, Imported sessions |
 | Agent templates (a versioned library, typed parameters, created by code through `agent:define`), sharing and importing them as bundles, question forms (`fields` on questions, answers checked by code), skill writes under a rule (`skill:write`), skill references and built-in orbit skills | branches question-forms, templates, template-bundles, skill-rule, skill-references (claude-templates) | question forms first: templates ask for `user_prompt` parameters with a form |

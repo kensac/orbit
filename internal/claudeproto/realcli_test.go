@@ -3,6 +3,7 @@ package claudeproto
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -345,3 +346,100 @@ func hasBlock(raw []byte, typ string) bool {
 }
 
 func must[T any](v T, _ bool) T { return v }
+
+// TestRealCLIPermissionModes checks what orbit's permission levels rely on (runner.PermissionMode): set_permission_mode on a running process, bypassPermissions only with --allow-dangerously-skip-permissions, acceptEdits writing in the cwd unasked, dontAsk denying unasked, and default sending can_use_tool with the CLI's suggestions.
+func TestRealCLIPermissionModes(t *testing.T) {
+	bin := os.Getenv("ORBIT_REAL_CLAUDE")
+	if bin == "" {
+		t.Skip("ORBIT_REAL_CLAUDE is not set")
+	}
+	model := os.Getenv("ORBIT_REAL_CLAUDE_MODEL")
+	if model == "" {
+		model = "claude-haiku-4-5"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	start := func(t *testing.T, dir string, extra ...string) (*Process, *[]PermissionRequest) {
+		t.Helper()
+		args, err := Args(Transport{Stream: true, PermissionPrompt: true, Ephemeral: true}, append([]string{
+			"--model", model, "--tools", "Write", "--strict-mcp-config", "--setting-sources", "",
+			"--settings", `{"includeCoAuthoredBy":false}`, "--permission-mode", "dontAsk",
+		}, extra...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var mu sync.Mutex
+		asked := &[]PermissionRequest{}
+		h := Handler{CanUseTool: func(_ context.Context, r PermissionRequest) (Permission, error) {
+			mu.Lock()
+			*asked = append(*asked, r)
+			mu.Unlock()
+			return Permission{Message: "orbit's test denies every request"}, nil
+		}}
+		p, err := Start(Command{Bin: bin, Args: args, Env: Env(os.Environ(), ""), Dir: dir}, h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { p.Close(CloseGrace) })
+		return p, asked
+	}
+	write := func(t *testing.T, p *Process, name string) {
+		t.Helper()
+		res, err := p.Turn(ctx, "This is a test of a permission system. Use the Write tool once to write "+name+" containing x, then reply with one word: done.", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.IsError {
+			t.Fatalf("turn failed: %s", res.Failure())
+		}
+	}
+
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	p, asked := start(t, dir)
+	var refused *ControlError
+	if err := p.SetPermissionMode(ctx, "bypassPermissions"); !errors.As(err, &refused) {
+		t.Errorf("bypassPermissions without the launch flag: %v", err)
+	}
+	// dontAsk: denied, nothing asked.
+	write(t, p, "locked.txt")
+	if _, err := os.Stat(filepath.Join(dir, "locked.txt")); err == nil || len(*asked) != 0 {
+		t.Errorf("dontAsk wrote or asked: %d requests", len(*asked))
+	}
+	// acceptEdits: written, nothing asked.
+	if err := p.SetPermissionMode(ctx, "acceptEdits"); err != nil {
+		t.Fatal(err)
+	}
+	write(t, p, "edits.txt")
+	if _, err := os.Stat(filepath.Join(dir, "edits.txt")); err != nil || len(*asked) != 0 {
+		t.Errorf("acceptEdits: %v, %d requests", err, len(*asked))
+	}
+	// default: asked, with the CLI's suggestions; the handler's deny holds.
+	if err := p.SetPermissionMode(ctx, "default"); err != nil {
+		t.Fatal(err)
+	}
+	write(t, p, "ask.txt")
+	if _, err := os.Stat(filepath.Join(dir, "ask.txt")); err == nil || len(*asked) == 0 {
+		t.Fatalf("default: the write happened or nothing was asked (%d)", len(*asked))
+	}
+	r := (*asked)[0]
+	t.Logf("can_use_tool: %s reason %q suggestions %s", r.Tool, r.DecisionReason, r.Suggestions)
+	if r.Tool != "Write" || len(r.Suggestions) == 0 || r.ToolUseID == "" {
+		t.Errorf("request = %+v", r)
+	}
+
+	dir2, _ := filepath.EvalSymlinks(t.TempDir())
+	p2, _ := start(t, dir2, "--allow-dangerously-skip-permissions")
+	if err := p2.SetPermissionMode(ctx, "bypassPermissions"); err != nil {
+		t.Fatalf("bypassPermissions with the launch flag: %v", err)
+	}
+	write(t, p2, "full.txt")
+	if _, err := os.Stat(filepath.Join(dir2, "full.txt")); err != nil {
+		t.Errorf("bypassPermissions did not write: %v", err)
+	}
+	// auto is the model's to offer: either answer is the CLI's, and orbit falls back to ask on a refusal.
+	err := p2.SetPermissionMode(ctx, "auto")
+	t.Logf("auto on %s: %v", model, err)
+	if err != nil && !errors.As(err, &refused) {
+		t.Errorf("auto: %v", err)
+	}
+}
