@@ -106,7 +106,7 @@ func handle(id json.RawMessage, method string, params json.RawMessage, root, sta
 		if skillsAvailable(state) {
 			tools = append(tools, map[string]any{
 				"name": "skill",
-				"description": "Read one of your skills in full: its SKILL.md (with the list of its files), or one of its files. " +
+				"description": "Read one of your skills in full: its SKILL.md (with the list of its files and its references, each a name and title), one of its files, or one reference by name. " +
 					"A skill's stub says to call this; follow the text it returns.",
 				"inputSchema": SkillSchema,
 			})
@@ -138,16 +138,17 @@ func handle(id json.RawMessage, method string, params json.RawMessage, root, sta
 		if p.Name == "skill" {
 			// A skill's text is instructions, not a computed figure: it goes to no ledger.
 			var a struct {
-				Name   string `json:"name"`
-				File   string `json:"file"`
-				Offset int64  `json:"offset"`
+				Name      string `json:"name"`
+				File      string `json:"file"`
+				Reference string `json:"reference"`
+				Offset    int64  `json:"offset"`
 			}
 			dec := json.NewDecoder(bytes.NewReader(p.Arguments))
 			dec.DisallowUnknownFields()
 			var res map[string]any
 			err := dec.Decode(&a)
 			if err == nil {
-				res, err = ReadSkill(state, a.Name, a.File, a.Offset)
+				res, err = ReadSkill(state, a.Name, a.File, a.Reference, a.Offset)
 			}
 			if err != nil {
 				return rpcResult(id, map[string]any{"isError": true, "content": []any{map[string]any{"type": "text", "text": "skill: " + err.Error()}}})

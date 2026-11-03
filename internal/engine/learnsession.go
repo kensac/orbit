@@ -125,7 +125,7 @@ Rules:
 - summary: one line saying what you kept, or that nothing was.
 - procedures: the reusable procedures this session carried out (at most 5, one line each: what was done, in what steps, with which tools), or none. Later passes over other sessions read them.
 - skills: propose a skill only for a procedure this session shows that one or more of the other sessions below also show (by their procedures), so it has been done at least twice. sessions names every session it was seen in by id, this one's first. content is the whole SKILL.md (frontmatter with name and a description saying when to use it, then the steps). To improve a skill in Skills in the library, use its name and the version shown; for a new one, version 0 and a name the library does not have. Almost always: none.
-` + entriesContract(topics)
+` + entriesContract(topics, false)
 }
 
 // learnSession is learn for an imported session: its window rendered newest kept, the other sessions' reports and the skills library beside it, and skill proposals turned into skill:write actions for a person.
