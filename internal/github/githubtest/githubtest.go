@@ -94,6 +94,13 @@ type Server struct {
 	Others map[int]map[string]any
 	// PRFiles are PR 7's files as pulls/7/files lists them, paged.
 	PRFiles []map[string]any
+	// Issues and Releases are what GET issues and releases answer, one
+	// page of per_page from page.
+	Issues   []map[string]any
+	Releases []map[string]any
+	// Comments are the issue and pull request comments posted, each with
+	// "number" set to the issue's.
+	Comments []map[string]any
 }
 
 // New starts a fake, stopped when the test ends.
@@ -221,6 +228,13 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			"base": map[string]any{"ref": b["base"], "repo": map[string]any{"full_name": "kensac/orbit", "default_branch": "main"}},
 		}
 		f.write(w, 201, f.PR)
+	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls/7/files" && f.PR != nil:
+		per, page := 30, 1
+		_, _ = fmt.Sscan(r.URL.Query().Get("per_page"), &per)
+		_, _ = fmt.Sscan(r.URL.Query().Get("page"), &page)
+		per = min(per, 100)
+		lo, hi := min((page-1)*per, len(f.PRFiles)), min(page*per, len(f.PRFiles))
+		f.write(w, 200, f.PRFiles[lo:hi])
 	case (r.Method == "GET" || r.Method == "PATCH") && f.other(r.URL.Path) != nil:
 		pr := f.other(r.URL.Path)
 		if r.Method == "PATCH" {
@@ -230,13 +244,6 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			patch(pr, b)
 		}
 		f.write(w, 200, pr)
-	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls/7/files" && f.PR != nil:
-		per, page := 30, 1
-		_, _ = fmt.Sscan(r.URL.Query().Get("per_page"), &per)
-		_, _ = fmt.Sscan(r.URL.Query().Get("page"), &page)
-		per = min(per, 100)
-		lo, hi := min((page-1)*per, len(f.PRFiles)), min(page*per, len(f.PRFiles))
-		f.write(w, 200, f.PRFiles[lo:hi])
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls/7" && f.PR == nil:
 		f.write(w, 404, map[string]string{"message": "Not Found"})
 	case r.Method == "GET" && r.URL.Path == "/repos/kensac/orbit/pulls/7":
@@ -308,6 +315,28 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		f.write(w, 200, map[string]any{"statuses": f.Statuses})
 	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/commits/") && strings.HasSuffix(r.URL.Path, "/status"):
 		f.write(w, 200, map[string]any{"statuses": []any{}})
+	case r.Method == "GET" && (r.URL.Path == "/repos/kensac/orbit/issues" || r.URL.Path == "/repos/kensac/orbit/releases"):
+		all := f.Issues
+		if strings.HasSuffix(r.URL.Path, "/releases") {
+			all = f.Releases
+		}
+		var per, page int
+		_, _ = fmt.Sscan(r.URL.Query().Get("per_page"), &per)
+		_, _ = fmt.Sscan(r.URL.Query().Get("page"), &page)
+		lo, hi := min((page-1)*per, len(all)), min(page*per, len(all))
+		out := all[lo:hi]
+		if out == nil {
+			out = []map[string]any{}
+		}
+		f.write(w, 200, out)
+	case r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/repos/kensac/orbit/issues/") && strings.HasSuffix(r.URL.Path, "/comments"):
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		var n int
+		_, _ = fmt.Sscan(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/repos/kensac/orbit/issues/"), "/comments"), &n)
+		b["number"] = n
+		f.Comments = append(f.Comments, b)
+		f.write(w, 201, map[string]any{"id": 1000 + len(f.Comments), "html_url": fmt.Sprintf("https://github.com/kensac/orbit/issues/%d#issuecomment-%d", n, 1000+len(f.Comments))})
 	case r.Method == "PUT" && r.URL.Path == "/repos/kensac/orbit/pulls/7/merge":
 		_ = json.NewDecoder(r.Body).Decode(&f.Merged)
 		if f.Merged["sha"] != f.PR["head"].(map[string]any)["sha"] {
