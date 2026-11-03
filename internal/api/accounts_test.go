@@ -98,6 +98,9 @@ func TestAccounts(t *testing.T) {
 	v.fake.mu.Lock()
 	v.fake.logins[slot] = sandbox.AccountStatus{LoggedIn: true, Email: "k@example.com", OrgID: "o-1", OrgName: "K's Organization",
 		SubscriptionType: "max", RefreshExpiresAt: time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC).UnixMilli()}
+	seen, pct := time.Date(2026, 11, 2, 7, 0, 0, 0, time.UTC), 12.5
+	v.fake.usage[slot] = sandbox.AccountUsage{Source: sandbox.UsageStatusline, ObservedAt: &seen,
+		Windows: []sandbox.UsageWindow{{Window: "five_hour", UsedPercentage: &pct, ResetsAt: &seen}}}
 	v.fake.mu.Unlock()
 	code, out = call(t, http.MethodGet, base, v.person("kanishk"), "")
 	as := out["accounts"].([]any)
@@ -109,6 +112,11 @@ func TestAccounts(t *testing.T) {
 	if first["logged_in"] != true || first["email"] != "k@example.com" || first["subscription_type"] != "max" ||
 		!exp.Equal(time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC)) || first["checked_at"] == nil || first["access_expires_at"] != nil {
 		t.Fatalf("a logged-in account: %v", first)
+	}
+	usage, _ := first["usage"].(map[string]any)
+	if usage == nil || usage["source"] != "statusline" || usage["observed_at"] != "2026-11-02T07:00:00Z" ||
+		usage["windows"].([]any)[0].(map[string]any)["used_percentage"] != 12.5 || as[1].(map[string]any)["usage"] != nil {
+		t.Fatalf("usage %v / %v", first["usage"], as[1].(map[string]any)["usage"])
 	}
 	// A later read that finds no login keeps who it was.
 	v.fake.mu.Lock()

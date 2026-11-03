@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,18 +67,19 @@ const AgentAuthorPrefix = "agent:"
 
 // Task is one delegated task as the API and a run's prompt show it.
 type Task struct {
-	ID                   string `json:"id"`
-	Key                  string `json:"key"`
-	Agent                string `json:"agent"`
-	ConversationID       string `json:"conversation_id"`
-	ParentAgent          string `json:"parent_agent"`
-	ParentConversationID string `json:"parent_conversation_id"`
-	ParentRunID          string `json:"parent_run_id"`
-	ActionID             string `json:"action_id"`
-	Brief                string `json:"brief"`
-	Fresh                bool   `json:"fresh"`
-	Depth                int    `json:"depth"`
-	Status               string `json:"status"`
+	ID                   string        `json:"id"`
+	Key                  string        `json:"key"`
+	Agent                string        `json:"agent"`
+	Template             *TaskTemplate `json:"template,omitempty"`
+	ConversationID       string        `json:"conversation_id"`
+	ParentAgent          string        `json:"parent_agent"`
+	ParentConversationID string        `json:"parent_conversation_id"`
+	ParentRunID          string        `json:"parent_run_id"`
+	ActionID             string        `json:"action_id"`
+	Brief                string        `json:"brief"`
+	Fresh                bool          `json:"fresh"`
+	Depth                int           `json:"depth"`
+	Status               string        `json:"status"`
 	// DependsOn is the keys of the tasks it waits for: of its batch, or
 	// earlier tasks of its parent conversation.
 	DependsOn []string      `json:"depends_on"`
@@ -107,6 +110,13 @@ type Task struct {
 	// New is set for a parent run's prompt: the task finished or asked
 	// since the parent's previous run started.
 	New bool `json:"-"`
+}
+
+// TaskTemplate records which immutable template version produced a task's
+// worker spec.
+type TaskTemplate struct {
+	Name    string `json:"name"`
+	Version int    `json:"version"`
 }
 
 // OutcomeReasonText is OutcomeReason, or "" without one.
@@ -149,7 +159,7 @@ type TaskReport struct {
 // tasks that finished or asked after that run's conversation's previous
 // run started.
 const taskSelect = `
-	SELECT t.id::text, t.key, t.agent, t.conversation_id::text, t.parent_agent, t.parent_conversation_id::text,
+	SELECT t.id::text, t.key, t.agent, t.template_name, t.template_version, t.conversation_id::text, t.parent_agent, t.parent_conversation_id::text,
 	       t.parent_run_id::text, t.action_id::text, t.brief, t.fresh, t.depth, t.status,
 	       COALESCE((SELECT array_agg(d.key ORDER BY d.key) FROM task_deps x JOIN tasks d ON d.id = x.depends_on
 	                 WHERE x.task_id = t.id), '{}'),
@@ -171,8 +181,10 @@ const taskSelect = `
 func scanTask(row pgx.Row) (*Task, error) {
 	var t Task
 	var decID, decQ, decStatus, decBy *string
+	var templateName *string
+	var templateVersion *int
 	var report, attempts, questions []byte
-	if err := row.Scan(&t.ID, &t.Key, &t.Agent, &t.ConversationID, &t.ParentAgent, &t.ParentConversationID,
+	if err := row.Scan(&t.ID, &t.Key, &t.Agent, &templateName, &templateVersion, &t.ConversationID, &t.ParentAgent, &t.ParentConversationID,
 		&t.ParentRunID, &t.ActionID, &t.Brief, &t.Fresh, &t.Depth, &t.Status, &t.DependsOn,
 		&decID, &decQ, &decStatus, &decBy, &report, &t.Error, &t.RunID, &t.RunStatus, &t.Outcome, &t.OutcomeReason, &t.Attempt, &t.Failures, &t.StalledAt, &attempts, &questions,
 		&t.CreatedAt, &t.UpdatedAt, &t.FinishedAt); err != nil {
@@ -180,6 +192,10 @@ func scanTask(row pgx.Row) (*Task, error) {
 			return nil, ErrNotFound
 		}
 		return nil, err
+	}
+	if templateName != nil && templateVersion != nil {
+		t.Template = &TaskTemplate{Name: *templateName, Version: *templateVersion}
+		t.Agent = "template:" + *templateName
 	}
 	if decID != nil {
 		t.Decision = &TaskDecision{ActionID: *decID, Question: *decQ, Status: *decStatus, DecidedBy: decBy}
@@ -230,6 +246,17 @@ func (s *Store) TaskForConversation(ctx context.Context, conversationID string) 
 	return t, err
 }
 
+// TaskWorkerSpec returns the immutable spec a template-backed task runs with.
+func (s *Store) TaskWorkerSpec(ctx context.Context, agent, sha string) ([]byte, error) {
+	var doc []byte
+	err := s.Pool.QueryRow(ctx, `SELECT sp.spec FROM agents a JOIN agent_specs sp ON sp.sha = a.spec_sha
+		WHERE a.name = $1 AND a.spec_sha = $2 AND a.task_worker`, agent, sha).Scan(&doc)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return doc, err
+}
+
 // ConversationTasks returns the tasks delegated from a conversation, oldest
 // first. With runID, a task is New when it finished, or its agent asked,
 // after the newest other run of that conversation started: what this run
@@ -274,9 +301,15 @@ const (
 
 // NewTask is one task of a delegate action.
 type NewTask struct {
-	Key   string
-	Agent string
-	Brief string
+	Key             string
+	Agent           string
+	TemplateName    string
+	TemplateVersion int
+	WorkerSpec      []byte
+	WorkerSHA       string
+	Parameters      map[string]json.RawMessage
+	Connectors      []string
+	Brief           string
 	// After is the keys of the tasks it waits for: in the same batch, or
 	// (a key the batch does not have) the newest earlier task of that key
 	// the conversation delegated.
@@ -312,6 +345,19 @@ func (s *Store) Delegate(ctx context.Context, d Delegation) ([]Delegated, error)
 	if len(d.Tasks) == 0 || len(d.Tasks) > MaxTasksPerDelegation {
 		return nil, fmt.Errorf("%w: a delegation has 1 to %d tasks", ErrInvalid, MaxTasksPerDelegation)
 	}
+	for _, nt := range d.Tasks {
+		if nt.TemplateName != "" {
+			if nt.TemplateVersion < 1 || len(nt.WorkerSpec) == 0 || nt.WorkerSHA == "" || !json.Valid(nt.WorkerSpec) {
+				return nil, fmt.Errorf("%w: template task %q needs a versioned worker spec", ErrInvalid, nt.Key)
+			}
+			sum := sha256.Sum256(nt.WorkerSpec)
+			if got := hex.EncodeToString(sum[:]); got != nt.WorkerSHA {
+				return nil, fmt.Errorf("%w: template task %q worker spec hash does not match", ErrInvalid, nt.Key)
+			}
+		} else if len(nt.WorkerSpec) > 0 || nt.WorkerSHA != "" || nt.TemplateVersion != 0 {
+			return nil, fmt.Errorf("%w: task %q has worker template data without a template", ErrInvalid, nt.Key)
+		}
+	}
 	if err := checkDAG(d.Tasks); err != nil {
 		return nil, err
 	}
@@ -339,6 +385,16 @@ func (s *Store) Delegate(ctx context.Context, d Delegation) ([]Delegated, error)
 		}
 		ids := map[string]string{}
 		for _, nt := range d.Tasks {
+			if nt.TemplateName != "" {
+				if _, err := tx.Exec(ctx, `INSERT INTO agent_specs (sha, agent, spec) VALUES ($1, $2, $3)
+					ON CONFLICT (sha) DO NOTHING`, nt.WorkerSHA, nt.Agent, nt.WorkerSpec); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(ctx, `INSERT INTO agents (name, spec_sha, enabled, present, task_worker)
+					VALUES ($1, $2, true, false, true)`, nt.Agent, nt.WorkerSHA); err != nil {
+					return err
+				}
+			}
 			var conv string
 			if err := tx.QueryRow(ctx, `INSERT INTO conversations (agent, title) VALUES ($1, $2) RETURNING id::text`,
 				nt.Agent, DefaultTitle(nt.Key+": "+nt.Brief)).Scan(&conv); err != nil {
@@ -349,9 +405,9 @@ func (s *Store) Delegate(ctx context.Context, d Delegation) ([]Delegated, error)
 			}
 			var id string
 			if err := tx.QueryRow(ctx, `INSERT INTO tasks (action_id, key, parent_run_id, parent_agent, parent_conversation_id,
-				    agent, conversation_id, brief, fresh, depth, created_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, clock_timestamp()) RETURNING id::text`,
-				d.ActionID, nt.Key, d.RunID, parent, convo, nt.Agent, conv, nt.Brief, nt.Fresh, depth+1).Scan(&id); err != nil {
+				    agent, template_name, template_version, conversation_id, brief, fresh, depth, created_at)
+				VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, 0), $9, $10, $11, $12, clock_timestamp()) RETURNING id::text`,
+				d.ActionID, nt.Key, d.RunID, parent, convo, nt.Agent, nt.TemplateName, nt.TemplateVersion, conv, nt.Brief, nt.Fresh, depth+1).Scan(&id); err != nil {
 				return err
 			}
 			// The brief is the parent's first message in the task's
@@ -363,7 +419,11 @@ func (s *Store) Delegate(ctx context.Context, d Delegation) ([]Delegated, error)
 				return err
 			}
 			ids[nt.Key] = id
-			dl := Delegated{ID: id, Key: nt.Key, Agent: nt.Agent, ConversationID: conv}
+			displayAgent := nt.Agent
+			if nt.TemplateName != "" {
+				displayAgent = "template:" + nt.TemplateName
+			}
+			dl := Delegated{ID: id, Key: nt.Key, Agent: displayAgent, ConversationID: conv}
 			if q := strings.TrimSpace(nt.Decision); q != "" {
 				params, _ := json.Marshal(map[string]string{"task_id": id, "key": nt.Key, "agent": nt.Agent, "question": q})
 				var aid string
