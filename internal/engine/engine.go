@@ -26,6 +26,7 @@ import (
 
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/build"
+	"github.com/kensac/orbit/internal/forms"
 	"github.com/kensac/orbit/internal/github"
 	"github.com/kensac/orbit/internal/harness"
 	"github.com/kensac/orbit/internal/mail"
@@ -832,7 +833,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	for _, t := range actions.Catalog(a, snap.Config.Deployment) {
 		types[t.Name] = t
 	}
-	o := store.Outcome{Questions: out.Questions}
+	o := store.Outcome{Questions: e.outcomeQuestions(c, out.Questions)}
 	if out.planTicket != "" && strings.TrimSpace(out.Plan) != "" {
 		o.Plan = &store.PlanProposal{TicketID: out.planTicket, Body: strings.TrimSpace(out.Plan)}
 	}
@@ -924,7 +925,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 	reply := e.mailForRun(ctx, snap, c.ID)
 	if reply != nil && !routed {
 		e.deliver(ctx, snap, a, &c.ID, nil, purposeMailReply, mailReply(reply, notify.Message{
-			Title: a.Name + ": " + out.Summary, Body: withQuestions(out.Report, out.Questions), Priority: pr, Link: link,
+			Title: a.Name + ": " + out.Summary, Body: withQuestions(out.Report, o.Questions), Priority: pr, Link: link,
 		}))
 	}
 	if Attended(c.Trigger) {
@@ -933,7 +934,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		return nil
 	}
 	send := reply == nil && (a.Notify.When == "always" || (a.Notify.When == "agent" && out.Notify.Send))
-	if !routed && (send || (reply == nil && len(out.Questions) > 0)) {
+	if !routed && (send || (reply == nil && len(o.Questions) > 0)) {
 		title := out.Notify.Title
 		if title == "" {
 			title = out.Summary
@@ -944,7 +945,7 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 			title, body = a.Name+" has a question", ""
 		}
 		m := notify.Message{
-			Title: a.Name + ": " + title, Body: withQuestions(body, out.Questions), Priority: pr,
+			Title: a.Name + ": " + title, Body: withQuestions(body, o.Questions), Priority: pr,
 			Tags: []string{"orbit", a.Name}, Link: link,
 		}
 		e.deliver(ctx, snap, a, &c.ID, nil, "report", m)
@@ -980,6 +981,26 @@ func (e *Engine) succeed(ctx context.Context, snap *Snapshot, a *spec.Agent, c *
 		})
 	}
 	return nil
+}
+
+// outcomeQuestions are a run's questions as stored. A form that does not validate (forms.Validate) is dropped and logged, keeping the question: the person can still answer it in words.
+func (e *Engine) outcomeQuestions(c *store.ClaimedRun, qs []OutputQuestion) []store.Question {
+	var out []store.Question
+	for _, q := range qs {
+		if strings.TrimSpace(q.Question) == "" {
+			continue
+		}
+		fields, err := q.Fields, q.fieldsErr
+		if err == nil {
+			err = forms.Validate(fields)
+		}
+		if err != nil {
+			e.Log.Warn("question form refused", "run", c.ID, "err", err)
+			fields = nil
+		}
+		out = append(out, store.Question{Body: q.Question, Fields: fields})
+	}
+	return out
 }
 
 func (e *Engine) fail(ctx context.Context, snap *Snapshot, a *spec.Agent, c *store.ClaimedRun, start time.Time, runErr error, r *runner.Result) error {
@@ -1074,12 +1095,12 @@ func mailChannel(cfg *spec.Config, a *spec.Agent) string {
 	return names[0]
 }
 
-// withQuestions appends a run's questions to a body.
-func withQuestions(body string, questions []string) string {
+// withQuestions appends a run's questions to a body, each form as a numbered list under its question (questionText).
+func withQuestions(body string, questions []store.Question) string {
 	if len(questions) > 0 {
 		body += "\n\n**Questions**\n"
 		for _, q := range questions {
-			body += "\n- " + q
+			body += "\n" + questionText(q)
 		}
 	}
 	return strings.TrimSpace(body)

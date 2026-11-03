@@ -71,7 +71,7 @@ func TestAgentStatusAcrossListings(t *testing.T) {
 	}
 
 	if _, err := s.RecordOutcome(ctx, r1, "a", store.RunResult{Attempt: c.Attempt, Status: "succeeded"},
-		store.Outcome{Questions: []string{"Which card?"}}); err != nil {
+		store.Outcome{Questions: []store.Question{{Body: "Which card?"}}}); err != nil {
 		t.Fatal(err)
 	}
 	check("a question open", view{agentstatus.Waiting, agentstatus.Question, agentstatus.SourceRun}, r1)
