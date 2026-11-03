@@ -63,6 +63,7 @@ func Catalog(a *spec.Agent, d spec.Deployment) []Type {
 			out = append(out, webhookType(name, d.Endpoints[name]))
 		}
 	}
+	out = append(out, googleTypes(a, d)...)
 	if d.GitHub != nil && a.RuleFor(MergeType) != spec.RuleDeny {
 		out = append(out, mergeType(d))
 	}
@@ -384,6 +385,8 @@ type Executor struct {
 	SkillWrite func(ctx context.Context, c Call, w SkillWrite) (json.RawMessage, error)
 	// Connector calls a connector's tool for an approved connector:<conn>/<tool> action, adding the connector's credential (engine/connectors.go).
 	Connector func(ctx context.Context, c Call) (json.RawMessage, error)
+	// Google carries out a typed Gmail or Calendar write through its fixed connector mapping.
+	Google func(ctx context.Context, c Call, g GoogleCall) (json.RawMessage, error)
 	// Schedule applies a schedule action or run:now for the call's run.
 	Schedule func(ctx context.Context, c Call, p ScheduleParams) (json.RawMessage, error)
 }
@@ -451,6 +454,15 @@ func (e *Executor) Execute(ctx context.Context, c Call) (json.RawMessage, error)
 		return e.publish(ctx, c)
 	case typ == CommentType:
 		return e.comment(ctx, params)
+	case typ == GmailDraftType || typ == CalendarCreateType:
+		g, err := googleCall(e.Deployment, typ, params)
+		if err != nil {
+			return nil, err
+		}
+		if e.Google == nil {
+			return nil, fmt.Errorf("%s: not available in this process", typ)
+		}
+		return e.Google(ctx, c, g)
 	case typ == store.DecisionType:
 		// A person approved it; the task it holds starts at the next
 		// reconcile. Nothing else happens here.

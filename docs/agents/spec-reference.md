@@ -18,6 +18,7 @@ Every field of `orbit.yaml` and `agents/<name>.yaml`, from `internal/spec` (`spe
 | `mail` | map | absent | orbit's mailbox. Without it orbit reads no mail and its mails carry no reply address. |
 | `credentials` | map of variable to credential | none | The variables sources and endpoint headers may send, each only to URLs under its prefix (below); the only `${VAR}`s a database or built-in agent may reference. |
 | `connectors` | map of name to connector | none | MCP servers agents may be given; orbit calls them on the agents' behalf and holds their credentials (below). |
+| `google_actions` | map | absent | Fixed connector tools for typed Gmail draft and Calendar create actions (below). |
 | `expires` | map of variable to `YYYY-MM-DD` | none | When a credential orbit cannot inspect stops working (the Claude Code subscription token), exported as `orbit_credential_expiry_timestamp_seconds{credential}` at midnight UTC of the date so an alert fires before it lapses. Nothing else reads it. |
 | `webhook_secrets` | map of variable to webhook secret | none | The signing secrets inbound webhooks are verified with, each bound to the agents whose webhook triggers may name it (below). |
 | `usage_poll` | map: `every` (default 5m, at least 1m), `token_env` (default `CLAUDE_CODE_OAUTH_TOKEN`) | absent | Poll the subscription's usage windows (configuration.md, Subscription usage and low-priority agents). |
@@ -164,6 +165,28 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 | `client_id` | string | none | An `oauth` client registered by hand; without it orbit registers itself (dynamic client registration). |
 | `client_secret_env` | env var | none | That client's secret, for a confidential client; needs `client_id`. |
 
+### `google_actions`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `gmail_draft` | map | absent | Fixed connector and write tool used by `gmail:draft`. |
+| `calendar_create` | map | absent | Fixed connector, write tool and calendar used by `calendar:create`. |
+
+### `google_actions.gmail_draft`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `connector` | connector name | required | Connector must authenticate and be named by any agent enabling `gmail:draft`. |
+| `tool` | tool name | required | Must be listed in that connector's `write_tools`; receives Google `users.drafts.create` arguments. |
+
+### `google_actions.calendar_create`
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `connector` | connector name | required | Connector must authenticate and be named by any agent enabling `calendar:create`. |
+| `tool` | tool name | required | Must be listed in that connector's `write_tools`; receives Google `events.insert` arguments. |
+| `calendar_id` | string | `primary` | Fixed destination calendar. The agent cannot choose it. |
+
 ### `webhook_secrets.<VAR>`
 
 | Field | Type | Default | What it does |
@@ -274,8 +297,8 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | Field | Type | Default | What it does |
 |---|---|---|---|
 | `name` | `^[a-z][a-z0-9-]{0,62}$` | required | The input's name; unique among sources and transforms. |
-| `kind` | `http`, `prometheus`, `loki`, `github`, `file`, `webhook` | required | How it is fetched (below). `webhook` takes only `name` and `max_bytes`. |
-| `url` | URL | required for http, prometheus, loki | Target; may use `${VAR}` and `{{today}}`-style templates. A credential in any field of the source is sent only under its `url_prefix`. |
+| `kind` | `http`, `prometheus`, `loki`, `github`, `lake`, `file`, `webhook` | required | How it is fetched (below). `webhook` takes only `name` and `max_bytes`. |
+| `url` | URL | required for http, prometheus, loki, lake | Target; may use `${VAR}` and `{{today}}`-style templates except for lake, which requires a fixed S3-compatible endpoint. A credential in any field of the source is sent only under its `url_prefix`. |
 | `headers` | map | none | http and loki request headers; values may use `${VAR}`. |
 | `query` | map | none | http query values; may use `${VAR}` and templates. |
 | `paginate` | map | absent | Page-numbered http pagination (below). |
@@ -286,6 +309,13 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | `resource` | `issues`, `pulls`, `checks`, `releases` | required for github | What is read (below). |
 | `ref` | branch, tag or sha | required for github checks | The commit whose check runs and statuses are read. |
 | `state` | `open`, `closed`, `all` | `open` | github issues and pulls: which are listed. |
+| `bucket` | S3 bucket | required for lake | Bucket to read. |
+| `prefix` | object-key prefix | required for lake | Lake partition prefix; supports date templates such as `positions/date={{today}}/`. Objects are read in key order and must be gzip NDJSON files. |
+| `region` | string | required for lake | S3 signing region, such as `garage`. |
+| `access_key_id` | `${VAR}` | required for lake | Environment variable holding the read-only S3 access key ID. |
+| `secret_access_key` | `${VAR}` | required for lake | Environment variable holding the S3 secret key. |
+| `session_token` | `${VAR}` | none | Optional environment variable holding the S3 session token. |
+| `max_objects` | int | `100` | lake: most objects listed and read, at most 1000; overflow fails instead of returning partial data. |
 | `path` | path | required for file | A file on orbit's host, read as orbit's user (relative to orbit's working directory). |
 | `max_bytes` | int | `8388608` (8 MiB) | The most one source may fetch; more fails the run. |
 | `by_trigger` | map of trigger to override | none | http only: query values for runs of one trigger (`schedule`, `manual`, `message`, `continue`, `task`, `delegation`, `webhook`) over the source's own (below). |
@@ -296,6 +326,7 @@ Fetched by orbit with orbit's credentials; the model sees only the data, as `inp
 | `prometheus` | a Prometheus API | As http. |
 | `loki` | a Loki API, `query_range` only | As http; log lines can carry anything a service logged, instructions included. |
 | `github` | GitHub as the App, one repository of `github.read_repositories`, with a token minted for the fetch alone and revoked after it: `issues` (`issues: read`; pull requests left out; each body cut at 4000 bytes, `body_truncated` set), `pulls` (`pull_requests: read`), `checks` (`checks: read`, `statuses: read`: `{ref, check_runs, statuses}`), `releases` (`contents: read`) | Issue, PR and release text is written by anyone who can open one on that repository. Needs `github` in `needs`. |
+| `lake` | S3-compatible object store with signed ListObjectsV2 and GET requests only | Objects are untrusted input. The key must be read-only and its environment variables must be declared under `credentials:` with a `url_prefix` for this endpoint; for a private HTTP endpoint, keep the service on a trusted private network. The compressed objects, decompressed rows and final JSON are all bounded by `max_bytes`. |
 | `file` | any file orbit's user can read | Exposes orbit's host files to the model: name only files meant for it. Only a file agent may have one. |
 | `webhook` | the body of the delivery that started the run, as received; absent on any other run | The sender writes it: it is untrusted input, as http's is. Needs a webhook trigger. |
 
@@ -375,6 +406,8 @@ A map of action type to rule: `auto` (executed when the run finishes), `approve`
 | `webhook:<endpoint>` | Sends a body to an `orbit.yaml` endpoint, with `path` params filling its path's placeholders; never a URL, method or header of the model's. No redirect is followed. | the endpoint |
 | `github:merge` | Squash-merges a PR once its checks are green; `kensac/orbit` merges always wait for a person. | `github` |
 | `github:comment` | Posts a comment on an issue or a pull request as the App: `{repo, number, body}`, body at most 20000 bytes, attribution lines scrubbed. | `github.comment_repositories` |
+| `gmail:draft` | Creates a plain text Gmail draft with recipients, subject and body; never sends it. | `google_actions.gmail_draft`, the connector in `connectors` |
+| `calendar:create` | Creates one timed event with summary, start and end, and optional description, location and attendees. | `google_actions.calendar_create`, the connector in `connectors` |
 | `agent:define` | Creates or changes database agents, itself included, as new revertible versions; a change that widens the agent waits for a person whatever the rule. | |
 | `mcp:<connector>:<tool>` | The rule for one connector tool, overriding its default: `approve` for a tool in the connector's `write_tools`, `auto` for any other. A `deny` tool is not offered. An `approve` call is recorded as the action `connector:<connector>/<tool>` (configuration.md, Connectors). | the connector in `connectors` |
 | `schedule:add`, `schedule:pause`, `schedule:resume`, `schedule:remove` | Changes one trigger (or, pausing and resuming, every trigger) of this agent or one in `delegates`, as a new revertible version; times are the person's words, parsed by code (configuration.md, Changing schedules by talking). `approve` applies directly in a run answering the person's message. | a database or built-in target |
