@@ -154,8 +154,9 @@ Names match `^[a-z][a-z0-9-]{0,62}$`; `orbit` is taken. The model calls a connec
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
-| `transport` | `http` | `http` | MCP streamable HTTP. `stdio` is refused: it is not built (it would run in sandboxd). |
-| `url` | http(s) URL | required | The server's MCP endpoint. orbit follows no redirect from it. |
+| `transport` | `http` or `stdio` | `http` | MCP streamable HTTP, or a package-pinned local stdio server in sandboxd's networkless extension profile. |
+| `url` | http(s) URL | required for `http` | The HTTP server's MCP endpoint. Stdio connectors cannot set it; orbit follows no redirect from HTTP endpoints. |
+| `package` | extension package ID | required for `stdio` | Exact package pin in `extensions.packages`; stdio packages may declare only local `tool` operations without input slots or endpoint bindings. |
 | `description` | string | none | What the server is for, shown to the model. |
 | `auth` | map | `kind: none` | How orbit signs the server's requests (below). |
 | `write_tools` | list of tool names | none | The server's tools that change the world: each waits for a person unless the agent's rules say otherwise. Every other tool runs at once. |

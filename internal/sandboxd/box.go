@@ -236,6 +236,9 @@ func (s *Server) boxState(ctx context.Context, name string) (containerState, err
 	if err != nil {
 		return c, err
 	}
+	if c.Config.Labels[LabelChatBox] != "" {
+		return c, fmt.Errorf("container %s is an isolated chat box", boxContainer(name))
+	}
 	if err := verifyBox(s.cfg, name, c); err != nil {
 		return c, fmt.Errorf("container %s is not this box: %w", boxContainer(name), err)
 	}

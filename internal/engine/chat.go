@@ -166,13 +166,21 @@ func (e *Engine) sandboxPlan(d spec.Deployment, profile string, c *store.Claimed
 	if len(cred) == 0 {
 		return nil, fmt.Errorf("a sandboxed chat needs %s or %s for the CLI in the sandbox", claudeproto.OAuthToken, claudeproto.APIKey)
 	}
+	persistent := profile == spec.SandboxWorkstation
+	label := c.ID
+	if persistent {
+		label, err = sandbox.ChatBoxName(c.ConversationID)
+		if err != nil {
+			return nil, fmt.Errorf("chat box: %w", err)
+		}
+	}
 	path, _ := runner.SessionFile(home, workdir, "x")
 	project := filepath.Dir(path)
 	// A workstation's own HOME, beside the conversation's (it is the
 	// model's, unlike HOME, which holds orbit's session state).
 	boxHome := filepath.Join(filepath.Dir(workdir), "box-home")
 	return &runner.Sandbox{
-		Client: client, Label: c.ID, Env: cred, Profile: profile,
+		Client: client, Label: label, Env: cred, Profile: profile, Persistent: persistent, RunID: c.ID,
 		Pack: func() ([]byte, error) {
 			tree, _, err := workspace.Pack(
 				workspace.Tree{Dir: workdir, Skip: func(rel string) bool { return rel == ".orbit" || strings.HasPrefix(rel, ".orbit/") }},

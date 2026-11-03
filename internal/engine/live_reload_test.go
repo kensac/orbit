@@ -90,7 +90,7 @@ session: {resume: true, idle: 24h, live: 24h}
 		return run
 	}
 	first := send("first", "alpha\n")
-	if first.Status != "succeeded" || deref(first.Report) != "reply 1 saw alpha token tok-1" || e.Live.Len() != 1 {
+	if first.Status != "succeeded" || deref(first.Report) != "reply 1 saw alpha token sealed-proxy-token" || e.Live.Len() != 1 {
 		t.Fatalf("first = %s %q, live=%d", first.Status, deref(first.Report), e.Live.Len())
 	}
 
@@ -102,7 +102,7 @@ session: {resume: true, idle: 24h, live: 24h}
 		t.Fatalf("config reload closed an unchanged invocation; live=%d", e.Live.Len())
 	}
 	second := send("second", "beta\n")
-	if second.Status != "succeeded" || deref(second.Report) != "reply 2 saw beta alpha token tok-1" {
+	if second.Status != "succeeded" || deref(second.Report) != "reply 2 saw beta alpha token sealed-proxy-token" {
 		var mode string
 		_ = s.Pool.QueryRow(ctx, "SELECT COALESCE(session_mode, '') FROM runs WHERE id = $1", second.ID).Scan(&mode)
 		t.Fatalf("second = %s %q %q mode=%s", second.Status, deref(second.Report), deref(second.Error), mode)
