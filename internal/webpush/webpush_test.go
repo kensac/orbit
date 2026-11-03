@@ -3,11 +3,8 @@ package webpush
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/ecdsa"
-	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -20,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kensac/orbit/internal/webpush/webpushtest"
 )
 
 // RFC 8291 Appendix A: the worked example, byte for byte.
@@ -164,31 +163,14 @@ func verifyVAPID(t *testing.T, header string, keys *Keys, origin string) {
 // decrypt is the user agent's half of RFC 8291.
 func decrypt(t *testing.T, ua *ecdh.PrivateKey, auth, body []byte) []byte {
 	t.Helper()
-	salt, rs, idlen := body[:16], binary.BigEndian.Uint32(body[16:20]), int(body[20])
-	if rs != recordSize {
+	if rs := binary.BigEndian.Uint32(body[16:20]); rs != recordSize {
 		t.Fatalf("rs %d", rs)
 	}
-	asRaw := body[21 : 21+idlen]
-	as, err := ecdh.P256().NewPublicKey(asRaw)
+	plain, err := webpushtest.Decrypt(ua, auth, body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	shared, _ := ua.ECDH(as)
-	info := append(append([]byte("WebPush: info\x00"), ua.PublicKey().Bytes()...), asRaw...)
-	ikm, _ := hkdf.Key(sha256.New, shared, auth, string(info), 32)
-	prk, _ := hkdf.Extract(sha256.New, ikm, salt)
-	cek, _ := hkdf.Expand(sha256.New, prk, "Content-Encoding: aes128gcm\x00", 16)
-	nonce, _ := hkdf.Expand(sha256.New, prk, "Content-Encoding: nonce\x00", 12)
-	block, _ := aes.NewCipher(cek)
-	gcm, _ := cipher.NewGCM(block)
-	plain, err := gcm.Open(nil, nonce, body[21+idlen:], nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plain[len(plain)-1] != 2 {
-		t.Fatal("missing last-record delimiter")
-	}
-	return plain[:len(plain)-1]
+	return plain
 }
 
 func mustDecode(t *testing.T, s string) []byte {

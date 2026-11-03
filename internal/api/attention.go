@@ -1,10 +1,13 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/kensac/orbit/internal/push"
+	"github.com/kensac/orbit/internal/secret"
 	"github.com/kensac/orbit/internal/store"
 )
 
@@ -66,6 +69,41 @@ func (s *Server) setPresence(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.Store.SetPresence(r.Context(), actorOrOperator(r), b.ConversationID)
 	respond(w, map[string]any{"ok": err == nil}, err)
+}
+
+// pushAct serves POST /push/act?t=<token>: a button on a notification
+// (push actions.go), POSTed by the service worker without the app's
+// session. The signed token is the credential: it names one action or
+// permission request, the decision, the person and an expiry, and its
+// nonce is used once (store.UsePushAction), so one notification decides
+// at most once. Any origin may call it (the worker runs on the app's), and
+// it reads no body.
+func (s *Server) pushAct(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	t, err := push.ParseAction(secret.Key(s.Token), r.URL.Query().Get("t"), time.Now())
+	if err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if err := s.Store.UsePushAction(r.Context(), store.PushActionUse{Nonce: t.Nonce, Person: t.Person, Kind: t.Kind,
+		TargetID: t.ID, Decision: t.Decision}); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeErr(w, http.StatusConflict, "this notification was already acted on")
+			return
+		}
+		respond(w, nil, err)
+		return
+	}
+	approve := t.Decision == push.DecideApprove
+	if t.Kind == "action" {
+		err = s.Store.DecideAction(r.Context(), t.ID, approve, t.Person)
+		if err == nil {
+			s.Wake()
+		}
+	} else {
+		_, err = s.Store.DecideApproval(r.Context(), t.ID, approve, store.ScopeOnce, "", t.Person)
+	}
+	respond(w, map[string]any{"ok": err == nil, "decision": t.Decision}, err)
 }
 
 // pushInfo serves GET /push: whether push is configured and the key a

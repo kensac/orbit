@@ -509,6 +509,9 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		}
 		if pusher == nil {
 			log.Info("ORBIT_VAPID_* not set: Web Push is off (the inbox still lists what needs attention)")
+		} else {
+			pusher.Secret = eng.Secret
+			pusher.PublicURL = func() string { return eng.Current().Config.Deployment.PublicURL }
 		}
 		// reloadNow puts the files and the database's definitions in force,
 		// for the poll below and for the API after it writes a definition.
