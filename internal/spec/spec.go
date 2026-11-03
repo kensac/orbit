@@ -360,6 +360,8 @@ type SessionSpec struct {
 	// person's message started, and feeds the next runs into it instead of
 	// starting a process per run. Zero means no live process.
 	Live Duration `yaml:"live,omitempty" json:"live,omitempty"`
+	// Stall bounds time without CLI output while no tool call is running.
+	Stall Duration `yaml:"stall,omitempty" json:"stall,omitempty"`
 }
 
 // Hook is one Claude Code hook of an agent: at Event (and, for a tool event, a tool Matcher matches), orbit's hook binary does one thing: Say tells the model something (as context; at Stop it sends the model back once with it), Deny refuses the tool with a reason (PreToolUse), or Run runs a command with the event on stdin, in the run's workdir, with an empty environment but PATH, under Timeout.
@@ -426,6 +428,15 @@ const MaxSessionIdle = 24 * time.Hour
 // a resident CLI process; an hour covers a conversation with pauses, and
 // resume picks up after it closes.
 const MaxSessionLive = time.Hour
+
+// DefaultSessionStall is session.stall when a spec names none.
+const DefaultSessionStall = 10 * time.Minute
+
+// MinSessionStall and MaxSessionStall bound session.stall.
+const (
+	MinSessionStall = time.Minute
+	MaxSessionStall = 24 * time.Hour
+)
 
 // Trigger is one way an agent wakes: a cron Schedule, an RRule (RFC
 // 5545, internal/rrule) anchored at Start, or a Webhook (webhook.go).
@@ -714,6 +725,14 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 
 // Verifies reports whether the agent's spec names a check.
 func (a *Agent) Verifies(check string) bool { return slices.Contains(a.Verify, check) }
+
+// StallAfter is the agent's session.stall, or DefaultSessionStall.
+func (a *Agent) StallAfter() time.Duration {
+	if a.Session != nil && a.Session.Stall > 0 {
+		return time.Duration(a.Session.Stall)
+	}
+	return DefaultSessionStall
+}
 
 // IsEnabled reports whether the agent's triggers fire. Manual runs work
 // either way.
@@ -1226,7 +1245,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		switch {
 		case typ == "notify", typ == "continue", typ == "agent:define", typ == "agent:save", typ == "skill:write",
-			typ == "schedule:add", typ == "schedule:pause", typ == "schedule:resume", typ == "schedule:remove", typ == "run:now":
+			typ == "schedule:add", typ == "schedule:pause", typ == "schedule:resume", typ == "schedule:remove", typ == "run:now", typ == "template:create":
 		case typ == "delegate", typ == "task:message", typ == "task:cancel", typ == "task:retry":
 			if len(a.Delegates) == 0 {
 				at("action %q: needs delegates, the agents this one may hand tasks to", typ)
@@ -1248,7 +1267,7 @@ func (c *Config) validateAgent(a *Agent) []error {
 		case strings.HasPrefix(typ, ConnectorActionPrefix):
 			at("action %q: a connector tool's rule is named mcp:<connector>:<tool>", typ)
 		default:
-			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, skill:write, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr, github:comment or mcp:<connector>:<tool>)", typ)
+			at("action %q: unknown action type (want notify, continue, agent:define, agent:save, skill:write, template:create, schedule:add, schedule:pause, schedule:resume, schedule:remove, run:now, delegate, task:message, task:cancel, task:retry, webhook:<endpoint>, github:merge, github:clone, github:pr, github:comment or mcp:<connector>:<tool>)", typ)
 		}
 	}
 	for _, ch := range a.Notify.Channels {
@@ -1420,6 +1439,9 @@ func (c *Config) validateAgent(a *Agent) []error {
 		}
 		if ss.Idle < 0 || time.Duration(ss.Idle) > MaxSessionIdle {
 			at("session.idle must be between 0 and %s", MaxSessionIdle)
+		}
+		if ss.Stall != 0 && (time.Duration(ss.Stall) < MinSessionStall || time.Duration(ss.Stall) > MaxSessionStall) {
+			at("session.stall must be between %s and %s", MinSessionStall, MaxSessionStall)
 		}
 		if ss.Live < 0 || time.Duration(ss.Live) > MaxSessionLive {
 			at("session.live must be between 0 and %s", MaxSessionLive)
