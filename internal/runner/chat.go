@@ -252,6 +252,8 @@ type chatProc interface {
 	Kill()
 	Exited() <-chan struct{}
 	LastLine() time.Time
+	SetModel(ctx context.Context, model string) error
+	SetEffort(ctx context.Context, level string) error
 }
 
 // chatTools routes a process's control requests to the turn in progress: a
@@ -455,6 +457,11 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 			sess.Live.discard(sess.Key)
 		} else if p = sess.Live.take(sess.Key, key, resume); p != nil {
 			mode = "live"
+			if err := p.switchModel(ctx, req, c.rs.Model); err != nil {
+				// The process cannot take them; one started with them can.
+				sess.Live.drop(p)
+				p, mode = nil, "fresh"
+			}
 		}
 	}
 	if p == nil {
@@ -464,7 +471,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		tools := &chatTools{}
 		tools.connectors(req.Connectors)
 		// Every chat process has the stdio permission prompt, so a level that asks can be set without a new process; at locked or full the CLI sends none but ExitPlanMode's.
-		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, PermissionPrompt: true, Resume: resume, Ephemeral: sess == nil}, extra)
+		args, err := claudeproto.Args(claudeproto.Transport{Stream: true, PermissionPrompt: true, Resume: resume, Ephemeral: sess == nil}, withModel(extra, req))
 		if err != nil {
 			return nil, err
 		}
@@ -482,7 +489,7 @@ func (c *claudeCode) runChat(ctx context.Context, req Request, emit func(Event))
 		if err != nil {
 			return nil, err
 		}
-		p = &liveProc{proc: proc, tools: tools, busy: true}
+		p = &liveProc{proc: proc, tools: tools, busy: true, model: req.Model, effort: req.Effort}
 		started = true
 		if sess != nil {
 			p.key = sess.Key
