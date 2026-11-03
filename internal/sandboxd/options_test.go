@@ -144,9 +144,6 @@ func TestExtensionProfileHasNoNetworkOrCredentialEnvironment(t *testing.T) {
 	state.HostConfig.UTSMode = ""
 	state.HostConfig.CgroupnsMode = "private"
 	state.HostConfig.Tmpfs = c.HostConfig.Tmpfs
-	for destination := range c.HostConfig.Tmpfs {
-		state.Mounts = append(state.Mounts, mountState{Type: "tmpfs", Destination: destination})
-	}
 	state.HostConfig.IpcMode = "private"
 	state.HostConfig.Memory = ExtensionMemoryBytes
 	state.HostConfig.MemorySwap = ExtensionMemoryBytes

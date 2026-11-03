@@ -421,7 +421,9 @@ func verifyCreated(cfg Config, c containerState) error {
 	case h.PidsLimit == nil || *h.PidsLimit != wantPids:
 		return fmt.Errorf("pids limit is not %d", wantPids)
 	}
-	seenTmpfs := map[string]bool{}
+	// Docker includes bind and volume mounts here, but not tmpfs entries. Their
+	// effective extension destinations and options were checked in HostConfig
+	// above, where inspect retains the create-time Tmpfs map.
 	for _, m := range c.Mounts {
 		if m.Type != "volume" && m.Type != "tmpfs" {
 			return fmt.Errorf("mount of type %s at %s", m.Type, m.Destination)
@@ -429,12 +431,9 @@ func verifyCreated(cfg Config, c containerState) error {
 		if m.Type == "volume" && m.Destination != sandbox.WorkDir {
 			return fmt.Errorf("volume at %s", m.Destination)
 		}
-		if m.Type == "tmpfs" {
-			seenTmpfs[m.Destination] = true
+		if cfg.ExtensionProfile && m.Type == "tmpfs" && m.Destination != "/tmp" && m.Destination != "/work/out" {
+			return fmt.Errorf("unexpected extension tmpfs mount at %s", m.Destination)
 		}
-	}
-	if cfg.ExtensionProfile && (!seenTmpfs["/tmp"] || !seenTmpfs["/work/out"] || len(seenTmpfs) != 2) {
-		return fmt.Errorf("extension tmpfs mounts are %v", seenTmpfs)
 	}
 	return nil
 }
