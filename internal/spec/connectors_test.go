@@ -2,8 +2,12 @@ package spec
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kensac/orbit/internal/extensions"
 )
 
 const connectorBase = trustBase + `
@@ -47,6 +51,65 @@ actions:
 	if got := a.ToolRule(cfg.Deployment.Connectors["gws"], "gws", "delete"); got != RuleDeny {
 		t.Errorf("an agent's deny = %s", got)
 	}
+}
+
+func TestStdioConnectorRequiresAnExactLocalToolPackage(t *testing.T) {
+	dir := stdioSpecFixture(t)
+	pkg, err := extensions.ValidateDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orbit := base + "sandbox: {sandboxd: 'sandboxd:8080'}\nextensions:\n  enabled: true\n  packages:\n    daily-total: {path: '" + dir + "', sha256: " + pkg.Digest + "}\nconnectors:\n  local: {transport: stdio, package: daily-total, write_tools: [sum]}\n"
+	agent := "name: local-agent\ncharter: x\nconnectors: [local]\nactions: {\"mcp:local:sum\": approve}\n"
+	cfg, err := loadConnectors(t, orbit, map[string]string{"agents/local-agent.yaml": agent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Deployment.Connectors["local"].AuthKind() != ConnectorAuthNone || cfg.ExtensionPackages["daily-total"].Digest != pkg.Digest {
+		t.Fatal("stdio package or no-auth policy was not retained")
+	}
+	bad := strings.Replace(orbit, "transport: stdio, package: daily-total, write_tools: [sum]", "transport: stdio, package: daily-total, auth: {kind: oauth}", 1)
+	if _, err := loadConnectors(t, bad, map[string]string{"agents/local-agent.yaml": agent}); err == nil || !strings.Contains(err.Error(), "takes no authentication configuration") {
+		t.Fatalf("stdio OAuth error = %v", err)
+	}
+	badAgent := strings.Replace(agent, "mcp:local:sum", "mcp:local:missing", 1)
+	if _, err := loadConnectors(t, orbit, map[string]string{"agents/local-agent.yaml": badAgent}); err == nil || !strings.Contains(err.Error(), "stdio package does not declare tool") {
+		t.Fatalf("undeclared tool error = %v", err)
+	}
+}
+
+func stdioSpecFixture(t *testing.T) string {
+	t.Helper()
+	src := filepath.Join("..", "extensions", "testdata", "reducer")
+	manifest, err := os.ReadFile(filepath.Join(src, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(manifest, &m); err != nil {
+		t.Fatal(err)
+	}
+	op := m["operations"].([]any)[0].(map[string]any)
+	op["kind"] = "tool"
+	delete(op, "inputs")
+	manifest, err = json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for name, body := range map[string][]byte{"manifest.json": manifest} {
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry, err := os.ReadFile(filepath.Join(src, "reducer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "reducer"), entry, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func TestCalendarSkipRequiresListedReadOnlyConnectorTool(t *testing.T) {
@@ -148,7 +211,7 @@ func TestConnectorMistakesFailTheLoad(t *testing.T) {
 			"${ORBIT_API_TOKEN} is not in orbit.yaml's credentials"},
 		"credential elsewhere": {strings.Replace(connectorBase, "https://housing.example.com/mcp", "https://evil.example/mcp", 1), "",
 			"credential HW_TOKEN may be sent only to https://housing.example.com/"},
-		"stdio":    {connectorBase + "  local: {transport: stdio, url: 'https://x.example/'}\n", "", "transport stdio is not supported yet"},
+		"stdio":    {connectorBase + "  local: {transport: stdio, url: 'https://x.example/'}\n", "", "stdio transport takes a package and no url"},
 		"reserved": {connectorBase + "  orbit: {url: 'https://x.example/mcp'}\n", "", "orbit's own MCP server"},
 		"codex": {strings.Replace(connectorBase, "runners: {r: {kind: claude-code}}", "runners: {r: {kind: claude-code}, cx: {kind: codex}}", 1), "runner: cx\nconnectors: [hw]",
 			"connectors: need a claude-code runner"},

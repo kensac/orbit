@@ -16,8 +16,10 @@ import (
 	"github.com/kensac/orbit/internal/actions"
 	"github.com/kensac/orbit/internal/claudeproto"
 	"github.com/kensac/orbit/internal/connectors"
+	"github.com/kensac/orbit/internal/extensions"
 	"github.com/kensac/orbit/internal/journal"
 	"github.com/kensac/orbit/internal/runner"
+	"github.com/kensac/orbit/internal/sandbox"
 	"github.com/kensac/orbit/internal/spec"
 	"github.com/kensac/orbit/internal/store"
 )
@@ -49,7 +51,8 @@ type connectorGateway struct {
 	emit   func(string, any)
 	record func(kind string, v any) error
 
-	clients     map[string]*connectors.Client
+	clients     map[string]connectors.ToolClient
+	packagePins map[string]string
 	rules       map[string]map[string]spec.Rule
 	unavailable map[string]string
 
@@ -107,6 +110,38 @@ func (e *Engine) connectorSealer() (*connectors.Sealer, error) {
 	return connectors.NewSealer(key)
 }
 
+func (e *Engine) connectorClient(d spec.Deployment, packages map[string]*extensions.Package, name string, cn spec.Connector) (connectors.ToolClient, error) {
+	if cn.Transport == spec.ConnectorTransportStdio {
+		if d.Extensions == nil || !d.Extensions.Enabled {
+			return nil, errors.New("stdio connectors require extensions.enabled: true")
+		}
+		pin, ok := d.Extensions.Packages[cn.Package]
+		pkg := packages[cn.Package]
+		if !ok || pkg == nil {
+			return nil, fmt.Errorf("stdio connector package %q is not pinned", cn.Package)
+		}
+		addr, tokenEnv := d.SandboxService()
+		if e.Env == nil {
+			return nil, errors.New("stdio connector sandbox token environment is unavailable")
+		}
+		token, _ := e.Env(tokenEnv)
+		newSandbox := e.NewSandbox
+		if newSandbox == nil {
+			newSandbox = func(addr, token string) (runner.SandboxClient, error) { return sandbox.NewClient(addr, token) }
+		}
+		sb, err := newSandbox(addr, token)
+		if err != nil {
+			return nil, fmt.Errorf("stdio connector sandboxd: %w", err)
+		}
+		return connectors.NewStdio(name, pin.Path, pin.SHA256, pkg, sb), nil
+	}
+	auth, err := e.connectorAuth(d, name, cn)
+	if err != nil {
+		return nil, err
+	}
+	return connectors.New(name, cn, auth, e.Client), nil
+}
+
 // tokenRows is the store as a connector token store.
 type tokenRows struct{ s *store.Store }
 
@@ -135,9 +170,19 @@ func (e *Engine) prepareConnectors(ctx context.Context, snap *Snapshot, a *spec.
 		return nil, nil, ""
 	}
 	d := snap.Config.Deployment
+	packagePins := map[string]string{}
+	if d.Extensions != nil {
+		for name, cn := range d.Connectors {
+			if cn.Transport == spec.ConnectorTransportStdio {
+				if pin, ok := d.Extensions.Packages[cn.Package]; ok {
+					packagePins[name] = pin.SHA256
+				}
+			}
+		}
+	}
 	g := &connectorGateway{e: e, a: a, c: c, attended: Attended(c.Trigger), workdir: workdir,
 		dir: filepath.Join(inputsDir, "connectors"), emit: emit, record: record,
-		clients: map[string]*connectors.Client{}, rules: map[string]map[string]spec.Rule{}, unavailable: map[string]string{}}
+		clients: map[string]connectors.ToolClient{}, packagePins: packagePins, rules: map[string]map[string]spec.Rule{}, unavailable: map[string]string{}}
 	rc := &runner.Connectors{Call: g.call, Permit: g.permit, Record: g.recordPermission}
 	var b strings.Builder
 	b.WriteString("\n# Connectors\n\nThese servers' tools are yours, named mcp__<connector>__<tool>; orbit calls the server for you. ")
@@ -152,10 +197,9 @@ func (e *Engine) prepareConnectors(ctx context.Context, snap *Snapshot, a *spec.
 		if desc == "" {
 			desc = "(no description)"
 		}
-		auth, err := e.connectorAuth(d, name, cn)
+		cl, err := e.connectorClient(d, snap.Config.ExtensionPackages, name, cn)
 		var tools []connectors.Tool
 		if err == nil {
-			cl := connectors.New(name, cn, auth, e.Client)
 			lctx, cancel := context.WithTimeout(ctx, connectorListTimeout)
 			tools, err = cl.ListTools(lctx)
 			cancel()
@@ -237,7 +281,7 @@ func (g *connectorGateway) call(ctx context.Context, server, tool, toolUseID str
 	var actionID string
 	if g.isWrite(server, tool) {
 		id, err := g.e.Store.ProposeAction(ctx, g.c.ID, g.c.Attempt, g.a.Name, store.ProposedAction{
-			Type: spec.ConnectorActionType(server, tool), Params: callParams(args), Reason: callReason(server, tool), Rule: string(spec.RuleAuto)}, true)
+			Type: spec.ConnectorActionType(server, tool), Params: callParams(args, g.packagePins[server]), Reason: callReason(server, tool), Rule: string(spec.RuleAuto)}, true)
 		if err != nil {
 			return textResult("orbit could not record this call: "+err.Error(), true)
 		}
@@ -328,7 +372,14 @@ func (g *connectorGateway) permit(ctx context.Context, server, tool, toolUseID s
 			case "approved":
 				claimed, cerr := g.e.Store.ClaimAction(ctx, id)
 				if cerr == nil && claimed {
-					res, raw, ferr := g.forward(ctx, server, tool, toolUseID, string(spec.RuleApprove), args)
+					ferr := g.checkPackagePin(server, g.packagePins[server])
+					var res runner.ConnectorResult
+					var raw *connectors.Result
+					if ferr == nil {
+						res, raw, ferr = g.forward(ctx, server, tool, toolUseID, string(spec.RuleApprove), args)
+					} else {
+						res = textResult(ferr.Error(), true)
+					}
 					_ = g.e.Store.FinishAction(context.WithoutCancel(ctx), id, actionResult(raw, ferr), callError(raw, ferr))
 					g.keepDecided(toolUseID, server, tool, args, res)
 					return claudeproto.Permission{Allow: true}
@@ -361,7 +412,7 @@ func recordPermission(record func(string, any) error, req claudeproto.Permission
 // propose records a call to an approve tool as a pending action of the run.
 func (g *connectorGateway) propose(ctx context.Context, server, tool string, args json.RawMessage) (string, error) {
 	typ := spec.ConnectorActionType(server, tool)
-	params := callParams(args)
+	params := callParams(args, g.packagePins[server])
 	id, err := g.e.Store.ProposeAction(context.WithoutCancel(ctx), g.c.ID, g.c.Attempt, g.a.Name, store.ProposedAction{
 		Type: typ, Params: params, Reason: callReason(server, tool), Rule: string(spec.RuleApprove)}, false)
 	if err != nil {
@@ -374,6 +425,22 @@ func (g *connectorGateway) propose(ctx context.Context, server, tool string, arg
 		g.mu.Unlock()
 	}
 	return id, nil
+}
+
+func (g *connectorGateway) checkPackagePin(server, expected string) error {
+	if expected == "" {
+		return nil
+	}
+	current := g.e.Current().Config
+	cn, ok := current.Deployment.Connectors[server]
+	if !ok || cn.Transport != spec.ConnectorTransportStdio || current.Deployment.Extensions == nil {
+		return fmt.Errorf("connector %s changed while approval was pending", server)
+	}
+	pin, ok := current.Deployment.Extensions.Packages[cn.Package]
+	if !ok || pin.SHA256 != expected {
+		return fmt.Errorf("connector %s package changed while approval was pending", server)
+	}
+	return nil
 }
 
 func (g *connectorGateway) keepDecided(toolUseID, server, tool string, args json.RawMessage, res runner.ConnectorResult) {
@@ -419,11 +486,15 @@ func sameJSON(a, b json.RawMessage) bool {
 }
 
 // callParams is a connector action's params: the call's arguments.
-func callParams(args json.RawMessage) json.RawMessage {
+func callParams(args json.RawMessage, packageSHA256 string) json.RawMessage {
 	if len(args) == 0 || string(args) == "null" {
 		args = json.RawMessage(`{}`)
 	}
-	b, _ := json.Marshal(map[string]json.RawMessage{"arguments": args})
+	params := map[string]any{"arguments": args}
+	if packageSHA256 != "" {
+		params["package_sha256"] = packageSHA256
+	}
+	b, _ := json.Marshal(params)
 	return b
 }
 
@@ -516,18 +587,29 @@ func (e *Engine) executeConnector(ctx context.Context, snap *Snapshot, c actions
 		return nil, fmt.Errorf("the agent's rules now deny %s", tool)
 	}
 	var p struct {
-		Arguments json.RawMessage `json:"arguments"`
+		Arguments     json.RawMessage `json:"arguments"`
+		PackageSHA256 string          `json:"package_sha256,omitempty"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(c.Params))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&p); err != nil {
 		return nil, fmt.Errorf("params: %w", err)
 	}
-	auth, err := e.connectorAuth(d, conn, cn)
+	if cn.Transport == spec.ConnectorTransportStdio {
+		if d.Extensions == nil {
+			return nil, errors.New("stdio connector extensions are no longer enabled")
+		}
+		pin, ok := d.Extensions.Packages[cn.Package]
+		if !ok || p.PackageSHA256 == "" || pin.SHA256 != p.PackageSHA256 {
+			return nil, fmt.Errorf("connector %s package changed while approval was pending", conn)
+		}
+	} else if p.PackageSHA256 != "" {
+		return nil, errors.New("connector action has an unexpected package pin")
+	}
+	cl, err := e.connectorClient(d, snap.Config.ExtensionPackages, conn, cn)
 	if err != nil {
 		return nil, err
 	}
-	cl := connectors.New(conn, cn, auth, e.Client)
 	defer cl.Close()
 	res, err := cl.Call(ctx, tool, p.Arguments)
 	return actionResult(res, err), callError(res, err)
@@ -567,11 +649,13 @@ func (e *Engine) executeGoogleAction(ctx context.Context, snap *Snapshot, c acti
 	if !ok || !containsString(cn.WriteTools, g.Tool) {
 		return nil, fmt.Errorf("%s: configured connector write tool is unavailable", c.Type)
 	}
-	auth, err := e.connectorAuth(snap.Config.Deployment, g.Connector, cn)
+	if cn.Transport == spec.ConnectorTransportStdio {
+		return nil, fmt.Errorf("%s: typed Google writes require an authenticated HTTP connector", c.Type)
+	}
+	cl, err := e.connectorClient(snap.Config.Deployment, snap.Config.ExtensionPackages, g.Connector, cn)
 	if err != nil {
 		return nil, err
 	}
-	cl := connectors.New(g.Connector, cn, auth, e.Client)
 	defer cl.Close()
 	res, err := cl.Call(ctx, g.Tool, g.Arguments)
 	return actionResult(res, err), callError(res, err)
