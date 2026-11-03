@@ -36,6 +36,20 @@ func TestDecidingAnApprovalOverTheAPI(t *testing.T) {
 	if code != 200 || len(r["approvals"].([]any)) != 2 {
 		t.Fatalf("pending = %d %v", code, r)
 	}
+	// Each pending approval is in the inbox, linked to its card.
+	code, r = call(t, "GET", base+"/attention", kanishk, "")
+	inbox := map[string]map[string]any{}
+	for _, it := range r["items"].([]any) {
+		m := it.(map[string]any)
+		inbox[m["approval_id"].(string)] = m
+	}
+	if it := inbox[tool]; code != 200 || len(inbox) != 2 || it["kind"] != "permission" || it["key"] != "approval:"+tool ||
+		it["title"] != "a needs permission" || it["detail"] != "Bash" || it["push"] != true || it["link"] != "/orbit/c/"+conv+"#approval-"+tool {
+		t.Fatalf("attention = %d %v", code, r)
+	}
+	if inbox[plan]["title"] != "a has a plan to approve" {
+		t.Fatalf("plan attention = %v", inbox[plan])
+	}
 	code, r = call(t, "GET", base+"/approvals/"+tool, kanishk, "")
 	ap := r["approval"].(map[string]any)
 	if code != 200 || ap["state"] != "pending" || ap["matched_rule"].(map[string]any)["tool_name"] != "Bash" || ap["scope"] != nil {
@@ -64,6 +78,9 @@ func TestDecidingAnApprovalOverTheAPI(t *testing.T) {
 	code, r = call(t, "POST", base+"/approvals/"+plan, kanishk, `{"allow":false,"message":"plan the tests too"}`)
 	if ap := r["approval"].(map[string]any); code != 200 || ap["state"] != "denied" || ap["scope"] != "once" || ap["message"] != "plan the tests too" {
 		t.Fatalf("deny = %d %v", code, r)
+	}
+	if _, r := call(t, "GET", base+"/attention", kanishk, ""); len(r["items"].([]any)) != 0 {
+		t.Fatalf("decided approvals still in the inbox: %v", r)
 	}
 	if code, _ := call(t, "GET", base+"/conversations/"+conv+"/approvals?state=bogus", kanishk, ""); code != 400 {
 		t.Fatalf("bad state = %d", code)
