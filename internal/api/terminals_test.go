@@ -2,6 +2,8 @@ package api_test
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -50,6 +52,8 @@ type fakeSandboxd struct {
 	recreates int
 	prepared  []string
 	logins    map[string]sandbox.AccountStatus
+	configs   map[string]sandbox.ClaudeConfigStatus
+	bundles   [][]byte
 }
 
 func (f *fakeSandboxd) handler(t *testing.T) http.Handler {
@@ -113,6 +117,56 @@ func (f *fakeSandboxd) handler(t *testing.T) http.Handler {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(f.logins[r.PathValue("slot")])
+	})
+	mux.HandleFunc("GET /v1/boxes/{name}/accounts/{slot}/claude-config", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		st, ok := f.configs[r.PathValue("slot")]
+		if !ok {
+			st = sandbox.ClaudeConfigStatus{Digest: sandbox.ClaudeConfigDigest(nil), Files: []sandbox.ClaudeConfigFile{}}
+		}
+		_ = json.NewEncoder(w).Encode(st)
+	})
+	mux.HandleFunc("PUT /v1/boxes/{name}/accounts/{slot}/claude-config", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		slot := r.PathValue("slot")
+		st, ok := f.configs[slot]
+		if !ok {
+			st = sandbox.ClaudeConfigStatus{Digest: sandbox.ClaudeConfigDigest(nil), Files: []sandbox.ClaudeConfigFile{}}
+		}
+		if r.Header.Get("If-Match") != st.Digest {
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "config changed"})
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		h := sha256.Sum256(b)
+		if hex.EncodeToString(h[:]) != r.Header.Get("X-Orbit-Bundle-SHA256") {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_, incoming, err := sandbox.ParseClaudeConfigTar(b)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		byPath := map[string]sandbox.ClaudeConfigFile{}
+		for _, file := range st.Files {
+			byPath[file.Path] = file
+		}
+		for _, file := range incoming.Files {
+			byPath[file.Path] = file
+		}
+		st.Files = st.Files[:0]
+		for _, file := range byPath {
+			st.Files = append(st.Files, file)
+		}
+		slices.SortFunc(st.Files, func(a, b sandbox.ClaudeConfigFile) int { return strings.Compare(a.Path, b.Path) })
+		st.Digest = sandbox.ClaudeConfigDigest(st.Files)
+		f.configs[slot] = st
+		f.bundles = append(f.bundles, bytes.Clone(b))
+		_ = json.NewEncoder(w).Encode(st)
 	})
 	mux.HandleFunc("GET /v1/boxes/{name}/sessions/{s}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -184,11 +238,12 @@ type boxEnv struct {
 	*env
 	fake  *fakeSandboxd
 	drain *engine.Drain
+	api   *api.Server
 }
 
 func newBoxEnv(t *testing.T) *boxEnv {
 	t.Helper()
-	fake := &fakeSandboxd{running: map[string]bool{}, sessions: map[string]bool{}, mounts: map[string][]string{}, logins: map[string]sandbox.AccountStatus{}}
+	fake := &fakeSandboxd{running: map[string]bool{}, sessions: map[string]bool{}, mounts: map[string][]string{}, logins: map[string]sandbox.AccountStatus{}, configs: map[string]sandbox.ClaudeConfigStatus{}}
 	sb := httptest.NewServer(fake.handler(t))
 	t.Cleanup(sb.Close)
 	addr := strings.TrimPrefix(sb.URL, "http://")
@@ -241,7 +296,7 @@ sandbox: {sandboxd: "`+addr+`"}
 		pub.Close()
 		internal.Close()
 	})
-	return &boxEnv{env: &env{srv: pub, internal: internal, s: s, e: e, is: is}, fake: fake, drain: drain}
+	return &boxEnv{env: &env{srv: pub, internal: internal, s: s, e: e, is: is}, fake: fake, drain: drain, api: a}
 }
 
 func (v *boxEnv) newTerminal(t *testing.T, body string) map[string]any {

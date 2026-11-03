@@ -38,6 +38,8 @@ type Server struct {
 	readyAt time.Time
 	// boxMu serializes box creates, starts and stops.
 	boxMu sync.Mutex
+	// claudeConfigMu serializes config imports with each other.
+	claudeConfigMu sync.Mutex
 	// host and arch are the docker host's, from Check, for BoxStatus.
 	host, arch string
 }
@@ -121,6 +123,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/recreate", s.boxRecreate)
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/accounts/{slot}/prepare", s.accountPrepare)
 	mux.HandleFunc("GET "+sandbox.PathBoxes+"/{name}/accounts/{slot}", s.accountStatus)
+	mux.HandleFunc("GET "+sandbox.PathBoxes+"/{name}/accounts/{slot}/claude-config", s.claudeConfigGet)
+	mux.HandleFunc("PUT "+sandbox.PathBoxes+"/{name}/accounts/{slot}/claude-config", s.claudeConfigPut)
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/tty", s.tty)
 	mux.HandleFunc("GET "+sandbox.PathBoxes+"/{name}/sessions/{session}", s.sessionExists)
 	mux.HandleFunc("POST "+sandbox.PathBoxes+"/{name}/sessions/{session}/kill", s.sessionKill)

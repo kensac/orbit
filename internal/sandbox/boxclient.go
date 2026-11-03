@@ -116,6 +116,74 @@ func (c *Client) AccountStatus(ctx context.Context, name, slot string) (AccountS
 	return st, err
 }
 
+// ClaudeConfigStatus returns hashes for the nonsecret shared Claude profile
+// files visible to an account. It does not return their contents.
+func (c *Client) ClaudeConfigStatus(ctx context.Context, name, slot string) (ClaudeConfigStatus, error) {
+	var st ClaudeConfigStatus
+	if !ValidSlot(slot) {
+		return st, fmt.Errorf("invalid account slot %q", slot)
+	}
+	p, err := boxPath(name, "accounts", slot, "claude-config")
+	if err == nil {
+		err = c.boxCall(ctx, http.MethodGet, p, &st)
+	}
+	return st, err
+}
+
+// ApplyClaudeConfig installs a validated allowlisted tar when the shared
+// profile still has expectedDigest. bundleDigest names the exact archive.
+func (c *Client) ApplyClaudeConfig(ctx context.Context, name, slot, expectedDigest, bundleDigest string, archive []byte) (ClaudeConfigStatus, error) {
+	var st ClaudeConfigStatus
+	if !ValidSlot(slot) {
+		return st, fmt.Errorf("invalid account slot %q", slot)
+	}
+	if !validSHA256(expectedDigest) || !validSHA256(bundleDigest) {
+		return st, errors.New("claude config digests must be lowercase sha256 values")
+	}
+	if len(archive) == 0 || len(archive) > MaxClaudeBundleBytes {
+		return st, fmt.Errorf("claude config archive must be 1 to %d bytes", MaxClaudeBundleBytes)
+	}
+	p, err := boxPath(name, "accounts", slot, "claude-config")
+	if err != nil {
+		return st, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://"+c.host+PathBoxes+p, bytes.NewReader(archive))
+	if err != nil {
+		return st, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/x-tar")
+	req.Header.Set("If-Match", expectedDigest)
+	req.Header.Set("X-Orbit-Bundle-SHA256", bundleDigest)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return st, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return st, ErrNoBox
+	}
+	if resp.StatusCode >= 300 {
+		return st, readError(resp)
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&st); err != nil {
+		return st, fmt.Errorf("sandboxd: Claude config response: %w", err)
+	}
+	return st, nil
+}
+
+func validSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, c := range value {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // Box reports a box; its State is BoxNone when there is none.
 func (c *Client) Box(ctx context.Context, name string) (BoxStatus, error) {
 	var st BoxStatus

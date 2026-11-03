@@ -1092,6 +1092,15 @@ Routes require the workspace to be a box (`409`, `no_shell`, otherwise). Mutatio
 
 Accounts are never deleted. Attaching to a `login` terminal is as for any terminal; when it ends, the account is read again before the `exit` frame, so the client's next list shows the login.
 
+### Claude profile import (box only): built
+
+The shared `~/.claude` profile is visible to the box's own terminal and is linked into each account directory. The import is account-scoped for authorization and requires that account's volume to be mounted, but it writes only the shared `CLAUDE.md` and skill files. It never reads or writes account credentials, sessions, history, settings, plugins or MCP configuration. It adds or updates included files and leaves other target files alone.
+
+- `GET /workspaces/{id}/accounts/{aid}/claude-config`: returns `{"config":{"digest":"<sha256>","files":[{"path":"CLAUDE.md","bytes":123,"sha256":"<sha256>"}]}}`; hashes and sizes only, never file contents. The box must be running and mount the account (`409`, `box_stopped` or `account_unmounted`).
+- `PUT /workspaces/{id}/accounts/{aid}/claude-config`: raw `application/x-tar`, with `If-Match: <config digest from GET>` and `X-Orbit-Bundle-SHA256: <sha256 of the exact tar bytes>`. Only regular `CLAUDE.md` and `skills/<name>/**` files are accepted, up to 32 MiB and 2,000 files. Symlinks, links, settings, plugins, MCP config and account state are rejected. The server canonicalizes file metadata, checks the target digest again immediately before writing and returns `200 {"config":...}`. A changed target is `409` (`check: changed`) with its current manifest. Mutations require `ORBIT_WORKSPACE_GROUP` membership.
+
+This is not a general box-home archive write route. Plugin installation and account-specific MCP declarations still need separate safe import behavior; plugin payloads are executable and MCP configuration can contain credentials.
+
 ### Review comments
 
 Comments on lines, sent to the conversation's agent as one message, as a ticket's review comments are (tickets.md, Review comments). The routes need a conversation with a workspace (`404`, `check: "no_workspace"`, otherwise); a comment, like a message, needs no workspace group. Errors carry a `check` as the routes above do, and `state` (`409`) when a comment's state does not allow the change.
