@@ -1353,6 +1353,12 @@ The access token is authentik's own (the `orbit-mcp` provider), so its issuer an
 
 `ORBIT_OIDC_GROUP` is required with the issuer. The authentik provider needs the redirect URI `<public_url>/oauth/callback` (strict), the `openid`, `email`, `profile` and `offline_access` scope mappings (profile carries `preferred_username` and `groups`), the `authorization_code` and `refresh_token` grants, and the application bound to the group. traefik must route `/mcp`, `/.well-known/oauth-` and `/oauth/` past forward-auth, as it does `/api/`.
 
+### MCP servers and login
+
+- `GET /workspaces/{id}/accounts/{aid}/mcp` runs `claude mcp list` as the selected account and returns `{"servers": [...]}`. Each server reports `name`, `transport`, `status`, whether it is a `claude.ai` connector, and whether Orbit manages it. Raw targets, command arguments and provider error details are omitted because they can contain credentials. The command runs inside the box with that account's config directory.
+- To authenticate an MCP server, create an account-scoped terminal with `preset: "mcp-login"` and `mcp_server` set to the listed server name. The fixed command is `claude mcp login --no-browser <server>`; the server name is validated and cannot supply command options.
+- `box.mcp_servers` config is synchronized by Orbit into each mounted account with `claude mcp add-json -s user`. Credential-bearing fields, secret-like arguments, URL credentials, queries and fragments are refused. Orbit records its own server names and removes only those when they leave configuration.
+
 ## Skills
 
 orbit keeps a library of Claude Code skills: each a `SKILL.md` (frontmatter with `name` and `description`, then the instructions) and optional files beside it (references, scripts, assets), every version kept. An agent runs with the skills its spec names (`skills`) and those attached here; a run gets each at its current version (docs/ARCHITECTURE.md, Skills). Agents also write and retire their own skills, with the `skill:write` action under its rule (below).
