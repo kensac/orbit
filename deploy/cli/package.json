@@ -3,7 +3,7 @@
   "private": true,
   "description": "The agent CLIs the orbit image carries. Pinned exactly; Renovate bumps them.",
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.316",
+    "@anthropic-ai/claude-code": "2.1.318",
     "@openai/codex": "0.166.0"
   }
 }
