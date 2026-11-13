@@ -30,6 +30,8 @@ func apiFixture(t *testing.T, failThread bool) (*client.Client, *[]string) {
 		switch r.URL.Path {
 		case "/api/v1/agents/assistant":
 			fmt.Fprint(w, `{"agent":{"name":"assistant","origin":"database","version":7,"spec_sha":"abc","spec":{"charter":"help"}},"memory":"current memory"}`)
+		case "/api/v1/agents/assistant/definitions":
+			fmt.Fprint(w, `{"name":"assistant","origin":"database","versions":[{"id":2,"name":"assistant","version":2,"spec":{"charter":"new"}},{"id":1,"name":"assistant","version":1,"spec":{"charter":"old"}}]}`)
 		case "/api/v1/agents/assistant/memory":
 			fmt.Fprint(w, `{"versions":[{"id":12,"content":"current memory"}]}`)
 		case "/api/v1/agents/assistant/context":
@@ -87,8 +89,33 @@ func TestExportTLSAPI(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %v %v", info, err)
 	}
-	if len(*calls) != 14 {
+	if len(*calls) != 15 {
 		t.Fatalf("calls %d: %v", len(*calls), *calls)
+	}
+	var foundHistory bool
+	historyZip, err := zip.OpenReader(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range historyZip.File {
+		if f.Name == "resources/000002.json" {
+			foundHistory = true
+			body, err := f.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := io.ReadAll(body)
+			_ = body.Close()
+			if err != nil || !bytes.Contains(data, []byte(`"version":1`)) || !bytes.Contains(data, []byte(`"version":2`)) {
+				t.Fatalf("definition history missing or unreadable: %s %v", data, err)
+			}
+		}
+	}
+	if err := historyZip.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !foundHistory {
+		t.Fatal("definition history resource missing")
 	}
 	var cursor, revision bool
 	for _, r := range m.Resources {
