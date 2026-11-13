@@ -47,9 +47,9 @@ RUN install -d -m 0755 /etc/apt/keyrings \
 
 # yq, the release binary for this architecture, checked against its sha256.
 # renovate: datasource=github-release-attachments depName=mikefarah/yq
-ARG YQ_VERSION_AMD64=v4.54.2 YQ_SHA256_AMD64=44c7759059b4910827a0059a2757b22001e59360cdecdb2ef8dedc4b6c7e9f32
+ARG YQ_VERSION_AMD64=v4.54.3 YQ_SHA256_AMD64=129534601871538efe0ba4c5e62a34fb1d5f469bcb975c4fddeb467d82974973
 # renovate: datasource=github-release-attachments depName=mikefarah/yq
-ARG YQ_VERSION_ARM64=v4.54.2 YQ_SHA256_ARM64=bd44211dcd29a5f0eb701d4b7eb5ccd0cfff3bd3966cb4f7f9bd5b13701d997e
+ARG YQ_VERSION_ARM64=v4.54.3 YQ_SHA256_ARM64=89f69310b61b68d1245065a1241d1fc843f7a36cd6103ffd77ad987613bd1b67
 RUN case "${TARGETARCH}" in \
         amd64) v="${YQ_VERSION_AMD64}" sum="${YQ_SHA256_AMD64}" ;; \
         arm64) v="${YQ_VERSION_ARM64}" sum="${YQ_SHA256_ARM64}" ;; \
