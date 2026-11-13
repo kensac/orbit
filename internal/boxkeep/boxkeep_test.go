@@ -1,6 +1,7 @@
 package boxkeep_test
 
 import (
+	"archive/tar"
 	"context"
 	"encoding/json"
 	"io"
@@ -46,6 +47,10 @@ type fakeBoxes struct {
 	// tokens are the gh tokens written, "agent=token", and "agent=" for a
 	// clear.
 	tokens []string
+	// skills are the file names of each skills sync; mcp each account's
+	// mcp sync bodies.
+	skills [][]string
+	mcp    []string
 }
 
 func (f *fakeBoxes) server(t *testing.T) *sandbox.Client {
@@ -66,6 +71,28 @@ func (f *fakeBoxes) server(t *testing.T) *sandbox.Client {
 		pct := 9.0
 		_ = json.NewEncoder(w).Encode(sandbox.AccountUsage{Source: sandbox.UsagePoll, ObservedAt: &f.at,
 			Windows: []sandbox.UsageWindow{{Window: "five_hour", UsedPercentage: &pct}}})
+	})
+	mux.HandleFunc("PUT /v1/boxes/{name}/skills", func(w http.ResponseWriter, r *http.Request) {
+		var names []string
+		tr := tar.NewReader(r.Body)
+		for {
+			h, err := tr.Next()
+			if err != nil {
+				break
+			}
+			names = append(names, h.Name)
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.skills = append(f.skills, names)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /v1/boxes/{name}/accounts/{slot}/mcp/sync", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.mcp = append(f.mcp, r.PathValue("slot")+" "+string(b))
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("PUT /v1/boxes/{name}/gh-token", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -217,5 +244,44 @@ func TestGHOnce(t *testing.T) {
 	k.Once(ctx)
 	if got := written(); len(got) != 4 || got[3] != "orbit=" {
 		t.Fatalf("switched off: %v", got)
+	}
+}
+
+// TestSyncOnce puts the skills library into running boxes and the managed
+// MCP servers into their mounted accounts, again only when either changes.
+func TestSyncOnce(t *testing.T) {
+	s := testdb.New(t)
+	ctx := context.Background()
+	box, _ := s.EnsureBox(ctx, "orbit")
+	a, _ := s.CreateAccount(ctx, box.ID, "personal", "k")
+	unmounted, _ := s.CreateAccount(ctx, box.ID, "later", "k")
+	put := func(name, body string) {
+		t.Helper()
+		if _, _, err := s.PutSkill(ctx, store.SkillWrite{Name: name, Content: "---\nname: " + name + "\ndescription: d\n---\n" + body,
+			Files: []store.SkillFile{{Path: "scripts/run.sh", Content: []byte("echo")}}}, store.SkillProvenance{Source: store.SkillByPerson, Author: "k"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("recheck", "v1")
+	f := &fakeBoxes{running: map[string][]string{"orbit": {a.Slot}}, ids: map[string]string{"orbit": "c1"}}
+	client := f.server(t)
+	servers := map[string]json.RawMessage{"orbit": json.RawMessage(`{"type":"http","url":"https://orbit.kanishksachdev.com/mcp"}`)}
+	k := &boxkeep.Keeper{Store: s, Boxes: func() (*sandbox.Client, error) { return client, nil },
+		Agents:     func() []string { return []string{"orbit"} },
+		MCPServers: func() map[string]json.RawMessage { return servers },
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil))}
+	k.Once(ctx)
+	k.Once(ctx)
+	if len(f.skills) != 1 || strings.Join(f.skills[0], " ") != "recheck/SKILL.md recheck/scripts/run.sh" {
+		t.Fatalf("skills synced %v", f.skills)
+	}
+	if len(f.mcp) != 1 || f.mcp[0] != a.Slot+" "+`{"orbit":{"type":"http","url":"https://orbit.kanishksachdev.com/mcp"}}` {
+		t.Fatalf("mcp synced %v (not %s)", f.mcp, unmounted.Slot)
+	}
+	put("recheck", "v2")
+	delete(servers, "orbit")
+	k.Once(ctx)
+	if len(f.skills) != 2 || len(f.mcp) != 2 || f.mcp[1] != a.Slot+" {}" {
+		t.Fatalf("after changes: skills %v mcp %v", f.skills, f.mcp)
 	}
 }
