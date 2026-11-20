@@ -105,7 +105,7 @@ func Export(ctx context.Context, fetch Fetcher, agent, target string) (Manifest,
 	defer func() { _ = stage.Close(); _ = os.Remove(stage.Name()) }()
 	e := exporter{fetch: fetch, zip: zip.NewWriter(stage), manifest: Manifest{FormatVersion: 1, Agent: agent, Started: time.Now().UTC(), ResourceCoverageComplete: true, Resources: []Resource{}, Exclusions: []string{
 		"Responses are separate reads, not a transactionally consistent snapshot; concurrent writes may move or duplicate conversations between pages.",
-		"Current selected-agent definition, legacy memory and visible current profile/agent/topic entries only; historical definitions, memory versions and retired entries are excluded.",
+		"Current selected-agent definition and its database definition history, legacy memory and visible current profile/agent/topic entries only; memory versions and retired entries are excluded.",
 		"Only skills attached to the selected agent at context-read time are fetched at their recorded versions; other skills and historical versions are excluded.",
 		"Conversation thread summaries are included; upload bytes, run artifacts, journals, transcripts, source inputs, actions outside threads and server configuration are excluded.",
 		"Persistent conversation workspace file listings/content, snapshot metadata/archives, retained sandbox HOME and hidden .orbit session state are excluded and are not fetched.",
@@ -271,6 +271,32 @@ func (e *exporter) run(ctx context.Context, agent string) error {
 		}
 		if json.Unmarshal(agentObj["agent"], &row) != nil || row.Name == "" || len(row.Spec) == 0 {
 			e.problem(agentResource, "invalid agent definition")
+		}
+	}
+	definitionsObj, definitionsResource, err := e.get(ctx, "agents/"+agent+"/definitions", "history", "")
+	if err != nil {
+		return err
+	}
+	if definitionsObj != nil {
+		var history struct {
+			Name     string `json:"name"`
+			Versions []struct {
+				Name    string `json:"name"`
+				Version int    `json:"version"`
+			} `json:"versions"`
+		}
+		valid := json.Unmarshal(definitionsObj["name"], &history.Name) == nil &&
+			json.Unmarshal(definitionsObj["versions"], &history.Versions) == nil && history.Name == agent
+		previous := int(^uint(0) >> 1)
+		for _, version := range history.Versions {
+			if version.Name != agent || version.Version < 1 || version.Version >= previous {
+				valid = false
+				break
+			}
+			previous = version.Version
+		}
+		if !valid {
+			e.problem(definitionsResource, "invalid agent definition history")
 		}
 	}
 	memoryObj, memoryResource, err := e.get(ctx, "agents/"+agent+"/memory?limit=1", "current", "")
@@ -556,7 +582,7 @@ func verifyData(data []byte, validated *Manifest) error {
 			return errors.New("missing resource endpoint")
 		}
 		switch res.Coverage {
-		case "current", "pinned-current", "page", "error", "partial":
+		case "current", "pinned-current", "history", "page", "error", "partial":
 		default:
 			return errors.New("invalid resource coverage")
 		}
