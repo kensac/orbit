@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -137,7 +139,7 @@ func missingEnv(cfg *spec.Config, caps spec.Capabilities, lookup func(string) (s
 	want := map[string]bool{}
 	var backend bool
 	for _, a := range cfg.Agents {
-		if !caps.Covers(a) {
+		if !a.IsEnabled() || !caps.Covers(a) {
 			continue
 		}
 		for _, s := range a.Sources {
@@ -150,6 +152,12 @@ func missingEnv(cfg *spec.Config, caps spec.Capabilities, lookup func(string) (s
 				want[r] = true
 			}
 		}
+		if agentNeedsSandboxService(a) {
+			_, tokenEnv := cfg.Deployment.SandboxService()
+			if tokenEnv != "" {
+				want[tokenEnv] = true
+			}
+		}
 		rs := cfg.Deployment.Runners[a.Runner]
 		switch {
 		case rs.APIKeyEnv != "":
@@ -160,7 +168,7 @@ func missingEnv(cfg *spec.Config, caps spec.Capabilities, lookup func(string) (s
 	}
 	var out []string
 	for k := range want {
-		if _, ok := lookup(k); !ok {
+		if v, ok := lookup(k); !ok || v == "" {
 			out = append(out, k)
 		}
 	}
@@ -171,15 +179,99 @@ func missingEnv(cfg *spec.Config, caps spec.Capabilities, lookup func(string) (s
 	return out
 }
 
+func agentNeedsSandboxService(a *spec.Agent) bool {
+	if a.Sandbox != "" {
+		return true
+	}
+	for _, source := range a.Sources {
+		if source.Kind == "extension" {
+			return true
+		}
+	}
+	return false
+}
+
+func workerCoverageError(cfg *spec.Config, caps spec.Capabilities) error {
+	for _, agent := range cfg.Agents {
+		if !agent.IsEnabled() || !caps.Covers(agent) {
+			continue
+		}
+		if slices.Contains(agent.Needs, spec.NeedsGitHub) {
+			key := "ORBIT_GITHUB_APP_PRIVATE_KEY"
+			if cfg.Deployment.GitHub != nil && cfg.Deployment.GitHub.PrivateKeyEnv != "" {
+				key = cfg.Deployment.GitHub.PrivateKeyEnv
+			}
+			return fmt.Errorf("worker preflight: agent %q requires GitHub access through %s, which is control-only", agent.Name, key)
+		}
+		if agentNeedsSandboxService(agent) && !slices.Contains(agent.Needs, "sandbox") {
+			return fmt.Errorf("worker preflight: agent %q uses sandboxd but does not require the sandbox capability; add needs: [sandbox] so only hosts with sandbox access can claim it", agent.Name)
+		}
+	}
+	return nil
+}
+
+func workerSettings(lookup func(string) (string, bool)) (int, spec.Capabilities, error) {
+	workers, ok := lookup("ORBIT_WORKERS")
+	if !ok || workers == "" {
+		workers = "2"
+	}
+	n, err := strconv.Atoi(workers)
+	if err != nil || n < 1 {
+		return 0, spec.Capabilities{}, errors.New("ORBIT_WORKERS: want a positive integer")
+	}
+	capabilityText, _ := lookup("ORBIT_CAPABILITIES")
+	caps, err := spec.ParseCapabilities(capabilityText)
+	if err != nil {
+		return 0, spec.Capabilities{}, fmt.Errorf("ORBIT_CAPABILITIES: %w", err)
+	}
+	return n, caps, nil
+}
+
+func workerPreflight(ctx context.Context, s *store.Store, w io.Writer, lookup func(string) (string, bool)) error {
+	workers, caps, err := workerSettings(lookup)
+	if err != nil {
+		return fmt.Errorf("worker preflight: %w", err)
+	}
+	current, err := s.SchemaCurrent(ctx)
+	if err != nil {
+		return fmt.Errorf("worker preflight: checking database schema: %w", err)
+	}
+	if !current {
+		return errors.New("worker preflight: database schema is older than this image; control must migrate it first")
+	}
+	cfg, err := storedConfig(ctx, s)
+	if errors.Is(err, store.ErrNotFound) {
+		return errors.New("worker preflight: control has not recorded a configuration")
+	}
+	if err != nil {
+		return fmt.Errorf("worker preflight: reading control configuration: %w", err)
+	}
+	if err := workerCoverageError(cfg, caps); err != nil {
+		return err
+	}
+	missing := missingEnv(cfg, caps, lookup)
+	if len(missing) > 0 {
+		return fmt.Errorf("worker preflight: required environment variables are unset: %s", strings.Join(missing, ", "))
+	}
+	covered := 0
+	for _, agent := range cfg.Agents {
+		if agent.IsEnabled() && caps.Covers(agent) {
+			covered++
+		}
+	}
+	capabilityText := caps.String()
+	if capabilityText == "" {
+		capabilityText = "none"
+	}
+	_, _ = fmt.Fprintf(w, "worker preflight: ok: schema current; %d agent(s) covered; %d worker(s); capabilities %s; required environment is present\n", covered, workers, capabilityText)
+	return nil
+}
+
 // worker is `orbit worker`: executors only. It claims the runs whose agents this host's capabilities cover, runs them from the specs control recorded in the database, and writes everything to the database: no API, no scheduler, no delivery, no actions, no builds, no migrations. It holds the database URL, its backend credential, and the source credentials of its capabilities, nothing else (docs/agents/deployment.md, Worker fleet).
 func worker(ctx context.Context, log *slog.Logger) error {
-	workers, err := strconv.Atoi(env("ORBIT_WORKERS", "2"))
-	if err != nil || workers < 1 {
-		return fmt.Errorf("ORBIT_WORKERS: want a positive integer")
-	}
-	caps, err := spec.ParseCapabilities(os.Getenv("ORBIT_CAPABILITIES"))
+	workers, caps, err := workerSettings(os.LookupEnv)
 	if err != nil {
-		return fmt.Errorf("ORBIT_CAPABILITIES: %w", err)
+		return err
 	}
 	hostname, _ := os.Hostname()
 	name := env("ORBIT_WORKER_NAME", hostname)
