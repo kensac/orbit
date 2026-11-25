@@ -381,3 +381,57 @@ func (c *Client) ghToken(ctx context.Context, method, name string, body io.Reade
 	}
 	return nil
 }
+
+// AccountMCP lists an account's MCP servers and connectors, health-checked
+// in the box.
+func (c *Client) AccountMCP(ctx context.Context, name, slot string) ([]MCPServer, error) {
+	var out struct {
+		Servers []MCPServer `json:"servers"`
+	}
+	if !ValidSlot(slot) {
+		return nil, fmt.Errorf("invalid account slot %q", slot)
+	}
+	p, err := boxPath(name, "accounts", slot, "mcp")
+	if err == nil {
+		err = c.boxCall(ctx, http.MethodGet, p, &out)
+	}
+	return out.Servers, err
+}
+
+// SyncAccountMCP mirrors the servers orbit manages into an account.
+func (c *Client) SyncAccountMCP(ctx context.Context, name, slot string, servers map[string]json.RawMessage) error {
+	if !ValidSlot(slot) {
+		return fmt.Errorf("invalid account slot %q", slot)
+	}
+	if servers == nil {
+		servers = map[string]json.RawMessage{}
+	}
+	if err := ValidateMCPServers(servers); err != nil {
+		return err
+	}
+	p, err := boxPath(name, "accounts", slot, "mcp", "sync")
+	if err == nil {
+		err = c.boxSend(ctx, http.MethodPost, p, servers, nil)
+	}
+	return err
+}
+
+// SyncSkills puts a tar of <skill>/<file> into the box's shared profile.
+func (c *Client) SyncSkills(ctx context.Context, name string, tarball io.Reader) error {
+	p, err := boxPath(name, "skills")
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(ctx, http.MethodPut, PathBoxes+p, tarball, "application/x-tar")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNoBox
+	}
+	if resp.StatusCode >= 300 {
+		return readError(resp)
+	}
+	return nil
+}
