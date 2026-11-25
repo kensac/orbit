@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/kensac/orbit/internal/spec"
@@ -36,6 +37,17 @@ func TestAWorkerNamesTheCredentialsItLacks(t *testing.T) {
 	if got := missingEnv(cfg, sure, lookup("CLAUDE_CODE_OAUTH_TOKEN")); !reflect.DeepEqual(got, []string{"SURE_API_KEY"}) {
 		t.Fatalf("missing = %v, want the Sure key", got)
 	}
+	if got := missingEnv(cfg, sure, func(k string) (string, bool) {
+		if k == "CLAUDE_CODE_OAUTH_TOKEN" {
+			return "token", true
+		}
+		if k == "SURE_API_KEY" {
+			return "", true
+		}
+		return "", false
+	}); !reflect.DeepEqual(got, []string{"SURE_API_KEY"}) {
+		t.Fatalf("empty variable is missing: %v", got)
+	}
 	// The backend credential is either variable, and a worker with neither is told both names. The fixture is the test's own: one claude-code agent that needs nothing, so a bare worker covers it.
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "agents"), 0o755)
@@ -50,6 +62,90 @@ func TestAWorkerNamesTheCredentialsItLacks(t *testing.T) {
 	}
 	if got := missingEnv(own, bare, lookup()); !reflect.DeepEqual(got, []string{"CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY"}) {
 		t.Fatalf("missing = %v, want both backend names", got)
+	}
+}
+
+func TestWorkerSettingsDefaultsAndRejectsInvalidValues(t *testing.T) {
+	lookup := func(values map[string]string) func(string) (string, bool) {
+		return func(k string) (string, bool) {
+			v, ok := values[k]
+			return v, ok
+		}
+	}
+	workers, caps, err := workerSettings(lookup(nil))
+	if err != nil || workers != 2 || caps.Any || len(caps.List) != 0 {
+		t.Fatalf("defaults = %d, %+v, %v", workers, caps, err)
+	}
+	if _, _, err := workerSettings(lookup(map[string]string{"ORBIT_WORKERS": "0"})); err == nil {
+		t.Fatal("zero workers accepted")
+	}
+	if _, _, err := workerSettings(lookup(map[string]string{"ORBIT_CAPABILITIES": "INVALID"})); err == nil {
+		t.Fatal("invalid capability accepted")
+	}
+}
+
+func TestWorkerPreflightRejectsControlOnlyGitHubCoverage(t *testing.T) {
+	cfg := &spec.Config{
+		Deployment: spec.Deployment{GitHub: &spec.GitHub{PrivateKeyEnv: "ORBIT_GITHUB_APP_PRIVATE_KEY"}},
+		Agents: map[string]*spec.Agent{
+			"repo-reader": {Name: "repo-reader", Needs: []string{spec.NeedsGitHub}},
+		},
+	}
+	caps, err := spec.ParseCapabilities("github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = workerCoverageError(cfg, caps)
+	if err == nil || !strings.Contains(err.Error(), "ORBIT_GITHUB_APP_PRIVATE_KEY") {
+		t.Fatalf("GitHub-capable worker error = %v", err)
+	}
+	all, err := spec.ParseCapabilities("*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workerCoverageError(cfg, all); err == nil {
+		t.Fatal("wildcard worker accepted a control-only GitHub agent")
+	}
+	bare, _ := spec.ParseCapabilities("")
+	if err := workerCoverageError(cfg, bare); err != nil {
+		t.Fatalf("worker unable to claim GitHub agent: %v", err)
+	}
+}
+
+func TestWorkerPreflightChecksSandboxTokenOnlyForClaimableSandboxAgents(t *testing.T) {
+	cfg := &spec.Config{
+		Deployment: spec.Deployment{
+			Sandbox: &spec.SandboxService{Sandboxd: "sandboxd:8080", TokenEnv: "WORKER_SANDBOX_TOKEN"},
+		},
+		Agents: map[string]*spec.Agent{
+			"plain":     {Name: "plain"},
+			"sandbox":   {Name: "sandbox", Needs: []string{"sandbox"}, Sandbox: spec.SandboxWorkstation},
+			"extension": {Name: "extension", Needs: []string{"sandbox"}, Sources: []spec.Source{{Kind: "extension"}}},
+		},
+	}
+	bare, _ := spec.ParseCapabilities("")
+	if got := missingEnv(cfg, bare, func(string) (string, bool) { return "", false }); len(got) != 0 {
+		t.Fatalf("sandbox token required from worker without sandbox capability: %v", got)
+	}
+	sandboxCaps, err := spec.ParseCapabilities("sandbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workerCoverageError(cfg, sandboxCaps); err != nil {
+		t.Fatal(err)
+	}
+	if got := missingEnv(cfg, sandboxCaps, func(string) (string, bool) { return "", false }); !reflect.DeepEqual(got, []string{"WORKER_SANDBOX_TOKEN"}) {
+		t.Fatalf("missing sandbox token = %v", got)
+	}
+
+	bad := &spec.Config{
+		Deployment: cfg.Deployment,
+		Agents: map[string]*spec.Agent{
+			"unscoped": {Name: "unscoped", Sandbox: spec.SandboxWorkstation},
+		},
+	}
+	if err := workerCoverageError(bad, bare); err == nil || !strings.Contains(err.Error(), "needs: [sandbox]") {
+		t.Fatalf("unscoped sandbox agent error = %v", err)
 	}
 }
 

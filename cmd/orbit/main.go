@@ -6,6 +6,7 @@
 //	orbit migrate            apply database migrations and exit
 //	orbit restore-check [--expect FILE]   read a restored orbit-db read only (deploy/restore-drill.sh)
 //	orbit preflight [--config DIR]   check this binary can migrate the database and the running one survives it, changing nothing
+//	orbit preflight --worker        check worker readiness without claiming runs or writing
 //	orbit validate [dir]     load and check a configuration directory
 //	orbit run <agent> [prompt]   queue a manual run (a running serve picks it up)
 //	orbit approve <action-id> / orbit reject <action-id>
@@ -173,7 +174,7 @@ func agentHookCmd(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir] | validate [dir] | restore-check [--expect file] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills|claude-sessions <dir> | pack <agent> --output <new-dir> | pack inspect <dir> | sync claude | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
+	fmt.Fprintln(os.Stderr, "usage: orbit serve | worker | migrate | preflight [--config dir | --worker] | validate [dir] | restore-check [--expect file] | run <agent> [prompt] | approve <id> | reject <id> | healthcheck [--ready | --url <url>] | drain | vapid | import claude-memory|skills|claude-sessions <dir> | pack <agent> --output <new-dir> | pack inspect <dir> | sync claude | version | mcp | hook | tls-cert | sandboxd | egress | credproxy")
 	os.Exit(2)
 }
 
